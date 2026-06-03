@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Local web-target wasm smoke/bench harness for mmd-anim-wasm",
+  "scripts": {
+    "build": "node build.mjs",
+    "smoke": "node build.mjs && node smoke.mjs",
+    "bench": "node build.mjs && node bench.mjs"
+  }
+}

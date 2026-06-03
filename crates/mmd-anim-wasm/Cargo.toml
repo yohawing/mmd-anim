@@ -1,0 +1,23 @@
+[package]
+name = "mmd-anim-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Wasm wrapper for mmd-anim-runtime"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+glam.workspace = true
+mmd-anim-runtime.workspace = true
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.0" }
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+serde_json.workspace = true

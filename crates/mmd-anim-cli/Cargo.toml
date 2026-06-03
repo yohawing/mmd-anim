@@ -1,0 +1,22 @@
+[package]
+name = "mmd-anim-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "CLI diagnostics and roundtrip tools for mmd-anim"
+
+[[bin]]
+name = "mmd-anim"
+path = "src/main.rs"
+
+[dependencies]
+glam.workspace = true
+mmd-anim-runtime.workspace = true
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.0" }
+mmd-anim-schema.workspace = true
+serde_json.workspace = true

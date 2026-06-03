@@ -1,0 +1,21 @@
+[package]
+name = "mmd-anim-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "C ABI wrapper for Unity and native hosts"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+glam.workspace = true
+mmd-anim-runtime.workspace = true
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.0" }
+serde_json.workspace = true

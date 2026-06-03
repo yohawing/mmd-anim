@@ -1,0 +1,21 @@
+[package]
+name = "mmd-anim-format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "MMD format parser and exporter for mmd-anim"
+
+[dependencies]
+mmd-anim-runtime.workspace = true
+glam.workspace = true
+thiserror.workspace = true
+encoding_rs.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

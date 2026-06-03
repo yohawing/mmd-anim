@@ -6,7 +6,6 @@ use mmd_anim_runtime::{
     MorphIndex, MorphKeyframe, MorphTrack, MovableBoneKeyframe, MovableBoneTrack,
     PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
 };
-use mmd_anim_schema::MmdDumperOracleDump;
 
 fn assert_matrix_near(actual: &[f32; 16], expected: &[f32; 16]) {
     for (index, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
@@ -20,10 +19,6 @@ fn assert_matrix_near(actual: &[f32; 16], expected: &[f32; 16]) {
 
 #[test]
 fn matches_mmddumper_sample_basic_oracle() {
-    let oracle = r#"{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"0.1.0","project":"synthetic/sample-basic.pmm"},"frame":0,"models":[{"index":0,"name":"fake-model","filename":"fake-model.pmd","visible":true,"bones":[{"index":0,"name":"センター","worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]}],"morphs":[{"index":0,"name":"まばたき","weight":0}]}]}
-{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"0.1.0","project":"synthetic/sample-basic.pmm"},"frame":30,"models":[{"index":0,"name":"fake-model","filename":"fake-model.pmd","visible":true,"bones":[{"index":0,"name":"センター","worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,1,0,0,1]}],"morphs":[{"index":0,"name":"まばたき","weight":0.5}]}]}
-{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"0.1.0","project":"synthetic/sample-basic.pmm"},"frame":60,"models":[{"index":0,"name":"fake-model","filename":"fake-model.pmd","visible":true,"bones":[{"index":0,"name":"センター","worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,2,0,0,1]}],"morphs":[{"index":0,"name":"まばたき","weight":1}]}]}"#;
-    let dump = MmdDumperOracleDump::from_jsonl_str(oracle, Some(&[0, 30, 60])).unwrap();
     let model = Arc::new(ModelArena::new(vec![BoneInit::new(None, Vec3A::ZERO)]).unwrap());
     let clip = AnimationClip::new_full(
         vec![BoneAnimationBinding {
@@ -47,18 +42,37 @@ fn matches_mmddumper_sample_basic_oracle() {
     );
     let mut runtime = RuntimeInstance::new_with_counts(model, 1, 1);
 
-    for frame in [0, 30, 60] {
-        runtime.evaluate_clip_frame(&clip, frame as f32);
-        let oracle_frame = dump.find_frame(frame).unwrap();
-        let oracle_model = &oracle_frame.models[0];
-        let center = oracle_model.find_bone("センター").unwrap();
-        let blink = oracle_model.find_morph("まばたき").unwrap();
+    let expected = [
+        (
+            0,
+            [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            0.0,
+            true,
+        ),
+        (
+            30,
+            [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+            ],
+            0.5,
+            false,
+        ),
+        (
+            60,
+            [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0,
+            ],
+            1.0,
+            false,
+        ),
+    ];
 
-        assert_matrix_near(
-            &runtime.world_matrices()[0].to_cols_array(),
-            &center.world_matrix,
-        );
-        assert!((runtime.morph_weights()[0] - blink.weight).abs() < 1.0e-5);
-        assert_eq!(runtime.ik_enabled()[0], u8::from(frame < 30));
+    for (frame, world_matrix, morph_weight, ik_enabled) in expected {
+        runtime.evaluate_clip_frame(&clip, frame as f32);
+        assert_matrix_near(&runtime.world_matrices()[0].to_cols_array(), &world_matrix);
+        assert!((runtime.morph_weights()[0] - morph_weight).abs() < 1.0e-5);
+        assert_eq!(runtime.ik_enabled()[0], u8::from(ik_enabled));
     }
 }

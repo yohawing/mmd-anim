@@ -78,6 +78,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
+name = "mmd-anim"
+version = "0.1.0"
+dependencies = [
+ "mmd-anim-format",
+ "mmd-anim-runtime",
+]
+
+[[package]]
 name = "mmd-anim-cli"
 version = "0.1.0"
 dependencies = [
@@ -115,7 +123,6 @@ name = "mmd-anim-runtime"
 version = "0.1.0"
 dependencies = [
  "glam",
- "mmd-anim-schema",
  "thiserror",
 ]
 

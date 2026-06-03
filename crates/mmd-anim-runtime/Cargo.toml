@@ -14,5 +14,3 @@ description = "Renderer-independent MMD animation runtime core"
 glam.workspace = true
 thiserror.workspace = true
 
-[dev-dependencies]
-mmd-anim-schema.workspace = true

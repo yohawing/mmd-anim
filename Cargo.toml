@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/mmd-anim",
     "crates/mmd-anim-runtime",
     "crates/mmd-anim-schema",
     "crates/mmd-anim-ffi",
@@ -29,4 +30,5 @@ js-sys = "0.3"
 encoding_rs = "0.8"
 mmd-anim-runtime = { path = "crates/mmd-anim-runtime", version = "0.1.0" }
 mmd-anim-schema = { path = "crates/mmd-anim-schema", version = "0.1.0" }
+mmd-anim-format = { path = "crates/mmd-anim-format", version = "0.1.0" }
  

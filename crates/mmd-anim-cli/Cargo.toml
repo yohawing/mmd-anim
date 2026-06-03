@@ -9,10 +9,12 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "CLI diagnostics and roundtrip tools for mmd-anim"
+publish = false
 
 [[bin]]
 name = "mmd-anim"
 path = "src/main.rs"
+doc = false
 
 [dependencies]
 glam.workspace = true

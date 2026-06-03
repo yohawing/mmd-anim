@@ -1,5 +1,5 @@
 [package]
-name = "mmd-anim-schema"
+name = "mmd-anim"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,11 +8,8 @@ repository.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Shared IR and trace schema for mmd-anim"
-publish = false
+description = "Rust toolkit for MMD animation formats, runtime evaluation, and host integration"
 
 [dependencies]
-glam.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
+mmd-anim-format.workspace = true
+mmd-anim-runtime.workspace = true

@@ -18,7 +18,7 @@ fn assert_matrix_near(actual: &[f32; 16], expected: &[f32; 16]) {
 }
 
 #[test]
-fn matches_mmddumper_sample_basic_oracle() {
+fn evaluates_synthetic_clip_basic_outputs() {
     let model = Arc::new(ModelArena::new(vec![BoneInit::new(None, Vec3A::ZERO)]).unwrap());
     let clip = AnimationClip::new_full(
         vec![BoneAnimationBinding {

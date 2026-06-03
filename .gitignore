@@ -10,6 +10,11 @@ target/package/
 **/bin/
 **/obj/
 
+# editor
+.vscode/
+.idea/
+
+# ai
 .opencode/
 .codex/
 .claude/
@@ -20,6 +25,7 @@ CLAUDE.md
 docs/**
 !docs/
 !docs/RELEASE.md
+!docs/README.ja.md
 
 crates/mmd-runtime-wasm/harness/pkg/
 crates/mmd-runtime-wasm/harness/pkg-web/

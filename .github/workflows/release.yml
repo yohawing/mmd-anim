@@ -75,27 +75,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          version="${GITHUB_REF_NAME#v}"
-
-          wait_for_crate() {
+          crate_exists() {
             local crate="$1"
             local version="$2"
-            for attempt in {1..60}; do
-              if curl -fsS "https://crates.io/api/v1/crates/${crate}/${version}" >/dev/null; then
-                return 0
-              fi
-              echo "Waiting for ${crate} ${version} to appear on crates.io (${attempt}/60)..."
-              sleep 10
-            done
-            echo "${crate} ${version} did not appear on crates.io in time."
-            exit 1
+            cargo search "$crate" --limit 1 | grep -Eq "^${crate} = \"${version}\""
           }
 
-          cargo publish -p mmd-anim-runtime
-          wait_for_crate mmd-anim-runtime "$version"
+          publish_crate() {
+            local package="$1"
+            local version="${GITHUB_REF_NAME#v}"
 
-          cargo publish -p mmd-anim-format
-          wait_for_crate mmd-anim-format "$version"
+            if crate_exists "$package" "$version"; then
+              echo "${package} ${version} already exists on crates.io; skipping."
+              return 0
+            fi
 
-          cargo publish -p mmd-anim
-          wait_for_crate mmd-anim "$version"
+            cargo publish -p "$package"
+          }
+
+          publish_crate mmd-anim-runtime
+          publish_crate mmd-anim-format
+          publish_crate mmd-anim

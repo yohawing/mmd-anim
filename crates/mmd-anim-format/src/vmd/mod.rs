@@ -61,6 +61,19 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn require_record_bytes(&self, count: usize, record_size: usize) -> Result<(), ImportError> {
+        let bytes = count
+            .checked_mul(record_size)
+            .ok_or(ImportError::SectionOverflow)?;
+        self.require(bytes)
+    }
+
+    fn read_record_count(&mut self, record_size: usize) -> Result<usize, ImportError> {
+        let count = self.read_u32_le()? as usize;
+        self.require_record_bytes(count, record_size)?;
+        Ok(count)
+    }
+
     fn skip_optional_ignored_records(&mut self, record_size: usize) -> Result<bool, ImportError> {
         let Some(count) = self.read_optional_u32_le()? else {
             return Ok(false);
@@ -80,11 +93,12 @@ impl<'a> Reader<'a> {
     fn read_optional_record_count(
         &mut self,
         record_size: usize,
-    ) -> Result<Option<u32>, ImportError> {
+    ) -> Result<Option<usize>, ImportError> {
         let Some(count) = self.read_optional_u32_le()? else {
             return Ok(None);
         };
-        let Some(bytes) = (count as usize).checked_mul(record_size) else {
+        let count = count as usize;
+        let Some(bytes) = count.checked_mul(record_size) else {
             self.pos = self.data.len();
             return Ok(None);
         };
@@ -187,7 +201,7 @@ pub fn import_vmd_motion(data: &[u8]) -> Result<VmdImportResult, ImportError> {
     let (_header, pos) = read_header(data)?;
     let mut r = Reader { data, pos };
 
-    let bone_count = r.read_u32_le()? as usize;
+    let bone_count = r.read_record_count(111)?;
     let mut bone_keyframes = Vec::with_capacity(bone_count);
     for _ in 0..bone_count {
         let bone_name = r.read_shifts_jis_name()?;
@@ -217,6 +231,7 @@ pub fn import_vmd_motion(data: &[u8]) -> Result<VmdImportResult, ImportError> {
         });
     };
     let morph_count = morph_count as usize;
+    r.require_record_bytes(morph_count, 23)?;
     let mut morph_keyframes = Vec::with_capacity(morph_count);
     for _ in 0..morph_count {
         let morph_name = r.read_shifts_jis_name()?;
@@ -261,12 +276,14 @@ pub fn import_vmd_motion(data: &[u8]) -> Result<VmdImportResult, ImportError> {
         });
     };
     let show_ik_count = show_ik_count as usize;
+    r.require_record_bytes(show_ik_count, 9)?;
     let mut property_keyframes = Vec::with_capacity(show_ik_count);
     let mut property_ik_frames = Vec::with_capacity(show_ik_count);
     for _ in 0..show_ik_count {
         let frame = r.read_u32_le()?;
         let show = r.read_u8()?;
         let ik_count = r.read_u32_le()? as usize;
+        r.require_record_bytes(ik_count, 21)?;
         let mut ik_enabled = Vec::with_capacity(ik_count);
         let mut ik_entries = Vec::with_capacity(ik_count);
         for _ in 0..ik_count {
@@ -414,7 +431,7 @@ pub fn parse_vmd_animation(data: &[u8]) -> Result<VmdParsedAnimation, ImportErro
     let model_name_bytes = trim_fixed_bytes(&_header.model_name_bytes).to_vec();
     let mut max_frame = 0u32;
 
-    let bone_count = r.read_u32_le()? as usize;
+    let bone_count = r.read_record_count(111)?;
     let mut bone_frames = Vec::with_capacity(bone_count);
     for _ in 0..bone_count {
         let bone_name_bytes = r.read_slice(15)?;
@@ -449,7 +466,9 @@ pub fn parse_vmd_animation(data: &[u8]) -> Result<VmdParsedAnimation, ImportErro
             },
         ));
     };
-    let mut morph_frames = Vec::with_capacity(morph_count as usize);
+    let morph_count = morph_count as usize;
+    r.require_record_bytes(morph_count, 23)?;
+    let mut morph_frames = Vec::with_capacity(morph_count);
     for _ in 0..morph_count {
         let morph_name_bytes = r.read_slice(15)?;
         let morph_name = decode_sjis_fixed(morph_name_bytes);
@@ -616,7 +635,7 @@ fn read_parsed_camera_frames(
     let Some(count) = r.read_optional_record_count(61)? else {
         return Ok(Vec::new());
     };
-    let mut frames = Vec::with_capacity(count as usize);
+    let mut frames = Vec::with_capacity(count);
     for _ in 0..count {
         let frame = r.read_u32_le()?;
         *max_frame = (*max_frame).max(frame);
@@ -646,7 +665,7 @@ fn read_parsed_light_frames(
     let Some(count) = r.read_optional_record_count(28)? else {
         return Ok(Vec::new());
     };
-    let mut frames = Vec::with_capacity(count as usize);
+    let mut frames = Vec::with_capacity(count);
     for _ in 0..count {
         let frame = r.read_u32_le()?;
         *max_frame = (*max_frame).max(frame);
@@ -668,7 +687,7 @@ fn read_parsed_self_shadow_frames(
     let Some(count) = r.read_optional_record_count(9)? else {
         return Ok(Vec::new());
     };
-    let mut frames = Vec::with_capacity(count as usize);
+    let mut frames = Vec::with_capacity(count);
     for _ in 0..count {
         let frame = r.read_u32_le()?;
         *max_frame = (*max_frame).max(frame);
@@ -688,12 +707,15 @@ fn read_parsed_property_frames(
     let Some(count) = r.read_optional_u32_le()? else {
         return Ok(Vec::new());
     };
-    let mut frames = Vec::with_capacity(count as usize);
+    let count = count as usize;
+    r.require_record_bytes(count, 9)?;
+    let mut frames = Vec::with_capacity(count);
     for _ in 0..count {
         let frame = r.read_u32_le()?;
         *max_frame = (*max_frame).max(frame);
         let visible = r.read_u8()? != 0;
         let ik_count = r.read_u32_le()? as usize;
+        r.require_record_bytes(ik_count, 21)?;
         let mut ik_states = Vec::with_capacity(ik_count);
         for _ in 0..ik_count {
             let bone_name_bytes = r.read_slice(20)?;
@@ -1015,6 +1037,44 @@ mod tests {
         buf.extend_from_slice(&VMD_MAGIC);
         buf.extend_from_slice(&[0u8; 20]);
         buf
+    }
+
+    #[test]
+    fn rejects_impossible_vmd_bone_count_before_allocation() {
+        let mut buf = build_vmd_header_bytes();
+        buf.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        assert!(matches!(
+            import_vmd_motion(&buf),
+            Err(ImportError::UnexpectedEof(_))
+        ));
+        assert!(matches!(
+            parse_vmd_animation(&buf),
+            Err(ImportError::UnexpectedEof(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_impossible_vmd_property_ik_count_before_allocation() {
+        let mut buf = build_vmd_header_bytes();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bones
+        buf.extend_from_slice(&0u32.to_le_bytes()); // morphs
+        buf.extend_from_slice(&0u32.to_le_bytes()); // cameras
+        buf.extend_from_slice(&0u32.to_le_bytes()); // lights
+        buf.extend_from_slice(&0u32.to_le_bytes()); // self shadows
+        buf.extend_from_slice(&1u32.to_le_bytes()); // property frames
+        buf.extend_from_slice(&0u32.to_le_bytes()); // frame
+        buf.push(1); // visible
+        buf.extend_from_slice(&u32::MAX.to_le_bytes()); // IK entries
+
+        assert!(matches!(
+            import_vmd_motion(&buf),
+            Err(ImportError::UnexpectedEof(_))
+        ));
+        assert!(matches!(
+            parse_vmd_animation(&buf),
+            Err(ImportError::UnexpectedEof(_))
+        ));
     }
 
     #[test]

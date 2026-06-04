@@ -8,7 +8,7 @@ repository.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Rust toolkit for MMD animation formats, runtime evaluation, and host integration"
+description = "Rust MMD animation runtime foundation for formats, evaluation, and host integration"
 
 [dependencies]
 mmd-anim-format.workspace = true

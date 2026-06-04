@@ -1,42 +1,63 @@
 # mmd-anim
 
-MikuMikuDance のアセットを読み込み／書き出しし、アニメーションを評価するための、
-実験的な Rust ツールキットです。同じ評価コアを Rust ライブラリ、ネイティブ連携、
-ブラウザ、コマンドラインツールのいずれからも利用できます。
+`mmd-anim` は、MikuMikuDance 向けツール群のための、検証済み Rust アニメーション基盤です。
 
-ランタイム評価に加えて、PMX/PMD/VMD/PMM/VPD/X/VAC の形式判定と読み込み（構造化データへの変換）、
-PMX/PMD/VMD/VPD/X/VAC の書き出し、PMX パーツからのモデル生成を提供します。
+PMX/VMD をランタイム向けに正規化し、任意フレームのワールド行列、スキニング行列、
+モーフ重み、IK 状態を評価する、レンダラー非依存の評価コアを提供します。
+同じ評価コアを Rust ライブラリ、ネイティブ連携、ブラウザ WASM、CLI 診断、
+および下流の MMD 製品群から共有できます。
 
-> **ステータス:** 実験的な `0.1.0` — Rust API / C ABI はまだ固定版ではありません。互換性のない変更が入る可能性があります。
+このリポジトリは、`yohawing` MMD ツールチェーンのアニメーション中核として設計されています。
+形式の読み込み・書き出しは、ランタイム評価、変換、診断、アセット生成を支えるために提供されます。
 
-## 使い方
+## ステータス
 
-```toml
-[dependencies]
-mmd-anim = "0.1"
-```
+`mmd-anim` は production-oriented ですが、まだ pre-1.0 です。
 
-```powershell
-# Rust ワークスペースのビルドとテスト
-rtk cargo test --workspace
+ランタイム構造、検証方針、対応形式の処理系は、下流連携で使う前提で設計しています。
+ただし Rust API、C ABI、WASM の呼び出し口はまだ固定されておらず、1.0 までに互換性のない変更が入る可能性があります。
 
-# リリース前のローカルチェック
-rtk cargo fmt --all -- --check
-rtk cargo clippy --workspace --all-targets -- -D warnings
-rtk cargo doc --workspace --no-deps
-```
-
-`mmd-anim` 0.1.0 はアルファ版です。Rust API・C ABI・WASM の呼び出し口はまだ安定していません。
-
-## 機能概要
-
-### ランタイム評価
+## ランタイム評価
 
 - PMX バイト列からランタイム用モデルを構築する。
 - VMD バイト列を、PMX 由来の名前マップで解決して `AnimationClip` に変換する。
 - 任意のフレームを評価して、ワールド行列、スキニング用行列、モーフの重み、IK の有効状態を取得する。
 
-### 読み込み / 書き出し
+## 検証
+
+`mmd-anim` は共有アニメーション基盤として開発しているため、正しさを公開 API の一部として扱います。
+
+公開リポジトリでは、次の検証を行います。
+
+- アニメーションサンプリング、階層評価、IK descriptor、付与変形、モーフ展開、形式別の読み書き経路に対する Rust unit test。
+- 意味を保った出力が期待される writer 経路の round-trip check。
+- PMX/VMD ランタイム評価挙動に対する synthetic runtime frame check。
+- 取り込んだアセットや評価済みアニメーション状態を比較するための、メンテナ向け CLI 診断。
+- ホスト向け API が同じランタイム経路を通ることを確認する FFI / WASM smoke test。
+
+公開リリース前の推奨チェックは次の通りです。
+
+```powershell
+rtk cargo test --workspace
+rtk cargo fmt --all -- --check
+rtk cargo clippy --workspace --all-targets -- -D warnings
+rtk cargo doc --workspace --no-deps
+```
+
+一部の参照アセットはライセンス上の理由で公開リポジトリには含めていません。
+メンテナ専用のローカルアセット照合や参照データとの比較はリリース判断に有用ですが、
+配布可能な公開リリースゲートには含めていません。
+
+## 採用プロジェクト
+
+`mmd-anim` は、MMD 関連プロジェクトで共有するアニメーション backend として開発されています。
+
+- [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): `mmd-anim` を
+  アニメーション・形式処理 backend として利用する Three.js 向け MMD loader。
+
+Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同じ評価コアを組み込めます。
+
+## 対応形式
 
 形式ごとの対応状況です。「読み込み」は対象ファイルを解析して構造化データにすること、
 「書き出し」は対象ファイルとして出力できることを指します。
@@ -64,6 +85,13 @@ rtk cargo doc --workspace --no-deps
 
 通常のライブラリ利用では `mmd-anim` を依存に追加してください。低レイヤだけを直接使いたい場合は
 `mmd-anim-format` や `mmd-anim-runtime` に直接依存できます。
+
+## Rust から使う
+
+```toml
+[dependencies]
+mmd-anim = "0.1"
+```
 
 ## ネイティブ (C ABI) から使う
 
@@ -173,7 +201,6 @@ rtk cargo run -p mmd-anim-cli -- --help
 ```
 
 このコマンドラインツールはメンテナ向けの診断ツールで、公開リリースの前提条件にはしていません。
-ローカルでのアセット照合や参照データとの比較も、公開リリースの必須ゲートには含めていません。
 
 ## 現在の制限と注意点
 
@@ -182,12 +209,6 @@ rtk cargo run -p mmd-anim-cli -- --help
 - **PMM:** プロジェクトのヘッダ情報、タイムライン由来の値、表示状態、モデル枠の初期範囲、参照アセット、PMMv2 の概要情報、アセット/ヘッダの整合性診断までです。プロジェクト全体のグラフを保持しないため、書き出しは未提供です。
 - **X/VAC:** テキスト X のメッシュ、材質、法線、UV、頂点色と VAC の共通行順を扱います。バイナリ X は診断のみです。
 - **API / ABI / WASM:** まだ実験段階です。外部ホストに繋ぐ場合は、まず簡単な動作確認と代表フレームでの確認から始めてください。
-
-## 並行開発プロジェクト
-
-以下のプロジェクトのバックエンドに使用しています。
-
-- [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): Three.js 向け MMD ローダー。
 
 ## 参考にしたプロジェクト
 

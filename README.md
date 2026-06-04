@@ -1,45 +1,70 @@
 # mmd-anim
 
-`mmd-anim` is an experimental Rust toolkit for loading, writing, and evaluating
-MikuMikuDance assets. The same evaluation core can be used from Rust libraries,
-native integrations, browsers, and command-line tools.
+`mmd-anim` is a tested Rust animation foundation for MikuMikuDance tools.
 
-In addition to runtime evaluation, it provides format detection and structured
-loading for PMX/PMD/VMD/PMM/VPD/X/VAC, writing support for PMX/PMD/VMD/VPD/X/VAC,
-and PMX generation from parts.
+It provides a renderer-independent runtime core for evaluating PMX/VMD animation
+state: world matrices, skinning matrices, morph weights, and IK enabled states.
+The same core is shared across Rust libraries, native host integrations, browser
+WASM builds, command-line diagnostics, and downstream MMD products.
 
-> **Status:** experimental `0.1.0` — the Rust API and C ABI are not stable yet.
-> Breaking changes may happen.
+This repository is intended to be the animation backbone of the `yohawing` MMD
+toolchain. Format loading and writing are included where they support reliable
+runtime evaluation, conversion, diagnostics, and asset generation.
 
-## Usage
+## Status
 
-```toml
-[dependencies]
-mmd-anim = "0.1"
-```
+`mmd-anim` is production-oriented but still pre-1.0.
 
-```powershell
-# Build and test the Rust workspace
-rtk cargo test --workspace
+The runtime architecture, validation strategy, and supported format paths are
+designed for downstream integrations. However, the Rust API, C ABI, and WASM
+entry points are not yet frozen, and breaking changes may happen before 1.0.
 
-# Local release checks
-rtk cargo fmt --all -- --check
-rtk cargo clippy --workspace --all-targets -- -D warnings
-rtk cargo doc --workspace --no-deps
-```
-
-`mmd-anim` 0.1.0 is an alpha release. The Rust API, C ABI, and WASM entry points
-are not stable yet.
-
-## Features
-
-### Runtime Evaluation
+## Runtime Evaluation
 
 - Build a runtime model from PMX bytes.
 - Resolve VMD bytes against names from a PMX model and convert them into an `AnimationClip`.
 - Evaluate any frame and read world matrices, skinning matrices, morph weights, and IK enabled state.
 
-### Loading / Writing
+## Validation
+
+`mmd-anim` is developed as a shared animation foundation, so correctness is
+treated as part of the public API.
+
+The public repository is validated through:
+
+- Rust unit tests for animation sampling, hierarchy evaluation, IK descriptors,
+  append transforms, morph expansion, and format-specific parsing/writing paths.
+- Round-trip checks for supported writer paths where meaning-preserving output is expected.
+- Synthetic runtime frame checks for PMX/VMD evaluation behavior.
+- CLI diagnostics used by maintainers to compare imported assets and evaluated animation state.
+- FFI and WASM smoke tests to keep host-facing APIs on the same runtime path.
+
+Recommended public release checks:
+
+
+```powershell
+rtk cargo test --workspace
+rtk cargo fmt --all -- --check
+rtk cargo clippy --workspace --all-targets -- -D warnings
+rtk cargo doc --workspace --no-deps
+```
+
+Some reference assets are not included in the public repository because of asset
+licensing constraints. Maintainer-only local asset comparisons and
+reference-data checks are useful for release confidence, but they are not part of
+the distributable public release gate.
+
+## Used By
+
+`mmd-anim` is developed as the shared animation backend for MMD-related projects.
+
+- [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): A Three.js
+  MMD loader that uses `mmd-anim` as its animation and format backend.
+
+More integrations can share the same runtime core through the Rust API, C ABI,
+or WASM wrapper.
+
+## Supported Formats
 
 Format support overview. "Loading" means parsing a file into structured data.
 "Writing" means outputting the target file format.
@@ -67,6 +92,13 @@ Format support overview. "Loading" means parsing a file into structured data.
 
 For normal library use, depend on `mmd-anim`. Advanced users who only need a
 lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
+
+## Rust Usage
+
+```toml
+[dependencies]
+mmd-anim = "0.1"
+```
 
 ## Native Hosts (C ABI)
 
@@ -182,8 +214,7 @@ rtk cargo run -p mmd-anim-cli -- --help
 ```
 
 This command-line tool is for maintainer diagnostics and is not required for
-public releases. Local asset comparisons and reference-data checks are also not
-part of the public release gate.
+public releases.
 
 ## Current Limitations
 
@@ -192,12 +223,6 @@ part of the public release gate.
 - **PMM:** Supported PMM data currently includes project header information, timeline-derived values, display state, initial model-slot data, referenced assets, PMMv2 summary information, and asset/header consistency diagnostics. PMM writing is not provided because the full project graph is not preserved yet.
 - **X/VAC:** Text X mesh, material, normal, UV, vertex color, and common VAC line order are handled. Binary X is diagnostic-only.
 - **API / ABI / WASM:** These surfaces are still experimental. When integrating with an external host, start with a small smoke test and representative-frame checks.
-
-## Related Project
-
-The following project is developed alongside `mmd-anim` and uses it as a backend:
-
-- [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): MMD loader for Three.js.
 
 ## Japanese README
 

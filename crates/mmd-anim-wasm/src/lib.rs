@@ -1030,7 +1030,7 @@ fn build_morph_init_from_wasm(input: &ModelInput<'_>) -> Result<MorphInit, Strin
             .enumerate()
             .map(|(i, pair)| (pair[0], pair[1], i))
             .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.sort_by_key(|a| a.0);
         if entries.last().unwrap().0 as usize >= mc {
             return Err("bone_morph_u32 contains morph_index >= morph_count".to_owned());
         }
@@ -1075,7 +1075,7 @@ fn build_morph_init_from_wasm(input: &ModelInput<'_>) -> Result<MorphInit, Strin
             .enumerate()
             .map(|(i, pair)| (pair[0], pair[1], i))
             .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.sort_by_key(|a| a.0);
         if entries.last().unwrap().0 as usize >= mc {
             return Err("group_morph_u32 contains morph_index >= morph_count".to_owned());
         }

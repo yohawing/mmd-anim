@@ -1600,7 +1600,7 @@ fn build_morph_init_from_ffi(
         (Vec::new(), vec![MorphOffsetSpan::default(); mc])
     } else {
         let mut sorted: Vec<_> = bone_morph_offsets.iter().collect();
-        sorted.sort_by(|a, b| a.morph_index.cmp(&b.morph_index));
+        sorted.sort_by_key(|a| a.morph_index);
         if sorted.last().unwrap().morph_index as usize >= mc {
             return None;
         }
@@ -1639,7 +1639,7 @@ fn build_morph_init_from_ffi(
         (Vec::new(), vec![MorphOffsetSpan::default(); mc])
     } else {
         let mut sorted: Vec<_> = group_morph_offsets.iter().collect();
-        sorted.sort_by(|a, b| a.morph_index.cmp(&b.morph_index));
+        sorted.sort_by_key(|a| a.morph_index);
         if sorted.last().unwrap().morph_index as usize >= mc {
             return None;
         }

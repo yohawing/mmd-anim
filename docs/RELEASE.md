@@ -5,6 +5,26 @@ This checklist is the operator-facing release procedure for `mmd-anim`.
 Use this for every release. Replace `X.Y.Z` with the target version and run the
 publish steps in dependency order.
 
+## crates.io Setup
+
+For local publishing, log in with a crates.io API token:
+
+```powershell
+rtk cargo login
+```
+
+For GitHub Actions publishing, create a repository secret named
+`CARGO_REGISTRY_TOKEN` with a crates.io token that can publish these crates:
+
+- `mmd-anim-runtime`
+- `mmd-anim-format`
+- `mmd-anim`
+
+The release workflow publishes on `vX.Y.Z` tag pushes after release checks pass.
+For the first release, it publishes in dependency order and waits for each crate
+to become visible in the crates.io index before publishing the next dependent
+crate.
+
 ## Branch And Release Flow
 
 - `develop` is the main development branch.

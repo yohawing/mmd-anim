@@ -38,6 +38,50 @@ pub fn parse_pmx_model_json(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&parsed).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+fn pmx_model_non_geometry_json_from_parsed(
+    parsed: &mmd_anim_format::pmx::PmxParsedModel,
+) -> Result<String, String> {
+    // Serialize each non-geometry field individually into a JSON object.
+    // `parsed.geometry` is intentionally omitted — no geometry JSON is constructed.
+    let mut obj = serde_json::Map::with_capacity(9);
+    let mut sv = |key: &str, val: serde_json::Result<serde_json::Value>| -> Result<(), String> {
+        obj.insert(key.to_owned(), val.map_err(|e| e.to_string())?);
+        Ok(())
+    };
+    sv("metadata", serde_json::to_value(&parsed.metadata))?;
+    sv("materials", serde_json::to_value(&parsed.materials))?;
+    sv("skeleton", serde_json::to_value(&parsed.skeleton))?;
+    sv("morphs", serde_json::to_value(&parsed.morphs))?;
+    sv(
+        "displayFrames",
+        serde_json::to_value(&parsed.display_frames),
+    )?;
+    sv("rigidBodies", serde_json::to_value(&parsed.rigid_bodies))?;
+    sv("joints", serde_json::to_value(&parsed.joints))?;
+    sv("softBodies", serde_json::to_value(&parsed.soft_bodies))?;
+    sv("diagnostics", serde_json::to_value(&parsed.diagnostics))?;
+    serde_json::to_string(&serde_json::Value::Object(obj)).map_err(|e| e.to_string())
+}
+
+fn parse_pmx_model_non_geometry_json_inner(data: &[u8]) -> Result<String, String> {
+    if data.is_empty() {
+        return Err("PMX data is empty".to_owned());
+    }
+    let parsed = mmd_anim_format::parse_pmx_model(data).map_err(|e| e.to_string())?;
+    pmx_model_non_geometry_json_from_parsed(&parsed)
+}
+
+/// Parse PMX bytes and return a JSON string with all model data **except** the
+/// geometry section (vertex positions, normals, UVs, indices, skinning data).
+///
+/// Each non-geometry field is serialized individually — no geometry JSON is
+/// constructed. Use `parsePmxModelJson` when full-model JSON is required.
+#[wasm_bindgen(js_name = parsePmxModelNonGeometryJson)]
+pub fn parse_pmx_model_non_geometry_json(data: &[u8]) -> Result<String, JsValue> {
+    parse_pmx_model_non_geometry_json_inner(data)
+        .map_err(|error| js_parser_error("PMX", "parsePmxModelNonGeometryJson", None, error))
+}
+
 #[wasm_bindgen(js_name = parseMmdFormatJson)]
 pub fn parse_mmd_format_json(data: &[u8], file_name: Option<String>) -> Result<String, JsValue> {
     if data.is_empty() {
@@ -195,6 +239,249 @@ pub fn export_mmd_format_bytes(data: &[u8], file_name: Option<String>) -> Result
         kind => Err(JsValue::from_str(&format!(
             "export is not implemented for {kind:?}"
         ))),
+    }
+}
+
+// --- PMX geometry typed-array DTO ---
+
+/// Typed-array geometry DTO for one parsed PMX model.
+///
+/// All getter methods return **owned copies** (no wasm-memory lifetime coupling).
+///
+/// Strides: positions/normals/sdefC/R0/R1/Rw0/Rw1 — vertex_count×3;
+///   uvs — vertex_count×2; additionalUvs — additional_uv_count×vertex_count×4;
+///   indices — face_count×3 (u32); materialGroups — group_count×3
+///   ([start, count, materialIndex], u32); skinIndices/skinWeights — vertex_count×4;
+///   edgeScale/sdefEnabled/qdefEnabled — vertex_count×1.
+#[wasm_bindgen]
+pub struct WasmPmxGeometry {
+    positions: Vec<f32>,
+    normals: Vec<f32>,
+    uvs: Vec<f32>,
+    additional_uvs: Vec<f32>,
+    additional_uv_count: usize,
+    indices: Vec<u32>,
+    material_groups: Vec<u32>,
+    skin_indices: Vec<u32>,
+    skin_weights: Vec<f32>,
+    edge_scale: Vec<f32>,
+    sdef_enabled: Vec<u8>,
+    sdef_c: Vec<f32>,
+    sdef_r0: Vec<f32>,
+    sdef_r1: Vec<f32>,
+    sdef_rw0: Vec<f32>,
+    sdef_rw1: Vec<f32>,
+    qdef_enabled: Vec<u8>,
+}
+
+impl WasmPmxGeometry {
+    fn from_geometry(g: &mmd_anim_format::pmx::PmxParsedGeometry) -> Self {
+        Self {
+            positions: g.positions.clone(),
+            normals: g.normals.clone(),
+            uvs: g.uvs.clone(),
+            additional_uvs: g.additional_uvs.iter().flatten().copied().collect(),
+            additional_uv_count: g.additional_uvs.len(),
+            indices: g.indices.clone(),
+            material_groups: g
+                .material_groups
+                .iter()
+                .flat_map(|group| {
+                    [
+                        group.start as u32,
+                        group.count as u32,
+                        group.material_index as u32,
+                    ]
+                })
+                .collect(),
+            skin_indices: g.skin_indices.clone(),
+            skin_weights: g.skin_weights.clone(),
+            edge_scale: g.edge_scale.clone(),
+            sdef_enabled: g.sdef.enabled.iter().map(|&v| u8::from(v != 0.0)).collect(),
+            sdef_c: g.sdef.c.clone(),
+            sdef_r0: g.sdef.r0.clone(),
+            sdef_r1: g.sdef.r1.clone(),
+            sdef_rw0: g.sdef.rw0.clone(),
+            sdef_rw1: g.sdef.rw1.clone(),
+            qdef_enabled: g.qdef.enabled.iter().map(|&v| u8::from(v != 0.0)).collect(),
+        }
+    }
+
+    fn parse_inner(data: &[u8]) -> Result<Self, String> {
+        if data.is_empty() {
+            return Err("PMX data is empty".to_owned());
+        }
+        let parsed = mmd_anim_format::parse_pmx_model(data).map_err(|e| e.to_string())?;
+        Ok(Self::from_geometry(&parsed.geometry))
+    }
+}
+
+#[wasm_bindgen]
+impl WasmPmxGeometry {
+    /// Parse PMX bytes and return the geometry DTO. All returned arrays are copies.
+    #[wasm_bindgen(js_name = fromPmxBytes)]
+    pub fn from_pmx_bytes(data: &[u8]) -> Result<WasmPmxGeometry, JsValue> {
+        Self::parse_inner(data)
+            .map_err(|error| js_parser_error("PMX", "parsePmxGeometry", None, error))
+    }
+
+    #[wasm_bindgen(js_name = vertexCount)]
+    pub fn vertex_count(&self) -> usize {
+        self.positions.len() / 3
+    }
+
+    #[wasm_bindgen(js_name = faceCount)]
+    pub fn face_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    #[wasm_bindgen(js_name = additionalUvCount)]
+    pub fn additional_uv_count(&self) -> usize {
+        self.additional_uv_count
+    }
+
+    #[wasm_bindgen(js_name = materialGroupCount)]
+    pub fn material_group_count(&self) -> usize {
+        self.material_groups.len() / 3
+    }
+
+    /// Copy of positions (vertex_count×3, XYZ, f32).
+    #[wasm_bindgen(js_name = positions)]
+    pub fn positions(&self) -> Vec<f32> {
+        self.positions.clone()
+    }
+
+    /// Copy of normals (vertex_count×3, XYZ, f32).
+    #[wasm_bindgen(js_name = normals)]
+    pub fn normals(&self) -> Vec<f32> {
+        self.normals.clone()
+    }
+
+    /// Copy of UV coordinates (vertex_count×2, UV, f32).
+    #[wasm_bindgen(js_name = uvs)]
+    pub fn uvs(&self) -> Vec<f32> {
+        self.uvs.clone()
+    }
+
+    /// Copy of additional UV coordinates (additional_uv_count×vertex_count×4, f32).
+    #[wasm_bindgen(js_name = additionalUvs)]
+    pub fn additional_uvs(&self) -> Vec<f32> {
+        self.additional_uvs.clone()
+    }
+
+    /// Copy of triangle indices (face_count×3, u32). u32 because PMX allows >65535 vertices.
+    #[wasm_bindgen(js_name = indices)]
+    pub fn indices(&self) -> Vec<u32> {
+        self.indices.clone()
+    }
+
+    /// Copy of material groups (group_count×3, [start, count, materialIndex], u32).
+    #[wasm_bindgen(js_name = materialGroups)]
+    pub fn material_groups(&self) -> Vec<u32> {
+        self.material_groups.clone()
+    }
+
+    /// Copy of bone skin indices (vertex_count×4, u32). 4 bones per vertex, 0-padded.
+    #[wasm_bindgen(js_name = skinIndices)]
+    pub fn skin_indices(&self) -> Vec<u32> {
+        self.skin_indices.clone()
+    }
+
+    /// Copy of bone skin weights (vertex_count×4, f32). 4 weights per vertex.
+    #[wasm_bindgen(js_name = skinWeights)]
+    pub fn skin_weights(&self) -> Vec<f32> {
+        self.skin_weights.clone()
+    }
+
+    /// Copy of per-vertex edge scale (vertex_count×1, f32).
+    #[wasm_bindgen(js_name = edgeScale)]
+    pub fn edge_scale(&self) -> Vec<f32> {
+        self.edge_scale.clone()
+    }
+
+    /// Copy of SDEF active flags (vertex_count×1, u8; 1=SDEF, 0=other).
+    #[wasm_bindgen(js_name = sdefEnabled)]
+    pub fn sdef_enabled(&self) -> Vec<u8> {
+        self.sdef_enabled.clone()
+    }
+
+    /// Copy of SDEF C vectors (vertex_count×3, XYZ, f32).
+    #[wasm_bindgen(js_name = sdefC)]
+    pub fn sdef_c(&self) -> Vec<f32> {
+        self.sdef_c.clone()
+    }
+
+    /// Copy of SDEF R0 vectors (vertex_count×3, XYZ, f32).
+    #[wasm_bindgen(js_name = sdefR0)]
+    pub fn sdef_r0(&self) -> Vec<f32> {
+        self.sdef_r0.clone()
+    }
+
+    /// Copy of SDEF R1 vectors (vertex_count×3, XYZ, f32).
+    #[wasm_bindgen(js_name = sdefR1)]
+    pub fn sdef_r1(&self) -> Vec<f32> {
+        self.sdef_r1.clone()
+    }
+
+    /// Copy of SDEF Rw0 vectors (vertex_count×3, XYZ, f32). Pre-computed from R0/R1/C/weight.
+    #[wasm_bindgen(js_name = sdefRw0)]
+    pub fn sdef_rw0(&self) -> Vec<f32> {
+        self.sdef_rw0.clone()
+    }
+
+    /// Copy of SDEF Rw1 vectors (vertex_count×3, XYZ, f32). Pre-computed from R0/R1/C/weight.
+    #[wasm_bindgen(js_name = sdefRw1)]
+    pub fn sdef_rw1(&self) -> Vec<f32> {
+        self.sdef_rw1.clone()
+    }
+
+    /// Copy of QDEF active flags (vertex_count×1, u8; 1=QDEF, 0=other).
+    #[wasm_bindgen(js_name = qdefEnabled)]
+    pub fn qdef_enabled(&self) -> Vec<u8> {
+        self.qdef_enabled.clone()
+    }
+}
+
+/// Parsed PMX handle for the split loader ABI.
+///
+/// Use this when both non-geometry JSON and geometry typed arrays are needed
+/// for the same PMX bytes. The PMX parser runs once; getters return owned
+/// copies and the handle can be freed immediately after those copies are made.
+#[wasm_bindgen]
+pub struct WasmPmxParsedModel {
+    parsed: mmd_anim_format::pmx::PmxParsedModel,
+}
+
+impl WasmPmxParsedModel {
+    fn parse_inner(data: &[u8]) -> Result<Self, String> {
+        if data.is_empty() {
+            return Err("PMX data is empty".to_owned());
+        }
+        let parsed = mmd_anim_format::parse_pmx_model(data).map_err(|e| e.to_string())?;
+        Ok(Self { parsed })
+    }
+}
+
+#[wasm_bindgen]
+impl WasmPmxParsedModel {
+    /// Parse PMX bytes once and expose split non-geometry JSON plus geometry DTO getters.
+    #[wasm_bindgen(js_name = parse)]
+    pub fn parse(data: &[u8]) -> Result<WasmPmxParsedModel, JsValue> {
+        Self::parse_inner(data)
+            .map_err(|error| js_parser_error("PMX", "parsePmxParsedModel", None, error))
+    }
+
+    /// Return JSON with all model data except geometry.
+    #[wasm_bindgen(js_name = nonGeometryJson)]
+    pub fn non_geometry_json(&self) -> Result<String, JsValue> {
+        pmx_model_non_geometry_json_from_parsed(&self.parsed)
+            .map_err(|error| js_parser_error("PMX", "nonGeometryJson", None, error))
+    }
+
+    /// Return copied geometry typed arrays for this parsed PMX model.
+    #[wasm_bindgen(js_name = geometry)]
+    pub fn geometry(&self) -> WasmPmxGeometry {
+        WasmPmxGeometry::from_geometry(&self.parsed.geometry)
     }
 }
 
@@ -1420,7 +1707,9 @@ TextureFilename { "tex/main.png"; }
                 "skinIndices": [],
                 "skinWeights": [],
                 "edgeScale": [],
-                "materialGroups": []
+                "materialGroups": [],
+                "sdef": { "enabled": [], "c": [], "r0": [], "r1": [], "rw0": [], "rw1": [] },
+                "qdef": { "enabled": [] }
             },
             "materials": [],
             "skeleton": { "bones": [] },
@@ -2093,5 +2382,214 @@ TextureFilename { "tex/main.png"; }
         .unwrap();
         assert_eq!(model.morph_count(), 0);
         assert_eq!(model.ik_count(), 1);
+    }
+
+    // --- WasmPmxGeometry tests ---
+    // Tests call WasmPmxGeometry::parse_inner (returns String error) rather than
+    // from_pmx_bytes (returns JsValue) to avoid JsValue::from_str panicking outside wasm.
+
+    #[test]
+    fn pmx_geometry_dto_basic_roundtrip() {
+        let metadata = serde_json::json!({
+            "name": "geo-test",
+            "encoding": "utf-8",
+            "indexSizes": { "vertex": 1, "texture": 1, "material": 1, "bone": 1, "morph": 1, "rigidBody": 1 }
+        })
+        .to_string();
+        let pmx_bytes = export_pmx_from_parts(
+            &metadata,
+            &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            &[0, 1, 2],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let geo = WasmPmxGeometry::parse_inner(&pmx_bytes).unwrap();
+
+        assert_eq!(geo.vertex_count(), 3);
+        assert_eq!(geo.face_count(), 1);
+        assert_eq!(geo.additional_uv_count(), 0);
+        assert_eq!(
+            geo.positions(),
+            vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            geo.normals(),
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+        );
+        assert_eq!(geo.additional_uvs(), Vec::<f32>::new());
+        assert_eq!(geo.indices(), vec![0, 1, 2]);
+        assert_eq!(geo.material_groups().len(), geo.material_group_count() * 3);
+        assert_eq!(geo.skin_indices().len(), 12); // vertex_count × 4
+        assert_eq!(geo.skin_weights().len(), 12); // vertex_count × 4
+        assert_eq!(geo.edge_scale().len(), 3);
+        assert_eq!(geo.sdef_enabled(), vec![0u8, 0, 0]);
+        assert_eq!(geo.sdef_c().len(), 9); // vertex_count × 3
+        assert_eq!(geo.sdef_r0().len(), 9);
+        assert_eq!(geo.sdef_r1().len(), 9);
+        assert_eq!(geo.sdef_rw0().len(), 9);
+        assert_eq!(geo.sdef_rw1().len(), 9);
+        assert_eq!(geo.qdef_enabled(), vec![0u8, 0, 0]);
+    }
+
+    #[test]
+    fn pmx_geometry_dto_sdef_vertex() {
+        // Minimal PMX with 1 SDEF vertex (weight type 3)
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"PMX ");
+        buf.extend_from_slice(&2.0f32.to_le_bytes());
+        buf.push(8); // data_count
+        buf.push(1); // UTF-8
+        buf.push(0); // extra_uv_count
+        buf.push(1); // vertex_index_size
+        buf.push(1); // texture_index_size
+        buf.push(1); // material_index_size
+        buf.push(1); // bone_index_size
+        buf.push(1); // morph_index_size
+        buf.push(1); // rigidbody_index_size
+        // 4 empty model-info strings (UTF-8 i32-prefixed, len=0 each)
+        for _ in 0..4 {
+            buf.extend_from_slice(&0i32.to_le_bytes());
+        }
+        // 1 vertex
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // pos x
+        buf.extend_from_slice(&2.0f32.to_le_bytes()); // pos y
+        buf.extend_from_slice(&3.0f32.to_le_bytes()); // pos z
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // normal x
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // normal y
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // normal z
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // uv u
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // uv v
+        buf.push(3u8); // weight type = SDEF
+        buf.push(0u8); // bone_index_0 (1-byte)
+        buf.push(0u8); // bone_index_1 (1-byte)
+        buf.extend_from_slice(&0.25f32.to_le_bytes()); // weight
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // c.x
+        buf.extend_from_slice(&2.0f32.to_le_bytes()); // c.y
+        buf.extend_from_slice(&3.0f32.to_le_bytes()); // c.z
+        buf.extend_from_slice(&4.0f32.to_le_bytes()); // r0.x
+        buf.extend_from_slice(&5.0f32.to_le_bytes()); // r0.y
+        buf.extend_from_slice(&6.0f32.to_le_bytes()); // r0.z
+        buf.extend_from_slice(&7.0f32.to_le_bytes()); // r1.x
+        buf.extend_from_slice(&8.0f32.to_le_bytes()); // r1.y
+        buf.extend_from_slice(&9.0f32.to_le_bytes()); // r1.z
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // edge_scale
+        // 8 empty sections (faces/textures/materials/bones/morphs/displayFrames/rigidBodies/joints)
+        for _ in 0..8 {
+            buf.extend_from_slice(&0i32.to_le_bytes());
+        }
+
+        let geo = WasmPmxGeometry::parse_inner(&buf).unwrap();
+
+        assert_eq!(geo.vertex_count(), 1);
+        assert_eq!(geo.positions(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(geo.sdef_enabled(), vec![1u8]);
+        assert_eq!(geo.sdef_c(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(geo.sdef_r0(), vec![4.0, 5.0, 6.0]);
+        assert_eq!(geo.sdef_r1(), vec![7.0, 8.0, 9.0]);
+        assert_eq!(geo.sdef_rw0().len(), 3); // pre-computed from r0/r1/c/weight
+        assert_eq!(geo.sdef_rw1().len(), 3);
+        assert_eq!(geo.qdef_enabled(), vec![0u8]);
+    }
+
+    #[test]
+    fn pmx_geometry_dto_rejects_empty_input() {
+        assert!(WasmPmxGeometry::parse_inner(&[]).is_err());
+    }
+
+    // --- parsePmxModelNonGeometryJson tests ---
+
+    fn minimal_pmx_bytes() -> Vec<u8> {
+        export_pmx_from_parts(
+            &serde_json::json!({
+                "name": "test",
+                "encoding": "utf-8",
+                "indexSizes": { "vertex": 1, "texture": 1, "material": 1, "bone": 1, "morph": 1, "rigidBody": 1 }
+            })
+            .to_string(),
+            &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            &[0, 1, 2],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn pmx_non_geometry_json_excludes_geometry_key() {
+        let pmx_bytes = minimal_pmx_bytes();
+        let json_str = parse_pmx_model_non_geometry_json_inner(&pmx_bytes).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(
+            value.get("geometry").is_none(),
+            "geometry key must not appear in non-geometry JSON"
+        );
+    }
+
+    #[test]
+    fn pmx_non_geometry_json_contains_required_keys() {
+        let pmx_bytes = minimal_pmx_bytes();
+        let json_str = parse_pmx_model_non_geometry_json_inner(&pmx_bytes).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(value.get("metadata").is_some(), "metadata must be present");
+        assert!(
+            value.get("materials").is_some(),
+            "materials must be present"
+        );
+        assert!(value.get("skeleton").is_some(), "skeleton must be present");
+        assert!(value.get("morphs").is_some(), "morphs must be present");
+        assert!(
+            value.get("displayFrames").is_some(),
+            "displayFrames must be present"
+        );
+        assert!(
+            value.get("rigidBodies").is_some(),
+            "rigidBodies must be present"
+        );
+        assert!(value.get("joints").is_some(), "joints must be present");
+        assert!(
+            value.get("softBodies").is_some(),
+            "softBodies must be present"
+        );
+        assert!(
+            value.get("diagnostics").is_some(),
+            "diagnostics must be present"
+        );
+    }
+
+    #[test]
+    fn pmx_non_geometry_json_rejects_empty_input() {
+        let result = parse_pmx_model_non_geometry_json_inner(&[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn pmx_parsed_model_handle_exposes_non_geometry_json_and_geometry() {
+        let pmx_bytes = minimal_pmx_bytes();
+        let parsed = WasmPmxParsedModel::parse_inner(&pmx_bytes).unwrap();
+        let json_str = parsed.non_geometry_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let geometry = parsed.geometry();
+
+        assert!(value.get("geometry").is_none());
+        assert!(value.get("metadata").is_some());
+        assert_eq!(geometry.vertex_count(), 3);
+        assert_eq!(geometry.indices(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn pmx_parsed_model_handle_rejects_empty_input() {
+        assert!(WasmPmxParsedModel::parse_inner(&[]).is_err());
     }
 }

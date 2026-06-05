@@ -1,58 +1,54 @@
 # mmd-anim
 
-`mmd-anim` is a tested Rust animation foundation for MikuMikuDance tools.
+`mmd-anim` is a Rust animation foundation for playing MikuMikuDance animation
+across multiple platforms.
 
-It provides a renderer-independent runtime core for evaluating PMX/VMD animation
-state: world matrices, skinning matrices, morph weights, and IK enabled states.
-The same core is shared across Rust libraries, native host integrations, browser
-WASM builds, command-line diagnostics, and downstream MMD products.
-
-This repository is intended to be the animation backbone of the `yohawing` MMD
-toolchain. Format loading and writing are included where they support reliable
-runtime evaluation, conversion, diagnostics, and asset generation.
+It loads PMX/VMD data and evaluates world matrices, skinning matrices, morph
+weights, and IK state at any frame. The library is designed so the same runtime
+can be called from browsers, command-line tools, Rust applications, mobile
+applications, game engines, and other host environments.
 
 ## Status
 
-`mmd-anim` is production-oriented but still pre-1.0.
+`mmd-anim` is still in an evaluation stage.
 
-The runtime architecture, validation strategy, and supported format paths are
-designed for downstream integrations. However, the Rust API, C ABI, and WASM
-entry points are not yet frozen, and breaking changes may happen before 1.0.
+It is tested against data exported from the original MMD and against several
+PMX/VMD assets, but real-world usage is still limited. APIs and features are not
+frozen yet, and breaking changes may happen before 1.0. Feedback is welcome.
 
 ## Runtime Evaluation
 
-- Build a runtime model from PMX bytes.
-- Resolve VMD bytes against names from a PMX model and convert them into an `AnimationClip`.
-- Evaluate any frame and read world matrices, skinning matrices, morph weights, and IK enabled state.
+- Load a PMX model and convert it into runtime-ready model data.
+- Load a VMD motion, resolve names against the PMX model, and convert it into a playable clip.
+- Evaluate a frame and read the bone matrices, morph weights, and IK on/off state for that moment.
+- Interpolate between keyframes with MMD-style Bezier interpolation for translation and rotation.
 
-## Validation
+> **Physics simulation is not included.** Rigid-body and joint data can be read
+> and written, but cloth, hair, and other physics-driven motion must be handled
+> by the host-side physics engine.
 
-`mmd-anim` is developed as a shared animation foundation, so correctness is
-treated as part of the public API.
+## Test Foundation
 
-The public repository is validated through:
+`mmd-anim` is a shared animation foundation for multiple projects, so test
+coverage focuses on keeping evaluated results correct.
 
-- Rust unit tests for animation sampling, hierarchy evaluation, IK descriptors,
-  append transforms, morph expansion, and format-specific parsing/writing paths.
-- Round-trip checks for supported writer paths where meaning-preserving output is expected.
-- Synthetic runtime frame checks for PMX/VMD evaluation behavior.
-- CLI diagnostics used by maintainers to compare imported assets and evaluated animation state.
-- FFI and WASM smoke tests to keep host-facing APIs on the same runtime path.
+The repository includes tests for:
+
+- animation evaluation, bone hierarchy evaluation, IK, append transforms, morphs, and format read/write paths;
+- round-trip checks that write parsed data and read it back without changing the represented content;
+- frame-by-frame PMX/VMD runtime evaluation against expected synthetic results;
+- maintainer CLI diagnostics for inspecting loaded models and evaluated state;
+- C ABI and WASM smoke checks to confirm host-facing APIs use the same runtime path.
 
 Recommended public release checks:
 
 
 ```powershell
-rtk cargo test --workspace
-rtk cargo fmt --all -- --check
-rtk cargo clippy --workspace --all-targets -- -D warnings
-rtk cargo doc --workspace --no-deps
+cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo doc --workspace --no-deps
 ```
-
-Some reference assets are not included in the public repository because of asset
-licensing constraints. Maintainer-only local asset comparisons and
-reference-data checks are useful for release confidence, but they are not part of
-the distributable public release gate.
 
 ## Used By
 
@@ -71,12 +67,12 @@ Format support overview. "Loading" means parsing a file into structured data.
 
 | Format | Loading | Writing |
 |--------|---------|---------|
-| PMX | model sections + soft-body header diagnostics | meaning-preserving write / JSON-based read-write / generation from parts |
-| PMD | model structure + partial runtime import | meaning-preserving write / JSON-based read-write |
+| PMX | model sections + soft-body header diagnostics | writing / JSON conversion / generation from mesh data |
+| PMD | model structure + partial runtime import | writing / JSON conversion |
 | VMD | animation structure | **supported** |
 | PMM | header, timeline, display state, referenced assets, and PMMv2 summary information | — |
 | VPD | pose structure | **supported** |
-| X/VAC | text X mesh, material, UV, normal, vertex color + VAC settings and raw lines | meaning-preserving text X / VAC wrapper write |
+| X/VAC | text X mesh, material, UV, normal, vertex color + VAC settings and raw lines | text X / VAC wrapper writing |
 
 ## Crates
 
@@ -85,10 +81,10 @@ Format support overview. "Loading" means parsing a file into structured data.
 | `mmd-anim` | Main public crate. Provides the evaluation core and format handling through one entry point. |
 | `mmd-anim-runtime` | Format-independent evaluation core: model arena, pose, VMD evaluation, append transforms, IK, and morphs. |
 | `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
-| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for 0.1.0. |
-| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for 0.1.0. |
-| `mmd-anim-cli` | Maintainer diagnostics and verification command-line tool. Repository-local for 0.1.0. |
-| `mmd-anim-schema` | Maintainer quality-check schema helper crate. Repository-local for 0.1.0. |
+| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for the 0.1.x line. |
+| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for the 0.1.x line. |
+| `mmd-anim-cli` | Maintainer diagnostics and verification command-line tool. Repository-local for the 0.1.x line. |
+| `mmd-anim-schema` | Maintainer quality-check schema helper crate. Repository-local for the 0.1.x line. |
 
 For normal library use, depend on `mmd-anim`. Advanced users who only need a
 lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
@@ -139,7 +135,7 @@ host-side geometry data, use `mmd_runtime_export_pmx_from_parts`.
 Input arrays remain owned by the caller, and returned bytes must be freed with
 `mmd_runtime_byte_buffer_free`.
 
-This native integration crate is not published to crates.io for 0.1.0. It is
+This native integration crate is not published to crates.io for the 0.1.x line. It is
 kept in the Rust workspace for builds and checks.
 
 ## WASM / Browser
@@ -173,7 +169,12 @@ const clip = WasmMmdClip.fromVmdBytesForModel(model, vmdBytes);
 const runtime = WasmMmdRuntimeInstance.forModel(model);
 
 runtime.evaluateClipFrame(clip, 300);
-const world = runtime.worldMatricesView();
+const world = runtime.worldMatrices();
+
+// Explicitly free resources when they are no longer needed.
+runtime.free();
+clip.free();
+model.free();
 
 // Loading / writing without a runtime handle
 const json = parseMmdFormatJson(vmdBytes, "motion.vmd");
@@ -197,11 +198,7 @@ const generatedPmxBytes = exportPmxFromParts(
 );
 ```
 
-`worldMatricesView()` avoids a copy, but it becomes invalid after the next
-evaluation or WASM memory growth. Use `worldMatrices()` or `copyWorldMatrices()`
-when the data needs to live longer.
-
-The WASM package is not published to crates.io for 0.1.0. It is kept in the Rust
+The WASM package is not published to crates.io for the 0.1.x line. It is kept in the Rust
 workspace for builds and checks.
 
 ## CLI Checks
@@ -210,7 +207,7 @@ For local loading and writing checks, use the repository-local `mmd-anim-cli`.
 Available subcommands can be listed with:
 
 ```powershell
-rtk cargo run -p mmd-anim-cli -- --help
+cargo run -p mmd-anim-cli -- --help
 ```
 
 This command-line tool is for maintainer diagnostics and is not required for
@@ -222,6 +219,7 @@ public releases.
 - **Writing:** PMX generation from parts currently covers the initial range of geometry, materials, bones, display frames, morphs, and physics. PMM writing is not provided until the full project graph can be represented.
 - **PMM:** Supported PMM data currently includes project header information, timeline-derived values, display state, initial model-slot data, referenced assets, PMMv2 summary information, and asset/header consistency diagnostics. PMM writing is not provided because the full project graph is not preserved yet.
 - **X/VAC:** Text X mesh, material, normal, UV, vertex color, and common VAC line order are handled. Binary X is diagnostic-only.
+- **Physics:** Rigid-body and joint data can be read and written, but physics simulation itself is not provided. Physics-driven parts should be handled by the host engine.
 - **API / ABI / WASM:** These surfaces are still experimental. When integrating with an external host, start with a small smoke test and representative-frame checks.
 
 ## Japanese README

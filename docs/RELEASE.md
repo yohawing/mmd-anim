@@ -44,6 +44,10 @@ crate.
 - Build the `CHANGELOG.md` entry from the commits since the previous release tag,
   not only from the final release-prep commit.
 - Confirm all workspace package versions match the intended release.
+- Confirm `README.md` and `docs/README.ja.md` describe the same release-facing
+  behavior, API examples, limitations, and publish scope. When one README is
+  changed, translate the same user-visible change into the other before
+  release.
 - Confirm the working tree is clean.
 - Confirm `origin` points to `git@github.com:yohawing/mmd-anim.git`.
 - Confirm `develop` is up to date with `origin/develop` before preparing the

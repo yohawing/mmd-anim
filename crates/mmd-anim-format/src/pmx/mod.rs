@@ -75,6 +75,13 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn require_record_bytes(&self, count: usize, record_size: usize) -> Result<(), ImportError> {
+        let bytes = count
+            .checked_mul(record_size)
+            .ok_or(ImportError::SectionOverflow)?;
+        self.require(bytes)
+    }
+
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], ImportError> {
         self.require(n)?;
         let slice = &self.data[self.pos..self.pos + n];
@@ -244,6 +251,18 @@ pub fn read_header(data: &[u8]) -> Result<(PmxHeader, usize), ImportError> {
     let bone_index_size = r.read_u8()?;
     let morph_index_size = r.read_u8()?;
     let rigidbody_index_size = r.read_u8()?;
+    for size in [
+        vertex_index_size,
+        texture_index_size,
+        material_index_size,
+        bone_index_size,
+        morph_index_size,
+        rigidbody_index_size,
+    ] {
+        if !matches!(size, 1 | 2 | 4) {
+            return Err(ImportError::InvalidIndexSize(size));
+        }
+    }
     if data_count > 8 {
         r.skip((data_count - 8) as usize)?;
     }
@@ -324,7 +343,10 @@ pub fn skip_faces(data: &[u8], vertex_index_size: u8, pos: usize) -> Result<usiz
         return Err(ImportError::SectionOverflow);
     }
     let count = count as usize;
-    r.skip(count * vertex_index_size as usize)?;
+    let bytes = count
+        .checked_mul(vertex_index_size as usize)
+        .ok_or(ImportError::SectionOverflow)?;
+    r.skip(bytes)?;
     Ok(r.pos)
 }
 
@@ -458,6 +480,7 @@ pub fn read_morph_names(
         return Err(ImportError::SectionOverflow);
     }
     let count = count as usize;
+    r.require_record_bytes(count, 1)?;
 
     let mut name_bytes = Vec::with_capacity(count);
     let mut names = Vec::with_capacity(count);
@@ -511,6 +534,7 @@ pub fn read_morph_offsets(
         return Err(ImportError::SectionOverflow);
     }
     let count = count as usize;
+    r.require_record_bytes(count, 1)?;
 
     let mut name_bytes = Vec::with_capacity(count);
     let mut names = Vec::with_capacity(count);
@@ -644,6 +668,7 @@ pub fn read_bones(
         return Err(ImportError::SectionOverflow);
     }
     let count = count as usize;
+    r.require_record_bytes(count, 1)?;
 
     let mut bones = Vec::with_capacity(count);
     let mut ik_solvers = Vec::new();
@@ -710,6 +735,7 @@ pub fn read_bones(
             if link_count < 0 {
                 return Err(ImportError::SectionOverflow);
             }
+            r.require_record_bytes(link_count as usize, header.bone_index_size as usize + 1)?;
 
             let mut links = Vec::with_capacity(link_count as usize);
             for _ in 0..link_count {
@@ -839,6 +865,23 @@ pub struct PmxParsedIndexSizes {
     pub rigid_body: u8,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxParsedSdef {
+    pub enabled: Vec<f32>,
+    pub c: Vec<f32>,
+    pub r0: Vec<f32>,
+    pub r1: Vec<f32>,
+    pub rw0: Vec<f32>,
+    pub rw1: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxParsedQdef {
+    pub enabled: Vec<f32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedGeometry {
@@ -851,6 +894,8 @@ pub struct PmxParsedGeometry {
     pub skin_weights: Vec<f32>,
     pub edge_scale: Vec<f32>,
     pub material_groups: Vec<PmxParsedMaterialGroup>,
+    pub sdef: PmxParsedSdef,
+    pub qdef: PmxParsedQdef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1595,6 +1640,8 @@ pub fn build_pmx_model_from_parts(input: PmxPartsInput<'_>) -> Result<PmxParsedM
             skin_weights,
             edge_scale,
             material_groups,
+            sdef: PmxParsedSdef::default(),
+            qdef: PmxParsedQdef::default(),
         },
         materials,
         skeleton: PmxParsedSkeleton { bones },
@@ -2394,13 +2441,13 @@ pub fn parse_pmx_model(data: &[u8]) -> Result<PmxParsedModel, ImportError> {
     let comment = r.read_string(header.encoding)?;
     let english_comment = r.read_string(header.encoding)?;
 
-    let vertex_count = read_section_count(&mut r)?;
+    let vertex_count = read_section_count_with_min_record(&mut r, 12 + 12 + 8 + 1 + 4)?;
     let geometry = read_parsed_geometry(&mut r, &header, vertex_count)?;
     let index_count = geometry.indices.len();
     let textures = read_parsed_textures(&mut r, header.encoding)?;
     let materials = read_parsed_materials(&mut r, &header, &textures)?;
     let material_groups = build_material_groups(&materials);
-    let bone_count = read_section_count(&mut r)?;
+    let bone_count = read_section_count_with_min_record(&mut r, 4 + 4 + 12)?;
     let skeleton = PmxParsedSkeleton {
         bones: read_parsed_bones(&mut r, &header, bone_count)?,
     };
@@ -2849,21 +2896,48 @@ fn read_section_count(r: &mut Reader<'_>) -> Result<usize, ImportError> {
     Ok(count as usize)
 }
 
+fn read_section_count_with_min_record(
+    r: &mut Reader<'_>,
+    min_record_size: usize,
+) -> Result<usize, ImportError> {
+    let count = read_section_count(r)?;
+    r.require_record_bytes(count, min_record_size)?;
+    Ok(count)
+}
+
 fn read_parsed_geometry(
     r: &mut Reader<'_>,
     header: &PmxHeader,
     vertex_count: usize,
 ) -> Result<PmxParsedGeometry, ImportError> {
-    let mut positions = Vec::with_capacity(vertex_count * 3);
-    let mut normals = Vec::with_capacity(vertex_count * 3);
-    let mut uvs = Vec::with_capacity(vertex_count * 2);
-    let mut additional_uvs =
-        vec![Vec::with_capacity(vertex_count * 4); header.extra_uv_count as usize];
-    let mut skin_indices = Vec::with_capacity(vertex_count * 4);
-    let mut skin_weights = Vec::with_capacity(vertex_count * 4);
-    let mut edge_scale = Vec::with_capacity(vertex_count);
+    r.require_record_bytes(vertex_count, 12 + 12 + 8 + 1 + 4)?;
+    let position_capacity = vertex_count
+        .checked_mul(3)
+        .ok_or(ImportError::SectionOverflow)?;
+    let uv_capacity = vertex_count
+        .checked_mul(2)
+        .ok_or(ImportError::SectionOverflow)?;
+    let skin_capacity = vertex_count
+        .checked_mul(4)
+        .ok_or(ImportError::SectionOverflow)?;
 
-    for _ in 0..vertex_count {
+    let mut positions = Vec::with_capacity(position_capacity);
+    let mut normals = Vec::with_capacity(position_capacity);
+    let mut uvs = Vec::with_capacity(uv_capacity);
+    let mut additional_uvs =
+        vec![Vec::with_capacity(skin_capacity); header.extra_uv_count as usize];
+    let mut skin_indices = Vec::with_capacity(skin_capacity);
+    let mut skin_weights = Vec::with_capacity(skin_capacity);
+    let mut edge_scale = Vec::with_capacity(vertex_count);
+    let mut sdef_enabled = vec![0.0f32; vertex_count];
+    let mut sdef_c = vec![0.0f32; vertex_count * 3];
+    let mut sdef_r0 = vec![0.0f32; vertex_count * 3];
+    let mut sdef_r1 = vec![0.0f32; vertex_count * 3];
+    let mut sdef_rw0 = vec![0.0f32; vertex_count * 3];
+    let mut sdef_rw1 = vec![0.0f32; vertex_count * 3];
+    let mut qdef_enabled = vec![0.0f32; vertex_count];
+
+    for vertex_i in 0..vertex_count {
         positions.extend_from_slice(&r.read_vec3_array()?);
         normals.extend_from_slice(&r.read_vec3_array()?);
         uvs.extend_from_slice(&r.read_vec2_array()?);
@@ -2888,10 +2962,23 @@ fn read_parsed_geometry(
                 weights[0] = w;
                 weights[1] = 1.0 - w;
                 if weight_type == 3 {
-                    r.skip(36)?;
+                    let c = r.read_vec3_array()?;
+                    let r0 = r.read_vec3_array()?;
+                    let r1 = r.read_vec3_array()?;
+                    let w1 = 1.0 - w;
+                    let offset = vertex_i * 3;
+                    sdef_enabled[vertex_i] = 1.0;
+                    sdef_c[offset..offset + 3].copy_from_slice(&c);
+                    sdef_r0[offset..offset + 3].copy_from_slice(&r0);
+                    sdef_r1[offset..offset + 3].copy_from_slice(&r1);
+                    for k in 0..3 {
+                        let rw = r0[k] * w + r1[k] * w1;
+                        sdef_rw0[offset + k] = (c[k] * 2.0 + r0[k] - rw) * 0.5;
+                        sdef_rw1[offset + k] = (c[k] * 2.0 + r1[k] - rw) * 0.5;
+                    }
                 }
             }
-            2 | 4 => {
+            2 => {
                 for index in &mut indices {
                     *index =
                         normalize_nonnegative_index(r.read_sized_index(header.bone_index_size)?);
@@ -2900,6 +2987,16 @@ fn read_parsed_geometry(
                     *weight = r.read_f32_le()?;
                 }
             }
+            4 => {
+                for index in &mut indices {
+                    *index =
+                        normalize_nonnegative_index(r.read_sized_index(header.bone_index_size)?);
+                }
+                for weight in &mut weights {
+                    *weight = r.read_f32_le()?;
+                }
+                qdef_enabled[vertex_i] = 1.0;
+            }
             _ => return Err(ImportError::SectionOverflow),
         }
         skin_indices.extend_from_slice(&indices);
@@ -2907,7 +3004,7 @@ fn read_parsed_geometry(
         edge_scale.push(r.read_f32_le()?);
     }
 
-    let index_count = read_section_count(r)?;
+    let index_count = read_section_count_with_min_record(r, header.vertex_index_size as usize)?;
     let mut indices = Vec::with_capacity(index_count);
     for _ in 0..index_count {
         indices.push(r.read_vertex_index(header.vertex_index_size)?);
@@ -2923,6 +3020,17 @@ fn read_parsed_geometry(
         skin_weights,
         edge_scale,
         material_groups: Vec::new(),
+        sdef: PmxParsedSdef {
+            enabled: sdef_enabled,
+            c: sdef_c,
+            r0: sdef_r0,
+            r1: sdef_r1,
+            rw0: sdef_rw0,
+            rw1: sdef_rw1,
+        },
+        qdef: PmxParsedQdef {
+            enabled: qdef_enabled,
+        },
     })
 }
 
@@ -2934,7 +3042,7 @@ fn read_parsed_textures(
     r: &mut Reader<'_>,
     encoding: TextEncoding,
 ) -> Result<Vec<String>, ImportError> {
-    let count = read_section_count(r)?;
+    let count = read_section_count_with_min_record(r, 4)?;
     let mut textures = Vec::with_capacity(count);
     for _ in 0..count {
         textures.push(r.read_string(encoding)?);
@@ -2947,7 +3055,7 @@ fn read_parsed_materials(
     header: &PmxHeader,
     textures: &[String],
 ) -> Result<Vec<PmxParsedMaterial>, ImportError> {
-    let count = read_section_count(r)?;
+    let count = read_section_count_with_min_record(r, 4 + 4 + 16 + 16 + 12 + 1 + 16 + 4)?;
     let mut materials = Vec::with_capacity(count);
     for _ in 0..count {
         let name = r.read_string(header.encoding)?;
@@ -3231,6 +3339,7 @@ fn read_parsed_bones(
     header: &PmxHeader,
     count: usize,
 ) -> Result<Vec<PmxParsedBone>, ImportError> {
+    r.require_record_bytes(count, 4 + 4 + 12)?;
     let mut bones = Vec::with_capacity(count);
     for _ in 0..count {
         let name = r.read_string(header.encoding)?;
@@ -3275,7 +3384,8 @@ fn read_parsed_bones(
             let target_index = r.read_sized_index(header.bone_index_size)?;
             let loop_count = r.read_i32_le()?;
             let limit_angle = r.read_f32_le()?;
-            let link_count = read_section_count(r)?;
+            let link_count =
+                read_section_count_with_min_record(r, header.bone_index_size as usize + 1)?;
             let mut links = Vec::with_capacity(link_count);
             for _ in 0..link_count {
                 let bone_index = r.read_sized_index(header.bone_index_size)?;
@@ -3342,14 +3452,24 @@ fn read_parsed_morphs(
     r: &mut Reader<'_>,
     header: &PmxHeader,
 ) -> Result<Vec<PmxParsedMorph>, ImportError> {
-    let count = read_section_count(r)?;
+    let count = read_section_count_with_min_record(r, 4 + 4 + 1 + 1 + 4)?;
     let mut morphs = Vec::with_capacity(count);
     for _ in 0..count {
         let name = r.read_string(header.encoding)?;
         let english_name = r.read_string(header.encoding)?;
         let _panel = r.read_u8()?;
         let morph_type = r.read_u8()?;
-        let offset_count = read_section_count(r)?;
+        let min_offset_size = match morph_type {
+            0 => header.morph_index_size as usize + 4,
+            1 => header.vertex_index_size as usize + 12,
+            2 => header.bone_index_size as usize + 12 + 16,
+            3..=7 => header.vertex_index_size as usize + 16,
+            8 => header.material_index_size as usize + 1 + 16 + 12 + 4 + 12 + 16 + 4 + 16 + 16 + 16,
+            9 => header.morph_index_size as usize + 4,
+            10 => header.rigidbody_index_size as usize + 1 + 12 + 12,
+            _ => return Err(ImportError::SectionOverflow),
+        };
+        let offset_count = read_section_count_with_min_record(r, min_offset_size)?;
         let mut morph = PmxParsedMorph {
             name,
             english_name,
@@ -3439,13 +3559,13 @@ fn read_parsed_display_frames(
     r: &mut Reader<'_>,
     header: &PmxHeader,
 ) -> Result<Vec<PmxParsedDisplayFrame>, ImportError> {
-    let count = read_section_count(r)?;
+    let count = read_section_count_with_min_record(r, 4 + 4 + 1 + 4)?;
     let mut frames = Vec::with_capacity(count);
     for _ in 0..count {
         let name = r.read_string(header.encoding)?;
         let english_name = r.read_string(header.encoding)?;
         let special = r.read_u8()? == 1;
-        let item_count = read_section_count(r)?;
+        let item_count = read_section_count_with_min_record(r, 1)?;
         let mut items = Vec::with_capacity(item_count);
         for _ in 0..item_count {
             let kind = r.read_u8()?;
@@ -3477,7 +3597,10 @@ fn read_parsed_rigid_bodies(
     r: &mut Reader<'_>,
     header: &PmxHeader,
 ) -> Result<Vec<PmxParsedRigidBody>, ImportError> {
-    let count = read_section_count(r)?;
+    let count = read_section_count_with_min_record(
+        r,
+        4 + 4 + header.bone_index_size as usize + 1 + 2 + 1 + 12 + 12 + 12 + 4 + 4 + 4 + 4 + 4 + 1,
+    )?;
     let mut bodies = Vec::with_capacity(count);
     for _ in 0..count {
         bodies.push(PmxParsedRigidBody {
@@ -3517,7 +3640,10 @@ fn read_parsed_joints(
     r: &mut Reader<'_>,
     header: &PmxHeader,
 ) -> Result<Vec<PmxParsedJoint>, ImportError> {
-    let count = read_section_count(r)?;
+    let count = read_section_count_with_min_record(
+        r,
+        4 + 4 + 1 + header.rigidbody_index_size as usize * 2 + 12 * 8,
+    )?;
     let mut joints = Vec::with_capacity(count);
     for _ in 0..count {
         joints.push(PmxParsedJoint {
@@ -3552,7 +3678,26 @@ fn read_parsed_soft_bodies(
     r: &mut Reader<'_>,
     header: &PmxHeader,
 ) -> Result<Vec<PmxParsedSoftBody>, ImportError> {
-    let count = read_section_count(r)?;
+    let count = read_section_count_with_min_record(
+        r,
+        4 + 4
+            + 1
+            + header.material_index_size as usize
+            + 1
+            + 2
+            + 1
+            + 4
+            + 4
+            + 4
+            + 4
+            + 4
+            + 12 * 4
+            + 6 * 4
+            + 4 * 4
+            + 3 * 4
+            + 4
+            + 4,
+    )?;
     let mut soft_bodies = Vec::with_capacity(count);
     for _ in 0..count {
         let name = r.read_string(header.encoding)?;
@@ -3572,13 +3717,16 @@ fn read_parsed_soft_bodies(
         let total_mass = r.read_f32_le()?;
         let collision_margin = r.read_f32_le()?;
         r.skip(4 + 12 * 4 + 6 * 4 + 4 * 4 + 3 * 4)?;
-        let anchor_count = read_section_count(r)?;
+        let anchor_count = read_section_count_with_min_record(
+            r,
+            header.rigidbody_index_size as usize + header.vertex_index_size as usize + 1,
+        )?;
         for _ in 0..anchor_count {
             r.read_sized_index(header.rigidbody_index_size)?;
             r.read_vertex_index(header.vertex_index_size)?;
             r.skip(1)?;
         }
-        let pin_count = read_section_count(r)?;
+        let pin_count = read_section_count_with_min_record(r, header.vertex_index_size as usize)?;
         for _ in 0..pin_count {
             r.read_vertex_index(header.vertex_index_size)?;
         }
@@ -3744,6 +3892,32 @@ mod tests {
         vec![0u8, 0, 0, 0]
     }
 
+    #[test]
+    fn rejects_impossible_pmx_vertex_count_before_allocation() {
+        let mut buf = build_small_pmx_header_bytes(1, TextEncoding::Utf8);
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&i32::MAX.to_le_bytes());
+
+        assert!(matches!(
+            parse_pmx_model(&buf),
+            Err(ImportError::UnexpectedEof(_))
+        ));
+        assert!(matches!(
+            import_pmx_runtime(&buf),
+            Err(ImportError::UnexpectedEof(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_pmx_index_sizes_in_header() {
+        let buf = build_small_pmx_header_bytes(3, TextEncoding::Utf8);
+
+        assert!(matches!(
+            read_header(&buf),
+            Err(ImportError::InvalidIndexSize(3))
+        ));
+    }
+
     fn build_bone_name_bytes(name: &str) -> Vec<u8> {
         let mut buf = Vec::new();
         let name_bytes = name.as_bytes();
@@ -3842,6 +4016,15 @@ mod tests {
                     count: 3,
                     material_index: 0,
                 }],
+                sdef: PmxParsedSdef {
+                    enabled: vec![0.0],
+                    c: vec![0.0, 0.0, 0.0],
+                    r0: vec![0.0, 0.0, 0.0],
+                    r1: vec![0.0, 0.0, 0.0],
+                    rw0: vec![0.0, 0.0, 0.0],
+                    rw1: vec![0.0, 0.0, 0.0],
+                },
+                qdef: PmxParsedQdef { enabled: vec![0.0] },
             },
             materials: vec![PmxParsedMaterial {
                 name: "mat".to_owned(),
@@ -5139,5 +5322,144 @@ mod tests {
         assert_eq!(matrices.len(), 2);
         assert_eq!(matrices[0], Mat4::IDENTITY);
         assert_eq!(matrices[1], Mat4::IDENTITY);
+    }
+
+    fn build_sdef_vertex_pmx() -> Vec<u8> {
+        // Header: PMX 2.0, UTF-8, extra_uv=0, vertex_idx=1, tex_idx=1, mat_idx=1,
+        //         bone_idx=1, morph_idx=1, rigidBody_idx=1
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"PMX ");
+        buf.extend_from_slice(&2.0f32.to_le_bytes());
+        buf.push(8); // data count
+        buf.push(1); // UTF-8
+        buf.push(0); // extra_uv_count
+        buf.push(1); // vertex_index_size
+        buf.push(1); // texture_index_size
+        buf.push(1); // material_index_size
+        buf.push(1); // bone_index_size
+        buf.push(1); // morph_index_size
+        buf.push(1); // rigidbody_index_size
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        // 1 vertex, SDEF (type 3): bone indices 0 and 0 (i8 size=1), weight 0.25
+        // SDEF params: c=[1,2,3], r0=[4,5,6], r1=[7,8,9]
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // position x
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // position y
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // position z
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // normal x
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // normal y
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // normal z
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // uv u
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // uv v
+        buf.push(3u8); // weight type = 3 (SDEF)
+        buf.push(0u8); // bone_index_0 (1 byte)
+        buf.push(0u8); // bone_index_1 (1 byte)
+        buf.extend_from_slice(&0.25f32.to_le_bytes()); // weight
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // c.x
+        buf.extend_from_slice(&2.0f32.to_le_bytes()); // c.y
+        buf.extend_from_slice(&3.0f32.to_le_bytes()); // c.z
+        buf.extend_from_slice(&4.0f32.to_le_bytes()); // r0.x
+        buf.extend_from_slice(&5.0f32.to_le_bytes()); // r0.y
+        buf.extend_from_slice(&6.0f32.to_le_bytes()); // r0.z
+        buf.extend_from_slice(&7.0f32.to_le_bytes()); // r1.x
+        buf.extend_from_slice(&8.0f32.to_le_bytes()); // r1.y
+        buf.extend_from_slice(&9.0f32.to_le_bytes()); // r1.z
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // edge_scale
+        for _ in 0..8 {
+            buf.extend_from_slice(&0i32.to_le_bytes()); // 0 faces/textures/materials/bones/morphs/displayFrames/rigidBodies/joints
+        }
+        buf
+    }
+
+    fn build_qdef_vertex_pmx() -> Vec<u8> {
+        // Header: PMX 2.0, UTF-8, all index sizes = 1
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"PMX ");
+        buf.extend_from_slice(&2.0f32.to_le_bytes());
+        buf.push(8);
+        buf.push(1); // UTF-8
+        buf.push(0); // extra_uv_count
+        buf.push(1); // vertex_index_size
+        buf.push(1); // texture_index_size
+        buf.push(1); // material_index_size
+        buf.push(1); // bone_index_size
+        buf.push(1); // morph_index_size
+        buf.push(1); // rigidbody_index_size
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        // 1 vertex, QDEF (type 4): 4 bone indices (i8 each), 4 weights
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // position
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // normal
+        buf.extend_from_slice(&1.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // uv
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.push(4u8); // weight type = 4 (QDEF)
+        buf.push(0u8);
+        buf.push(0u8);
+        buf.push(0u8);
+        buf.push(0u8); // 4 bone indices
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // w0
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // w1
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // w2
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // w3
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // edge_scale
+        for _ in 0..8 {
+            buf.extend_from_slice(&0i32.to_le_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn pmx_sdef_geometry_json_includes_sdef_fields() {
+        let buf = build_sdef_vertex_pmx();
+        let model = parse_pmx_model(&buf).unwrap();
+        assert_eq!(model.geometry.sdef.enabled.len(), 1);
+        assert!((model.geometry.sdef.enabled[0] - 1.0).abs() < 1e-5);
+        assert_eq!(model.geometry.sdef.c, vec![1.0, 2.0, 3.0]);
+        assert_eq!(model.geometry.sdef.r0, vec![4.0, 5.0, 6.0]);
+        assert_eq!(model.geometry.sdef.r1, vec![7.0, 8.0, 9.0]);
+        // rw values: w=0.25, w1=0.75
+        // rw[k] = r0[k]*0.25 + r1[k]*0.75
+        // rw0[k] = (c[k]*2 + r0[k] - rw[k]) * 0.5
+        // rw1[k] = (c[k]*2 + r1[k] - rw[k]) * 0.5
+        let w = 0.25f32;
+        let w1 = 0.75f32;
+        let c = [1.0f32, 2.0, 3.0];
+        let r0 = [4.0f32, 5.0, 6.0];
+        let r1 = [7.0f32, 8.0, 9.0];
+        for k in 0..3 {
+            let rw = r0[k] * w + r1[k] * w1;
+            let expected_rw0 = (c[k] * 2.0 + r0[k] - rw) * 0.5;
+            let expected_rw1 = (c[k] * 2.0 + r1[k] - rw) * 0.5;
+            assert!(
+                (model.geometry.sdef.rw0[k] - expected_rw0).abs() < 1e-4,
+                "rw0[{k}]: expected {expected_rw0}, got {}",
+                model.geometry.sdef.rw0[k]
+            );
+            assert!(
+                (model.geometry.sdef.rw1[k] - expected_rw1).abs() < 1e-4,
+                "rw1[{k}]: expected {expected_rw1}, got {}",
+                model.geometry.sdef.rw1[k]
+            );
+        }
+        assert_eq!(model.geometry.qdef.enabled[0], 0.0);
+        // Verify roundtrip through JSON preserves the sdef key
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(json.contains("\"sdef\""), "JSON must contain sdef key");
+        assert!(json.contains("\"qdef\""), "JSON must contain qdef key");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["geometry"]["sdef"]["enabled"][0], 1.0);
+    }
+
+    #[test]
+    fn pmx_qdef_vertex_marks_enabled() {
+        let buf = build_qdef_vertex_pmx();
+        let model = parse_pmx_model(&buf).unwrap();
+        assert_eq!(model.geometry.qdef.enabled.len(), 1);
+        assert!((model.geometry.qdef.enabled[0] - 1.0).abs() < 1e-5);
+        assert_eq!(model.geometry.sdef.enabled[0], 0.0);
     }
 }

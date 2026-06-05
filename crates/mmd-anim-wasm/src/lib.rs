@@ -1632,7 +1632,9 @@ mod tests {
                 "skinIndices": [],
                 "skinWeights": [],
                 "edgeScale": [],
-                "materialGroups": []
+                "materialGroups": [],
+                "sdef": { "enabled": [], "c": [], "r0": [], "r1": [], "rw0": [], "rw1": [] },
+                "qdef": { "enabled": [] }
             },
             "materials": [],
             "skeleton": { "bones": [] },

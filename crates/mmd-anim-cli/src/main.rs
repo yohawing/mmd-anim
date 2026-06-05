@@ -2788,6 +2788,8 @@ mod tests {
                 skin_weights: Vec::new(),
                 edge_scale: Vec::new(),
                 material_groups: Vec::new(),
+                sdef: mmd_anim_format::pmx::PmxParsedSdef::default(),
+                qdef: mmd_anim_format::pmx::PmxParsedQdef::default(),
             },
             materials: Vec::new(),
             skeleton: mmd_anim_format::pmx::PmxParsedSkeleton { bones: Vec::new() },

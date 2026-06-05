@@ -865,6 +865,23 @@ pub struct PmxParsedIndexSizes {
     pub rigid_body: u8,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxParsedSdef {
+    pub enabled: Vec<f32>,
+    pub c: Vec<f32>,
+    pub r0: Vec<f32>,
+    pub r1: Vec<f32>,
+    pub rw0: Vec<f32>,
+    pub rw1: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxParsedQdef {
+    pub enabled: Vec<f32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedGeometry {
@@ -877,6 +894,8 @@ pub struct PmxParsedGeometry {
     pub skin_weights: Vec<f32>,
     pub edge_scale: Vec<f32>,
     pub material_groups: Vec<PmxParsedMaterialGroup>,
+    pub sdef: PmxParsedSdef,
+    pub qdef: PmxParsedQdef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1621,6 +1640,8 @@ pub fn build_pmx_model_from_parts(input: PmxPartsInput<'_>) -> Result<PmxParsedM
             skin_weights,
             edge_scale,
             material_groups,
+            sdef: PmxParsedSdef::default(),
+            qdef: PmxParsedQdef::default(),
         },
         materials,
         skeleton: PmxParsedSkeleton { bones },
@@ -2908,8 +2929,15 @@ fn read_parsed_geometry(
     let mut skin_indices = Vec::with_capacity(skin_capacity);
     let mut skin_weights = Vec::with_capacity(skin_capacity);
     let mut edge_scale = Vec::with_capacity(vertex_count);
+    let mut sdef_enabled = vec![0.0f32; vertex_count];
+    let mut sdef_c = vec![0.0f32; vertex_count * 3];
+    let mut sdef_r0 = vec![0.0f32; vertex_count * 3];
+    let mut sdef_r1 = vec![0.0f32; vertex_count * 3];
+    let mut sdef_rw0 = vec![0.0f32; vertex_count * 3];
+    let mut sdef_rw1 = vec![0.0f32; vertex_count * 3];
+    let mut qdef_enabled = vec![0.0f32; vertex_count];
 
-    for _ in 0..vertex_count {
+    for vertex_i in 0..vertex_count {
         positions.extend_from_slice(&r.read_vec3_array()?);
         normals.extend_from_slice(&r.read_vec3_array()?);
         uvs.extend_from_slice(&r.read_vec2_array()?);
@@ -2934,10 +2962,23 @@ fn read_parsed_geometry(
                 weights[0] = w;
                 weights[1] = 1.0 - w;
                 if weight_type == 3 {
-                    r.skip(36)?;
+                    let c = r.read_vec3_array()?;
+                    let r0 = r.read_vec3_array()?;
+                    let r1 = r.read_vec3_array()?;
+                    let w1 = 1.0 - w;
+                    let offset = vertex_i * 3;
+                    sdef_enabled[vertex_i] = 1.0;
+                    sdef_c[offset..offset + 3].copy_from_slice(&c);
+                    sdef_r0[offset..offset + 3].copy_from_slice(&r0);
+                    sdef_r1[offset..offset + 3].copy_from_slice(&r1);
+                    for k in 0..3 {
+                        let rw = r0[k] * w + r1[k] * w1;
+                        sdef_rw0[offset + k] = (c[k] * 2.0 + r0[k] - rw) * 0.5;
+                        sdef_rw1[offset + k] = (c[k] * 2.0 + r1[k] - rw) * 0.5;
+                    }
                 }
             }
-            2 | 4 => {
+            2 => {
                 for index in &mut indices {
                     *index =
                         normalize_nonnegative_index(r.read_sized_index(header.bone_index_size)?);
@@ -2945,6 +2986,16 @@ fn read_parsed_geometry(
                 for weight in &mut weights {
                     *weight = r.read_f32_le()?;
                 }
+            }
+            4 => {
+                for index in &mut indices {
+                    *index =
+                        normalize_nonnegative_index(r.read_sized_index(header.bone_index_size)?);
+                }
+                for weight in &mut weights {
+                    *weight = r.read_f32_le()?;
+                }
+                qdef_enabled[vertex_i] = 1.0;
             }
             _ => return Err(ImportError::SectionOverflow),
         }
@@ -2969,6 +3020,17 @@ fn read_parsed_geometry(
         skin_weights,
         edge_scale,
         material_groups: Vec::new(),
+        sdef: PmxParsedSdef {
+            enabled: sdef_enabled,
+            c: sdef_c,
+            r0: sdef_r0,
+            r1: sdef_r1,
+            rw0: sdef_rw0,
+            rw1: sdef_rw1,
+        },
+        qdef: PmxParsedQdef {
+            enabled: qdef_enabled,
+        },
     })
 }
 
@@ -3954,6 +4016,15 @@ mod tests {
                     count: 3,
                     material_index: 0,
                 }],
+                sdef: PmxParsedSdef {
+                    enabled: vec![0.0],
+                    c: vec![0.0, 0.0, 0.0],
+                    r0: vec![0.0, 0.0, 0.0],
+                    r1: vec![0.0, 0.0, 0.0],
+                    rw0: vec![0.0, 0.0, 0.0],
+                    rw1: vec![0.0, 0.0, 0.0],
+                },
+                qdef: PmxParsedQdef { enabled: vec![0.0] },
             },
             materials: vec![PmxParsedMaterial {
                 name: "mat".to_owned(),
@@ -5251,5 +5322,144 @@ mod tests {
         assert_eq!(matrices.len(), 2);
         assert_eq!(matrices[0], Mat4::IDENTITY);
         assert_eq!(matrices[1], Mat4::IDENTITY);
+    }
+
+    fn build_sdef_vertex_pmx() -> Vec<u8> {
+        // Header: PMX 2.0, UTF-8, extra_uv=0, vertex_idx=1, tex_idx=1, mat_idx=1,
+        //         bone_idx=1, morph_idx=1, rigidBody_idx=1
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"PMX ");
+        buf.extend_from_slice(&2.0f32.to_le_bytes());
+        buf.push(8); // data count
+        buf.push(1); // UTF-8
+        buf.push(0); // extra_uv_count
+        buf.push(1); // vertex_index_size
+        buf.push(1); // texture_index_size
+        buf.push(1); // material_index_size
+        buf.push(1); // bone_index_size
+        buf.push(1); // morph_index_size
+        buf.push(1); // rigidbody_index_size
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        // 1 vertex, SDEF (type 3): bone indices 0 and 0 (i8 size=1), weight 0.25
+        // SDEF params: c=[1,2,3], r0=[4,5,6], r1=[7,8,9]
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // position x
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // position y
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // position z
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // normal x
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // normal y
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // normal z
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // uv u
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // uv v
+        buf.push(3u8); // weight type = 3 (SDEF)
+        buf.push(0u8); // bone_index_0 (1 byte)
+        buf.push(0u8); // bone_index_1 (1 byte)
+        buf.extend_from_slice(&0.25f32.to_le_bytes()); // weight
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // c.x
+        buf.extend_from_slice(&2.0f32.to_le_bytes()); // c.y
+        buf.extend_from_slice(&3.0f32.to_le_bytes()); // c.z
+        buf.extend_from_slice(&4.0f32.to_le_bytes()); // r0.x
+        buf.extend_from_slice(&5.0f32.to_le_bytes()); // r0.y
+        buf.extend_from_slice(&6.0f32.to_le_bytes()); // r0.z
+        buf.extend_from_slice(&7.0f32.to_le_bytes()); // r1.x
+        buf.extend_from_slice(&8.0f32.to_le_bytes()); // r1.y
+        buf.extend_from_slice(&9.0f32.to_le_bytes()); // r1.z
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // edge_scale
+        for _ in 0..8 {
+            buf.extend_from_slice(&0i32.to_le_bytes()); // 0 faces/textures/materials/bones/morphs/displayFrames/rigidBodies/joints
+        }
+        buf
+    }
+
+    fn build_qdef_vertex_pmx() -> Vec<u8> {
+        // Header: PMX 2.0, UTF-8, all index sizes = 1
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"PMX ");
+        buf.extend_from_slice(&2.0f32.to_le_bytes());
+        buf.push(8);
+        buf.push(1); // UTF-8
+        buf.push(0); // extra_uv_count
+        buf.push(1); // vertex_index_size
+        buf.push(1); // texture_index_size
+        buf.push(1); // material_index_size
+        buf.push(1); // bone_index_size
+        buf.push(1); // morph_index_size
+        buf.push(1); // rigidbody_index_size
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        // 1 vertex, QDEF (type 4): 4 bone indices (i8 each), 4 weights
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // position
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // normal
+        buf.extend_from_slice(&1.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // uv
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.push(4u8); // weight type = 4 (QDEF)
+        buf.push(0u8);
+        buf.push(0u8);
+        buf.push(0u8);
+        buf.push(0u8); // 4 bone indices
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // w0
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // w1
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // w2
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // w3
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // edge_scale
+        for _ in 0..8 {
+            buf.extend_from_slice(&0i32.to_le_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn pmx_sdef_geometry_json_includes_sdef_fields() {
+        let buf = build_sdef_vertex_pmx();
+        let model = parse_pmx_model(&buf).unwrap();
+        assert_eq!(model.geometry.sdef.enabled.len(), 1);
+        assert!((model.geometry.sdef.enabled[0] - 1.0).abs() < 1e-5);
+        assert_eq!(model.geometry.sdef.c, vec![1.0, 2.0, 3.0]);
+        assert_eq!(model.geometry.sdef.r0, vec![4.0, 5.0, 6.0]);
+        assert_eq!(model.geometry.sdef.r1, vec![7.0, 8.0, 9.0]);
+        // rw values: w=0.25, w1=0.75
+        // rw[k] = r0[k]*0.25 + r1[k]*0.75
+        // rw0[k] = (c[k]*2 + r0[k] - rw[k]) * 0.5
+        // rw1[k] = (c[k]*2 + r1[k] - rw[k]) * 0.5
+        let w = 0.25f32;
+        let w1 = 0.75f32;
+        let c = [1.0f32, 2.0, 3.0];
+        let r0 = [4.0f32, 5.0, 6.0];
+        let r1 = [7.0f32, 8.0, 9.0];
+        for k in 0..3 {
+            let rw = r0[k] * w + r1[k] * w1;
+            let expected_rw0 = (c[k] * 2.0 + r0[k] - rw) * 0.5;
+            let expected_rw1 = (c[k] * 2.0 + r1[k] - rw) * 0.5;
+            assert!(
+                (model.geometry.sdef.rw0[k] - expected_rw0).abs() < 1e-4,
+                "rw0[{k}]: expected {expected_rw0}, got {}",
+                model.geometry.sdef.rw0[k]
+            );
+            assert!(
+                (model.geometry.sdef.rw1[k] - expected_rw1).abs() < 1e-4,
+                "rw1[{k}]: expected {expected_rw1}, got {}",
+                model.geometry.sdef.rw1[k]
+            );
+        }
+        assert_eq!(model.geometry.qdef.enabled[0], 0.0);
+        // Verify roundtrip through JSON preserves the sdef key
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(json.contains("\"sdef\""), "JSON must contain sdef key");
+        assert!(json.contains("\"qdef\""), "JSON must contain qdef key");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["geometry"]["sdef"]["enabled"][0], 1.0);
+    }
+
+    #[test]
+    fn pmx_qdef_vertex_marks_enabled() {
+        let buf = build_qdef_vertex_pmx();
+        let model = parse_pmx_model(&buf).unwrap();
+        assert_eq!(model.geometry.qdef.enabled.len(), 1);
+        assert!((model.geometry.qdef.enabled[0] - 1.0).abs() < 1e-5);
+        assert_eq!(model.geometry.sdef.enabled[0], 0.0);
     }
 }

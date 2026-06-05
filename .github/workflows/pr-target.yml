@@ -1,0 +1,40 @@
+name: PR target policy
+
+"on":
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate-pr-target:
+    name: Validate PR target
+    runs-on: ubuntu-latest
+    steps:
+      - name: Allow only develop to target main
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+        run: |
+          if [ "$BASE_REF" != "main" ]; then
+            exit 0
+          fi
+
+          if [ "$HEAD_REPO" = "$BASE_REPO" ] && [ "$HEAD_REF" = "develop" ]; then
+            echo "main-targeted PR is from develop."
+            exit 0
+          fi
+
+          echo "Only PRs from develop may target main."
+          echo "Change this PR's base branch to develop, or merge develop into main through the release PR."
+          exit 1

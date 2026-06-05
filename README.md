@@ -85,10 +85,10 @@ Format support overview. "Loading" means parsing a file into structured data.
 | `mmd-anim` | Main public crate. Provides the evaluation core and format handling through one entry point. |
 | `mmd-anim-runtime` | Format-independent evaluation core: model arena, pose, VMD evaluation, append transforms, IK, and morphs. |
 | `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
-| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for 0.1.0. |
-| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for 0.1.0. |
-| `mmd-anim-cli` | Maintainer diagnostics and verification command-line tool. Repository-local for 0.1.0. |
-| `mmd-anim-schema` | Maintainer quality-check schema helper crate. Repository-local for 0.1.0. |
+| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for the 0.1.x line. |
+| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for the 0.1.x line. |
+| `mmd-anim-cli` | Maintainer diagnostics and verification command-line tool. Repository-local for the 0.1.x line. |
+| `mmd-anim-schema` | Maintainer quality-check schema helper crate. Repository-local for the 0.1.x line. |
 
 For normal library use, depend on `mmd-anim`. Advanced users who only need a
 lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
@@ -139,7 +139,7 @@ host-side geometry data, use `mmd_runtime_export_pmx_from_parts`.
 Input arrays remain owned by the caller, and returned bytes must be freed with
 `mmd_runtime_byte_buffer_free`.
 
-This native integration crate is not published to crates.io for 0.1.0. It is
+This native integration crate is not published to crates.io for the 0.1.x line. It is
 kept in the Rust workspace for builds and checks.
 
 ## WASM / Browser
@@ -201,7 +201,7 @@ const generatedPmxBytes = exportPmxFromParts(
 evaluation or WASM memory growth. Use `worldMatrices()` or `copyWorldMatrices()`
 when the data needs to live longer.
 
-The WASM package is not published to crates.io for 0.1.0. It is kept in the Rust
+The WASM package is not published to crates.io for the 0.1.x line. It is kept in the Rust
 workspace for builds and checks.
 
 ## CLI Checks

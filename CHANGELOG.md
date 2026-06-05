@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.1 - 2026-06-05
+
+Patch release for parser and host-facing ABI improvements.
+
+### Added
+
+- Added split PMX WASM geometry APIs so host integrations can fetch large geometry buffers separately from non-geometry JSON.
+- Added parsed PMX SDEF and QDEF geometry fields, including SDEF helper vectors and QDEF active flags.
+- Added repository policy automation to fail `main`-targeted pull requests unless they come from `develop`.
+
+### Fixed
+
+- Hardened PMX and VMD count validation.
+- Updated PMX geometry test fixtures for the expanded parsed geometry shape.
+- Rewrote the Japanese README in plainer language.
+
 ## 0.1.0 - 2026-06-04
 
 Initial experimental release of `mmd-anim`.

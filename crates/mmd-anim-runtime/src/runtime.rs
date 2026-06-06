@@ -76,7 +76,7 @@ pub struct IkSolveOptions {
 impl Default for IkSolveOptions {
     fn default() -> Self {
         Self {
-            tolerance: 1.0e-4,
+            tolerance: 1.0e-2,
             max_iterations_cap: None,
         }
     }

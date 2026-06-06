@@ -26,6 +26,7 @@ docs/**
 !docs/
 !docs/RELEASE.md
 !docs/README.ja.md
+!docs/TESTING.md
 
 crates/mmd-runtime-wasm/harness/pkg/
 crates/mmd-runtime-wasm/harness/pkg-web/

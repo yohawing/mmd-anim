@@ -52,6 +52,11 @@ impl PoseArena {
         self.append_rotations.fill(Quat::IDENTITY);
     }
 
+    pub(crate) fn reset_append_transform(&mut self, bone: BoneIndex) {
+        self.append_position_offsets[bone.as_usize()] = Vec3A::ZERO;
+        self.append_rotations[bone.as_usize()] = Quat::IDENTITY;
+    }
+
     #[inline]
     pub fn set_local_position_offset(&mut self, bone: BoneIndex, value: Vec3A) {
         self.local_position_offsets[bone.as_usize()] = value;

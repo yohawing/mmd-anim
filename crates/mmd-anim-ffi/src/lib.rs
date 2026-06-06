@@ -6,9 +6,10 @@ use std::{ptr, slice, str, sync::Arc};
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
     AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneInit, BoneMorphOffset,
-    GroupMorphOffset, IkAngleLimit, IkLinkInit, IkSolverInit, MorphAnimationBinding, MorphIndex,
-    MorphInit, MorphKeyframe, MorphOffsetSpan, MorphTrack, MovableBoneKeyframe, MovableBoneTrack,
-    PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
+    GroupMorphOffset, IkAngleLimit, IkLinkInit, IkSolveOptions, IkSolverInit,
+    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan, MorphTrack,
+    MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
+    RuntimeInstance,
 };
 
 pub const ABI_VERSION: u32 = 1;
@@ -939,6 +940,48 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame(
         return false;
     };
     instance.runtime.evaluate_clip_frame(&clip.clip, frame);
+    instance.refresh_matrix_caches();
+    true
+}
+
+/// Evaluates a clip at `frame` with custom IK solver options.
+///
+/// `ik_tolerance` is clamped to a non-negative finite value; invalid values
+/// return `false`. `ik_max_iterations_cap == 0` means no cap.
+///
+/// # Safety
+///
+/// `instance` and `clip` must be null or valid pointers returned by their
+/// respective create functions. A null pointer returns `false`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_with_ik_options(
+    instance: *mut MmdRuntimeInstance,
+    clip: *const MmdRuntimeClip,
+    frame: f32,
+    ik_tolerance: f32,
+    ik_max_iterations_cap: u32,
+) -> bool {
+    let Some(instance) = (unsafe { instance.as_mut() }) else {
+        return false;
+    };
+    let Some(clip) = (unsafe { clip.as_ref() }) else {
+        return false;
+    };
+    if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
+        return false;
+    }
+    instance.runtime.evaluate_clip_frame_with_ik_options(
+        &clip.clip,
+        frame,
+        IkSolveOptions {
+            tolerance: ik_tolerance,
+            max_iterations_cap: if ik_max_iterations_cap == 0 {
+                None
+            } else {
+                Some(ik_max_iterations_cap)
+            },
+        },
+    );
     instance.refresh_matrix_caches();
     true
 }

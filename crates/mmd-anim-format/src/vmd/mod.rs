@@ -391,6 +391,15 @@ pub struct VmdParsedCameraFrame {
     pub perspective: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VmdCameraState {
+    pub distance: f32,
+    pub position: [f32; 3],
+    pub rotation: [f32; 3],
+    pub fov: f32,
+    pub perspective: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VmdParsedLightFrame {
@@ -732,6 +741,98 @@ fn read_parsed_property_frames(
         });
     }
     Ok(frames)
+}
+
+pub fn sample_vmd_camera_frames(
+    frames: &[VmdParsedCameraFrame],
+    frame: f32,
+) -> Option<VmdCameraState> {
+    if frames.is_empty() {
+        return None;
+    }
+
+    let mut sorted: Vec<&VmdParsedCameraFrame> = frames.iter().collect();
+    sorted.sort_by_key(|keyframe| keyframe.frame);
+
+    let mut index = 0usize;
+    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
+        index += 1;
+    }
+
+    let previous = sorted[index];
+    let next = sorted.get(index + 1).copied().unwrap_or(previous);
+    let t = interpolation_ratio(previous.frame, next.frame, frame);
+    let interpolation = decode_camera_interpolation(&next.interpolation);
+
+    let distance_t = interpolation.distance.evaluate(t);
+    let position_x_t = interpolation.position.x.evaluate(t);
+    let position_y_t = interpolation.position.y.evaluate(t);
+    let position_z_t = interpolation.position.z.evaluate(t);
+    let rotation_t = interpolation.rotation.evaluate(t);
+    let fov_t = interpolation.fov.evaluate(t);
+
+    Some(VmdCameraState {
+        distance: lerp(previous.distance, next.distance, distance_t),
+        position: [
+            lerp(previous.position[0], next.position[0], position_x_t),
+            lerp(previous.position[1], next.position[1], position_y_t),
+            lerp(previous.position[2], next.position[2], position_z_t),
+        ],
+        rotation: [
+            lerp(previous.rotation[0], next.rotation[0], rotation_t),
+            lerp(previous.rotation[1], next.rotation[1], rotation_t),
+            lerp(previous.rotation[2], next.rotation[2], rotation_t),
+        ],
+        fov: lerp(previous.fov as f32, next.fov as f32, fov_t),
+        perspective: if t < 1.0 {
+            previous.perspective
+        } else {
+            next.perspective
+        },
+    })
+}
+
+struct CameraInterpolation {
+    position: InterpolationVector3,
+    rotation: InterpolationScalar,
+    distance: InterpolationScalar,
+    fov: InterpolationScalar,
+}
+
+fn decode_camera_interpolation(interpolation: &[u8; 24]) -> CameraInterpolation {
+    CameraInterpolation {
+        position: InterpolationVector3 {
+            x: decode_camera_interpolation_scalar(interpolation, 0),
+            y: decode_camera_interpolation_scalar(interpolation, 1),
+            z: decode_camera_interpolation_scalar(interpolation, 2),
+        },
+        rotation: decode_camera_interpolation_scalar(interpolation, 3),
+        distance: decode_camera_interpolation_scalar(interpolation, 4),
+        fov: decode_camera_interpolation_scalar(interpolation, 5),
+    }
+}
+
+fn decode_camera_interpolation_scalar(
+    interpolation: &[u8; 24],
+    channel: usize,
+) -> InterpolationScalar {
+    decode_interpolation_scalar([
+        interpolation[channel],
+        interpolation[channel + 6],
+        interpolation[channel + 12],
+        interpolation[channel + 18],
+    ])
+}
+
+fn interpolation_ratio(previous_frame: u32, next_frame: u32, frame: f32) -> f32 {
+    if next_frame <= previous_frame {
+        return 0.0;
+    }
+    ((frame - previous_frame as f32) / (next_frame - previous_frame) as f32).clamp(0.0, 1.0)
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }
 
 fn decode_sjis_fixed(bytes: &[u8]) -> String {
@@ -2025,6 +2126,24 @@ mod tests {
     type SyntheticMorphFrame<'a> = (&'a str, u32, f32);
     type SyntheticPropertyFrame<'a> = (&'a [(&'a str, bool)], u32, bool);
 
+    fn assert_near(actual: f32, expected: f32) {
+        let delta = (actual - expected).abs();
+        assert!(
+            delta < 1.0e-5,
+            "actual={actual:?} expected={expected:?} delta={delta:?}"
+        );
+    }
+
+    fn assert_vec3_near(actual: [f32; 3], expected: [f32; 3]) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert_near(actual, expected);
+        }
+    }
+
+    fn simple_camera_vmd_fixture() -> &'static [u8] {
+        include_bytes!("../../fixtures/vmd/simple_camera.vmd")
+    }
+
     fn make_vmd_bytes(
         model_name_ascii: &str,
         bone_frames: &[SyntheticBoneFrame<'_>],
@@ -2116,6 +2235,87 @@ mod tests {
                 "selfShadowFrames",
             ]
         );
+    }
+
+    #[test]
+    fn parses_simple_camera_vmd_fixture() {
+        let parsed = parse_vmd_animation(simple_camera_vmd_fixture()).unwrap();
+
+        assert_eq!(parsed.metadata.model_name, "camera_fixture");
+        assert_eq!(parsed.metadata.counts.bones, 0);
+        assert_eq!(parsed.metadata.counts.morphs, 0);
+        assert_eq!(parsed.metadata.counts.cameras, 2);
+        assert_eq!(parsed.metadata.counts.lights, 0);
+        assert_eq!(parsed.metadata.counts.self_shadows, 0);
+        assert_eq!(parsed.metadata.counts.properties, 0);
+        assert_eq!(parsed.metadata.max_frame, 45);
+        assert_eq!(parsed.camera_frames.len(), 2);
+
+        let first = &parsed.camera_frames[0];
+        assert_eq!(first.frame, 0);
+        assert_eq!(first.distance, -30.5);
+        assert_eq!(first.position, [1.0, 2.0, 3.0]);
+        assert_eq!(first.rotation, [0.1, -0.2, 0.3]);
+        assert_eq!(
+            first.interpolation,
+            [
+                20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+                41, 42, 43
+            ]
+        );
+        assert_eq!(first.fov, 35);
+        assert!(first.perspective);
+
+        let second = &parsed.camera_frames[1];
+        assert_eq!(second.frame, 45);
+        assert_eq!(second.distance, -50.0);
+        assert_eq!(second.position, [-1.5, 10.0, 0.25]);
+        assert_eq!(second.rotation, [-0.3, 0.0, 1.2]);
+        assert_eq!(
+            second.interpolation,
+            [
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 127, 127, 127, 127, 127, 127, 127, 127, 127,
+                127, 127, 127
+            ]
+        );
+        assert_eq!(second.fov, 60);
+        assert!(!second.perspective);
+    }
+
+    #[test]
+    fn roundtrip_simple_camera_vmd_fixture_parse_export_parse() {
+        let parsed = parse_vmd_animation(simple_camera_vmd_fixture()).unwrap();
+        let exported = export_vmd_animation(&parsed);
+        let reparsed = parse_vmd_animation(&exported).unwrap();
+
+        assert_eq!(reparsed.metadata.model_name, parsed.metadata.model_name);
+        assert_eq!(reparsed.metadata.counts.cameras, 2);
+        assert_eq!(reparsed.metadata.max_frame, 45);
+        assert_eq!(reparsed.camera_frames.len(), parsed.camera_frames.len());
+        for (left, right) in parsed.camera_frames.iter().zip(&reparsed.camera_frames) {
+            assert_eq!(left.frame, right.frame);
+            assert_eq!(left.distance, right.distance);
+            assert_eq!(left.position, right.position);
+            assert_eq!(left.rotation, right.rotation);
+            assert_eq!(left.interpolation, right.interpolation);
+            assert_eq!(left.fov, right.fov);
+            assert_eq!(left.perspective, right.perspective);
+        }
+    }
+
+    #[test]
+    fn samples_simple_camera_vmd_fixture_with_channel_interpolation() {
+        let parsed = parse_vmd_animation(simple_camera_vmd_fixture()).unwrap();
+        let camera = sample_vmd_camera_frames(&parsed.camera_frames, 22.5).unwrap();
+
+        assert_near(camera.distance, -40.25);
+        assert_vec3_near(camera.position, [-0.25, 6.0, 1.625]);
+        assert_vec3_near(camera.rotation, [-0.1, -0.1, 0.75]);
+        assert_near(camera.fov, 47.5);
+        assert!(camera.perspective);
+
+        let last = sample_vmd_camera_frames(&parsed.camera_frames, 45.0).unwrap();
+        assert!(!last.perspective);
     }
 
     #[test]

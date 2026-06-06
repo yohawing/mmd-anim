@@ -246,6 +246,15 @@ bool mmd_runtime_instance_evaluate_clip_frame(
     const mmd_runtime_clip_t*     clip,
     float                         frame);
 
+/* Evaluates with custom IK solver options.
+   ik_max_iterations_cap == 0 means no cap. */
+bool mmd_runtime_instance_evaluate_clip_frame_with_ik_options(
+    mmd_runtime_instance_t*       instance,
+    const mmd_runtime_clip_t*     clip,
+    float                         frame,
+    float                         ik_tolerance,
+    uint32_t                      ik_max_iterations_cap);
+
 bool mmd_runtime_instance_evaluate_clip_frame_without_ik(
     mmd_runtime_instance_t*       instance,
     const mmd_runtime_clip_t*     clip,

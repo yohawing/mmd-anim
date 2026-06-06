@@ -32,10 +32,10 @@ pub use pmx::{
     import_pmx_model, import_pmx_runtime, parse_pmx_model, validate_pmx_export_model,
 };
 pub use vmd::{
-    VmdClipBuildOptions, VmdIkEntry, VmdImportResult, VmdParsedAnimation, VmdPropertyIkFrame,
-    build_clip_from_import, build_pair_clip, build_pair_clip_with_options,
+    VmdCameraState, VmdClipBuildOptions, VmdIkEntry, VmdImportResult, VmdParsedAnimation,
+    VmdPropertyIkFrame, build_clip_from_import, build_pair_clip, build_pair_clip_with_options,
     build_property_binding_with_ik_resolver, export_vmd_animation, import_vmd_motion,
-    parse_vmd_animation,
+    parse_vmd_animation, sample_vmd_camera_frames,
 };
 pub use vpd::{VpdParsedPose, export_vpd_pose, parse_vpd_pose};
 pub use xfile::{AccessoryParsedManifest, export_accessory_manifest, parse_accessory_manifest};

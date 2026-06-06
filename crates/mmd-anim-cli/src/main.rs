@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -9,8 +9,8 @@ use std::{
 
 use glam::{Quat, Vec3A};
 use mmd_anim_runtime::{
-    AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, ModelArena, MovableBoneKeyframe,
-    MovableBoneTrack, RuntimeInstance,
+    AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, IkSolveOptions, ModelArena,
+    MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
 };
 use mmd_anim_schema::{
     DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
@@ -23,6 +23,7 @@ const IMPORT_PAIR_CLIP_USAGE: &str =
     "usage: mmd-anim import-pair-clip-summary <model.pmx> <motion.vmd>";
 const IMPORT_PAIR_FRAME_USAGE: &str =
     "usage: mmd-anim import-pair-frame-summary <model.pmx> <motion.vmd> <frame>";
+const BENCH_PAIR_USAGE: &str = "usage: mmd-anim bench-pair <model.pmx> <motion.vmd> [start-frame] [frame-count] [step] [--no-ik] [--ik-tolerance <value>] [--ik-max-iterations-cap <count>]";
 const IMPORT_PMD_SUMMARY_USAGE: &str = "usage: mmd-anim import-pmd-summary <model.pmd>";
 const PARSE_PMX_SUMMARY_USAGE: &str = "usage: mmd-anim parse-pmx-summary <model.pmx>";
 const PARSE_FORMAT_USAGE: &str = "usage: mmd-anim parse-format-summary <asset>";
@@ -33,6 +34,7 @@ const EXPORT_JSON_ROUNDTRIP_USAGE: &str = "usage: mmd-anim export-json-roundtrip
 const EXPORT_JSON_ROUNDTRIP_JSON_USAGE: &str = "usage: mmd-anim export-json-roundtrip-json <asset>";
 const GOLDEN_PARSER_SUMMARY_USAGE: &str = "usage: mmd-anim golden-parser-summary <golden-run-root>";
 const GOLDEN_IK_DIAGNOSE_USAGE: &str = "usage: mmd-anim golden-ik-diagnose <golden-ik-oracle-root> <case-name> <frame> <bone-name> [sample-frame-offset]";
+const COMPARE_NUMERIC_USAGE: &str = "usage: mmd-anim compare-numeric <manifest.json>";
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -61,9 +63,33 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("compare-numeric") => {
+            let manifest = required_arg(&mut args, COMPARE_NUMERIC_USAGE);
+            if let Err(error) = compare_numeric_manifest(Path::new(&manifest)) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("compare-camera-vmd-numeric") => {
+            let manifest = required_arg(&mut args, COMPARE_NUMERIC_USAGE);
+            if let Err(error) = compare_numeric_manifest(Path::new(&manifest)) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
         Some("import-pmx-summary") => {
             let path = required_arg(&mut args, "usage: mmd-anim import-pmx-summary <model.pmx>");
             if let Err(error) = import_pmx_summary(Path::new(&path)) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("import-pmx-ik-summary") => {
+            let path = required_arg(
+                &mut args,
+                "usage: mmd-anim import-pmx-ik-summary <model.pmx>",
+            );
+            if let Err(error) = import_pmx_ik_summary(Path::new(&path)) {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
@@ -155,6 +181,13 @@ fn main() {
             if let Err(error) =
                 import_pair_frame_summary(Path::new(&pmx_path), Path::new(&vmd_path), frame)
             {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("bench-pair") => {
+            let result = parse_bench_pair_args(&mut args).and_then(bench_pair);
+            if let Err(error) = result {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
@@ -259,6 +292,54 @@ fn import_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error
         imported.morph_name_to_index.len(),
         imported.ik_solver_bone_name_to_index.len()
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn import_pmx_ik_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let data = fs::read(path)?;
+    let imported = mmd_anim_format::import_pmx_runtime(&data)?;
+    let solvers = imported.model.ik_solvers();
+    let max_iterations = solvers
+        .iter()
+        .map(|solver| solver.iteration_count)
+        .max()
+        .unwrap_or(0);
+    let mut distribution = BTreeMap::<u32, usize>::new();
+    for solver in solvers {
+        *distribution.entry(solver.iteration_count).or_default() += 1;
+    }
+    let distribution = distribution
+        .iter()
+        .map(|(iterations, count)| format!("{iterations}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    println!(
+        "PMX IK summary: bones={} ik={} maxIterations={} distribution={}",
+        imported.model.bone_count(),
+        solvers.len(),
+        max_iterations,
+        distribution
+    );
+    for (solver_index, solver) in solvers.iter().enumerate() {
+        if solver.iteration_count == max_iterations {
+            let name = imported
+                .bone_names
+                .get(solver.ik_bone.as_usize())
+                .map(String::as_str)
+                .unwrap_or("<unknown>");
+            println!(
+                "max IK: solver={} bone={} name={} target={} iterations={} limitAngle={:.6} links={}",
+                solver_index,
+                solver.ik_bone.as_usize(),
+                name,
+                solver.target_bone.as_usize(),
+                solver.iteration_count,
+                solver.limit_angle,
+                solver.links.len()
+            );
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1674,6 +1755,602 @@ fn ensure_vpd_roundtrip(
     Ok(())
 }
 
+fn compare_numeric_manifest(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    const EPSILON: f64 = 0.003;
+
+    let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let manifest_bytes = fs::read(path)
+        .map_err(|error| format!("failed to read manifest {}: {}", path.display(), error))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+    let out_dir = manifest
+        .pointer("/defaults/outDir")
+        .and_then(|value| value.as_str())
+        .map(|path| resolve_manifest_path(manifest_dir, path));
+    let default_epsilon = manifest
+        .pointer("/defaults/compare/epsilon")
+        .or_else(|| manifest.pointer("/defaults/epsilon"))
+        .and_then(|value| value.as_f64())
+        .unwrap_or(EPSILON);
+    let cases = manifest
+        .get("cases")
+        .and_then(|value| value.as_array())
+        .ok_or("numeric compare manifest is missing cases")?;
+    let mut camera_stats = CameraNumericCompareStats::default();
+    let mut motion_stats = MotionNumericCompareStats::default();
+
+    for case in cases {
+        let name = case
+            .get("name")
+            .and_then(|value| value.as_str())
+            .ok_or("numeric compare case is missing name")?;
+        let kind = case
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| format!("{name} is missing kind"))?;
+        match kind {
+            "camera-vmd" => {
+                let case_dir = out_dir.as_ref().map(|out_dir| out_dir.join(name));
+                compare_camera_numeric_case(
+                    case,
+                    manifest_dir,
+                    case_dir.as_deref(),
+                    default_epsilon,
+                    &mut camera_stats,
+                )?;
+            }
+            "motion-numeric" | "physics-coarse" => {
+                compare_motion_numeric_case(
+                    case,
+                    manifest_dir,
+                    default_epsilon,
+                    &mut motion_stats,
+                )?;
+            }
+            _ => {
+                return Err(format!(
+                    "numeric compare case {} has unsupported kind {}; supported kinds: camera-vmd, motion-numeric, physics-coarse",
+                    name, kind
+                )
+                .into());
+            }
+        }
+    }
+
+    let failure_count = numeric_compare_failure_count(&camera_stats, &motion_stats);
+    if failure_count == 0 {
+        println!(
+            "Numeric compare: ok cameraCases={} cameraFrames={} cameraMaxDelta={:.6} motionCases={} motionComparedCases={} motionSkippedUnsupported={} motionMissing={} motionImportErrors={} motionFrames={} motionBones={} motionMaxAbsError={:.6} motionWorst={} motionSkippedTargets={} defaultEpsilon={}",
+            camera_stats.compared_cases,
+            camera_stats.compared_frames,
+            camera_stats.max_delta,
+            motion_stats.total_cases,
+            motion_stats.compared_cases,
+            motion_stats.skipped_unsupported,
+            motion_stats.missing,
+            motion_stats.import_errors,
+            motion_stats.compared_frames,
+            motion_stats.compared_bones,
+            motion_stats.max_abs_error,
+            motion_stats.worst,
+            motion_stats.skipped_targets_csv(),
+            default_epsilon
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Err(format!(
+            "Numeric compare failed: failures={} cameraMismatches={} motionMismatches={} motionMissing={} motionImportErrors={} cameraMaxDelta={:.6} motionMaxAbsError={:.6} motionWorst={} defaultEpsilon={}",
+            failure_count,
+            camera_stats.mismatch_count,
+            motion_stats.mismatch_count,
+            motion_stats.missing,
+            motion_stats.import_errors,
+            camera_stats.max_delta,
+            motion_stats.max_abs_error,
+            motion_stats.worst,
+            default_epsilon
+        )
+        .into())
+    }
+}
+
+#[derive(Default)]
+struct CameraNumericCompareStats {
+    compared_cases: usize,
+    compared_frames: usize,
+    mismatch_count: usize,
+    max_delta: f64,
+}
+
+fn compare_camera_numeric_case(
+    case: &serde_json::Value,
+    manifest_dir: &Path,
+    case_dir: Option<&Path>,
+    default_epsilon: f64,
+    stats: &mut CameraNumericCompareStats,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let name = case
+        .get("name")
+        .and_then(|value| value.as_str())
+        .ok_or("numeric compare case is missing name")?;
+    let epsilon = case
+        .pointer("/compare/epsilon")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(default_epsilon);
+    let oracle_path = resolve_camera_oracle_path(case, manifest_dir, case_dir)?;
+    let oracle_bytes = fs::read(&oracle_path).map_err(|error| {
+        format!(
+            "failed to read camera oracle for case {} at {}: {}",
+            name,
+            oracle_path.display(),
+            error
+        )
+    })?;
+    let oracle: serde_json::Value = serde_json::from_slice(&oracle_bytes)?;
+    let camera_vmd = resolve_camera_vmd_path(case, manifest_dir, case_dir)?;
+    let camera_vmd_bytes = fs::read(&camera_vmd).map_err(|error| {
+        format!(
+            "failed to read camera VMD for case {} at {}: {}",
+            name,
+            camera_vmd.display(),
+            error
+        )
+    })?;
+    let parsed = mmd_anim_format::parse_vmd_animation(&camera_vmd_bytes)?;
+    let frames = oracle
+        .get("frames")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{} is missing frames", oracle_path.display()))?;
+
+    stats.compared_cases += 1;
+    for frame_record in frames {
+        let frame = frame_record
+            .get("frame")
+            .and_then(|value| value.as_f64())
+            .ok_or_else(|| format!("{name} has a frame record without frame"))?;
+        let expected = frame_record
+            .get("camera")
+            .ok_or_else(|| format!("{name} frame {frame} is missing camera"))?;
+        let actual = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame as f32)
+            .ok_or_else(|| format!("{} has no camera frames", camera_vmd.display()))?;
+
+        stats.compared_frames += 1;
+        stats.mismatch_count += compare_camera_scalar(
+            name,
+            frame,
+            "distance",
+            actual.distance as f64,
+            expected_number(expected, "distance")?,
+            epsilon,
+            &mut stats.max_delta,
+        );
+        stats.mismatch_count += compare_camera_vec3(
+            name,
+            frame,
+            "position",
+            actual.position,
+            expected_array3(expected, "position")?,
+            epsilon,
+            &mut stats.max_delta,
+        );
+        stats.mismatch_count += compare_camera_vec3(
+            name,
+            frame,
+            "rotation",
+            actual.rotation,
+            expected_array3(expected, "rotation")?,
+            epsilon,
+            &mut stats.max_delta,
+        );
+        stats.mismatch_count += compare_camera_scalar(
+            name,
+            frame,
+            "fov",
+            actual.fov as f64,
+            expected_number(expected, "fov")?,
+            epsilon,
+            &mut stats.max_delta,
+        );
+        let expected_perspective = expected
+            .get("perspective")
+            .and_then(|value| value.as_bool())
+            .ok_or_else(|| format!("{name} frame {frame} camera.perspective is missing"))?;
+        if actual.perspective != expected_perspective {
+            stats.mismatch_count += 1;
+            eprintln!(
+                "camera mismatch case={} frame={} field=perspective actual={} expected={}",
+                name, frame, actual.perspective, expected_perspective
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+#[derive(Default)]
+struct MotionNumericCompareStats {
+    total_cases: usize,
+    compared_cases: usize,
+    skipped_unsupported: usize,
+    missing: usize,
+    import_errors: usize,
+    compared_frames: usize,
+    compared_bones: usize,
+    mismatch_count: usize,
+    skipped_targets: HashSet<String>,
+    max_abs_error: f32,
+    worst: String,
+}
+
+fn numeric_compare_failure_count(
+    camera_stats: &CameraNumericCompareStats,
+    motion_stats: &MotionNumericCompareStats,
+) -> usize {
+    camera_stats.mismatch_count
+        + motion_stats.mismatch_count
+        + motion_stats.missing
+        + motion_stats.import_errors
+}
+
+impl MotionNumericCompareStats {
+    fn skipped_targets_csv(&self) -> String {
+        let mut targets: Vec<_> = self.skipped_targets.iter().cloned().collect();
+        targets.sort();
+        targets.join(",")
+    }
+}
+
+fn compare_motion_numeric_case(
+    case: &serde_json::Value,
+    manifest_dir: &Path,
+    default_epsilon: f64,
+    stats: &mut MotionNumericCompareStats,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    stats.total_cases += 1;
+    if stats.worst.is_empty() {
+        stats.worst = String::from("none");
+    }
+    let name = case
+        .get("name")
+        .and_then(|value| value.as_str())
+        .ok_or("numeric compare case is missing name")?;
+    let epsilon = case
+        .pointer("/compare/epsilon")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(default_epsilon) as f32;
+    collect_unsupported_targets(case, &mut stats.skipped_targets);
+
+    let model_path = match case
+        .pointer("/assets/model")
+        .and_then(|value| value.as_str())
+        .map(|value| resolve_manifest_path(manifest_dir, value))
+    {
+        Some(path) => path,
+        None => {
+            stats.missing += 1;
+            eprintln!("missing: {name} assets.model");
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
+    let motion_path = match case
+        .pointer("/assets/motion")
+        .and_then(|value| value.as_str())
+        .map(|value| resolve_manifest_path(manifest_dir, value))
+    {
+        Some(path) => path,
+        None => {
+            stats.missing += 1;
+            eprintln!("missing: {name} assets.motion");
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
+    let oracle_path = match case
+        .pointer("/oracle/path")
+        .and_then(|value| value.as_str())
+        .map(|value| resolve_manifest_path(manifest_dir, value))
+    {
+        Some(path) => path,
+        None => {
+            stats.missing += 1;
+            eprintln!("missing: {name} oracle.path");
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
+
+    if !golden::is_supported_golden_model(&model_path) {
+        stats.skipped_unsupported += 1;
+        eprintln!("skipped unsupported model: {}", model_path.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+    if !model_path.exists() || !motion_path.exists() || !oracle_path.exists() {
+        stats.missing += 1;
+        if !model_path.exists() {
+            eprintln!("missing: {}", model_path.display());
+        }
+        if !motion_path.exists() {
+            eprintln!("missing: {}", motion_path.display());
+        }
+        if !oracle_path.exists() {
+            eprintln!("missing: {}", oracle_path.display());
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let frames = numeric_case_frames(case)?;
+    let dump =
+        MmdDumperOracleDump::from_jsonl_str(&fs::read_to_string(&oracle_path)?, Some(&frames))?;
+
+    let model_bytes = fs::read(&model_path)?;
+    let model_import = match golden::import_golden_runtime_model(&model_path, &model_bytes) {
+        Ok(import) => import,
+        Err(error) => {
+            stats.import_errors += 1;
+            eprintln!("import-error: {}: {}", model_path.display(), error);
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
+    let vmd_bytes = fs::read(&motion_path)?;
+    let vmd = match mmd_anim_format::import_vmd_motion(&vmd_bytes) {
+        Ok(vmd) => vmd,
+        Err(error) => {
+            stats.import_errors += 1;
+            eprintln!("import-error: {}: {}", motion_path.display(), error);
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
+
+    let solver_count = model_import.model.ik_count();
+    let clip = mmd_anim_format::build_pair_clip_with_options(
+        &vmd,
+        &model_import.bone_name_to_index,
+        &model_import.morph_name_to_index,
+        &model_import.ik_solver_bone_name_to_index,
+        solver_count,
+        mmd_anim_format::VmdClipBuildOptions {
+            honor_property_ik: false,
+        },
+    );
+
+    let model = Arc::new(model_import.model);
+    let morph_count = model_import
+        .morph_name_to_index
+        .values()
+        .map(|index| index.as_usize() + 1)
+        .max()
+        .unwrap_or(0);
+    let mut runtime =
+        RuntimeInstance::new_with_counts(Arc::clone(&model), morph_count, solver_count);
+
+    for oracle_frame in &dump.frames {
+        runtime.evaluate_clip_frame(&clip, oracle_frame.frame as f32);
+        let Some(model0) = oracle_frame.models.first() else {
+            continue;
+        };
+        let world_matrices = runtime.world_matrices();
+        for oracle_bone in model0.focused_ik_bones(DEFAULT_FOCUSED_IK_BONE_NAMES) {
+            if oracle_bone.index < 0 {
+                continue;
+            }
+            let index = oracle_bone.index as usize;
+            if index >= world_matrices.len() {
+                continue;
+            }
+            let runtime_matrix = world_matrices[index].to_cols_array();
+            for (component, actual) in runtime_matrix.iter().enumerate() {
+                let abs_error = (*actual - oracle_bone.world_matrix[component]).abs();
+                if abs_error > stats.max_abs_error {
+                    stats.max_abs_error = abs_error;
+                    stats.worst = format!("{}:{}:{}", name, oracle_frame.frame, oracle_bone.name);
+                }
+                if abs_error > epsilon {
+                    stats.mismatch_count += 1;
+                    eprintln!(
+                        "motion mismatch case={} frame={} bone={} component={} actual={:.9} expected={:.9} delta={:.9} epsilon={:.9}",
+                        name,
+                        oracle_frame.frame,
+                        oracle_bone.name,
+                        component,
+                        actual,
+                        oracle_bone.world_matrix[component],
+                        abs_error,
+                        epsilon
+                    );
+                }
+            }
+            stats.compared_bones += 1;
+        }
+        stats.compared_frames += 1;
+    }
+    stats.compared_cases += 1;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn collect_unsupported_targets(case: &serde_json::Value, skipped_targets: &mut HashSet<String>) {
+    let Some(targets) = case
+        .pointer("/compare/targets")
+        .and_then(|value| value.as_array())
+    else {
+        return;
+    };
+    for target in targets {
+        let Some(target) = target.as_str() else {
+            continue;
+        };
+        if !matches!(target, "bones") {
+            skipped_targets.insert(target.to_owned());
+        }
+    }
+}
+
+fn numeric_case_frames(case: &serde_json::Value) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
+    let frames = case
+        .get("frames")
+        .and_then(|value| value.as_array())
+        .ok_or("numeric compare case is missing frames")?;
+    frames
+        .iter()
+        .map(|frame| {
+            frame
+                .as_i64()
+                .and_then(|frame| i32::try_from(frame).ok())
+                .ok_or_else(|| "numeric compare frame must be an i32".into())
+        })
+        .collect()
+}
+
+fn resolve_manifest_path(manifest_dir: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        manifest_dir.join(path)
+    }
+}
+
+fn resolve_camera_vmd_path(
+    case: &serde_json::Value,
+    manifest_dir: &Path,
+    case_dir: Option<&Path>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let camera_vmd = case
+        .pointer("/assets/cameraMotion")
+        .or_else(|| case.pointer("/assets/cameraVmd"))
+        .or_else(|| case.get("cameraVmd"))
+        .or_else(|| case.get("cameraMotion"))
+        .and_then(|value| value.as_str())
+        .ok_or("camera manifest case is missing assets.cameraMotion/cameraVmd")?;
+    let camera_vmd = resolve_manifest_path(manifest_dir, camera_vmd);
+    if camera_vmd.exists() {
+        return Ok(camera_vmd);
+    }
+
+    let fixture_path = case
+        .get("fixture")
+        .and_then(|value| value.as_str())
+        .map(|path| resolve_manifest_path(manifest_dir, path))
+        .or_else(|| case_dir.map(|case_dir| case_dir.join("fixture.json")));
+    let Some(fixture_path) = fixture_path else {
+        return Err(format!(
+            "{} does not exist and no fixture path is available",
+            camera_vmd.display()
+        )
+        .into());
+    };
+    let fixture: serde_json::Value = serde_json::from_slice(&fs::read(&fixture_path)?)?;
+    let staged = fixture
+        .get("stagedCameraVmd")
+        .or_else(|| fixture.get("stagedCameraMotion"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            format!(
+                "{} does not exist and {} is missing stagedCameraVmd/stagedCameraMotion",
+                camera_vmd.display(),
+                fixture_path.display()
+            )
+        })?;
+    let fixture_dir = fixture_path.parent().unwrap_or(manifest_dir);
+    Ok(resolve_manifest_path(fixture_dir, staged))
+}
+
+fn resolve_camera_oracle_path(
+    case: &serde_json::Value,
+    manifest_dir: &Path,
+    case_dir: Option<&Path>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(output) = case
+        .pointer("/oracle/path")
+        .or_else(|| case.get("output"))
+        .and_then(|value| value.as_str())
+    {
+        return Ok(resolve_manifest_path(manifest_dir, output));
+    }
+    if let Some(case_dir) = case_dir {
+        return Ok(case_dir.join("oracle.actual.json"));
+    }
+    Err(
+        "camera manifest case is missing oracle.path/output and no defaults.outDir is available"
+            .into(),
+    )
+}
+
+fn expected_number(
+    camera: &serde_json::Value,
+    field: &str,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    camera
+        .get(field)
+        .and_then(|value| value.as_f64())
+        .ok_or_else(|| format!("camera.{field} is missing").into())
+}
+
+fn expected_array3(
+    camera: &serde_json::Value,
+    field: &str,
+) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+    let values = camera
+        .get(field)
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("camera.{field} is missing"))?;
+    if values.len() != 3 {
+        return Err(format!("camera.{field} must have exactly 3 values").into());
+    }
+    Ok([
+        values[0]
+            .as_f64()
+            .ok_or_else(|| format!("camera.{field}[0] is not a number"))?,
+        values[1]
+            .as_f64()
+            .ok_or_else(|| format!("camera.{field}[1] is not a number"))?,
+        values[2]
+            .as_f64()
+            .ok_or_else(|| format!("camera.{field}[2] is not a number"))?,
+    ])
+}
+
+fn compare_camera_vec3(
+    case_name: &str,
+    frame: f64,
+    field: &str,
+    actual: [f32; 3],
+    expected: [f64; 3],
+    epsilon: f64,
+    max_delta: &mut f64,
+) -> usize {
+    let mut mismatches = 0usize;
+    for component in 0..3 {
+        mismatches += compare_camera_scalar(
+            case_name,
+            frame,
+            &format!("{field}[{component}]"),
+            actual[component] as f64,
+            expected[component],
+            epsilon,
+            max_delta,
+        );
+    }
+    mismatches
+}
+
+fn compare_camera_scalar(
+    case_name: &str,
+    frame: f64,
+    field: &str,
+    actual: f64,
+    expected: f64,
+    epsilon: f64,
+    max_delta: &mut f64,
+) -> usize {
+    let delta = (actual - expected).abs();
+    *max_delta = (*max_delta).max(delta);
+    if delta <= epsilon {
+        0
+    } else {
+        eprintln!(
+            "camera mismatch case={} frame={} field={} actual={:.9} expected={:.9} delta={:.9}",
+            case_name, frame, field, actual, expected, delta
+        );
+        1
+    }
+}
+
 fn import_vmd_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data = fs::read(path)?;
     let imported = mmd_anim_format::import_vmd_motion(&data)?;
@@ -2064,6 +2741,232 @@ fn import_pair_frame_summary(
 }
 
 #[derive(Debug)]
+struct BenchPairConfig {
+    pmx_path: PathBuf,
+    vmd_path: PathBuf,
+    start_frame: f32,
+    frame_count: usize,
+    step: f32,
+    solve_ik: bool,
+    ik_options: IkSolveOptions,
+}
+
+fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let total_start = Instant::now();
+
+    let read_start = Instant::now();
+    let pmx_bytes = fs::read(&cfg.pmx_path)?;
+    let vmd_bytes = fs::read(&cfg.vmd_path)?;
+    let read_elapsed = read_start.elapsed();
+
+    let pmx_start = Instant::now();
+    let pmx = mmd_anim_format::import_pmx_runtime(&pmx_bytes)?;
+    let pmx_elapsed = pmx_start.elapsed();
+
+    let vmd_start = Instant::now();
+    let vmd = mmd_anim_format::import_vmd_motion(&vmd_bytes)?;
+    let vmd_elapsed = vmd_start.elapsed();
+
+    let bone_count = pmx.model.bone_count();
+    let append_count = pmx.model.append_transforms().len();
+    let fixed_axis_count = pmx.model.fixed_axis_count();
+    let solver_count = pmx.model.ik_count();
+    let ik_solver_summaries = pmx
+        .model
+        .ik_solvers()
+        .iter()
+        .enumerate()
+        .map(|(index, solver)| {
+            let name = pmx
+                .bone_names
+                .get(solver.ik_bone.as_usize())
+                .cloned()
+                .unwrap_or_else(|| "<unknown>".to_owned());
+            (
+                index,
+                solver.ik_bone.as_usize(),
+                name,
+                solver.iteration_count,
+                solver.links.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let morph_count = pmx
+        .morph_name_to_index
+        .values()
+        .map(|index| index.as_usize() + 1)
+        .max()
+        .unwrap_or(0);
+
+    let clip_start = Instant::now();
+    let clip = mmd_anim_format::build_pair_clip(
+        &vmd,
+        &pmx.bone_name_to_index,
+        &pmx.morph_name_to_index,
+        &pmx.ik_solver_bone_name_to_index,
+        solver_count,
+    );
+    let clip_elapsed = clip_start.elapsed();
+
+    let model = Arc::new(pmx.model);
+    let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, solver_count);
+    runtime.reset_ik_runtime_stats();
+
+    let eval_start = Instant::now();
+    let mut checksum = 0u32;
+    let mut morph_checksum = 0u32;
+    for i in 0..cfg.frame_count {
+        let frame = cfg.start_frame + cfg.step * i as f32;
+        if cfg.solve_ik {
+            runtime.evaluate_clip_frame_with_ik_options(&clip, frame, cfg.ik_options);
+        } else {
+            runtime.evaluate_clip_frame_without_ik(&clip, frame);
+        }
+        checksum = checksum.rotate_left(1) ^ translation_checksum(runtime.world_matrices());
+        morph_checksum = morph_checksum.rotate_left(1) ^ f32_checksum(runtime.morph_weights());
+    }
+    let eval_elapsed = eval_start.elapsed();
+    let total_elapsed = total_start.elapsed();
+
+    let frame_range = clip
+        .frame_range()
+        .map(|(first, last)| format!("{first}..{last}"))
+        .unwrap_or_else(|| "none".to_owned());
+    let eval_ms = eval_elapsed.as_secs_f64() * 1000.0;
+    let ms_per_frame = eval_ms / cfg.frame_count as f64;
+    let fps = cfg.frame_count as f64 / eval_elapsed.as_secs_f64();
+
+    println!(
+        "bench-pair: bones={} ik={} ikMode={} ikTolerance={:.8} ikMaxIterationsCap={} append={} fixedAxis={} vmdBoneKeys={} vmdMorphKeys={} clipBoneTracks={} clipMorphTracks={} propertyTrack={} clipFrameRange={} frames={} startFrame={:.3} step={:.3} readMs={:.3} pmxImportMs={:.3} vmdImportMs={:.3} clipBuildMs={:.3} evalMs={:.3} msPerFrame={:.6} fps={:.1} totalMs={:.3} checksum={:08x} morphChecksum={:08x}",
+        bone_count,
+        solver_count,
+        if cfg.solve_ik { "enabled" } else { "disabled" },
+        cfg.ik_options.tolerance,
+        cfg.ik_options
+            .max_iterations_cap
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_owned()),
+        append_count,
+        fixed_axis_count,
+        vmd.bone_keyframes.len(),
+        vmd.morph_keyframes.len(),
+        clip.bone_track_count(),
+        clip.morph_track_count(),
+        clip.has_property_track(),
+        frame_range,
+        cfg.frame_count,
+        cfg.start_frame,
+        cfg.step,
+        read_elapsed.as_secs_f64() * 1000.0,
+        pmx_elapsed.as_secs_f64() * 1000.0,
+        vmd_elapsed.as_secs_f64() * 1000.0,
+        clip_elapsed.as_secs_f64() * 1000.0,
+        eval_ms,
+        ms_per_frame,
+        fps,
+        total_elapsed.as_secs_f64() * 1000.0,
+        checksum,
+        morph_checksum,
+    );
+    if cfg.solve_ik {
+        let stats = runtime.ik_runtime_stats();
+        let total_evaluations = stats
+            .iter()
+            .map(|stats| stats.solver_evaluations)
+            .sum::<u64>();
+        let configured_iterations = stats
+            .iter()
+            .map(|stats| stats.configured_iterations)
+            .sum::<u64>();
+        let executed_iterations = stats
+            .iter()
+            .map(|stats| stats.executed_iterations)
+            .sum::<u64>();
+        let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
+        let tolerance_precheck_breaks = stats
+            .iter()
+            .map(|stats| stats.tolerance_precheck_breaks)
+            .sum::<u64>();
+        let tolerance_post_iteration_breaks = stats
+            .iter()
+            .map(|stats| stats.tolerance_post_iteration_breaks)
+            .sum::<u64>();
+        let rollback_breaks = stats.iter().map(|stats| stats.rollback_breaks).sum::<u64>();
+        let max_iteration_exhaustions = stats
+            .iter()
+            .map(|stats| stats.max_iteration_exhaustions)
+            .sum::<u64>();
+        let link_steps = stats.iter().map(|stats| stats.link_steps).sum::<u64>();
+        let skip_ratio = if configured_iterations == 0 {
+            0.0
+        } else {
+            skipped_iterations as f64 / configured_iterations as f64
+        };
+        println!(
+            "bench-pair-ik-stats: solverEvaluations={} configuredIterations={} executedIterations={} skippedIterations={} skippedRatio={:.3} tolerancePrecheckBreaks={} tolerancePostIterationBreaks={} rollbackBreaks={} maxIterationExhaustions={} linkSteps={}",
+            total_evaluations,
+            configured_iterations,
+            executed_iterations,
+            skipped_iterations,
+            skip_ratio,
+            tolerance_precheck_breaks,
+            tolerance_post_iteration_breaks,
+            rollback_breaks,
+            max_iteration_exhaustions,
+            link_steps,
+        );
+
+        let mut ranked = stats
+            .iter()
+            .enumerate()
+            .map(|(index, stats)| (index, *stats))
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(_, stats)| {
+            std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
+        });
+        for (index, stats) in ranked.into_iter().take(8) {
+            let (solver_index, bone_index, name, max_iterations, links) =
+                &ik_solver_summaries[index];
+            let skipped = stats
+                .configured_iterations
+                .saturating_sub(stats.executed_iterations);
+            let avg_final_distance = if stats.solver_evaluations == 0 {
+                0.0
+            } else {
+                stats.final_distance_sum / stats.solver_evaluations as f64
+            };
+            let avg_exhausted_final_distance = if stats.max_iteration_exhaustions == 0 {
+                0.0
+            } else {
+                stats.exhausted_final_distance_sum / stats.max_iteration_exhaustions as f64
+            };
+            println!(
+                "bench-pair-ik-solver: solver={} bone={} name={} maxIterations={} links={} evaluations={} configuredIterations={} executedIterations={} skippedIterations={} precheckBreaks={} postBreaks={} rollbackBreaks={} exhausted={} avgFinalDistance={:.8} maxFinalDistance={:.8} avgExhaustedFinalDistance={:.8} maxExhaustedFinalDistance={:.8}",
+                solver_index,
+                bone_index,
+                name,
+                max_iterations,
+                links,
+                stats.solver_evaluations,
+                stats.configured_iterations,
+                stats.executed_iterations,
+                skipped,
+                stats.tolerance_precheck_breaks,
+                stats.tolerance_post_iteration_breaks,
+                stats.rollback_breaks,
+                stats.max_iteration_exhaustions,
+                avg_final_distance,
+                stats.final_distance_max,
+                avg_exhausted_final_distance,
+                stats.exhausted_final_distance_max,
+            );
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+#[derive(Debug)]
 struct BenchSyntheticConfig {
     models: usize,
     bones: usize,
@@ -2196,6 +3099,66 @@ fn parse_bench_synthetic_args(
     })
 }
 
+fn parse_bench_pair_args(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<BenchPairConfig, Box<dyn std::error::Error>> {
+    let raw: Vec<String> = args.collect();
+    let mut solve_ik = true;
+    let mut ik_tolerance = IkSolveOptions::default().tolerance;
+    let mut ik_max_iterations_cap = None;
+    let mut positional = Vec::new();
+
+    let mut raw_iter = raw.into_iter();
+    while let Some(token) = raw_iter.next() {
+        match token.as_str() {
+            "--no-ik" => solve_ik = false,
+            "--ik-tolerance" => {
+                let value = raw_iter.next().ok_or("missing value for --ik-tolerance")?;
+                ik_tolerance = parse_finite_f32(&value, "ik-tolerance")?;
+                if ik_tolerance < 0.0 {
+                    return Err("ik-tolerance must be non-negative".into());
+                }
+            }
+            "--ik-max-iterations-cap" => {
+                let value = raw_iter
+                    .next()
+                    .ok_or("missing value for --ik-max-iterations-cap")?;
+                ik_max_iterations_cap = Some(parse_positive_u32(&value, "ik-max-iterations-cap")?);
+            }
+            _ if token.starts_with("--") => {
+                return Err(format!("unknown flag: {token}").into());
+            }
+            _ => positional.push(token),
+        }
+    }
+
+    let mut pos_iter = positional.into_iter();
+    let pmx_path = PathBuf::from(pos_iter.next().ok_or(BENCH_PAIR_USAGE)?);
+    let vmd_path = PathBuf::from(pos_iter.next().ok_or(BENCH_PAIR_USAGE)?);
+    let start_frame = optional_f32_parse_arg(&mut pos_iter, 0.0, "start-frame")?;
+    let frame_count = optional_positive_usize_arg(&mut pos_iter, 1000, "frame-count")?;
+    let step = optional_f32_parse_arg(&mut pos_iter, 1.0, "step")?;
+    if step <= 0.0 {
+        return Err("step must be positive".into());
+    }
+    if let Some(extra) = pos_iter.next() {
+        return Err(format!("unexpected extra argument: {extra}").into());
+    }
+
+    Ok(BenchPairConfig {
+        pmx_path,
+        vmd_path,
+        start_frame,
+        frame_count,
+        step,
+        solve_ik,
+        ik_options: IkSolveOptions {
+            tolerance: ik_tolerance,
+            max_iterations_cap: ik_max_iterations_cap,
+        },
+    })
+}
+
 fn optional_positive_usize_arg(
     args: &mut impl Iterator<Item = String>,
     default: usize,
@@ -2226,6 +3189,43 @@ fn optional_positive_u32_arg(
         .map_err(|_| format!("invalid {label}: {value}"))?;
     if parsed == 0 {
         return Err(format!("{label} must be positive").into());
+    }
+    Ok(parsed)
+}
+
+fn parse_positive_u32(value: &str, label: &str) -> Result<u32, Box<dyn std::error::Error>> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| format!("invalid {label}: {value}"))?;
+    if parsed == 0 {
+        return Err(format!("{label} must be positive").into());
+    }
+    Ok(parsed)
+}
+
+fn optional_f32_parse_arg(
+    args: &mut impl Iterator<Item = String>,
+    default: f32,
+    label: &str,
+) -> Result<f32, Box<dyn std::error::Error>> {
+    let Some(value) = args.next() else {
+        return Ok(default);
+    };
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("invalid {label}: {value}"))?;
+    if !parsed.is_finite() {
+        return Err(format!("{label} must be finite").into());
+    }
+    Ok(parsed)
+}
+
+fn parse_finite_f32(value: &str, label: &str) -> Result<f32, Box<dyn std::error::Error>> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("invalid {label}: {value}"))?;
+    if !parsed.is_finite() {
+        return Err(format!("{label} must be finite").into());
     }
     Ok(parsed)
 }
@@ -2263,6 +3263,15 @@ fn translation_checksum(matrices: &[glam::Mat4]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("mmd-anim-cli-{name}-{nanos}"))
+    }
 
     #[test]
     fn test_synthetic_model_bone_count() {
@@ -2427,6 +3436,80 @@ mod tests {
         .into_iter();
         let error = parse_bench_synthetic_args(&mut args).unwrap_err();
         assert!(error.to_string().contains("unexpected extra argument"));
+    }
+
+    #[test]
+    fn compare_numeric_mixed_manifest_dispatches_by_case_kind() {
+        let temp = unique_test_dir("compare-numeric-mixed");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("camera.vmd"),
+            include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd"),
+        )
+        .unwrap();
+        fs::write(
+            temp.join("camera-oracle.json"),
+            r#"{
+                "frames": [
+                    {
+                        "frame": 0,
+                        "camera": {
+                            "distance": -30.5,
+                            "position": [1.0, 2.0, 3.0],
+                            "rotation": [0.1, -0.2, 0.3],
+                            "fov": 35,
+                            "perspective": true
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.join("manifest.json"),
+            r#"{
+                "cases": [
+                    {
+                        "name": "camera",
+                        "kind": "camera-vmd",
+                        "assets": { "cameraMotion": "camera.vmd" },
+                        "oracle": { "path": "camera-oracle.json" },
+                        "compare": { "epsilon": 0.003 }
+                    },
+                    {
+                        "name": "motion",
+                        "kind": "motion-numeric",
+                        "assets": {
+                            "model": "missing.pmx",
+                            "motion": "missing.vmd"
+                        },
+                        "oracle": { "path": "missing.json" },
+                        "frames": [0],
+                        "compare": { "targets": ["bones"], "epsilon": 0.003 }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let error = compare_numeric_manifest(&temp.join("manifest.json")).unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("cameraMismatches=0"));
+        assert!(error.contains("motionMissing=1"));
+        assert!(!error.contains("unsupported kind"));
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn numeric_compare_failure_count_includes_motion_mismatches() {
+        let camera = CameraNumericCompareStats::default();
+        let motion = MotionNumericCompareStats {
+            mismatch_count: 1,
+            ..MotionNumericCompareStats::default()
+        };
+
+        assert_eq!(numeric_compare_failure_count(&camera, &motion), 1);
     }
 
     #[test]

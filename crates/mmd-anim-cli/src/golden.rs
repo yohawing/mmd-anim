@@ -12,13 +12,13 @@ use serde_json::json;
 pub(crate) const GOLDEN_IK_COMPARE_USAGE: &str =
     "usage: mmd-anim golden-ik-compare <golden-ik-oracle-root> [sample-frame-offset]";
 
-struct RuntimeModelImport {
-    model: ModelArena,
-    bone_names: Vec<String>,
-    bone_name_to_index: HashMap<Vec<u8>, BoneIndex>,
-    morph_name_to_index: HashMap<Vec<u8>, MorphIndex>,
-    ik_solver_bone_name_to_index: HashMap<Vec<u8>, usize>,
-    diagnostics: Vec<serde_json::Value>,
+pub(crate) struct RuntimeModelImport {
+    pub(crate) model: ModelArena,
+    pub(crate) bone_names: Vec<String>,
+    pub(crate) bone_name_to_index: HashMap<Vec<u8>, BoneIndex>,
+    pub(crate) morph_name_to_index: HashMap<Vec<u8>, MorphIndex>,
+    pub(crate) ik_solver_bone_name_to_index: HashMap<Vec<u8>, usize>,
+    pub(crate) diagnostics: Vec<serde_json::Value>,
 }
 
 pub(crate) fn parse_golden_ik_compare_args(
@@ -390,7 +390,7 @@ fn make_unsupported_case_entry(
     (summary, per_case)
 }
 
-fn is_supported_golden_model(path: &Path) -> bool {
+pub(crate) fn is_supported_golden_model(path: &Path) -> bool {
     matches!(
         path.extension()
             .and_then(|e| e.to_str())
@@ -400,7 +400,7 @@ fn is_supported_golden_model(path: &Path) -> bool {
     )
 }
 
-fn import_golden_runtime_model(
+pub(crate) fn import_golden_runtime_model(
     path: &Path,
     bytes: &[u8],
 ) -> Result<RuntimeModelImport, mmd_anim_format::error::ImportError> {

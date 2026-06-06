@@ -2239,7 +2239,7 @@ mod tests {
 
     #[test]
     fn parses_simple_camera_vmd_fixture() {
-        let parsed = parse_vmd_animation(&simple_camera_vmd_fixture()).unwrap();
+        let parsed = parse_vmd_animation(simple_camera_vmd_fixture()).unwrap();
 
         assert_eq!(parsed.metadata.model_name, "camera_fixture");
         assert_eq!(parsed.metadata.counts.bones, 0);
@@ -2284,7 +2284,7 @@ mod tests {
 
     #[test]
     fn roundtrip_simple_camera_vmd_fixture_parse_export_parse() {
-        let parsed = parse_vmd_animation(&simple_camera_vmd_fixture()).unwrap();
+        let parsed = parse_vmd_animation(simple_camera_vmd_fixture()).unwrap();
         let exported = export_vmd_animation(&parsed);
         let reparsed = parse_vmd_animation(&exported).unwrap();
 
@@ -2305,7 +2305,7 @@ mod tests {
 
     #[test]
     fn samples_simple_camera_vmd_fixture_with_channel_interpolation() {
-        let parsed = parse_vmd_animation(&simple_camera_vmd_fixture()).unwrap();
+        let parsed = parse_vmd_animation(simple_camera_vmd_fixture()).unwrap();
         let camera = sample_vmd_camera_frames(&parsed.camera_frames, 22.5).unwrap();
 
         assert_near(camera.distance, -40.25);

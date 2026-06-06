@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -9,8 +9,8 @@ use std::{
 
 use glam::{Quat, Vec3A};
 use mmd_anim_runtime::{
-    AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, ModelArena, MovableBoneKeyframe,
-    MovableBoneTrack, RuntimeInstance,
+    AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, IkSolveOptions, ModelArena,
+    MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
 };
 use mmd_anim_schema::{
     DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
@@ -23,6 +23,7 @@ const IMPORT_PAIR_CLIP_USAGE: &str =
     "usage: mmd-anim import-pair-clip-summary <model.pmx> <motion.vmd>";
 const IMPORT_PAIR_FRAME_USAGE: &str =
     "usage: mmd-anim import-pair-frame-summary <model.pmx> <motion.vmd> <frame>";
+const BENCH_PAIR_USAGE: &str = "usage: mmd-anim bench-pair <model.pmx> <motion.vmd> [start-frame] [frame-count] [step] [--no-ik] [--ik-tolerance <value>] [--ik-max-iterations-cap <count>]";
 const IMPORT_PMD_SUMMARY_USAGE: &str = "usage: mmd-anim import-pmd-summary <model.pmd>";
 const PARSE_PMX_SUMMARY_USAGE: &str = "usage: mmd-anim parse-pmx-summary <model.pmx>";
 const PARSE_FORMAT_USAGE: &str = "usage: mmd-anim parse-format-summary <asset>";
@@ -79,6 +80,16 @@ fn main() {
         Some("import-pmx-summary") => {
             let path = required_arg(&mut args, "usage: mmd-anim import-pmx-summary <model.pmx>");
             if let Err(error) = import_pmx_summary(Path::new(&path)) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("import-pmx-ik-summary") => {
+            let path = required_arg(
+                &mut args,
+                "usage: mmd-anim import-pmx-ik-summary <model.pmx>",
+            );
+            if let Err(error) = import_pmx_ik_summary(Path::new(&path)) {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
@@ -170,6 +181,13 @@ fn main() {
             if let Err(error) =
                 import_pair_frame_summary(Path::new(&pmx_path), Path::new(&vmd_path), frame)
             {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("bench-pair") => {
+            let result = parse_bench_pair_args(&mut args).and_then(bench_pair);
+            if let Err(error) = result {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
@@ -274,6 +292,54 @@ fn import_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error
         imported.morph_name_to_index.len(),
         imported.ik_solver_bone_name_to_index.len()
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn import_pmx_ik_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let data = fs::read(path)?;
+    let imported = mmd_anim_format::import_pmx_runtime(&data)?;
+    let solvers = imported.model.ik_solvers();
+    let max_iterations = solvers
+        .iter()
+        .map(|solver| solver.iteration_count)
+        .max()
+        .unwrap_or(0);
+    let mut distribution = BTreeMap::<u32, usize>::new();
+    for solver in solvers {
+        *distribution.entry(solver.iteration_count).or_default() += 1;
+    }
+    let distribution = distribution
+        .iter()
+        .map(|(iterations, count)| format!("{iterations}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    println!(
+        "PMX IK summary: bones={} ik={} maxIterations={} distribution={}",
+        imported.model.bone_count(),
+        solvers.len(),
+        max_iterations,
+        distribution
+    );
+    for (solver_index, solver) in solvers.iter().enumerate() {
+        if solver.iteration_count == max_iterations {
+            let name = imported
+                .bone_names
+                .get(solver.ik_bone.as_usize())
+                .map(String::as_str)
+                .unwrap_or("<unknown>");
+            println!(
+                "max IK: solver={} bone={} name={} target={} iterations={} limitAngle={:.6} links={}",
+                solver_index,
+                solver.ik_bone.as_usize(),
+                name,
+                solver.target_bone.as_usize(),
+                solver.iteration_count,
+                solver.limit_angle,
+                solver.links.len()
+            );
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2602,6 +2668,232 @@ fn import_pair_frame_summary(
 }
 
 #[derive(Debug)]
+struct BenchPairConfig {
+    pmx_path: PathBuf,
+    vmd_path: PathBuf,
+    start_frame: f32,
+    frame_count: usize,
+    step: f32,
+    solve_ik: bool,
+    ik_options: IkSolveOptions,
+}
+
+fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let total_start = Instant::now();
+
+    let read_start = Instant::now();
+    let pmx_bytes = fs::read(&cfg.pmx_path)?;
+    let vmd_bytes = fs::read(&cfg.vmd_path)?;
+    let read_elapsed = read_start.elapsed();
+
+    let pmx_start = Instant::now();
+    let pmx = mmd_anim_format::import_pmx_runtime(&pmx_bytes)?;
+    let pmx_elapsed = pmx_start.elapsed();
+
+    let vmd_start = Instant::now();
+    let vmd = mmd_anim_format::import_vmd_motion(&vmd_bytes)?;
+    let vmd_elapsed = vmd_start.elapsed();
+
+    let bone_count = pmx.model.bone_count();
+    let append_count = pmx.model.append_transforms().len();
+    let fixed_axis_count = pmx.model.fixed_axis_count();
+    let solver_count = pmx.model.ik_count();
+    let ik_solver_summaries = pmx
+        .model
+        .ik_solvers()
+        .iter()
+        .enumerate()
+        .map(|(index, solver)| {
+            let name = pmx
+                .bone_names
+                .get(solver.ik_bone.as_usize())
+                .cloned()
+                .unwrap_or_else(|| "<unknown>".to_owned());
+            (
+                index,
+                solver.ik_bone.as_usize(),
+                name,
+                solver.iteration_count,
+                solver.links.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let morph_count = pmx
+        .morph_name_to_index
+        .values()
+        .map(|index| index.as_usize() + 1)
+        .max()
+        .unwrap_or(0);
+
+    let clip_start = Instant::now();
+    let clip = mmd_anim_format::build_pair_clip(
+        &vmd,
+        &pmx.bone_name_to_index,
+        &pmx.morph_name_to_index,
+        &pmx.ik_solver_bone_name_to_index,
+        solver_count,
+    );
+    let clip_elapsed = clip_start.elapsed();
+
+    let model = Arc::new(pmx.model);
+    let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, solver_count);
+    runtime.reset_ik_runtime_stats();
+
+    let eval_start = Instant::now();
+    let mut checksum = 0u32;
+    let mut morph_checksum = 0u32;
+    for i in 0..cfg.frame_count {
+        let frame = cfg.start_frame + cfg.step * i as f32;
+        if cfg.solve_ik {
+            runtime.evaluate_clip_frame_with_ik_options(&clip, frame, cfg.ik_options);
+        } else {
+            runtime.evaluate_clip_frame_without_ik(&clip, frame);
+        }
+        checksum = checksum.rotate_left(1) ^ translation_checksum(runtime.world_matrices());
+        morph_checksum = morph_checksum.rotate_left(1) ^ f32_checksum(runtime.morph_weights());
+    }
+    let eval_elapsed = eval_start.elapsed();
+    let total_elapsed = total_start.elapsed();
+
+    let frame_range = clip
+        .frame_range()
+        .map(|(first, last)| format!("{first}..{last}"))
+        .unwrap_or_else(|| "none".to_owned());
+    let eval_ms = eval_elapsed.as_secs_f64() * 1000.0;
+    let ms_per_frame = eval_ms / cfg.frame_count as f64;
+    let fps = cfg.frame_count as f64 / eval_elapsed.as_secs_f64();
+
+    println!(
+        "bench-pair: bones={} ik={} ikMode={} ikTolerance={:.8} ikMaxIterationsCap={} append={} fixedAxis={} vmdBoneKeys={} vmdMorphKeys={} clipBoneTracks={} clipMorphTracks={} propertyTrack={} clipFrameRange={} frames={} startFrame={:.3} step={:.3} readMs={:.3} pmxImportMs={:.3} vmdImportMs={:.3} clipBuildMs={:.3} evalMs={:.3} msPerFrame={:.6} fps={:.1} totalMs={:.3} checksum={:08x} morphChecksum={:08x}",
+        bone_count,
+        solver_count,
+        if cfg.solve_ik { "enabled" } else { "disabled" },
+        cfg.ik_options.tolerance,
+        cfg.ik_options
+            .max_iterations_cap
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_owned()),
+        append_count,
+        fixed_axis_count,
+        vmd.bone_keyframes.len(),
+        vmd.morph_keyframes.len(),
+        clip.bone_track_count(),
+        clip.morph_track_count(),
+        clip.has_property_track(),
+        frame_range,
+        cfg.frame_count,
+        cfg.start_frame,
+        cfg.step,
+        read_elapsed.as_secs_f64() * 1000.0,
+        pmx_elapsed.as_secs_f64() * 1000.0,
+        vmd_elapsed.as_secs_f64() * 1000.0,
+        clip_elapsed.as_secs_f64() * 1000.0,
+        eval_ms,
+        ms_per_frame,
+        fps,
+        total_elapsed.as_secs_f64() * 1000.0,
+        checksum,
+        morph_checksum,
+    );
+    if cfg.solve_ik {
+        let stats = runtime.ik_runtime_stats();
+        let total_evaluations = stats
+            .iter()
+            .map(|stats| stats.solver_evaluations)
+            .sum::<u64>();
+        let configured_iterations = stats
+            .iter()
+            .map(|stats| stats.configured_iterations)
+            .sum::<u64>();
+        let executed_iterations = stats
+            .iter()
+            .map(|stats| stats.executed_iterations)
+            .sum::<u64>();
+        let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
+        let tolerance_precheck_breaks = stats
+            .iter()
+            .map(|stats| stats.tolerance_precheck_breaks)
+            .sum::<u64>();
+        let tolerance_post_iteration_breaks = stats
+            .iter()
+            .map(|stats| stats.tolerance_post_iteration_breaks)
+            .sum::<u64>();
+        let rollback_breaks = stats.iter().map(|stats| stats.rollback_breaks).sum::<u64>();
+        let max_iteration_exhaustions = stats
+            .iter()
+            .map(|stats| stats.max_iteration_exhaustions)
+            .sum::<u64>();
+        let link_steps = stats.iter().map(|stats| stats.link_steps).sum::<u64>();
+        let skip_ratio = if configured_iterations == 0 {
+            0.0
+        } else {
+            skipped_iterations as f64 / configured_iterations as f64
+        };
+        println!(
+            "bench-pair-ik-stats: solverEvaluations={} configuredIterations={} executedIterations={} skippedIterations={} skippedRatio={:.3} tolerancePrecheckBreaks={} tolerancePostIterationBreaks={} rollbackBreaks={} maxIterationExhaustions={} linkSteps={}",
+            total_evaluations,
+            configured_iterations,
+            executed_iterations,
+            skipped_iterations,
+            skip_ratio,
+            tolerance_precheck_breaks,
+            tolerance_post_iteration_breaks,
+            rollback_breaks,
+            max_iteration_exhaustions,
+            link_steps,
+        );
+
+        let mut ranked = stats
+            .iter()
+            .enumerate()
+            .map(|(index, stats)| (index, *stats))
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(_, stats)| {
+            std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
+        });
+        for (index, stats) in ranked.into_iter().take(8) {
+            let (solver_index, bone_index, name, max_iterations, links) =
+                &ik_solver_summaries[index];
+            let skipped = stats
+                .configured_iterations
+                .saturating_sub(stats.executed_iterations);
+            let avg_final_distance = if stats.solver_evaluations == 0 {
+                0.0
+            } else {
+                stats.final_distance_sum / stats.solver_evaluations as f64
+            };
+            let avg_exhausted_final_distance = if stats.max_iteration_exhaustions == 0 {
+                0.0
+            } else {
+                stats.exhausted_final_distance_sum / stats.max_iteration_exhaustions as f64
+            };
+            println!(
+                "bench-pair-ik-solver: solver={} bone={} name={} maxIterations={} links={} evaluations={} configuredIterations={} executedIterations={} skippedIterations={} precheckBreaks={} postBreaks={} rollbackBreaks={} exhausted={} avgFinalDistance={:.8} maxFinalDistance={:.8} avgExhaustedFinalDistance={:.8} maxExhaustedFinalDistance={:.8}",
+                solver_index,
+                bone_index,
+                name,
+                max_iterations,
+                links,
+                stats.solver_evaluations,
+                stats.configured_iterations,
+                stats.executed_iterations,
+                skipped,
+                stats.tolerance_precheck_breaks,
+                stats.tolerance_post_iteration_breaks,
+                stats.rollback_breaks,
+                stats.max_iteration_exhaustions,
+                avg_final_distance,
+                stats.final_distance_max,
+                avg_exhausted_final_distance,
+                stats.exhausted_final_distance_max,
+            );
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+#[derive(Debug)]
 struct BenchSyntheticConfig {
     models: usize,
     bones: usize,
@@ -2734,6 +3026,66 @@ fn parse_bench_synthetic_args(
     })
 }
 
+fn parse_bench_pair_args(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<BenchPairConfig, Box<dyn std::error::Error>> {
+    let raw: Vec<String> = args.collect();
+    let mut solve_ik = true;
+    let mut ik_tolerance = IkSolveOptions::default().tolerance;
+    let mut ik_max_iterations_cap = None;
+    let mut positional = Vec::new();
+
+    let mut raw_iter = raw.into_iter();
+    while let Some(token) = raw_iter.next() {
+        match token.as_str() {
+            "--no-ik" => solve_ik = false,
+            "--ik-tolerance" => {
+                let value = raw_iter.next().ok_or("missing value for --ik-tolerance")?;
+                ik_tolerance = parse_finite_f32(&value, "ik-tolerance")?;
+                if ik_tolerance < 0.0 {
+                    return Err("ik-tolerance must be non-negative".into());
+                }
+            }
+            "--ik-max-iterations-cap" => {
+                let value = raw_iter
+                    .next()
+                    .ok_or("missing value for --ik-max-iterations-cap")?;
+                ik_max_iterations_cap = Some(parse_positive_u32(&value, "ik-max-iterations-cap")?);
+            }
+            _ if token.starts_with("--") => {
+                return Err(format!("unknown flag: {token}").into());
+            }
+            _ => positional.push(token),
+        }
+    }
+
+    let mut pos_iter = positional.into_iter();
+    let pmx_path = PathBuf::from(pos_iter.next().ok_or(BENCH_PAIR_USAGE)?);
+    let vmd_path = PathBuf::from(pos_iter.next().ok_or(BENCH_PAIR_USAGE)?);
+    let start_frame = optional_f32_parse_arg(&mut pos_iter, 0.0, "start-frame")?;
+    let frame_count = optional_positive_usize_arg(&mut pos_iter, 1000, "frame-count")?;
+    let step = optional_f32_parse_arg(&mut pos_iter, 1.0, "step")?;
+    if step <= 0.0 {
+        return Err("step must be positive".into());
+    }
+    if let Some(extra) = pos_iter.next() {
+        return Err(format!("unexpected extra argument: {extra}").into());
+    }
+
+    Ok(BenchPairConfig {
+        pmx_path,
+        vmd_path,
+        start_frame,
+        frame_count,
+        step,
+        solve_ik,
+        ik_options: IkSolveOptions {
+            tolerance: ik_tolerance,
+            max_iterations_cap: ik_max_iterations_cap,
+        },
+    })
+}
+
 fn optional_positive_usize_arg(
     args: &mut impl Iterator<Item = String>,
     default: usize,
@@ -2764,6 +3116,43 @@ fn optional_positive_u32_arg(
         .map_err(|_| format!("invalid {label}: {value}"))?;
     if parsed == 0 {
         return Err(format!("{label} must be positive").into());
+    }
+    Ok(parsed)
+}
+
+fn parse_positive_u32(value: &str, label: &str) -> Result<u32, Box<dyn std::error::Error>> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| format!("invalid {label}: {value}"))?;
+    if parsed == 0 {
+        return Err(format!("{label} must be positive").into());
+    }
+    Ok(parsed)
+}
+
+fn optional_f32_parse_arg(
+    args: &mut impl Iterator<Item = String>,
+    default: f32,
+    label: &str,
+) -> Result<f32, Box<dyn std::error::Error>> {
+    let Some(value) = args.next() else {
+        return Ok(default);
+    };
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("invalid {label}: {value}"))?;
+    if !parsed.is_finite() {
+        return Err(format!("{label} must be finite").into());
+    }
+    Ok(parsed)
+}
+
+fn parse_finite_f32(value: &str, label: &str) -> Result<f32, Box<dyn std::error::Error>> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("invalid {label}: {value}"))?;
+    if !parsed.is_finite() {
+        return Err(format!("{label} must be finite").into());
     }
     Ok(parsed)
 }

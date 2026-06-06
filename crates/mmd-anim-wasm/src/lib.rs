@@ -10,9 +10,10 @@ use std::sync::Arc;
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
     AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneInit, BoneMorphOffset,
-    GroupMorphOffset, IkAngleLimit, IkLinkInit, IkSolverInit, MorphAnimationBinding, MorphIndex,
-    MorphInit, MorphKeyframe, MorphOffsetSpan, MorphTrack, MovableBoneKeyframe, MovableBoneTrack,
-    PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
+    GroupMorphOffset, IkAngleLimit, IkLinkInit, IkSolveOptions, IkSolverInit,
+    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan, MorphTrack,
+    MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
+    RuntimeInstance,
 };
 use wasm_bindgen::prelude::*;
 
@@ -936,6 +937,35 @@ impl WasmMmdRuntimeInstance {
     pub fn evaluate_clip_frame(&mut self, clip: &WasmMmdClip, frame: f32) {
         self.runtime.evaluate_clip_frame(&clip.clip, frame);
         self.refresh_caches();
+    }
+
+    #[wasm_bindgen(js_name = evaluateClipFrameWithIkOptions)]
+    pub fn evaluate_clip_frame_with_ik_options(
+        &mut self,
+        clip: &WasmMmdClip,
+        frame: f32,
+        ik_tolerance: f32,
+        ik_max_iterations_cap: u32,
+    ) -> Result<(), JsValue> {
+        if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
+            return Err(JsValue::from_str(
+                "ikTolerance must be non-negative and finite",
+            ));
+        }
+        self.runtime.evaluate_clip_frame_with_ik_options(
+            &clip.clip,
+            frame,
+            IkSolveOptions {
+                tolerance: ik_tolerance,
+                max_iterations_cap: if ik_max_iterations_cap == 0 {
+                    None
+                } else {
+                    Some(ik_max_iterations_cap)
+                },
+            },
+        );
+        self.refresh_caches();
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = worldMatrixF32Len)]

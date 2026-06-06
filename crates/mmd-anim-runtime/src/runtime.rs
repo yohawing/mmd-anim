@@ -44,12 +44,53 @@ impl MorphScratch {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct IkSolverRuntimeStats {
+    pub solver_evaluations: u64,
+    pub configured_iterations: u64,
+    pub executed_iterations: u64,
+    pub tolerance_precheck_breaks: u64,
+    pub tolerance_post_iteration_breaks: u64,
+    pub rollback_breaks: u64,
+    pub max_iteration_exhaustions: u64,
+    pub link_visits: u64,
+    pub link_steps: u64,
+    pub final_distance_sum: f64,
+    pub final_distance_max: f32,
+    pub exhausted_final_distance_sum: f64,
+    pub exhausted_final_distance_max: f32,
+}
+
+impl IkSolverRuntimeStats {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IkSolveOptions {
+    pub tolerance: f32,
+    pub max_iterations_cap: Option<u32>,
+}
+
+impl Default for IkSolveOptions {
+    fn default() -> Self {
+        Self {
+            tolerance: 1.0e-4,
+            max_iterations_cap: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RuntimeInstance {
     model: Arc<ModelArena>,
     pose: PoseArena,
     ik_scratch: IkScratch,
     morph_scratch: MorphScratch,
+    ik_stats: Vec<IkSolverRuntimeStats>,
+    #[cfg(test)]
+    world_matrix_bone_update_count: usize,
 }
 
 impl RuntimeInstance {
@@ -68,11 +109,15 @@ impl RuntimeInstance {
         let pose = PoseArena::new_with_counts(model.bone_count(), morph_count, ik_count);
         let ik_scratch = IkScratch::new(&model);
         let morph_scratch = MorphScratch::new(morph_count);
+        let ik_stats = vec![IkSolverRuntimeStats::default(); model.ik_count()];
         Self {
             model,
             pose,
             ik_scratch,
             morph_scratch,
+            ik_stats,
+            #[cfg(test)]
+            world_matrix_bone_update_count: 0,
         }
     }
 
@@ -93,7 +138,12 @@ impl RuntimeInstance {
 
     pub fn evaluate_current_pose(&mut self) {
         self.update_world_matrices();
-        self.solve_enabled_ik();
+        self.solve_enabled_ik(IkSolveOptions::default());
+    }
+
+    pub fn evaluate_current_pose_with_ik_options(&mut self, options: IkSolveOptions) {
+        self.update_world_matrices();
+        self.solve_enabled_ik(options);
     }
 
     /// Evaluate the current pose by updating world matrices only, without
@@ -104,8 +154,23 @@ impl RuntimeInstance {
     }
 
     fn update_world_matrices(&mut self) {
-        self.pose.reset_append_transforms();
-        for bone in self.model.eval_order() {
+        self.update_world_matrices_from_eval_order_position(0);
+    }
+
+    fn update_world_matrices_from_bone(&mut self, bone: crate::BoneIndex) {
+        self.update_world_matrices_from_eval_order_position(self.model.eval_order_position(bone));
+    }
+
+    fn update_world_matrices_from_eval_order_position(&mut self, start_position: usize) {
+        let start_position = self.expand_update_start_for_append_dependencies(start_position);
+        for bone in &self.model.eval_order()[start_position..] {
+            self.pose.reset_append_transform(*bone);
+        }
+        for bone in &self.model.eval_order()[start_position..] {
+            #[cfg(test)]
+            {
+                self.world_matrix_bone_update_count += 1;
+            }
             let mut local_position =
                 self.model.rest_position(*bone) + self.pose.local_position_offset(*bone);
             let mut local_rotation = self.pose.local_rotation(*bone);
@@ -170,9 +235,33 @@ impl RuntimeInstance {
         }
     }
 
-    fn solve_enabled_ik(&mut self) {
-        const DEFAULT_TOLERANCE: f32 = 1e-4;
+    fn expand_update_start_for_append_dependencies(&self, start_position: usize) -> usize {
+        let mut start = start_position;
+        loop {
+            let mut changed = false;
+            for append in self.model.append_transforms() {
+                let source_position = self.model.eval_order_position(append.source_bone);
+                let target_position = self.model.eval_order_position(append.target_bone);
+                if source_position >= start && target_position < start {
+                    start = target_position;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return start;
+            }
+        }
+    }
 
+    fn min_link_eval_order_position(&self, links: &[crate::IkLink]) -> Option<usize> {
+        links
+            .iter()
+            .map(|link| self.model.eval_order_position(link.bone))
+            .min()
+    }
+
+    fn solve_enabled_ik(&mut self, options: IkSolveOptions) {
+        let tolerance = options.tolerance.max(0.0);
         let mut links = std::mem::take(&mut self.ik_scratch.links);
         let mut base_rotations = std::mem::take(&mut self.ik_scratch.base_rotations);
         let mut ik_rotations = std::mem::take(&mut self.ik_scratch.ik_rotations);
@@ -187,12 +276,18 @@ impl RuntimeInstance {
             let solver = &self.model.ik_solvers()[ik_index];
             let ik_bone = solver.ik_bone;
             let target_bone = solver.target_bone;
-            let iteration_count = solver.iteration_count.max(1) as usize;
+            let iteration_count = options
+                .max_iterations_cap
+                .map(|cap| solver.iteration_count.min(cap))
+                .unwrap_or(solver.iteration_count)
+                .max(1) as usize;
             let limit_angle = solver.limit_angle.max(0.0);
             let link_count = solver.links.len();
 
             links.clear();
             links.extend(solver.links.iter().cloned());
+            self.ik_stats[ik_index].solver_evaluations += 1;
+            self.ik_stats[ik_index].configured_iterations += iteration_count as u64;
 
             base_rotations.clear();
             base_rotations.extend(links.iter().map(|l| self.pose.local_rotation(l.bone)));
@@ -208,26 +303,33 @@ impl RuntimeInstance {
 
             let mut best_distance = f32::MAX;
 
-            // Initial world matrix state
             self.apply_ik_link_rotations(&links, &base_rotations, &ik_rotations);
             self.update_world_matrices();
 
+            let mut broke_early = false;
+            let mut final_distance = f32::MAX;
             for _iteration in 0..iteration_count {
                 // Tolerance early exit
                 let eff_pos = translation(self.pose.world_matrices()[target_bone.as_usize()]);
                 let ik_pos = translation(self.pose.world_matrices()[ik_bone.as_usize()]);
-                if (eff_pos - ik_pos).length() <= DEFAULT_TOLERANCE {
+                final_distance = (eff_pos - ik_pos).length();
+                if final_distance <= tolerance {
+                    self.ik_stats[ik_index].tolerance_precheck_breaks += 1;
+                    broke_early = true;
                     break;
                 }
+                self.ik_stats[ik_index].executed_iterations += 1;
 
                 for link_index in 0..link_count {
                     let link = &links[link_index];
+                    let link_bone = link.bone;
+                    self.ik_stats[ik_index].link_visits += 1;
 
-                    if link.bone == target_bone {
+                    if link_bone == target_bone {
                         continue;
                     }
 
-                    let link_world = self.pose.world_matrices()[link.bone.as_usize()];
+                    let link_world = self.pose.world_matrices()[link_bone.as_usize()];
                     let link_pos = translation(link_world);
                     let eff_pos = translation(self.pose.world_matrices()[target_bone.as_usize()]);
                     let ik_pos = translation(self.pose.world_matrices()[ik_bone.as_usize()]);
@@ -306,7 +408,8 @@ impl RuntimeInstance {
                     }
 
                     self.apply_ik_link_rotations(&links, &base_rotations, &ik_rotations);
-                    self.update_world_matrices();
+                    self.update_world_matrices_from_bone(link_bone);
+                    self.ik_stats[ik_index].link_steps += 1;
                 }
 
                 // Best rotations tracking
@@ -315,24 +418,44 @@ impl RuntimeInstance {
                     let ik = translation(self.pose.world_matrices()[ik_bone.as_usize()]);
                     (eff - ik).length()
                 };
+                final_distance = current_distance;
 
                 if current_distance < best_distance {
                     best_distance = current_distance;
                     best_ik_rotations.copy_from_slice(&ik_rotations);
-                    if current_distance <= DEFAULT_TOLERANCE {
+                    if current_distance <= tolerance {
+                        self.ik_stats[ik_index].tolerance_post_iteration_breaks += 1;
+                        broke_early = true;
                         break;
                     }
                 } else {
+                    self.ik_stats[ik_index].rollback_breaks += 1;
                     ik_rotations.copy_from_slice(&best_ik_rotations);
                     self.apply_ik_link_rotations(&links, &base_rotations, &ik_rotations);
-                    self.update_world_matrices();
+                    if let Some(start_position) = self.min_link_eval_order_position(&links) {
+                        self.update_world_matrices_from_eval_order_position(start_position);
+                    }
+                    broke_early = true;
                     break;
                 }
+            }
+            self.ik_stats[ik_index].final_distance_sum += f64::from(final_distance);
+            self.ik_stats[ik_index].final_distance_max = self.ik_stats[ik_index]
+                .final_distance_max
+                .max(final_distance);
+            if !broke_early {
+                self.ik_stats[ik_index].max_iteration_exhaustions += 1;
+                self.ik_stats[ik_index].exhausted_final_distance_sum += f64::from(final_distance);
+                self.ik_stats[ik_index].exhausted_final_distance_max = self.ik_stats[ik_index]
+                    .exhausted_final_distance_max
+                    .max(final_distance);
             }
 
             // Apply final best effective rotations
             self.apply_ik_link_rotations(&links, &base_rotations, &best_ik_rotations);
-            self.update_world_matrices();
+            if let Some(start_position) = self.min_link_eval_order_position(&links) {
+                self.update_world_matrices_from_eval_order_position(start_position);
+            }
         }
 
         self.ik_scratch.links = links;
@@ -363,6 +486,17 @@ impl RuntimeInstance {
         clip.apply_to_pose(frame, &mut self.pose);
         self.expand_morphs();
         self.evaluate_current_pose();
+    }
+
+    pub fn evaluate_clip_frame_with_ik_options(
+        &mut self,
+        clip: &AnimationClip,
+        frame: f32,
+        options: IkSolveOptions,
+    ) {
+        clip.apply_to_pose(frame, &mut self.pose);
+        self.expand_morphs();
+        self.evaluate_current_pose_with_ik_options(options);
     }
 
     /// Evaluate a clip frame but stop before solving IK. Applies the clip to
@@ -449,6 +583,16 @@ impl RuntimeInstance {
         self.pose.world_matrices()
     }
 
+    #[cfg(test)]
+    fn reset_world_matrix_bone_update_count(&mut self) {
+        self.world_matrix_bone_update_count = 0;
+    }
+
+    #[cfg(test)]
+    fn world_matrix_bone_update_count(&self) -> usize {
+        self.world_matrix_bone_update_count
+    }
+
     #[inline]
     pub fn skinning_matrices(&self) -> &[Mat4] {
         self.pose.skinning_matrices()
@@ -457,6 +601,16 @@ impl RuntimeInstance {
     #[inline]
     pub fn morph_weights(&self) -> &[f32] {
         self.pose.morph_weights()
+    }
+
+    pub fn reset_ik_runtime_stats(&mut self) {
+        for stats in &mut self.ik_stats {
+            stats.reset();
+        }
+    }
+
+    pub fn ik_runtime_stats(&self) -> &[IkSolverRuntimeStats] {
+        &self.ik_stats
     }
 
     #[inline]
@@ -1071,6 +1225,52 @@ mod tests {
     }
 
     #[test]
+    fn ik_updates_only_affected_eval_suffix_for_late_chain() {
+        let unrelated_count = 96usize;
+        let chain_root = BoneIndex(unrelated_count as u32);
+        let chain_mid = BoneIndex(unrelated_count as u32 + 1);
+        let chain_tip = BoneIndex(unrelated_count as u32 + 2);
+        let controller = BoneIndex(unrelated_count as u32 + 3);
+
+        let mut bones = Vec::new();
+        for i in 0..unrelated_count {
+            bones.push(BoneInit::new(None, Vec3A::new(i as f32 * 10.0, -10.0, 0.0)));
+        }
+        bones.push(BoneInit::new(None, Vec3A::ZERO));
+        bones.push(BoneInit::new(Some(chain_root), Vec3A::new(1.0, 0.0, 0.0)));
+        bones.push(BoneInit::new(Some(chain_mid), Vec3A::new(1.0, 0.0, 0.0)));
+        bones.push(BoneInit::new(None, Vec3A::new(1.0, 1.0, 0.0)));
+
+        let model = Arc::new(
+            ModelArena::new_with_ik(
+                bones,
+                vec![IkSolverInit {
+                    ik_bone: controller,
+                    target_bone: chain_tip,
+                    links: vec![IkLinkInit::new(chain_mid), IkLinkInit::new(chain_root)],
+                    iteration_count: 4,
+                    limit_angle: 0.0,
+                }],
+            )
+            .unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(model);
+
+        runtime.reset_world_matrix_bone_update_count();
+        runtime.evaluate_current_pose();
+
+        assert_vec3a_near(
+            translation(runtime.world_matrices()[chain_tip.as_usize()]),
+            Vec3A::new(1.0, 1.0, 0.0),
+        );
+        assert!(
+            runtime.world_matrix_bone_update_count() < 250,
+            "IK should not recompute unrelated prefix bones repeatedly; updated {} bones",
+            runtime.world_matrix_bone_update_count()
+        );
+    }
+
+    #[test]
     fn clamps_ik_rotation_by_solver_limit_angle() {
         let model = Arc::new(
             ModelArena::new_with_ik(
@@ -1198,6 +1398,36 @@ mod tests {
             translation(with_ik.world_matrices()[1]),
             Vec3A::new(0.0, 1.0, 0.0),
         );
+    }
+
+    #[test]
+    fn ik_options_cap_configured_iterations() {
+        let model = Arc::new(
+            ModelArena::new_with_ik(
+                vec![
+                    BoneInit::new(None, Vec3A::ZERO),
+                    BoneInit::new(Some(BoneIndex(0)), Vec3A::new(1.0, 0.0, 0.0)),
+                    BoneInit::new(None, Vec3A::new(0.0, 1.0, 0.0)),
+                ],
+                vec![IkSolverInit {
+                    ik_bone: BoneIndex(2),
+                    target_bone: BoneIndex(1),
+                    links: vec![IkLinkInit::new(BoneIndex(0))],
+                    iteration_count: 100,
+                    limit_angle: 0.0,
+                }],
+            )
+            .unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(model);
+
+        runtime.reset_ik_runtime_stats();
+        runtime.evaluate_current_pose_with_ik_options(super::IkSolveOptions {
+            tolerance: 0.0,
+            max_iterations_cap: Some(5),
+        });
+
+        assert_eq!(runtime.ik_runtime_stats()[0].configured_iterations, 5);
     }
 
     // ---- morph expansion tests ----

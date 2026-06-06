@@ -20,4 +20,4 @@ pub use model::{
     MorphIndex, MorphInit, MorphOffsetSpan, VertexMorphOffset,
 };
 pub use pose::PoseArena;
-pub use runtime::RuntimeInstance;
+pub use runtime::{IkSolveOptions, IkSolverRuntimeStats, RuntimeInstance};

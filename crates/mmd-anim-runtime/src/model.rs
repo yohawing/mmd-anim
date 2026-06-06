@@ -217,6 +217,7 @@ pub struct ModelArena {
     fixed_axis_flags: Box<[u8]>,
     fixed_axes: Box<[Vec3A]>,
     eval_order: Box<[BoneIndex]>,
+    eval_order_positions: Box<[usize]>,
     ik_solvers: Box<[IkSolver]>,
     append_transforms: Box<[AppendTransform]>,
     append_transform_indices: Box<[i32]>,
@@ -296,6 +297,7 @@ impl ModelArena {
         }
 
         let eval_order = build_eval_order(&parent_indices, &transform_orders)?;
+        let eval_order_positions = build_eval_order_positions(&eval_order, bone_count);
         let ik_solvers = build_ik_solvers(ik_solvers, bone_count)?;
         let (append_transforms, append_transform_indices) =
             build_append_transforms(append_transforms, bone_count)?;
@@ -309,6 +311,7 @@ impl ModelArena {
             fixed_axis_flags: fixed_axis_flags.into_boxed_slice(),
             fixed_axes: fixed_axes.into_boxed_slice(),
             eval_order,
+            eval_order_positions,
             ik_solvers,
             append_transforms,
             append_transform_indices,
@@ -372,6 +375,11 @@ impl ModelArena {
     #[inline]
     pub fn eval_order(&self) -> &[BoneIndex] {
         &self.eval_order
+    }
+
+    #[inline]
+    pub(crate) fn eval_order_position(&self, bone: BoneIndex) -> usize {
+        self.eval_order_positions[bone.as_usize()]
     }
 
     #[inline]
@@ -580,6 +588,14 @@ fn build_eval_order(
     }
 
     Ok(order.into_boxed_slice())
+}
+
+fn build_eval_order_positions(eval_order: &[BoneIndex], bone_count: usize) -> Box<[usize]> {
+    let mut positions = vec![0; bone_count];
+    for (position, bone) in eval_order.iter().enumerate() {
+        positions[bone.as_usize()] = position;
+    }
+    positions.into_boxed_slice()
 }
 
 fn visit_bone(

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.2 - 2026-06-06
+
+Patch release for IK runtime tuning, diagnostics, and maintainer numeric
+comparison coverage.
+
+### Added
+
+- Added configurable IK solve options for Rust runtime, C FFI, and WASM hosts:
+  tolerance and an optional maximum iteration cap.
+- Added IK runtime statistics so hosts and CLI diagnostics can inspect solver
+  evaluations, executed iterations, tolerance breaks, rollback breaks, and max
+  iteration exhaustions.
+- Added PMX/VMD pair benchmark diagnostics, including REM Miku profiling support
+  and PMX IK iteration summaries.
+- Added unified `compare-numeric` maintainer diagnostics for camera, motion, and
+  physics-coarse GoldenOracle manifests.
+- Added a checked-in synthetic camera VMD fixture and documented maintainer
+  testing workflow in `docs/TESTING.md`.
+
+### Changed
+
+- Relaxed the default IK tolerance from `1.0e-4` to `1.0e-2` to reduce wasted
+  iterations after practical convergence.
+- Optimized IK world-matrix updates to recompute only the affected evaluation
+  suffix while preserving default solver semantics.
+
+### Fixed
+
+- Fixed `compare-numeric` mixed-kind manifest dispatch so each case is handled by
+  its own `case.kind`.
+- Fixed motion numeric comparison to fail on epsilon mismatches, missing inputs,
+  and import errors instead of reporting success with only `maxAbsError`.
+
 ## 0.1.1 - 2026-06-05
 
 Patch release for parser and host-facing ABI improvements.

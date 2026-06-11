@@ -70,7 +70,7 @@ Format support overview. "Loading" means parsing a file into structured data.
 | PMX | model sections + soft-body header diagnostics | writing / JSON conversion / generation from mesh data |
 | PMD | model structure + partial runtime import | writing / JSON conversion |
 | VMD | animation structure | **supported** |
-| PMM | header, timeline, display state, referenced assets, and PMMv2 summary information | — |
+| PMM | header, timeline, display state, referenced assets, and PMMv2 summary information | limited manifest/header export |
 | VPD | pose structure | **supported** |
 | X/VAC | text X mesh, material, UV, normal, vertex color + VAC settings and raw lines | text X / VAC wrapper writing |
 
@@ -216,8 +216,8 @@ public releases.
 ## Current Limitations
 
 - **Evaluation core:** PMD loading and partial runtime import are supported for bones, IK, morph slots, and vertex morph offsets, but renderer-side vertex deformation and full PMD compatibility are not claimed yet.
-- **Writing:** PMX generation from parts currently covers the initial range of geometry, materials, bones, display frames, morphs, and physics. PMM writing is not provided until the full project graph can be represented.
-- **PMM:** Supported PMM data currently includes project header information, timeline-derived values, display state, initial model-slot data, referenced assets, PMMv2 summary information, and asset/header consistency diagnostics. PMM writing is not provided because the full project graph is not preserved yet.
+- **Writing:** PMX generation from parts currently covers the initial range of geometry, materials, bones, display frames, morphs, and physics. PMM writing is limited to the data currently represented by the PMM manifest parser.
+- **PMM:** Supported PMM data currently includes project header information, timeline-derived values, display state, initial model-slot data, referenced assets, PMMv2 summary information, and asset/header consistency diagnostics. The PMM exporter can re-emit that limited manifest/header/slot/asset-reference surface as a PMMv2 file, but it is not a full PMM project-graph exporter. Keyframe payloads, full camera/light/accessory/self-shadow tracks, and other binary project graph data that are only summarized or not preserved by the parser cannot be reconstructed from `PmmParsedManifest`.
 - **X/VAC:** Text X mesh, material, normal, UV, vertex color, and common VAC line order are handled. Binary X is diagnostic-only.
 - **Physics:** Rigid-body and joint data can be read and written, but physics simulation itself is not provided. Physics-driven parts should be handled by the host engine.
 - **API / ABI / WASM:** These surfaces are still experimental. When integrating with an external host, start with a small smoke test and representative-frame checks.

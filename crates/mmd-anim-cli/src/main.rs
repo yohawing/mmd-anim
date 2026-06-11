@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -8,12 +8,14 @@ use std::{
 };
 
 use glam::{Quat, Vec3A};
+use mmd_anim_format::vmd::VmdBoneKeyframeRaw;
 use mmd_anim_runtime::{
     AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, IkSolveOptions, ModelArena,
-    MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
+    MorphIndex, MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
 };
 use mmd_anim_schema::{
-    DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
+    DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleBone,
+    MmdDumperOracleDump, MmdDumperOracleModel,
 };
 use serde_json::json;
 mod golden;
@@ -35,6 +37,12 @@ const EXPORT_JSON_ROUNDTRIP_JSON_USAGE: &str = "usage: mmd-anim export-json-roun
 const GOLDEN_PARSER_SUMMARY_USAGE: &str = "usage: mmd-anim golden-parser-summary <golden-run-root>";
 const GOLDEN_IK_DIAGNOSE_USAGE: &str = "usage: mmd-anim golden-ik-diagnose <golden-ik-oracle-root> <case-name> <frame> <bone-name> [sample-frame-offset]";
 const COMPARE_NUMERIC_USAGE: &str = "usage: mmd-anim compare-numeric <manifest.json>";
+const DIAGNOSE_NUMERIC_BONE_USAGE: &str = "usage: mmd-anim diagnose-numeric-bone <manifest.json> <case-name> <oracle-frame> [--eval-frame <frame>] <bone-name> [bone-name...]";
+const EXPORT_FORMAT_USAGE: &str = "usage: mmd-anim export-format <input-asset> <output-asset>";
+const EXPORT_JSON_FORMAT_USAGE: &str =
+    "usage: mmd-anim export-json-format <input-json> <output-asset>";
+const EXPORT_PMM_SCENE_USAGE: &str =
+    "usage: mmd-anim export-pmm-scene <model.pmx> <motion.vmd> <output.pmm>";
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -73,6 +81,33 @@ fn main() {
         Some("compare-camera-vmd-numeric") => {
             let manifest = required_arg(&mut args, COMPARE_NUMERIC_USAGE);
             if let Err(error) = compare_numeric_manifest(Path::new(&manifest)) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("diagnose-numeric-bone") => {
+            let manifest = required_arg(&mut args, DIAGNOSE_NUMERIC_BONE_USAGE);
+            let case_name = required_arg(&mut args, DIAGNOSE_NUMERIC_BONE_USAGE);
+            let frame = required_arg(&mut args, DIAGNOSE_NUMERIC_BONE_USAGE);
+            let frame: f32 = frame.parse().unwrap_or_else(|_| {
+                eprintln!("{DIAGNOSE_NUMERIC_BONE_USAGE}");
+                std::process::exit(1);
+            });
+            let rest: Vec<String> = args.collect();
+            let diagnose_options = parse_diagnose_numeric_bone_rest(rest, frame);
+            let eval_frame = diagnose_options.eval_frame;
+            let bone_names = diagnose_options.bone_names;
+            if bone_names.is_empty() {
+                eprintln!("{DIAGNOSE_NUMERIC_BONE_USAGE}");
+                std::process::exit(1);
+            }
+            if let Err(error) = diagnose_numeric_bones(
+                Path::new(&manifest),
+                &case_name,
+                frame,
+                eval_frame,
+                &bone_names,
+            ) {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
@@ -221,6 +256,33 @@ fn main() {
         Some("bench-synthetic") => {
             let result = parse_bench_synthetic_args(&mut args).and_then(bench_synthetic);
             if let Err(error) = result {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("export-format") => {
+            let input = required_arg(&mut args, EXPORT_FORMAT_USAGE);
+            let output = required_arg(&mut args, EXPORT_FORMAT_USAGE);
+            if let Err(error) = export_format(Path::new(&input), Path::new(&output)) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("export-pmm-scene") => {
+            let model = required_arg(&mut args, EXPORT_PMM_SCENE_USAGE);
+            let motion = required_arg(&mut args, EXPORT_PMM_SCENE_USAGE);
+            let output = required_arg(&mut args, EXPORT_PMM_SCENE_USAGE);
+            if let Err(error) =
+                export_pmm_scene(Path::new(&model), Path::new(&motion), Path::new(&output))
+            {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("export-json-format") => {
+            let input = required_arg(&mut args, EXPORT_JSON_FORMAT_USAGE);
+            let output = required_arg(&mut args, EXPORT_JSON_FORMAT_USAGE);
+            if let Err(error) = export_json_format(Path::new(&input), Path::new(&output)) {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
@@ -1101,6 +1163,137 @@ fn export_json_roundtrip_json(path: &Path) -> Result<ExitCode, Box<dyn std::erro
     Ok(ExitCode::SUCCESS)
 }
 
+fn export_format(input: &Path, output: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let data = fs::read(input)?;
+    let kind =
+        mmd_anim_format::detect_mmd_format(&data, input.file_name().and_then(|v| v.to_str()));
+    let (exported, kind_label): (Vec<u8>, &str) = match kind {
+        mmd_anim_format::MmdFormatKind::Vmd => {
+            let parsed = mmd_anim_format::parse_vmd_animation(&data)?;
+            (mmd_anim_format::export_vmd_animation(&parsed), "VMD")
+        }
+        mmd_anim_format::MmdFormatKind::Vpd => {
+            let parsed = mmd_anim_format::parse_vpd_pose(&data)?;
+            (mmd_anim_format::export_vpd_pose(&parsed), "VPD")
+        }
+        mmd_anim_format::MmdFormatKind::Pmx => {
+            let parsed = mmd_anim_format::parse_pmx_model(&data)?;
+            (mmd_anim_format::export_pmx_model(&parsed), "PMX")
+        }
+        mmd_anim_format::MmdFormatKind::Pmd => {
+            let parsed = mmd_anim_format::parse_pmd_model(&data)?;
+            (mmd_anim_format::export_pmd_model(&parsed), "PMD")
+        }
+        mmd_anim_format::MmdFormatKind::Pmm => {
+            let parsed = mmd_anim_format::parse_pmm_manifest(&data)?;
+            (mmd_anim_format::export_pmm_manifest(&parsed), "PMM")
+        }
+        mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac => {
+            let file_name = input.file_name().and_then(|v| v.to_str());
+            let parsed = mmd_anim_format::parse_accessory_manifest(&data, file_name)?;
+            let label: &'static str = if parsed.format == "vac" { "VAC" } else { "X" };
+            (mmd_anim_format::export_accessory_manifest(&parsed), label)
+        }
+        kind => return Err(format!("export is not supported for {kind:?}").into()),
+    };
+    fs::write(output, &exported)?;
+    println!(
+        "{kind_label} export: ok bytesIn={} bytesOut={} output={}",
+        data.len(),
+        exported.len(),
+        output.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn export_pmm_scene(
+    model_path: &Path,
+    motion_path: &Path,
+    output_path: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let model_data = fs::read(model_path)?;
+    let motion_data = fs::read(motion_path)?;
+    let model = mmd_anim_format::parse_pmx_model(&model_data)?;
+    let motion = mmd_anim_format::parse_vmd_animation(&motion_data)?;
+    let model_path_text = model_path.to_string_lossy();
+    let report = mmd_anim_format::export_pmm_scene_from_pmx_vmd(
+        &model,
+        &motion,
+        &model_path_text,
+        &mmd_anim_format::PmmSceneExportOptions::default(),
+    );
+    fs::write(output_path, &report.bytes)?;
+
+    let reparsed = mmd_anim_format::parse_pmm_manifest(&report.bytes)?;
+    let document = reparsed
+        .document_summary
+        .as_ref()
+        .ok_or("generated PMM does not contain a document model block")?;
+    println!(
+        "PMM scene export: ok bytesOut={} bones={} morphs={} boneKeyframes={} morphKeyframes={} frame0Bones={} frame0Morphs={} skippedBones={} skippedMorphs={} maxFrame={} output={}",
+        report.bytes.len(),
+        document.counts.bones,
+        document.counts.morphs,
+        report.bone_keyframes,
+        report.morph_keyframes,
+        report.frame_zero_bone_keyframes,
+        report.frame_zero_morph_keyframes,
+        report.skipped_bone_keyframes,
+        report.skipped_morph_keyframes,
+        report.max_frame,
+        output_path.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn export_json_format(input: &Path, output: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let json = fs::read_to_string(input)?;
+    let ext = output
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let (exported, kind_label): (Vec<u8>, &str) = match ext.as_str() {
+        "vmd" => {
+            let dto: mmd_anim_format::VmdParsedAnimation = serde_json::from_str(&json)?;
+            (mmd_anim_format::export_vmd_animation(&dto), "VMD")
+        }
+        "vpd" => {
+            let dto: mmd_anim_format::VpdParsedPose = serde_json::from_str(&json)?;
+            (mmd_anim_format::export_vpd_pose(&dto), "VPD")
+        }
+        "pmx" => {
+            let dto: mmd_anim_format::PmxParsedModel = serde_json::from_str(&json)?;
+            (mmd_anim_format::export_pmx_model(&dto), "PMX")
+        }
+        "pmd" => {
+            let dto: mmd_anim_format::PmdParsedModel = serde_json::from_str(&json)?;
+            (mmd_anim_format::export_pmd_model(&dto), "PMD")
+        }
+        "x" | "vac" => {
+            let dto: mmd_anim_format::AccessoryParsedManifest = serde_json::from_str(&json)?;
+            let label: &'static str = if ext == "vac" { "VAC" } else { "X" };
+            (mmd_anim_format::export_accessory_manifest(&dto), label)
+        }
+        _ => {
+            return Err(format!(
+                "cannot determine export format from output extension {:?}; \
+                 supported: vmd, vpd, pmx, pmd, x, vac",
+                ext
+            )
+            .into());
+        }
+    };
+    fs::write(output, &exported)?;
+    println!(
+        "{kind_label} export from JSON: ok jsonBytes={} bytesOut={} output={}",
+        json.len(),
+        exported.len(),
+        output.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 fn vmd_roundtrip_json(
     path: &Path,
     mode: &str,
@@ -1771,6 +1964,10 @@ fn compare_numeric_manifest(path: &Path) -> Result<ExitCode, Box<dyn std::error:
         .or_else(|| manifest.pointer("/defaults/epsilon"))
         .and_then(|value| value.as_f64())
         .unwrap_or(EPSILON);
+    let default_focus_bones = json_string_array(&manifest, "/defaults/focus/bones");
+    let default_motion_eval_frame_offset = json_f32(&manifest, "/defaults/compare/evalFrameOffset")
+        .or_else(|| json_f32(&manifest, "/defaults/evalFrameOffset"))
+        .unwrap_or(0.0);
     let cases = manifest
         .get("cases")
         .and_then(|value| value.as_array())
@@ -1803,6 +2000,8 @@ fn compare_numeric_manifest(path: &Path) -> Result<ExitCode, Box<dyn std::error:
                     case,
                     manifest_dir,
                     default_epsilon,
+                    default_focus_bones.as_deref(),
+                    default_motion_eval_frame_offset,
                     &mut motion_stats,
                 )?;
             }
@@ -2002,6 +2201,8 @@ fn compare_motion_numeric_case(
     case: &serde_json::Value,
     manifest_dir: &Path,
     default_epsilon: f64,
+    default_focus_bones: Option<&[String]>,
+    default_eval_frame_offset: f32,
     stats: &mut MotionNumericCompareStats,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     stats.total_cases += 1;
@@ -2016,6 +2217,9 @@ fn compare_motion_numeric_case(
         .pointer("/compare/epsilon")
         .and_then(|value| value.as_f64())
         .unwrap_or(default_epsilon) as f32;
+    let eval_frame_offset = json_f32(case, "/compare/evalFrameOffset")
+        .or_else(|| json_f32(case, "/metadata/evalFrameOffset"))
+        .unwrap_or(default_eval_frame_offset);
     collect_unsupported_targets(case, &mut stats.skipped_targets);
 
     let model_path = match case
@@ -2077,6 +2281,8 @@ fn compare_motion_numeric_case(
     let frames = numeric_case_frames(case)?;
     let dump =
         MmdDumperOracleDump::from_jsonl_str(&fs::read_to_string(&oracle_path)?, Some(&frames))?;
+    let focus_bones = motion_case_focus_bones(case, default_focus_bones);
+    let focus_bone_names: Vec<&str> = focus_bones.iter().map(String::as_str).collect();
 
     let model_bytes = fs::read(&model_path)?;
     let model_import = match golden::import_golden_runtime_model(&model_path, &model_bytes) {
@@ -2120,12 +2326,13 @@ fn compare_motion_numeric_case(
         RuntimeInstance::new_with_counts(Arc::clone(&model), morph_count, solver_count);
 
     for oracle_frame in &dump.frames {
-        runtime.evaluate_clip_frame(&clip, oracle_frame.frame as f32);
+        let eval_frame = oracle_frame.frame as f32 + eval_frame_offset;
+        runtime.evaluate_clip_frame(&clip, eval_frame);
         let Some(model0) = oracle_frame.models.first() else {
             continue;
         };
         let world_matrices = runtime.world_matrices();
-        for oracle_bone in model0.focused_ik_bones(DEFAULT_FOCUSED_IK_BONE_NAMES) {
+        for oracle_bone in model0.focused_ik_bones(&focus_bone_names) {
             if oracle_bone.index < 0 {
                 continue;
             }
@@ -2143,9 +2350,10 @@ fn compare_motion_numeric_case(
                 if abs_error > epsilon {
                     stats.mismatch_count += 1;
                     eprintln!(
-                        "motion mismatch case={} frame={} bone={} component={} actual={:.9} expected={:.9} delta={:.9} epsilon={:.9}",
+                        "motion mismatch case={} frame={} evalFrame={:.3} bone={} component={} actual={:.9} expected={:.9} delta={:.9} epsilon={:.9}",
                         name,
                         oracle_frame.frame,
+                        eval_frame,
                         oracle_bone.name,
                         component,
                         actual,
@@ -2161,6 +2369,395 @@ fn compare_motion_numeric_case(
     }
     stats.compared_cases += 1;
     Ok(ExitCode::SUCCESS)
+}
+
+fn diagnose_numeric_bones(
+    manifest_path: &Path,
+    case_name: &str,
+    oracle_frame_number: f32,
+    eval_frame: f32,
+    bone_names: &[String],
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
+    let cases = manifest
+        .get("cases")
+        .and_then(|value| value.as_array())
+        .ok_or("numeric manifest is missing cases")?;
+    let case = cases
+        .iter()
+        .find(|case| case.get("name").and_then(|value| value.as_str()) == Some(case_name))
+        .ok_or_else(|| format!("numeric manifest has no case named {case_name}"))?;
+
+    let model_path = case
+        .pointer("/assets/model")
+        .and_then(|value| value.as_str())
+        .map(|value| resolve_manifest_path(manifest_dir, value))
+        .ok_or("case is missing assets.model")?;
+    let motion_path = case
+        .pointer("/assets/motion")
+        .and_then(|value| value.as_str())
+        .map(|value| resolve_manifest_path(manifest_dir, value))
+        .ok_or("case is missing assets.motion")?;
+    let oracle_path = case
+        .pointer("/oracle/path")
+        .and_then(|value| value.as_str())
+        .map(|value| resolve_manifest_path(manifest_dir, value))
+        .ok_or("case is missing oracle.path")?;
+
+    let target_frame = oracle_frame_number.round() as i32;
+    let dump = MmdDumperOracleDump::from_jsonl_str(
+        &fs::read_to_string(&oracle_path)?,
+        Some(&[target_frame]),
+    )?;
+    let oracle_frame = dump
+        .find_frame(target_frame)
+        .ok_or_else(|| format!("oracle has no frame {target_frame}"))?;
+    let oracle_model = oracle_frame
+        .models
+        .first()
+        .ok_or_else(|| format!("oracle frame {target_frame} has no model"))?;
+
+    let model_bytes = fs::read(&model_path)?;
+    let model_import = golden::import_golden_runtime_model(&model_path, &model_bytes)?;
+    let vmd = mmd_anim_format::import_vmd_motion(&fs::read(&motion_path)?)?;
+    let solver_count = model_import.model.ik_count();
+    let clip = mmd_anim_format::build_pair_clip_with_options(
+        &vmd,
+        &model_import.bone_name_to_index,
+        &model_import.morph_name_to_index,
+        &model_import.ik_solver_bone_name_to_index,
+        solver_count,
+        mmd_anim_format::VmdClipBuildOptions {
+            honor_property_ik: false,
+        },
+    );
+
+    let morph_count = model_import
+        .morph_name_to_index
+        .values()
+        .map(|index| index.as_usize() + 1)
+        .max()
+        .unwrap_or(0);
+    let model = Arc::new(model_import.model);
+    let mut pre_ik =
+        RuntimeInstance::new_with_counts(Arc::clone(&model), morph_count, solver_count);
+    let mut post_ik =
+        RuntimeInstance::new_with_counts(Arc::clone(&model), morph_count, solver_count);
+    pre_ik.evaluate_clip_frame_without_ik(&clip, eval_frame);
+    post_ik.evaluate_clip_frame_with_ik_options(&clip, eval_frame, IkSolveOptions::default());
+
+    println!(
+        "numeric bone diagnosis case={} oracleFrame={:.3} evalFrame={:.3} model={} motion={} oracle={}",
+        case_name,
+        oracle_frame_number,
+        eval_frame,
+        model_path.display(),
+        motion_path.display(),
+        oracle_path.display()
+    );
+    for bone_name in bone_names {
+        let normalized = mmd_anim_format::normalize_vmd_name(bone_name.as_bytes());
+        let Some(index) = model_import
+            .bone_name_to_index
+            .get(bone_name.as_bytes())
+            .or_else(|| model_import.bone_name_to_index.get(&normalized))
+            .copied()
+        else {
+            println!("bone={} missing runtimeIndex", bone_name);
+            continue;
+        };
+        let Some(oracle_bone) = oracle_model.find_bone(bone_name) else {
+            println!(
+                "bone={} runtimeIndex={} missing oracleBone",
+                bone_name,
+                index.as_usize()
+            );
+            continue;
+        };
+        let pre = pre_ik.world_matrices()[index.as_usize()].to_cols_array();
+        let post = post_ik.world_matrices()[index.as_usize()].to_cols_array();
+        let (pre_component, pre_delta) = max_matrix_delta(&pre, &oracle_bone.world_matrix);
+        let (post_component, post_delta) = max_matrix_delta(&post, &oracle_bone.world_matrix);
+        let pre_pos_delta = position_delta(&pre, &oracle_bone.world_matrix);
+        let post_pos_delta = position_delta(&post, &oracle_bone.world_matrix);
+        let pre_local_pos = pre_ik.pose().local_position_offset(index);
+        let post_local_pos = post_ik.pose().local_position_offset(index);
+        let pre_local_rot = pre_ik.pose().local_rotation(index);
+        let post_local_rot = post_ik.pose().local_rotation(index);
+        let pre_local_axis = pre_local_rot.to_axis_angle();
+        let post_local_axis = post_local_rot.to_axis_angle();
+        let oracle_local = oracle_local_matrix(oracle_model, &model, oracle_bone);
+        let (_, oracle_local_rot, oracle_local_pos) =
+            glam::Mat4::from_cols_array(&oracle_local).to_scale_rotation_translation();
+        let oracle_local_axis = oracle_local_rot.to_axis_angle();
+        let vmd_keyframes: Vec<_> = vmd
+            .bone_keyframes
+            .iter()
+            .filter(|kf| {
+                model_import
+                    .bone_name_to_index
+                    .get(&kf.bone_name_normalized)
+                    == Some(&index)
+            })
+            .collect();
+        let vmd_lookup_frame = eval_frame;
+        let exact_vmd_keyframes: Vec<_> = vmd_keyframes
+            .iter()
+            .copied()
+            .filter(|kf| kf.frame as f32 == vmd_lookup_frame)
+            .collect();
+        let exact_vmd_rotation = exact_vmd_keyframes
+            .first()
+            .map(|kf| kf.rotation.to_axis_angle());
+        let prev_vmd_keyframe = vmd_keyframes
+            .iter()
+            .copied()
+            .filter(|kf| kf.frame as f32 <= vmd_lookup_frame)
+            .max_by_key(|kf| kf.frame)
+            .map(format_vmd_keyframe)
+            .unwrap_or_else(|| "none".to_owned());
+        let next_vmd_keyframe = vmd_keyframes
+            .iter()
+            .copied()
+            .filter(|kf| kf.frame as f32 > vmd_lookup_frame)
+            .min_by_key(|kf| kf.frame)
+            .map(format_vmd_keyframe)
+            .unwrap_or_else(|| "none".to_owned());
+        let bone_morphs =
+            describe_active_bone_morphs(&model_import.morph_name_to_index, &post_ik, &model, index);
+        println!(
+            "bone={} index={} oracleIndex={} preMaxDelta={:.9}@{} postMaxDelta={:.9}@{} prePosDelta=({:.6},{:.6},{:.6}) postPosDelta=({:.6},{:.6},{:.6}) prePos=({:.6},{:.6},{:.6}) postPos=({:.6},{:.6},{:.6}) oraclePos=({:.6},{:.6},{:.6}) preLocalOffset=({:.6},{:.6},{:.6}) postLocalOffset=({:.6},{:.6},{:.6}) oracleLocalPos=({:.6},{:.6},{:.6}) preLocalRotAxis=({:.6},{:.6},{:.6}) preLocalRotAngle={:.6} postLocalRotAxis=({:.6},{:.6},{:.6}) postLocalRotAngle={:.6} oracleLocalRotAxis=({:.6},{:.6},{:.6}) oracleLocalRotAngle={:.6} vmdKeys={} exactVmdKeys={} exactVmdRot={} prevVmd={} nextVmd={} activeBoneMorphs={}",
+            bone_name,
+            index.as_usize(),
+            oracle_bone.index,
+            pre_delta,
+            pre_component,
+            post_delta,
+            post_component,
+            pre_pos_delta[0],
+            pre_pos_delta[1],
+            pre_pos_delta[2],
+            post_pos_delta[0],
+            post_pos_delta[1],
+            post_pos_delta[2],
+            pre[12],
+            pre[13],
+            pre[14],
+            post[12],
+            post[13],
+            post[14],
+            oracle_bone.world_matrix[12],
+            oracle_bone.world_matrix[13],
+            oracle_bone.world_matrix[14],
+            pre_local_pos.x,
+            pre_local_pos.y,
+            pre_local_pos.z,
+            post_local_pos.x,
+            post_local_pos.y,
+            post_local_pos.z,
+            oracle_local_pos.x,
+            oracle_local_pos.y,
+            oracle_local_pos.z,
+            pre_local_axis.0.x,
+            pre_local_axis.0.y,
+            pre_local_axis.0.z,
+            pre_local_axis.1,
+            post_local_axis.0.x,
+            post_local_axis.0.y,
+            post_local_axis.0.z,
+            post_local_axis.1,
+            oracle_local_axis.0.x,
+            oracle_local_axis.0.y,
+            oracle_local_axis.0.z,
+            oracle_local_axis.1,
+            vmd_keyframes.len(),
+            exact_vmd_keyframes.len(),
+            exact_vmd_rotation
+                .map(|axis| format!(
+                    "axis=({:.6},{:.6},{:.6}) angle={:.6}",
+                    axis.0.x, axis.0.y, axis.0.z, axis.1
+                ))
+                .unwrap_or_else(|| "none".to_owned()),
+            prev_vmd_keyframe,
+            next_vmd_keyframe,
+            bone_morphs,
+        );
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+struct DiagnoseNumericBoneOptions {
+    eval_frame: f32,
+    bone_names: Vec<String>,
+}
+
+fn parse_diagnose_numeric_bone_rest(
+    rest: Vec<String>,
+    default_eval_frame: f32,
+) -> DiagnoseNumericBoneOptions {
+    let mut eval_frame = default_eval_frame;
+    let mut bone_names = Vec::new();
+    let mut iter = rest.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--eval-frame" {
+            let Some(value) = iter.next() else {
+                eprintln!("{DIAGNOSE_NUMERIC_BONE_USAGE}");
+                std::process::exit(1);
+            };
+            eval_frame = value.parse().unwrap_or_else(|_| {
+                eprintln!("{DIAGNOSE_NUMERIC_BONE_USAGE}");
+                std::process::exit(1);
+            });
+        } else if arg.starts_with("--") {
+            eprintln!("unknown flag: {arg}");
+            eprintln!("{DIAGNOSE_NUMERIC_BONE_USAGE}");
+            std::process::exit(1);
+        } else {
+            bone_names.push(arg);
+        }
+    }
+    DiagnoseNumericBoneOptions {
+        eval_frame,
+        bone_names,
+    }
+}
+
+fn describe_active_bone_morphs(
+    morph_name_to_index: &HashMap<Vec<u8>, MorphIndex>,
+    runtime: &RuntimeInstance,
+    model: &ModelArena,
+    target_bone: BoneIndex,
+) -> String {
+    let mut entries = Vec::new();
+    for morph_index in 0..model.morph_count() as usize {
+        let span = model.bone_morph_spans()[morph_index];
+        if span.count == 0 {
+            continue;
+        }
+        let weight = runtime.pose().morph_weight(MorphIndex(morph_index as u32));
+        for offset_index in span.start..span.start + span.count {
+            let offset = model.bone_morph_offsets()[offset_index as usize];
+            if offset.target_bone != target_bone {
+                continue;
+            }
+            let axis = offset.rotation_offset.to_axis_angle();
+            entries.push(format!(
+                "morph={} name={} weight={:.6} pos=({:.6},{:.6},{:.6}) rotAxis=({:.6},{:.6},{:.6}) rotAngle={:.6}",
+                morph_index,
+                morph_names_for_index(morph_name_to_index, MorphIndex(morph_index as u32)).join("|"),
+                weight,
+                offset.position_offset.x,
+                offset.position_offset.y,
+                offset.position_offset.z,
+                axis.0.x,
+                axis.0.y,
+                axis.0.z,
+                axis.1
+            ));
+        }
+    }
+    if entries.is_empty() {
+        "none".to_owned()
+    } else {
+        entries.join(";")
+    }
+}
+
+fn morph_names_for_index(
+    morph_name_to_index: &HashMap<Vec<u8>, MorphIndex>,
+    target_index: MorphIndex,
+) -> Vec<String> {
+    let mut names: Vec<String> = morph_name_to_index
+        .iter()
+        .filter_map(|(name, index)| {
+            if *index != target_index {
+                return None;
+            }
+            String::from_utf8(name.clone()).ok()
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn format_vmd_keyframe(kf: &VmdBoneKeyframeRaw) -> String {
+    let axis = kf.rotation.to_axis_angle();
+    format!(
+        "frame={} pos=({:.6},{:.6},{:.6}) rotAxis=({:.6},{:.6},{:.6}) rotAngle={:.6}",
+        kf.frame, kf.position.x, kf.position.y, kf.position.z, axis.0.x, axis.0.y, axis.0.z, axis.1
+    )
+}
+
+fn oracle_local_matrix(
+    oracle_model: &MmdDumperOracleModel,
+    model: &ModelArena,
+    oracle_bone: &MmdDumperOracleBone,
+) -> [f32; 16] {
+    let bone_matrix = glam::Mat4::from_cols_array(&oracle_bone.world_matrix);
+    let Some(parent) = model.parent_index(BoneIndex(oracle_bone.index as u32)) else {
+        return oracle_bone.world_matrix;
+    };
+    let Some(parent_bone) = oracle_model
+        .bones
+        .iter()
+        .find(|bone| bone.index == parent.as_usize() as i32)
+    else {
+        return oracle_bone.world_matrix;
+    };
+    let parent_matrix = glam::Mat4::from_cols_array(&parent_bone.world_matrix);
+    (parent_matrix.inverse() * bone_matrix).to_cols_array()
+}
+
+fn max_matrix_delta(actual: &[f32; 16], expected: &[f32; 16]) -> (usize, f32) {
+    let mut max_component = 0;
+    let mut max_delta = 0.0f32;
+    for component in 0..16 {
+        let delta = (actual[component] - expected[component]).abs();
+        if delta > max_delta {
+            max_component = component;
+            max_delta = delta;
+        }
+    }
+    (max_component, max_delta)
+}
+
+fn position_delta(actual: &[f32; 16], expected: &[f32; 16]) -> [f32; 3] {
+    [
+        actual[12] - expected[12],
+        actual[13] - expected[13],
+        actual[14] - expected[14],
+    ]
+}
+
+fn motion_case_focus_bones(
+    case: &serde_json::Value,
+    default_focus_bones: Option<&[String]>,
+) -> Vec<String> {
+    json_string_array(case, "/metadata/focus/bones")
+        .or_else(|| json_string_array(case, "/focus/bones"))
+        .or_else(|| default_focus_bones.map(|bones| bones.to_vec()))
+        .unwrap_or_else(|| {
+            DEFAULT_FOCUSED_IK_BONE_NAMES
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect()
+        })
+}
+
+fn json_string_array(value: &serde_json::Value, pointer: &str) -> Option<Vec<String>> {
+    let values = value.pointer(pointer)?.as_array()?;
+    let strings: Vec<String> = values
+        .iter()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect();
+    (!strings.is_empty()).then_some(strings)
+}
+
+fn json_f32(value: &serde_json::Value, pointer: &str) -> Option<f32> {
+    value.pointer(pointer)?.as_f64().map(|value| value as f32)
 }
 
 fn collect_unsupported_targets(case: &serde_json::Value, skipped_targets: &mut HashSet<String>) {
@@ -2837,10 +3434,13 @@ fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::error::Erro
     let fps = cfg.frame_count as f64 / eval_elapsed.as_secs_f64();
 
     println!(
-        "bench-pair: bones={} ik={} ikMode={} ikTolerance={:.8} ikMaxIterationsCap={} append={} fixedAxis={} vmdBoneKeys={} vmdMorphKeys={} clipBoneTracks={} clipMorphTracks={} propertyTrack={} clipFrameRange={} frames={} startFrame={:.3} step={:.3} readMs={:.3} pmxImportMs={:.3} vmdImportMs={:.3} clipBuildMs={:.3} evalMs={:.3} msPerFrame={:.6} fps={:.1} totalMs={:.3} checksum={:08x} morphChecksum={:08x}",
+        "bench-pair: bones={} ik={} ikTolerance={:.8} ikMaxIterationsCap={} append={} fixedAxis={} vmdBoneKeys={} vmdMorphKeys={} clipBoneTracks={} clipMorphTracks={} propertyTrack={} clipFrameRange={} frames={} startFrame={:.3} step={:.3} readMs={:.3} pmxImportMs={:.3} vmdImportMs={:.3} clipBuildMs={:.3} evalMs={:.3} msPerFrame={:.6} fps={:.1} totalMs={:.3} checksum={:08x} morphChecksum={:08x}",
         bone_count,
-        solver_count,
-        if cfg.solve_ik { "enabled" } else { "disabled" },
+        if cfg.solve_ik {
+            solver_count.to_string()
+        } else {
+            "disabled".to_owned()
+        },
         cfg.ik_options.tolerance,
         cfg.ik_options
             .max_iterations_cap
@@ -3510,6 +4110,42 @@ mod tests {
         };
 
         assert_eq!(numeric_compare_failure_count(&camera, &motion), 1);
+    }
+
+    #[test]
+    fn motion_case_focus_bones_prefers_case_metadata_focus() {
+        let case = serde_json::json!({
+            "metadata": {
+                "focus": {
+                    "bones": ["右袖", "左袖"]
+                }
+            }
+        });
+        let defaults = vec!["左ひざ".to_owned()];
+
+        assert_eq!(
+            motion_case_focus_bones(&case, Some(&defaults)),
+            vec!["右袖".to_owned(), "左袖".to_owned()]
+        );
+    }
+
+    #[test]
+    fn motion_case_focus_bones_uses_default_focus() {
+        let case = serde_json::json!({});
+        let defaults = vec!["右腕".to_owned(), "左腕".to_owned()];
+
+        assert_eq!(motion_case_focus_bones(&case, Some(&defaults)), defaults);
+    }
+
+    #[test]
+    fn json_f32_reads_nested_number() {
+        let value = serde_json::json!({
+            "compare": {
+                "evalFrameOffset": 1.25
+            }
+        });
+
+        assert_eq!(json_f32(&value, "/compare/evalFrameOffset"), Some(1.25));
     }
 
     #[test]

@@ -1,0 +1,378 @@
+{
+  "metadata": {
+    "format": "pmx",
+    "version": 2.0,
+    "encoding": "utf-8",
+    "name": "ik_multi_axis_limit_fixture",
+    "englishName": "ik_multi_axis_limit_fixture",
+    "comment": "Synthetic PMX fixture for multi-axis IK angle-limit clamp parity.",
+    "englishComment": "Synthetic PMX fixture for multi-axis IK angle-limit clamp parity.",
+    "counts": {
+      "vertices": 3,
+      "faces": 1,
+      "materials": 1,
+      "bones": 3,
+      "morphs": 0,
+      "displayFrames": 1,
+      "rigidBodies": 0,
+      "joints": 0,
+      "softBodies": 0
+    },
+    "indexSizes": {
+      "vertex": 1,
+      "texture": 1,
+      "material": 1,
+      "bone": 1,
+      "morph": 1,
+      "rigidBody": 1
+    },
+    "additionalUvCount": 0
+  },
+  "geometry": {
+    "positions": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.08,
+      0.0,
+      0.08,
+      0.0,
+      0.0
+    ],
+    "normals": [
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "uvs": [
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      1.0,
+      0.0
+    ],
+    "additionalUvs": [],
+    "indices": [
+      0,
+      1,
+      2
+    ],
+    "skinIndices": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "skinWeights": [
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "edgeScale": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "materialGroups": [
+      {
+        "start": 0,
+        "count": 3,
+        "materialIndex": 0
+      }
+    ],
+    "sdef": {
+      "enabled": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "c": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "r0": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "r1": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rw0": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rw1": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "qdef": {
+      "enabled": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "materials": [
+    {
+      "name": "mat",
+      "englishName": "mat",
+      "texturePath": "",
+      "sphereTexturePath": "",
+      "sphereMode": "none",
+      "toonTexturePath": "",
+      "sharedToonIndex": null,
+      "diffuse": [
+        0.8,
+        0.8,
+        0.8,
+        1.0
+      ],
+      "specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "specularPower": 0.0,
+      "ambient": [
+        0.4,
+        0.4,
+        0.4
+      ],
+      "edgeColor": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "edgeSize": 0.0,
+      "flags": {
+        "doubleSided": true,
+        "groundShadow": false,
+        "selfShadowMap": false,
+        "selfShadow": false,
+        "edge": false,
+        "vertexColor": false,
+        "pointDraw": false,
+        "lineDraw": false
+      },
+      "faceCount": 1
+    }
+  ],
+  "skeleton": {
+    "bones": [
+      {
+        "name": "link_root",
+        "englishName": "link_root",
+        "parentIndex": -1,
+        "layer": 0,
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tailIndex": 1,
+        "tailPosition": null,
+        "flags": {
+          "indexedTail": true,
+          "rotatable": true,
+          "translatable": false,
+          "visible": true,
+          "enabled": true,
+          "ik": false,
+          "appendLocal": false,
+          "appendRotate": false,
+          "appendTranslate": false,
+          "fixedAxis": false,
+          "localAxis": false,
+          "transformAfterPhysics": false,
+          "externalParentTransform": false
+        },
+        "appendTransform": null,
+        "fixedAxis": null,
+        "localAxis": null,
+        "externalParentKey": null,
+        "ik": null
+      },
+      {
+        "name": "effector",
+        "englishName": "effector",
+        "parentIndex": 0,
+        "layer": 0,
+        "position": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "tailIndex": -1,
+        "tailPosition": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "flags": {
+          "indexedTail": false,
+          "rotatable": true,
+          "translatable": false,
+          "visible": true,
+          "enabled": true,
+          "ik": false,
+          "appendLocal": false,
+          "appendRotate": false,
+          "appendTranslate": false,
+          "fixedAxis": false,
+          "localAxis": false,
+          "transformAfterPhysics": false,
+          "externalParentTransform": false
+        },
+        "appendTransform": null,
+        "fixedAxis": null,
+        "localAxis": null,
+        "externalParentKey": null,
+        "ik": null
+      },
+      {
+        "name": "ik_controller",
+        "englishName": "ik_controller",
+        "parentIndex": -1,
+        "layer": 0,
+        "position": [
+          0.25,
+          0.55,
+          0.8
+        ],
+        "tailIndex": 1,
+        "tailPosition": null,
+        "flags": {
+          "indexedTail": true,
+          "rotatable": true,
+          "translatable": true,
+          "visible": true,
+          "enabled": true,
+          "ik": true,
+          "appendLocal": false,
+          "appendRotate": false,
+          "appendTranslate": false,
+          "fixedAxis": false,
+          "localAxis": false,
+          "transformAfterPhysics": false,
+          "externalParentTransform": false
+        },
+        "appendTransform": null,
+        "fixedAxis": null,
+        "localAxis": null,
+        "externalParentKey": null,
+        "ik": {
+          "targetIndex": 1,
+          "loopCount": 1,
+          "limitAngle": 0.0,
+          "links": [
+            {
+              "boneIndex": 0,
+              "limits": {
+                "lower": [
+                  0.0,
+                  -1.0,
+                  -1.0
+                ],
+                "upper": [
+                  0.0,
+                  1.0,
+                  1.0
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "morphs": [],
+  "displayFrames": [
+    {
+      "name": "Root",
+      "englishName": "Root",
+      "special": true,
+      "frames": [
+        {
+          "index": 0,
+          "type": "bone"
+        },
+        {
+          "index": 1,
+          "type": "bone"
+        },
+        {
+          "index": 2,
+          "type": "bone"
+        }
+      ]
+    }
+  ],
+  "rigidBodies": [],
+  "joints": [],
+  "softBodies": [],
+  "diagnostics": []
+}

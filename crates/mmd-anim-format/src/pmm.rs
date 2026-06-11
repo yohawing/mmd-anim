@@ -4,6 +4,8 @@ use encoding_rs::SHIFT_JIS;
 use serde::Serialize;
 
 use crate::error::ImportError;
+use crate::pmx::PmxParsedModel;
+use crate::vmd::{VmdParsedAnimation, VmdParsedBoneFrame, VmdParsedMorphFrame};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -601,6 +603,735 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
         diagnostics,
         asset_references,
     })
+}
+
+pub fn export_pmm_manifest(manifest: &PmmParsedManifest) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"Polygon Movie maker 0002");
+    out.resize(30, 0);
+
+    push_u32(
+        &mut out,
+        manifest.project_settings.screen_width.unwrap_or(640),
+    );
+    push_u32(
+        &mut out,
+        manifest.project_settings.screen_height.unwrap_or(480),
+    );
+    push_u32(
+        &mut out,
+        manifest
+            .project_settings
+            .timeline_frame_count
+            .or(manifest.timeline.frame_count)
+            .unwrap_or(0),
+    );
+    push_f32(
+        &mut out,
+        manifest.project_settings.frame_rate.unwrap_or(30.0),
+    );
+
+    let mut flags = [0u8; 8];
+    for (index, flag) in manifest
+        .display_state
+        .model_slot_flags
+        .iter()
+        .take(8)
+        .enumerate()
+    {
+        flags[index] = *flag;
+    }
+    if flags.iter().all(|flag| *flag == 0) && !manifest.model_slots.is_empty() {
+        for slot in &manifest.model_slots {
+            if slot.slot_index < flags.len() {
+                flags[slot.slot_index] = 1;
+            }
+        }
+    }
+    out.extend_from_slice(&flags);
+
+    let document_model_count = manifest
+        .display_state
+        .document_model_count
+        .unwrap_or_else(|| manifest.model_slots.len().min(u8::MAX as usize) as u8);
+    out.push(document_model_count);
+    out.push(manifest.display_state.accessory_slot_count.unwrap_or(0));
+
+    let mut emitted_paths = Vec::<String>::new();
+    for slot in &manifest.model_slots {
+        push_pmm_len_prefixed_sjis(&mut out, &slot.name, &slot.name_bytes);
+        push_pmm_len_prefixed_sjis(&mut out, &slot.english_name, &slot.english_name_bytes);
+        push_pmm_sjis_string(&mut out, &slot.model_path, None);
+        out.push(0);
+        emitted_paths.push(slot.normalized_path.to_ascii_lowercase());
+    }
+
+    for reference in &manifest.asset_references {
+        let normalized = reference.normalized_path.to_ascii_lowercase();
+        if emitted_paths.iter().any(|path| path == &normalized) {
+            continue;
+        }
+        push_pmm_sjis_string(&mut out, &reference.path, None);
+        out.push(0);
+        emitted_paths.push(normalized);
+    }
+
+    out
+}
+
+#[derive(Debug, Clone)]
+pub struct PmmSceneExportOptions {
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub frame_rate: f32,
+    pub camera_fov: f32,
+}
+
+impl Default for PmmSceneExportOptions {
+    fn default() -> Self {
+        Self {
+            screen_width: 1024,
+            screen_height: 1024,
+            frame_rate: 30.0,
+            camera_fov: 30.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PmmSceneExportReport {
+    pub bytes: Vec<u8>,
+    pub bone_keyframes: usize,
+    pub morph_keyframes: usize,
+    pub frame_zero_bone_keyframes: usize,
+    pub frame_zero_morph_keyframes: usize,
+    pub skipped_bone_keyframes: usize,
+    pub skipped_morph_keyframes: usize,
+    pub max_frame: u32,
+}
+
+#[derive(Debug, Clone)]
+struct PmmExportBoneKeyframe {
+    bone_index: usize,
+    frame: u32,
+    translation: [f32; 3],
+    rotation: [f32; 4],
+    interpolation: [u8; 16],
+}
+
+#[derive(Debug, Clone)]
+struct PmmExportMorphKeyframe {
+    morph_index: usize,
+    frame: u32,
+    weight: f32,
+}
+
+pub fn export_pmm_scene_from_pmx_vmd(
+    model: &PmxParsedModel,
+    motion: &VmdParsedAnimation,
+    model_path: &str,
+    options: &PmmSceneExportOptions,
+) -> PmmSceneExportReport {
+    let bone_names: Vec<&str> = model
+        .skeleton
+        .bones
+        .iter()
+        .map(|bone| bone.name.as_str())
+        .collect();
+    let morph_names: Vec<&str> = model
+        .morphs
+        .iter()
+        .map(|morph| morph.name.as_str())
+        .collect();
+    let bone_indices: HashMap<&str, usize> = bone_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (*name, index))
+        .collect();
+    let morph_indices: HashMap<&str, usize> = morph_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (*name, index))
+        .collect();
+
+    let mut deduped_bones = BTreeMap::<(usize, u32), &VmdParsedBoneFrame>::new();
+    let mut skipped_bone_keyframes = 0usize;
+    for frame in &motion.bone_frames {
+        if let Some(&bone_index) = bone_indices.get(frame.bone_name.as_str()) {
+            deduped_bones.insert((bone_index, frame.frame), frame);
+        } else {
+            skipped_bone_keyframes += 1;
+        }
+    }
+
+    let mut deduped_morphs = BTreeMap::<(usize, u32), &VmdParsedMorphFrame>::new();
+    let mut skipped_morph_keyframes = 0usize;
+    for frame in &motion.morph_frames {
+        if let Some(&morph_index) = morph_indices.get(frame.morph_name.as_str()) {
+            deduped_morphs.insert((morph_index, frame.frame), frame);
+        } else {
+            skipped_morph_keyframes += 1;
+        }
+    }
+
+    let mut initial_bones = vec![None::<PmmExportBoneKeyframe>; bone_names.len()];
+    let mut additional_bones = Vec::<PmmExportBoneKeyframe>::new();
+    let mut max_frame = 0u32;
+    for ((bone_index, frame_index), frame) in deduped_bones {
+        max_frame = max_frame.max(frame_index);
+        let keyframe = pmm_export_bone_keyframe(bone_index, frame);
+        if frame_index == 0 {
+            initial_bones[bone_index] = Some(keyframe);
+        } else {
+            additional_bones.push(keyframe);
+        }
+    }
+    additional_bones.sort_by_key(|frame| (frame.bone_index, frame.frame));
+
+    let mut initial_morphs = vec![None::<PmmExportMorphKeyframe>; morph_names.len()];
+    let mut additional_morphs = Vec::<PmmExportMorphKeyframe>::new();
+    for ((morph_index, frame_index), frame) in deduped_morphs {
+        max_frame = max_frame.max(frame_index);
+        let keyframe = PmmExportMorphKeyframe {
+            morph_index,
+            frame: frame.frame,
+            weight: frame.weight,
+        };
+        if frame_index == 0 {
+            initial_morphs[morph_index] = Some(keyframe);
+        } else {
+            additional_morphs.push(keyframe);
+        }
+    }
+    additional_morphs.sort_by_key(|frame| (frame.morph_index, frame.frame));
+
+    let frame_zero_bone_keyframes = initial_bones.iter().filter(|frame| frame.is_some()).count();
+    let frame_zero_morph_keyframes = initial_morphs
+        .iter()
+        .filter(|frame| frame.is_some())
+        .count();
+    let bytes = write_pmm_scene(
+        model,
+        model_path,
+        options,
+        &bone_names,
+        &morph_names,
+        &initial_bones,
+        &additional_bones,
+        &initial_morphs,
+        &additional_morphs,
+        max_frame,
+    );
+
+    PmmSceneExportReport {
+        bytes,
+        bone_keyframes: additional_bones.len(),
+        morph_keyframes: additional_morphs.len(),
+        frame_zero_bone_keyframes,
+        frame_zero_morph_keyframes,
+        skipped_bone_keyframes,
+        skipped_morph_keyframes,
+        max_frame,
+    }
+}
+
+fn pmm_export_bone_keyframe(
+    bone_index: usize,
+    frame: &VmdParsedBoneFrame,
+) -> PmmExportBoneKeyframe {
+    PmmExportBoneKeyframe {
+        bone_index,
+        frame: frame.frame,
+        translation: frame.translation,
+        rotation: frame.rotation,
+        interpolation: pmm_bone_interpolation_from_vmd(&frame.interpolation),
+    }
+}
+
+fn pmm_bone_interpolation_from_vmd(interpolation: &[u8]) -> [u8; 16] {
+    if interpolation.len() < 16 {
+        return [20; 16];
+    }
+    [
+        interpolation[0],
+        interpolation[4],
+        interpolation[8],
+        interpolation[12],
+        interpolation[1],
+        interpolation[5],
+        interpolation[9],
+        interpolation[13],
+        interpolation[2],
+        interpolation[6],
+        interpolation[10],
+        interpolation[14],
+        interpolation[3],
+        interpolation[7],
+        interpolation[11],
+        interpolation[15],
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_pmm_scene(
+    model: &PmxParsedModel,
+    model_path: &str,
+    options: &PmmSceneExportOptions,
+    bone_names: &[&str],
+    morph_names: &[&str],
+    initial_bones: &[Option<PmmExportBoneKeyframe>],
+    additional_bones: &[PmmExportBoneKeyframe],
+    initial_morphs: &[Option<PmmExportMorphKeyframe>],
+    additional_morphs: &[PmmExportMorphKeyframe],
+    max_frame: u32,
+) -> Vec<u8> {
+    let mut out = b"Polygon Movie maker 0002".to_vec();
+    out.resize(30, 0);
+    push_u32(&mut out, options.screen_width);
+    push_u32(&mut out, options.screen_height);
+    push_u32(&mut out, max_frame);
+    push_f32(&mut out, options.frame_rate);
+    out.extend_from_slice(&[0, 1, 1, 1, 1, 1, 1]);
+    out.push(0);
+    out.push(1);
+
+    out.push(0);
+    push_pmm_len_prefixed_sjis(&mut out, &model.metadata.name, &[]);
+    push_pmm_len_prefixed_sjis(&mut out, &model.metadata.english_name, &[]);
+    push_pmm_fixed_sjis(&mut out, model_path, 256);
+    out.push(0);
+
+    push_i32(&mut out, bone_names.len() as i32);
+    for name in bone_names {
+        push_pmm_len_prefixed_sjis(&mut out, name, &[]);
+    }
+    push_i32(&mut out, morph_names.len() as i32);
+    for name in morph_names {
+        push_pmm_len_prefixed_sjis(&mut out, name, &[]);
+    }
+
+    push_i32(&mut out, 0);
+    push_i32(&mut out, 0);
+    out.push(0);
+    out.push(1);
+    push_i32(&mut out, -1);
+    for _ in 0..4 {
+        push_i32(&mut out, -1);
+    }
+    out.push(0);
+    push_i32(&mut out, 0);
+    push_i32(&mut out, max_frame as i32);
+
+    let bone_next =
+        next_keyframe_indices(bone_names.len(), bone_names.len(), additional_bones, |f| {
+            f.bone_index
+        });
+    for bone_index in 0..bone_names.len() {
+        let fallback = PmmExportBoneKeyframe {
+            bone_index,
+            frame: 0,
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            interpolation: [20; 16],
+        };
+        let frame = initial_bones[bone_index].as_ref().unwrap_or(&fallback);
+        push_document_bone_keyframe(
+            &mut out,
+            None,
+            0,
+            0,
+            bone_next[bone_index],
+            frame.interpolation,
+            frame.translation,
+            frame.rotation,
+        );
+    }
+    push_i32(&mut out, additional_bones.len() as i32);
+    for (offset, frame) in additional_bones.iter().enumerate() {
+        let index = bone_names.len() + offset;
+        let previous = previous_keyframe_index(
+            additional_bones,
+            offset,
+            frame.bone_index,
+            bone_names.len(),
+            |f| f.bone_index,
+        );
+        let next = next_keyframe_index(
+            additional_bones,
+            offset,
+            frame.bone_index,
+            bone_names.len(),
+            |f| f.bone_index,
+        );
+        push_document_bone_keyframe(
+            &mut out,
+            Some(index as i32),
+            frame.frame as i32,
+            previous,
+            next,
+            frame.interpolation,
+            frame.translation,
+            frame.rotation,
+        );
+    }
+
+    let morph_next = next_keyframe_indices(
+        morph_names.len(),
+        morph_names.len(),
+        additional_morphs,
+        |f| f.morph_index,
+    );
+    for morph_index in 0..morph_names.len() {
+        let weight = initial_morphs[morph_index]
+            .as_ref()
+            .map(|frame| frame.weight)
+            .unwrap_or(0.0);
+        push_document_morph_keyframe(&mut out, None, 0, 0, morph_next[morph_index], weight);
+    }
+    push_i32(&mut out, additional_morphs.len() as i32);
+    for (offset, frame) in additional_morphs.iter().enumerate() {
+        let index = morph_names.len() + offset;
+        let previous = previous_keyframe_index(
+            additional_morphs,
+            offset,
+            frame.morph_index,
+            morph_names.len(),
+            |f| f.morph_index,
+        );
+        let next = next_keyframe_index(
+            additional_morphs,
+            offset,
+            frame.morph_index,
+            morph_names.len(),
+            |f| f.morph_index,
+        );
+        push_document_morph_keyframe(
+            &mut out,
+            Some(index as i32),
+            frame.frame as i32,
+            previous,
+            next,
+            frame.weight,
+        );
+    }
+
+    push_document_model_keyframe(&mut out, None, 0, 0, 0, true);
+    push_i32(&mut out, 0);
+
+    for _ in bone_names {
+        for value in [0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0] {
+            push_f32(&mut out, value);
+        }
+        out.push(0);
+        out.push(0);
+        out.push(0);
+    }
+    for _ in morph_names {
+        push_f32(&mut out, 0.0);
+    }
+
+    out.push(0);
+    push_f32(&mut out, 1.0);
+    out.push(0);
+    out.push(0);
+
+    write_pmm_global_tail(&mut out, max_frame, options.camera_fov);
+    push_pmm_sjis_string(&mut out, model_path, None);
+    out.push(0);
+    out
+}
+
+fn next_keyframe_indices<T>(
+    count: usize,
+    initial_count: usize,
+    frames: &[T],
+    object_index: impl Fn(&T) -> usize,
+) -> Vec<i32> {
+    let mut next = vec![0; count];
+    for (offset, frame) in frames.iter().enumerate() {
+        let target = object_index(frame);
+        if target < count && next[target] == 0 {
+            next[target] = (initial_count + offset) as i32;
+        }
+    }
+    next
+}
+
+fn previous_keyframe_index<T>(
+    frames: &[T],
+    offset: usize,
+    object_index: usize,
+    initial_count: usize,
+    frame_object_index: impl Fn(&T) -> usize,
+) -> i32 {
+    if offset > 0 && frame_object_index(&frames[offset - 1]) == object_index {
+        (initial_count + offset - 1) as i32
+    } else {
+        object_index as i32
+    }
+}
+
+fn next_keyframe_index<T>(
+    frames: &[T],
+    offset: usize,
+    object_index: usize,
+    initial_count: usize,
+    frame_object_index: impl Fn(&T) -> usize,
+) -> i32 {
+    if offset + 1 < frames.len() && frame_object_index(&frames[offset + 1]) == object_index {
+        (initial_count + offset + 1) as i32
+    } else {
+        0
+    }
+}
+
+fn push_i32(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_pmm_fixed_sjis(out: &mut Vec<u8>, text: &str, length: usize) {
+    let (encoded, _, _) = SHIFT_JIS.encode(text);
+    let encoded = encoded.into_owned();
+    let mut bytes = vec![0u8; length];
+    let copy_len = encoded.len().min(length);
+    bytes[..copy_len].copy_from_slice(&encoded[..copy_len]);
+    out.extend_from_slice(&bytes);
+}
+
+fn push_empty_pmm_path(out: &mut Vec<u8>) {
+    out.extend_from_slice(&[0u8; 256]);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_document_bone_keyframe(
+    out: &mut Vec<u8>,
+    index: Option<i32>,
+    frame: i32,
+    previous: i32,
+    next: i32,
+    interpolation: [u8; 16],
+    translation: [f32; 3],
+    rotation: [f32; 4],
+) {
+    if let Some(index) = index {
+        push_i32(out, index);
+    }
+    push_i32(out, frame);
+    push_i32(out, previous);
+    push_i32(out, next);
+    out.extend_from_slice(&interpolation);
+    for value in translation {
+        push_f32(out, value);
+    }
+    for value in rotation {
+        push_f32(out, value);
+    }
+    out.push(0);
+    out.push(0);
+}
+
+fn push_document_morph_keyframe(
+    out: &mut Vec<u8>,
+    index: Option<i32>,
+    frame: i32,
+    previous: i32,
+    next: i32,
+    weight: f32,
+) {
+    if let Some(index) = index {
+        push_i32(out, index);
+    }
+    push_i32(out, frame);
+    push_i32(out, previous);
+    push_i32(out, next);
+    push_f32(out, weight);
+    out.push(0);
+}
+
+fn push_document_model_keyframe(
+    out: &mut Vec<u8>,
+    index: Option<i32>,
+    frame: i32,
+    previous: i32,
+    next: i32,
+    visible: bool,
+) {
+    if let Some(index) = index {
+        push_i32(out, index);
+    }
+    push_i32(out, frame);
+    push_i32(out, previous);
+    push_i32(out, next);
+    out.push(u8::from(visible));
+    out.push(0);
+}
+
+fn push_document_base_keyframe(
+    out: &mut Vec<u8>,
+    index: Option<i32>,
+    frame: i32,
+    previous: i32,
+    next: i32,
+) {
+    if let Some(index) = index {
+        push_i32(out, index);
+    }
+    push_i32(out, frame);
+    push_i32(out, previous);
+    push_i32(out, next);
+}
+
+fn push_document_camera_keyframe(out: &mut Vec<u8>, index: Option<i32>, selected: bool, fov: i32) {
+    push_document_base_keyframe(out, index, 0, 0, 0);
+    push_f32(out, 45.0);
+    out.extend_from_slice(&[0u8; 12]);
+    out.extend_from_slice(&[0u8; 12]);
+    push_i32(out, -1);
+    push_i32(out, -1);
+    out.extend_from_slice(&[20u8; 24]);
+    out.push(0);
+    push_i32(out, fov);
+    out.push(u8::from(selected));
+}
+
+fn push_document_light_keyframe(out: &mut Vec<u8>, index: Option<i32>, selected: bool) {
+    push_document_base_keyframe(out, index, 0, 0, 0);
+    for value in [0.602f32, 0.602, 0.602, -0.5, -1.0, 0.5] {
+        push_f32(out, value);
+    }
+    out.push(u8::from(selected));
+}
+
+fn push_document_gravity_keyframe(out: &mut Vec<u8>, index: Option<i32>, selected: bool) {
+    push_document_base_keyframe(out, index, 0, 0, 0);
+    out.push(0);
+    push_i32(out, 10);
+    push_f32(out, 9.8);
+    for value in [0.0f32, -1.0, 0.0] {
+        push_f32(out, value);
+    }
+    out.push(u8::from(selected));
+}
+
+fn push_document_self_shadow_keyframe(out: &mut Vec<u8>, index: Option<i32>, selected: bool) {
+    push_document_base_keyframe(out, index, 0, 0, 0);
+    out.push(1);
+    push_f32(out, 0.01125);
+    out.push(u8::from(selected));
+}
+
+fn write_pmm_global_tail(out: &mut Vec<u8>, max_frame: u32, camera_fov: f32) {
+    let camera_fov = camera_fov.round().clamp(1.0, i32::MAX as f32) as i32;
+    push_document_camera_keyframe(out, None, true, camera_fov);
+    push_i32(out, 0);
+    out.extend_from_slice(&[0u8; 12 * 3]);
+    out.push(0);
+
+    push_document_light_keyframe(out, None, true);
+    push_i32(out, 0);
+    for value in [0.602f32, 0.602, 0.602, -0.5, -1.0, 0.5] {
+        push_f32(out, value);
+    }
+
+    out.push(0);
+    push_i32(out, 0);
+    out.push(0);
+
+    push_i32(out, 0);
+    push_i32(out, 0);
+    push_i32(out, max_frame as i32);
+    push_i32(out, 0);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    push_i32(out, 500);
+    push_i32(out, 0);
+    out.push(0);
+    push_empty_pmm_path(out);
+    push_i32(out, 0);
+    push_i32(out, 0);
+    push_f32(out, 0.0);
+    push_empty_pmm_path(out);
+    push_i32(out, 0);
+    push_i32(out, 0);
+    push_i32(out, 0);
+    push_f32(out, 1.0);
+    push_empty_pmm_path(out);
+    out.push(0);
+    out.push(0);
+    out.push(1);
+    out.push(1);
+    push_f32(out, 60.0);
+    push_i32(out, 0);
+    push_i32(out, 1);
+    push_f32(out, 1.0);
+    out.push(1);
+    out.push(2);
+
+    push_f32(out, 9.8);
+    push_i32(out, 10);
+    for value in [0.0f32, -1.0, 0.0] {
+        push_f32(out, value);
+    }
+    out.push(0);
+    push_document_gravity_keyframe(out, None, true);
+    push_i32(out, 0);
+
+    out.push(1);
+    push_f32(out, 0.01125);
+    push_document_self_shadow_keyframe(out, None, true);
+    push_i32(out, 0);
+
+    push_i32(out, 0);
+    push_i32(out, 0);
+    push_i32(out, 0);
+    out.push(0);
+    push_i32(out, -1);
+    push_i32(out, -1);
+    for value in [
+        1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ] {
+        push_f32(out, value);
+    }
+    out.push(0);
+    out.push(0);
+    out.push(1);
+    push_i32(out, 0);
+    out.push(1);
+    out.push(0);
+    push_i32(out, 0);
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_f32(out: &mut Vec<u8>, value: f32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_pmm_len_prefixed_sjis(out: &mut Vec<u8>, text: &str, original_bytes: &[u8]) {
+    let bytes = if !original_bytes.is_empty() {
+        original_bytes.to_vec()
+    } else {
+        let (encoded, _, _) = SHIFT_JIS.encode(text);
+        encoded.into_owned()
+    };
+    let length = bytes.len().min(u8::MAX as usize);
+    out.push(length as u8);
+    out.extend_from_slice(&bytes[..length]);
+}
+
+fn push_pmm_sjis_string(out: &mut Vec<u8>, text: &str, original_bytes: Option<&[u8]>) {
+    if let Some(bytes) = original_bytes
+        && !bytes.is_empty()
+    {
+        out.extend_from_slice(bytes);
+        return;
+    }
+    let (encoded, _, _) = SHIFT_JIS.encode(text);
+    out.extend_from_slice(&encoded);
 }
 
 fn timeline_from_project_settings(settings: &PmmProjectSettings) -> PmmTimeline {
@@ -2548,6 +3279,118 @@ mod tests {
         data.push(0);
         data.extend_from_slice(b"UserFile\\Motion\\walk.vmd\0");
         data
+    }
+
+    #[test]
+    fn exports_pmm_project_settings_and_asset_references() {
+        let parsed = parse_pmm_manifest(&pmm_with_project_settings()).unwrap();
+        let exported = export_pmm_manifest(&parsed);
+        let reparsed = parse_pmm_manifest(&exported).unwrap();
+
+        assert_eq!(reparsed.version, "0002");
+        assert_eq!(reparsed.project_settings.screen_width, Some(1920));
+        assert_eq!(reparsed.project_settings.screen_height, Some(1080));
+        assert_eq!(reparsed.project_settings.timeline_frame_count, Some(424));
+        assert_eq!(reparsed.project_settings.frame_rate, Some(30.0));
+        assert_eq!(reparsed.model_paths, vec!["UserFile/Model/miku.pmx"]);
+        assert_eq!(reparsed.motion_paths, vec!["UserFile/Motion/walk.vmd"]);
+        assert_eq!(reparsed.audio_paths, vec!["UserFile/Audio/song.wav"]);
+    }
+
+    #[test]
+    fn exports_pmm_manifest_as_v2_layout_for_v1_input() {
+        let mut data = pmm_with_project_settings();
+        data[20..24].copy_from_slice(b"0001");
+        let parsed = parse_pmm_manifest(&data).unwrap();
+        assert_eq!(parsed.version, "0001");
+
+        let exported = export_pmm_manifest(&parsed);
+        let reparsed = parse_pmm_manifest(&exported).unwrap();
+
+        assert_eq!(reparsed.version, "0002");
+        assert_eq!(reparsed.project_settings.timeline_frame_count, Some(424));
+        assert_eq!(reparsed.model_paths, vec!["UserFile/Model/miku.pmx"]);
+    }
+
+    #[test]
+    fn exports_pmm_initial_model_slot() {
+        let parsed = parse_pmm_manifest(&pmm_with_initial_model_slot()).unwrap();
+        let exported = export_pmm_manifest(&parsed);
+        let reparsed = parse_pmm_manifest(&exported).unwrap();
+
+        assert_eq!(reparsed.project_settings.screen_width, Some(640));
+        assert_eq!(reparsed.project_settings.screen_height, Some(360));
+        assert_eq!(reparsed.project_settings.timeline_frame_count, Some(250));
+        assert_eq!(reparsed.model_slots.len(), 1);
+        let slot = &reparsed.model_slots[0];
+        assert_eq!(slot.name, "TestModel");
+        assert_eq!(slot.english_name, "Base");
+        assert_eq!(
+            slot.normalized_path,
+            "F:/Develop/MMDDev/data/unittest/test_1bone_cube.pmx"
+        );
+        assert_eq!(reparsed.motion_paths, vec!["UserFile/Motion/walk.vmd"]);
+    }
+
+    #[test]
+    fn exports_pmm_scene_header_timeline_fps_and_camera_fov() {
+        let model =
+            crate::pmx::parse_pmx_model(include_bytes!("../fixtures/pmx/ik_multi_axis_limit.pmx"))
+                .unwrap();
+        let motion = VmdParsedAnimation {
+            kind: "vmd",
+            metadata: crate::vmd::VmdParsedMetadata {
+                format: "vmd",
+                model_name: "ik_multi_axis_limit_fixture".to_owned(),
+                model_name_bytes: Vec::new(),
+                counts: crate::vmd::VmdParsedCounts {
+                    bones: 1,
+                    morphs: 0,
+                    cameras: 0,
+                    lights: 0,
+                    self_shadows: 0,
+                    properties: 0,
+                },
+                max_frame: 600,
+            },
+            bone_frames: vec![VmdParsedBoneFrame {
+                bone_name: "link_root".to_owned(),
+                bone_name_bytes: Vec::new(),
+                frame: 600,
+                translation: [0.0, 1.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                interpolation: vec![20; 64],
+            }],
+            morph_frames: Vec::new(),
+            camera_frames: Vec::new(),
+            light_frames: Vec::new(),
+            self_shadow_frames: Vec::new(),
+            property_frames: Vec::new(),
+        };
+
+        let report = export_pmm_scene_from_pmx_vmd(
+            &model,
+            &motion,
+            "UserFile/Model/ik_multi_axis_limit.pmx",
+            &PmmSceneExportOptions {
+                screen_width: 800,
+                screen_height: 600,
+                frame_rate: 60.0,
+                camera_fov: 42.0,
+            },
+        );
+        let reparsed = parse_pmm_manifest(&report.bytes).unwrap();
+
+        assert_eq!(report.max_frame, 600);
+        assert_eq!(reparsed.project_settings.screen_width, Some(800));
+        assert_eq!(reparsed.project_settings.screen_height, Some(600));
+        assert_eq!(reparsed.project_settings.timeline_frame_count, Some(600));
+        assert_eq!(reparsed.project_settings.frame_rate, Some(60.0));
+        let global = reparsed.document_global_summary.as_ref().unwrap();
+        match global.camera.initial_keyframe.as_ref().unwrap() {
+            PmmDocumentKeyframeSummary::Camera { fov, .. } => assert_eq!(*fov, 42),
+            other => panic!("unexpected camera keyframe summary: {other:?}"),
+        }
     }
 
     fn append_pmm_model_slot(data: &mut Vec<u8>, name: &[u8], english_name: &[u8], path: &[u8]) {

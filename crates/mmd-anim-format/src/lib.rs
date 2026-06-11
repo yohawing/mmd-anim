@@ -22,7 +22,10 @@ pub use normalize::normalize_vmd_name;
 pub use pmd::{
     PmdParsedModel, PmdRuntimeImport, export_pmd_model, import_pmd_runtime, parse_pmd_model,
 };
-pub use pmm::{PmmParsedManifest, parse_pmm_manifest};
+pub use pmm::{
+    PmmParsedManifest, PmmSceneExportOptions, PmmSceneExportReport, export_pmm_manifest,
+    export_pmm_scene_from_pmx_vmd, parse_pmm_manifest,
+};
 pub use pmx::{
     PmxBoneImport, PmxMorphNames, PmxParsedModel, PmxPartsBoneDescriptor, PmxPartsDescriptor,
     PmxPartsDisplayFrameDescriptor, PmxPartsDisplayFrameItem, PmxPartsGroupMorphOffset,

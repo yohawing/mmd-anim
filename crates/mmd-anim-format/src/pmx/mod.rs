@@ -4132,6 +4132,10 @@ mod tests {
         }
     }
 
+    fn ik_multi_axis_limit_pmx_fixture() -> &'static [u8] {
+        include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx")
+    }
+
     fn assert_pmx_roundtrip_eq(left: &PmxParsedModel, right: &PmxParsedModel) {
         assert_eq!(
             serde_json::to_value(left).unwrap(),
@@ -4194,6 +4198,32 @@ mod tests {
         assert_eq!(BONE_FLAG_FIXED_AXIS, 0x0400);
         assert_eq!(BONE_FLAG_LOCAL_AXIS, 0x0800);
         assert_eq!(BONE_FLAG_EXTERNAL_PARENT, 0x2000);
+    }
+
+    #[test]
+    fn parses_ik_multi_axis_limit_pmx_fixture() {
+        let parsed = parse_pmx_model(ik_multi_axis_limit_pmx_fixture()).unwrap();
+        assert_eq!(parsed.metadata.name, "ik_multi_axis_limit_fixture");
+        assert_eq!(parsed.metadata.counts.bones, 3);
+        assert_eq!(parsed.skeleton.bones[2].name, "ik_controller");
+        let ik = parsed.skeleton.bones[2].ik.as_ref().unwrap();
+        assert_eq!(ik.target_index, 1);
+        assert_eq!(ik.loop_count, 1);
+        assert_eq!(ik.links.len(), 1);
+        assert_eq!(ik.links[0].bone_index, 0);
+        let limits = ik.links[0].limits.as_ref().unwrap();
+        assert_eq!(limits.lower, [0.0, -1.0, -1.0]);
+        assert_eq!(limits.upper, [0.0, 1.0, 1.0]);
+
+        let runtime = import_pmx_runtime(ik_multi_axis_limit_pmx_fixture()).unwrap();
+        assert_eq!(runtime.model.bone_count(), 3);
+        assert_eq!(runtime.model.ik_count(), 1);
+        let solver = &runtime.model.ik_solvers()[0];
+        assert_eq!(solver.ik_bone.as_usize(), 2);
+        assert_eq!(solver.target_bone.as_usize(), 1);
+        let limit = solver.links[0].angle_limit.unwrap();
+        assert_eq!(limit.min.to_array(), [0.0, -1.0, -1.0]);
+        assert_eq!(limit.max.to_array(), [0.0, 1.0, 1.0]);
     }
 
     #[test]

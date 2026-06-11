@@ -15,6 +15,11 @@ PMX/VMD を読み込み、任意フレームからワールド行列、スキニ
 APIや機能はまだ固定されておらず、1.0 までに互換性のない変更が入る可能性があります。
 ぜひともフィードバックお待ちしております。
 
+PMM 対応は部分実装です。現時点では PMMv1/PMMv2 のメタデータ点検、parse 済み PMM バイト列の保持による lossless round trip、
+限定的な source-byte patch、メンテナ CLI による単一モデル PMMv2 scene の PMX/VMD からの試験生成に対応しています。
+まだ完全な semantic PMM exporter ではありません。MMD GUI での読み込みは UTF-16 PMX など MMD 互換のモデル asset に依存するため、
+生成 PMM を MikuMikuDance で使えるものとして扱う前に guarded smoke script で検証してください。
+
 ## ランタイム評価
 
 - PMX（モデル）を読み込んで、再生に使えるモデルデータに変換する。
@@ -64,7 +69,7 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 | PMX | モデル各セクションの構造化 + ソフトボディのヘッダ診断 | 書き出し / JSON 変換 / メッシュデータから生成 |
 | PMD | モデルの構造化 + 一部のランタイム取り込み | 書き出し / JSON 変換 |
 | VMD | アニメーションの構造化 | **対応** |
-| PMM | ヘッダ、タイムライン、表示状態、参照アセット、PMMv2 の概要情報 | 限定的な manifest/header 書き出し |
+| PMM | ヘッダ、タイムライン、表示状態、参照アセット、PMMv2 の概要情報、一部 keyframe payload metadata | 部分対応: parse 済み byte の lossless round trip、限定 source-byte patch、単一モデル PMX/VMD scene の試験生成 |
 | VPD | ポーズの構造化 | **対応** |
 | X/VAC | テキスト X のメッシュ、材質、UV、法線、頂点色の構造化 + VAC の設定/生データ行 | テキスト X / VAC ラッパーの書き出し |
 

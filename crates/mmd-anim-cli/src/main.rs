@@ -43,6 +43,8 @@ const EXPORT_JSON_FORMAT_USAGE: &str =
     "usage: mmd-anim export-json-format <input-json> <output-asset>";
 const EXPORT_PMM_SCENE_USAGE: &str =
     "usage: mmd-anim export-pmm-scene <model.pmx> <motion.vmd> <output.pmm>";
+const PATCH_PMM_DOCUMENT_MODEL_PATH_USAGE: &str = "usage: mmd-anim patch-pmm-document-model-path <input.pmm> <document-model-index> <model-path> <output.pmm>";
+const PATCH_PMM_SCENE_FRAME_RANGE_USAGE: &str = "usage: mmd-anim patch-pmm-scene-frame-range <input.pmm> <output.pmm> [--current-frame <i32>] [--current-frame-text <i32>] [--begin-frame <i32>] [--end-frame <i32>] [--begin-frame-enabled <bool>] [--end-frame-enabled <bool>]";
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -274,6 +276,32 @@ fn main() {
             let output = required_arg(&mut args, EXPORT_PMM_SCENE_USAGE);
             if let Err(error) =
                 export_pmm_scene(Path::new(&model), Path::new(&motion), Path::new(&output))
+            {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("patch-pmm-document-model-path") => {
+            let input = required_arg(&mut args, PATCH_PMM_DOCUMENT_MODEL_PATH_USAGE);
+            let index = required_arg(&mut args, PATCH_PMM_DOCUMENT_MODEL_PATH_USAGE);
+            let model_path = required_arg(&mut args, PATCH_PMM_DOCUMENT_MODEL_PATH_USAGE);
+            let output = required_arg(&mut args, PATCH_PMM_DOCUMENT_MODEL_PATH_USAGE);
+            if let Err(error) = patch_pmm_document_model_path(
+                Path::new(&input),
+                &index,
+                &model_path,
+                Path::new(&output),
+            ) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Some("patch-pmm-scene-frame-range") => {
+            let input = required_arg(&mut args, PATCH_PMM_SCENE_FRAME_RANGE_USAGE);
+            let output = required_arg(&mut args, PATCH_PMM_SCENE_FRAME_RANGE_USAGE);
+            let rest: Vec<String> = args.collect();
+            if let Err(error) =
+                patch_pmm_scene_frame_range(Path::new(&input), Path::new(&output), &rest)
             {
                 eprintln!("{error}");
                 std::process::exit(1);
@@ -851,6 +879,22 @@ fn export_roundtrip_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error:
             );
             Ok(ExitCode::SUCCESS)
         }
+        mmd_anim_format::MmdFormatKind::Pmm => {
+            let parsed = mmd_anim_format::parse_pmm_manifest(&data)?;
+            let exported = mmd_anim_format::export_pmm_manifest(&parsed);
+            let _reparsed = mmd_anim_format::parse_pmm_manifest(&exported)?;
+            ensure_pmm_lossless_roundtrip(&data, &exported)?;
+            println!(
+                "PMM export roundtrip: ok bytesIn={} bytesOut={} version={} modelReferences={} assetReferences={} diagnostics={}",
+                data.len(),
+                exported.len(),
+                parsed.version,
+                parsed.model_paths.len(),
+                parsed.asset_summary.reference_count,
+                parsed.diagnostics.len()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac => {
             let file_name = path.file_name().and_then(|v| v.to_str());
             let parsed = mmd_anim_format::parse_accessory_manifest(&data, file_name)?;
@@ -930,6 +974,20 @@ fn export_roundtrip_json(path: &Path) -> Result<ExitCode, Box<dyn std::error::Er
                 data.len(),
                 exported.len(),
                 None,
+                &parsed,
+            )
+        }
+        mmd_anim_format::MmdFormatKind::Pmm => {
+            let parsed = mmd_anim_format::parse_pmm_manifest(&data)?;
+            let exported = mmd_anim_format::export_pmm_manifest(&parsed);
+            let _reparsed = mmd_anim_format::parse_pmm_manifest(&exported)?;
+            ensure_pmm_lossless_roundtrip(&data, &exported)?;
+            pmm_roundtrip_json(
+                path,
+                "parse-export-parse-lossless",
+                data.len(),
+                exported.len(),
+                data == exported,
                 &parsed,
             )
         }
@@ -1206,6 +1264,32 @@ fn export_format(input: &Path, output: &Path) -> Result<ExitCode, Box<dyn std::e
     Ok(ExitCode::SUCCESS)
 }
 
+/// Resolves a PMX model path for PMM export to a canonical path string that MMD can open.
+fn resolve_pmx_path_for_pmm(model_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let canonical = model_path.canonicalize().map_err(|e| {
+        format!(
+            "failed to canonicalize PMX model path {}: {}",
+            model_path.display(),
+            e
+        )
+    })?;
+    Ok(pmm_display_path(&canonical))
+}
+
+fn pmm_display_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    #[cfg(windows)]
+    {
+        if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{stripped}");
+        }
+        if let Some(stripped) = text.strip_prefix(r"\\?\") {
+            return stripped.to_owned();
+        }
+    }
+    text
+}
+
 fn export_pmm_scene(
     model_path: &Path,
     motion_path: &Path,
@@ -1215,7 +1299,7 @@ fn export_pmm_scene(
     let motion_data = fs::read(motion_path)?;
     let model = mmd_anim_format::parse_pmx_model(&model_data)?;
     let motion = mmd_anim_format::parse_vmd_animation(&motion_data)?;
-    let model_path_text = model_path.to_string_lossy();
+    let model_path_text = resolve_pmx_path_for_pmm(model_path)?;
     let report = mmd_anim_format::export_pmm_scene_from_pmx_vmd(
         &model,
         &motion,
@@ -1242,6 +1326,176 @@ fn export_pmm_scene(
         report.skipped_morph_keyframes,
         report.max_frame,
         output_path.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn parse_bool_option(value: &str, label: &str) -> Result<bool, String> {
+    if value.eq_ignore_ascii_case("true")
+        || value == "1"
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
+    {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("false")
+        || value == "0"
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("off")
+    {
+        Ok(false)
+    } else {
+        Err(format!(
+            "invalid {label}: {value} (expected true/false, 1/0, yes/no, or on/off)"
+        ))
+    }
+}
+
+fn parse_pmm_scene_frame_range_patch_options(
+    option_args: &[String],
+) -> Result<mmd_anim_format::pmm::PmmSceneFrameRangePatch, String> {
+    let mut patch = mmd_anim_format::pmm::PmmSceneFrameRangePatch::default();
+    let mut iter = option_args.iter();
+    while let Some(arg) = iter.next() {
+        let value = iter.next().ok_or_else(|| {
+            format!("missing value for option {arg}; {PATCH_PMM_SCENE_FRAME_RANGE_USAGE}")
+        })?;
+        match arg.as_str() {
+            "--current-frame" => {
+                patch.current_frame_index = Some(value.parse().map_err(|_| {
+                    format!("invalid --current-frame value: {value} (expected i32)")
+                })?);
+            }
+            "--current-frame-text" => {
+                patch.current_frame_index_in_text_field = Some(value.parse().map_err(|_| {
+                    format!("invalid --current-frame-text value: {value} (expected i32)")
+                })?);
+            }
+            "--begin-frame" => {
+                patch.begin_frame_index =
+                    Some(value.parse().map_err(|_| {
+                        format!("invalid --begin-frame value: {value} (expected i32)")
+                    })?);
+            }
+            "--end-frame" => {
+                patch.end_frame_index =
+                    Some(value.parse().map_err(|_| {
+                        format!("invalid --end-frame value: {value} (expected i32)")
+                    })?);
+            }
+            "--begin-frame-enabled" => {
+                patch.begin_frame_index_enabled =
+                    Some(parse_bool_option(value, "--begin-frame-enabled")?);
+            }
+            "--end-frame-enabled" => {
+                patch.end_frame_index_enabled =
+                    Some(parse_bool_option(value, "--end-frame-enabled")?);
+            }
+            other if other.starts_with("--") => {
+                return Err(format!(
+                    "unknown option {other}; {PATCH_PMM_SCENE_FRAME_RANGE_USAGE}"
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "unexpected positional argument {other:?}; {PATCH_PMM_SCENE_FRAME_RANGE_USAGE}"
+                ));
+            }
+        }
+    }
+
+    if patch.current_frame_index.is_none()
+        && patch.current_frame_index_in_text_field.is_none()
+        && patch.begin_frame_index.is_none()
+        && patch.end_frame_index.is_none()
+        && patch.begin_frame_index_enabled.is_none()
+        && patch.end_frame_index_enabled.is_none()
+    {
+        return Err(format!(
+            "at least one patch option is required; {PATCH_PMM_SCENE_FRAME_RANGE_USAGE}"
+        ));
+    }
+
+    Ok(patch)
+}
+
+fn count_pmm_scene_frame_range_patch_fields(
+    patch: &mmd_anim_format::pmm::PmmSceneFrameRangePatch,
+) -> usize {
+    let mut count = 0usize;
+    if patch.current_frame_index.is_some() {
+        count += 1;
+    }
+    if patch.current_frame_index_in_text_field.is_some() {
+        count += 1;
+    }
+    if patch.begin_frame_index.is_some() {
+        count += 1;
+    }
+    if patch.end_frame_index.is_some() {
+        count += 1;
+    }
+    if patch.begin_frame_index_enabled.is_some() {
+        count += 1;
+    }
+    if patch.end_frame_index_enabled.is_some() {
+        count += 1;
+    }
+    count
+}
+
+fn patch_pmm_scene_frame_range(
+    input: &Path,
+    output: &Path,
+    option_args: &[String],
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let patch = parse_pmm_scene_frame_range_patch_options(option_args)?;
+    let data = fs::read(input)?;
+    let bytes_in = data.len();
+    let parsed = mmd_anim_format::parse_pmm_manifest(&data)?;
+    let exported =
+        mmd_anim_format::pmm::export_pmm_manifest_with_scene_frame_range_patch(&parsed, &patch)
+            .map_err(|e| format!("PMM scene frame range patch failed: {e}"))?;
+    let bytes_out = exported.len();
+    let changed_fields = count_pmm_scene_frame_range_patch_fields(&patch);
+    fs::write(output, &exported)?;
+    println!(
+        "PMM scene frame range patch: ok bytesIn={} bytesOut={} changedFields={} output={}",
+        bytes_in,
+        bytes_out,
+        changed_fields,
+        output.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn patch_pmm_document_model_path(
+    input: &Path,
+    document_model_index: &str,
+    model_path: &str,
+    output: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let data = fs::read(input)?;
+    let bytes_in = data.len();
+    let parsed = mmd_anim_format::parse_pmm_manifest(&data)?;
+    let index: u8 = document_model_index.parse().map_err(|_| {
+        format!(
+            "invalid document-model-index {:?}: expected u8 (0-255)",
+            document_model_index
+        )
+    })?;
+    let exported = mmd_anim_format::pmm::export_pmm_manifest_with_document_model_path_overrides(
+        &parsed,
+        &[(index, model_path)],
+    )
+    .map_err(|e| format!("PMM document model path patch failed: {e}"))?;
+    let bytes_out = exported.len();
+    fs::write(output, &exported)?;
+    println!(
+        "PMM document model path patch: ok bytesIn={} bytesOut={} documentModelIndex={} output={}",
+        bytes_in,
+        bytes_out,
+        index,
+        output.display()
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -1469,6 +1723,29 @@ fn accessory_roundtrip_json(
     })
 }
 
+fn pmm_roundtrip_json(
+    path: &Path,
+    mode: &str,
+    bytes_in: usize,
+    bytes_out: usize,
+    byte_for_byte: bool,
+    parsed: &mmd_anim_format::PmmParsedManifest,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "mode": mode,
+        "format": "pmm",
+        "path": path.display().to_string(),
+        "bytesIn": bytes_in,
+        "bytesOut": bytes_out,
+        "version": parsed.version,
+        "modelReferences": parsed.model_paths.len(),
+        "assetReferences": parsed.asset_summary.reference_count,
+        "diagnostics": parsed.diagnostics.len(),
+        "byteForByte": byte_for_byte,
+    })
+}
+
 fn ensure_pmx_roundtrip(
     left: &mmd_anim_format::PmxParsedModel,
     right: &mmd_anim_format::PmxParsedModel,
@@ -1489,6 +1766,18 @@ fn ensure_pmd_roundtrip(
     let right = serde_json::to_value(right)?;
     if left != right {
         return Err("PMD parse/export/parse DTO changed".into());
+    }
+    Ok(())
+}
+
+fn ensure_pmm_lossless_roundtrip(
+    original: &[u8],
+    exported: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if original != exported {
+        return Err(
+            "PMM parse/export/parse did not preserve source bytes (lossless path failed)".into(),
+        );
     }
     Ok(())
 }
@@ -4541,5 +4830,339 @@ mod tests {
         assert_eq!(value["metadata"]["indexSizes"]["bone"], 2);
         assert_eq!(value["counts"]["vertices"], 1);
         assert_eq!(value["counts"]["softBodies"], 9);
+    }
+
+    #[test]
+    fn resolve_pmx_path_for_pmm_makes_relative_existing_path_absolute() {
+        // Use a repository-local file that always exists at the workspace root
+        // when tests are executed via `cargo test -p mmd-anim-cli`.
+        // This keeps the test self-contained and independent of MMDDumper/MMD fixtures.
+        let relative = Path::new("Cargo.toml");
+        assert!(
+            relative.exists(),
+            "Cargo.toml must exist for this repository-local test"
+        );
+
+        let resolved = resolve_pmx_path_for_pmm(relative)
+            .expect("canonicalize must succeed for an existing repository file");
+
+        let resolved_path = Path::new(&resolved);
+        assert!(
+            resolved_path.is_absolute(),
+            "expected canonical PMX path for PMM to be absolute, got: {}",
+            resolved
+        );
+        assert!(
+            !resolved.starts_with(r"\\?\"),
+            "expected PMM path to avoid Windows verbatim prefix for MMD GUI loading, got: {}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn export_pmm_scene_embeds_clean_absolute_model_path() {
+        let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
+        let pmx_path = format_crate.join("fixtures/pmx/ik_multi_axis_limit.pmx");
+        let vmd_path = format_crate.join("fixtures/vmd/ik_multi_bone_nondefault.vmd");
+
+        let model_path_text =
+            resolve_pmx_path_for_pmm(&pmx_path).expect("PMX fixture path must resolve");
+        let model_bytes = fs::read(&pmx_path).expect("PMX fixture must exist");
+        let motion_bytes = fs::read(&vmd_path).expect("VMD fixture must exist");
+        let model = mmd_anim_format::parse_pmx_model(&model_bytes).expect("PMX fixture parses");
+        let motion =
+            mmd_anim_format::parse_vmd_animation(&motion_bytes).expect("VMD fixture parses");
+
+        let report = mmd_anim_format::export_pmm_scene_from_pmx_vmd(
+            &model,
+            &motion,
+            &model_path_text,
+            &mmd_anim_format::PmmSceneExportOptions::default(),
+        );
+        let reparsed =
+            mmd_anim_format::parse_pmm_manifest(&report.bytes).expect("exported PMM reparses");
+        let document = reparsed
+            .document_summary
+            .as_ref()
+            .expect("exported PMM includes a document summary");
+        let embedded_path = &document.models[0].path;
+
+        assert_eq!(embedded_path, &model_path_text);
+        assert!(
+            Path::new(embedded_path).is_absolute(),
+            "expected exported PMM model path to be absolute, got: {}",
+            embedded_path
+        );
+        assert!(
+            !embedded_path.starts_with(r"\\?\"),
+            "expected exported PMM model path to avoid Windows verbatim prefix, got: {}",
+            embedded_path
+        );
+    }
+
+    #[test]
+    fn pmm_roundtrip_json_reports_machine_readable_counts() {
+        let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
+        let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+        let data = fs::read(&pmm_path)
+            .expect("existing PMM fixture must be readable for helper shape test");
+        let parsed = mmd_anim_format::parse_pmm_manifest(&data)
+            .expect("existing PMM fixture must parse for helper shape test");
+        let value = pmm_roundtrip_json(
+            Path::new("scene.pmm"),
+            "parse-export-parse-lossless",
+            data.len(),
+            data.len(),
+            true,
+            &parsed,
+        );
+
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["format"], "pmm");
+        assert_eq!(value["mode"], "parse-export-parse-lossless");
+        assert_eq!(value["bytesIn"], data.len());
+        assert_eq!(value["bytesOut"], data.len());
+        assert_eq!(value["version"], parsed.version);
+        assert!(value["modelReferences"].is_number());
+        assert!(value["assetReferences"].is_number());
+        assert!(value["diagnostics"].is_number());
+        assert_eq!(value["byteForByte"], true);
+    }
+
+    #[test]
+    fn ensure_pmm_lossless_roundtrip_rejects_non_identical_bytes() {
+        let original: &[u8] = b"Polygon Movie maker 0002\0dummy";
+        let exported: &[u8] = b"different-bytes";
+        let error = ensure_pmm_lossless_roundtrip(original, exported).unwrap_err();
+        let msg = error.to_string();
+        assert!(
+            msg.contains("byte") || msg.contains("lossless") || msg.contains("preserve"),
+            "expected rejection message about non-identical bytes, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn pmm_parse_export_parse_lossless_roundtrip_via_helpers() {
+        // Integration-like unit test exercising the PMM lossless parse->export->parse path
+        // and the CLI helpers directly. Uses only repository-local fixture, no subprocess,
+        // and does not depend on external MMDDumper.
+        let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
+        let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+        let data = fs::read(&pmm_path).expect("existing PMM fixture must be readable");
+        let parsed = mmd_anim_format::parse_pmm_manifest(&data).expect("fixture parses");
+        let exported = mmd_anim_format::export_pmm_manifest(&parsed);
+        let reparsed = mmd_anim_format::parse_pmm_manifest(&exported).expect("exported reparses");
+
+        ensure_pmm_lossless_roundtrip(&data, &exported)
+            .expect("PMM parse-export-parse must be byte-for-byte lossless for parsed source");
+        // reparsed is exercised to match the CLI branch (even though byte equality is the gate)
+        assert_eq!(reparsed.version, parsed.version);
+        assert_eq!(
+            exported, data,
+            "exported bytes must equal original input bytes"
+        );
+    }
+
+    #[test]
+    fn export_roundtrip_summary_calls_pmm_lossless_branch_successfully() {
+        // Direct unit test of the CLI entrypoint for PMM parse-export-parse-lossless.
+        // Uses only the repository-local fixture; no MMDDumper dependency.
+        let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
+        let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+        let result = export_roundtrip_summary(&pmm_path);
+        assert!(
+            result.is_ok(),
+            "export_roundtrip_summary on repo-local PMM fixture must succeed (lossless branch)"
+        );
+        let code = result.unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn export_roundtrip_json_calls_pmm_lossless_branch_successfully() {
+        // Direct unit test of the CLI JSON entrypoint for PMM parse-export-parse-lossless.
+        // Uses only the repository-local fixture; no MMDDumper dependency.
+        let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
+        let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+        let result = export_roundtrip_json(&pmm_path);
+        assert!(
+            result.is_ok(),
+            "export_roundtrip_json on repo-local PMM fixture must succeed (lossless branch)"
+        );
+        let code = result.unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn export_json_roundtrip_summary_rejects_pmm_as_unsupported() {
+        // Confirms that export-json-roundtrip-* remains unsupported for PMM.
+        // This is by design: the JSON serialization path intentionally omits source bytes
+        // required for the lossless parsed-byte roundtrip.
+        let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
+        let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+        let result = export_json_roundtrip_summary(&pmm_path);
+        let err = result
+            .expect_err("export_json_roundtrip_summary on PMM fixture must remain unsupported");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not implemented") || msg.contains("PMM"),
+            "expected 'not implemented' error mentioning PMM for json roundtrip, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn patch_pmm_document_model_path_replaces_path_and_preserves_length() {
+        // Focused, MMDDumper-independent unit test for the new CLI path-patch helper.
+        // Uses only repo-local fixture, calls helper directly (no subprocess), writes
+        // temp under target/, re-parses, asserts path replacement + unchanged length.
+        let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
+        let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+        let data = fs::read(&pmm_path).expect("existing PMM fixture must be readable");
+
+        // target/ based unique-ish temp to satisfy task (best-effort cleanup)
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let out_dir = target_root.join("pmm-document-model-patch-test");
+        let _ = fs::create_dir_all(&out_dir);
+        let out_path = out_dir.join(format!("patched-doc0-{}.pmm", nanos));
+
+        let replacement = "UserFile\\Model\\override_for_cli_patch_test.pmx";
+        let result = patch_pmm_document_model_path(&pmm_path, "0", replacement, &out_path);
+        assert!(
+            result.is_ok(),
+            "patch_pmm_document_model_path on repo-local fixture must succeed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+
+        let out_data = fs::read(&out_path).expect("patched output must exist");
+        assert_eq!(
+            out_data.len(),
+            data.len(),
+            "byte length must be unchanged by document model path patch"
+        );
+
+        let reparsed =
+            mmd_anim_format::parse_pmm_manifest(&out_data).expect("patched output must reparse");
+        let doc = reparsed
+            .document_summary
+            .as_ref()
+            .expect("fixture PMM must have document_summary");
+        let model0 = doc
+            .models
+            .iter()
+            .find(|m| m.document_model_index == 0)
+            .expect("document model 0 must exist in fixture");
+        assert_eq!(
+            model0.path, replacement,
+            "document model 0 path must equal replacement after patch"
+        );
+
+        // best-effort cleanup (dir may be shared by nanos but file unique)
+        let _ = fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn patch_pmm_scene_frame_range_updates_fields_and_preserves_length() {
+        let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
+        let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+        let data = fs::read(&pmm_path).expect("existing PMM fixture must be readable");
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let out_dir = target_root.join("pmm-scene-frame-range-patch-test");
+        let _ = fs::create_dir_all(&out_dir);
+        let out_path = out_dir.join(format!("patched-scene-frame-range-{}.pmm", nanos));
+
+        let options = vec![
+            "--current-frame".to_string(),
+            "99".to_string(),
+            "--current-frame-text".to_string(),
+            "77".to_string(),
+            "--begin-frame-enabled".to_string(),
+            "true".to_string(),
+            "--end-frame-enabled".to_string(),
+            "false".to_string(),
+            "--begin-frame".to_string(),
+            "10".to_string(),
+            "--end-frame".to_string(),
+            "240".to_string(),
+        ];
+        let result = patch_pmm_scene_frame_range(&pmm_path, &out_path, &options);
+        assert!(
+            result.is_ok(),
+            "patch_pmm_scene_frame_range on repo-local fixture must succeed: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap(), ExitCode::SUCCESS);
+
+        let out_data = fs::read(&out_path).expect("patched output must exist");
+        assert_eq!(
+            out_data.len(),
+            data.len(),
+            "byte length must be unchanged by scene frame range patch"
+        );
+
+        let reparsed =
+            mmd_anim_format::parse_pmm_manifest(&out_data).expect("patched output must reparse");
+        let settings = &reparsed
+            .document_global_summary
+            .as_ref()
+            .expect("fixture PMM must have document_global_summary")
+            .settings;
+        assert_eq!(settings.current_frame_index, 99);
+        assert_eq!(settings.current_frame_index_in_text_field, 77);
+        assert!(settings.begin_frame_index_enabled);
+        assert!(!settings.end_frame_index_enabled);
+        assert_eq!(settings.begin_frame_index, 10);
+        assert_eq!(settings.end_frame_index, 240);
+
+        let _ = fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn parse_pmm_scene_frame_range_patch_options_requires_at_least_one_option() {
+        let err = parse_pmm_scene_frame_range_patch_options(&[]).unwrap_err();
+        assert!(
+            err.contains("at least one patch option is required"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_pmm_scene_frame_range_patch_options_rejects_unknown_and_invalid_values() {
+        let unknown =
+            parse_pmm_scene_frame_range_patch_options(&["--unknown".to_string(), "1".to_string()])
+                .unwrap_err();
+        assert!(
+            unknown.contains("unknown option"),
+            "unexpected unknown-option error: {unknown}"
+        );
+
+        let missing_value =
+            parse_pmm_scene_frame_range_patch_options(&["--begin-frame".to_string()]).unwrap_err();
+        assert!(
+            missing_value.contains("missing value"),
+            "unexpected missing-value error: {missing_value}"
+        );
+
+        let invalid_bool = parse_pmm_scene_frame_range_patch_options(&[
+            "--begin-frame-enabled".to_string(),
+            "maybe".to_string(),
+        ])
+        .unwrap_err();
+        assert!(
+            invalid_bool.contains("invalid --begin-frame-enabled"),
+            "unexpected invalid-bool error: {invalid_bool}"
+        );
     }
 }

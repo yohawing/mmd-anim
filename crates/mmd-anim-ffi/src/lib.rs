@@ -53,6 +53,20 @@ pub struct MmdRuntimeClip {
     clip: AnimationClip,
 }
 
+/// Opaque handle for a fully-parsed PMX model that retains geometry,
+/// material, skeleton, morph, display-frame, rigid-body, and joint data.
+///
+/// Created by parsing PMX bytes via [`mmd_runtime_parsed_model_create_from_pmx_bytes`].
+/// Pointer accessors borrow from the inner `PmxParsedModel` and remain valid
+/// until [`mmd_runtime_parsed_model_free`] is called.
+pub struct MmdRuntimeParsedModel {
+    /// The fully-parsed model from mmd-anim-format.
+    parsed: mmd_anim_format::PmxParsedModel,
+    /// Flat u32 array of (start, count, material_index) triples built from
+    /// [`PmxParsedGeometry::material_groups`]. Populated once at creation.
+    material_groups_flat: Vec<u32>,
+}
+
 #[repr(C)]
 pub struct MmdRuntimeFfiBoneTrack {
     pub bone_index: u32,
@@ -1383,6 +1397,339 @@ pub unsafe extern "C" fn mmd_runtime_clip_free(clip: *mut MmdRuntimeClip) {
         unsafe {
             drop(Box::from_raw(clip));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parsed-model (PmxParsedModel) C ABI
+// ---------------------------------------------------------------------------
+
+/// Creates an opaque parsed-model handle by parsing PMX binary bytes.
+///
+/// All geometry, material, skeleton, morph, display-frame, rigid-body, and
+/// joint data is retained. Returns null on any parse failure, null pointer,
+/// or zero-length input.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes. Both must remain valid for the
+/// duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_create_from_pmx_bytes(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimeParsedModel {
+    if data.is_null() || len == 0 {
+        return ptr::null_mut();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(m) => m,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    // Build flat u32 triple cache from material_groups.
+    let material_groups_flat: Vec<u32> = parsed
+        .geometry
+        .material_groups
+        .iter()
+        .flat_map(|g| vec![g.start as u32, g.count as u32, g.material_index as u32])
+        .collect();
+
+    Box::into_raw(Box::new(MmdRuntimeParsedModel {
+        parsed,
+        material_groups_flat,
+    }))
+}
+
+/// Frees a parsed model handle created by
+/// [`mmd_runtime_parsed_model_create_from_pmx_bytes`].
+///
+/// # Safety
+///
+/// `model` must be null or a pointer returned by
+/// `mmd_runtime_parsed_model_create_from_pmx_bytes` that has not already been
+/// freed. After this call the pointer is dangling; any previously returned
+/// borrow pointers from the accessor functions are invalidated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_free(model: *mut MmdRuntimeParsedModel) {
+    if !model.is_null() {
+        unsafe {
+            drop(Box::from_raw(model));
+        }
+    }
+}
+
+/// Returns the vertex count for a parsed model, or 0 for null.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer returned by
+/// `mmd_runtime_parsed_model_create_from_pmx_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_vertex_count(
+    model: *const MmdRuntimeParsedModel,
+) -> usize {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return 0;
+    };
+    model.parsed.metadata.counts.vertices
+}
+
+/// Returns the index (face-vertex) count for a parsed model, or 0 for null.
+///
+/// This is the number of *indices* (three per triangle).
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer returned by
+/// `mmd_runtime_parsed_model_create_from_pmx_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_index_count(
+    model: *const MmdRuntimeParsedModel,
+) -> usize {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return 0;
+    };
+    model.parsed.geometry.indices.len()
+}
+
+/// Returns the number of material groups for a parsed model, or 0 for null.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer returned by
+/// `mmd_runtime_parsed_model_create_from_pmx_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_material_group_count(
+    model: *const MmdRuntimeParsedModel,
+) -> usize {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return 0;
+    };
+    model.parsed.geometry.material_groups.len()
+}
+
+/// Returns a pointer to the vertex positions array (f32, 3 per vertex).
+///
+/// The array contains `vertex_count * 3` values. The pointer is valid until
+/// [`mmd_runtime_parsed_model_free`] is called.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer. Null returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_positions(
+    model: *const MmdRuntimeParsedModel,
+) -> *const f32 {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return ptr::null();
+    };
+    null_if_empty(model.parsed.geometry.positions.as_slice())
+}
+
+/// Returns a pointer to the vertex normals array (f32, 3 per vertex).
+///
+/// The array contains `vertex_count * 3` values. The pointer is valid until
+/// [`mmd_runtime_parsed_model_free`] is called.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer. Null returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_normals(
+    model: *const MmdRuntimeParsedModel,
+) -> *const f32 {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return ptr::null();
+    };
+    null_if_empty(model.parsed.geometry.normals.as_slice())
+}
+
+/// Returns a pointer to the vertex UVs array (f32, 2 per vertex).
+///
+/// The array contains `vertex_count * 2` values. The pointer is valid until
+/// [`mmd_runtime_parsed_model_free`] is called.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer. Null returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_uvs(
+    model: *const MmdRuntimeParsedModel,
+) -> *const f32 {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return ptr::null();
+    };
+    null_if_empty(model.parsed.geometry.uvs.as_slice())
+}
+
+/// Returns a pointer to the per-vertex edge scale array (f32).
+///
+/// The array contains `vertex_count` values. The pointer is valid until
+/// [`mmd_runtime_parsed_model_free`] is called.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer. Null returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_edge_scale(
+    model: *const MmdRuntimeParsedModel,
+) -> *const f32 {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return ptr::null();
+    };
+    null_if_empty(model.parsed.geometry.edge_scale.as_slice())
+}
+
+/// Returns a pointer to the face index array (u32).
+///
+/// The array contains `index_count` values (three per triangle). The pointer
+/// is valid until [`mmd_runtime_parsed_model_free`] is called.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer. Null returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_indices(
+    model: *const MmdRuntimeParsedModel,
+) -> *const u32 {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return ptr::null();
+    };
+    null_if_empty(model.parsed.geometry.indices.as_slice())
+}
+
+/// Returns a pointer to the skin index array (u32, 4 per vertex).
+///
+/// The array contains `vertex_count * 4` values (up to 4 bone indices per
+/// vertex, padded with 0 for fewer). The pointer is valid until
+/// [`mmd_runtime_parsed_model_free`] is called.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer. Null returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_skin_indices(
+    model: *const MmdRuntimeParsedModel,
+) -> *const u32 {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return ptr::null();
+    };
+    null_if_empty(model.parsed.geometry.skin_indices.as_slice())
+}
+
+/// Returns a pointer to the skin weight array (f32, 4 per vertex).
+///
+/// The array contains `vertex_count * 4` values, normalized to sum to 1.0.
+/// The pointer is valid until [`mmd_runtime_parsed_model_free`] is called.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer. Null returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_skin_weights(
+    model: *const MmdRuntimeParsedModel,
+) -> *const f32 {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return ptr::null();
+    };
+    null_if_empty(model.parsed.geometry.skin_weights.as_slice())
+}
+
+/// Returns a pointer to the flat material-groups array (u32 triples).
+///
+/// The array contains `material_group_count * 3` values, laid out as
+/// `(start_index, count, material_index)` triples. Each triple describes a
+/// contiguous range of face indices belonging to one material. The pointer
+/// is valid until [`mmd_runtime_parsed_model_free`] is called.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer. Null returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_material_groups(
+    model: *const MmdRuntimeParsedModel,
+) -> *const u32 {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return ptr::null();
+    };
+    null_if_empty(model.material_groups_flat.as_slice())
+}
+
+/// Serializes non-hot metadata (everything except the large geometry arrays)
+/// into a JSON byte buffer.
+///
+/// The returned buffer must be freed with
+/// [`mmd_runtime_byte_buffer_free`][mmd_runtime_byte_buffer_free]. On null
+/// input or serialization failure, an empty/zero-length buffer is returned.
+///
+/// The JSON contains metadata, materials, skeleton (bone definitions, IK,
+/// append transforms), morph names/types, display frames, rigid bodies, and
+/// joints. The following hot geometry arrays are excluded:
+/// positions, normals, uvs, additional_uvs, indices, skin_indices,
+/// skin_weights, edge_scale, sdef, and qdef.
+///
+/// # Safety
+///
+/// `model` must be null or a valid pointer returned by
+/// `mmd_runtime_parsed_model_create_from_pmx_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parsed_model_metadata_json(
+    model: *const MmdRuntimeParsedModel,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(model) = (unsafe { model.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+
+    // Build a JSON object with only the non-hot subsets.
+    // We use serde_json::Value for fine-grained control.
+    let json = serde_json::json!({
+        "format": model.parsed.metadata.format,
+        "version": model.parsed.metadata.version,
+        "encoding": model.parsed.metadata.encoding,
+        "name": model.parsed.metadata.name,
+        "englishName": model.parsed.metadata.english_name,
+        "comment": model.parsed.metadata.comment,
+        "englishComment": model.parsed.metadata.english_comment,
+        "counts": {
+            "vertices": model.parsed.metadata.counts.vertices,
+            "faces": model.parsed.metadata.counts.faces,
+            "materials": model.parsed.metadata.counts.materials,
+            "bones": model.parsed.metadata.counts.bones,
+            "morphs": model.parsed.metadata.counts.morphs,
+            "displayFrames": model.parsed.metadata.counts.display_frames,
+            "rigidBodies": model.parsed.metadata.counts.rigid_bodies,
+            "joints": model.parsed.metadata.counts.joints
+        },
+        "indexSizes": {
+            "vertex": model.parsed.metadata.index_sizes.vertex,
+            "texture": model.parsed.metadata.index_sizes.texture,
+            "material": model.parsed.metadata.index_sizes.material,
+            "bone": model.parsed.metadata.index_sizes.bone,
+            "morph": model.parsed.metadata.index_sizes.morph,
+            "rigidBody": model.parsed.metadata.index_sizes.rigid_body
+        },
+        "additionalUvCount": model.parsed.metadata.additional_uv_count,
+        "materials": model.parsed.materials,
+        "bones": model.parsed.skeleton.bones,
+        "morphs": model.parsed.morphs,
+        "displayFrames": model.parsed.display_frames,
+        "rigidBodies": model.parsed.rigid_bodies,
+        "joints": model.parsed.joints
+    });
+
+    match serde_json::to_vec(&json) {
+        Ok(bytes) => byte_buffer_from_vec(bytes),
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+fn null_if_empty<T>(slice: &[T]) -> *const T {
+    if slice.is_empty() {
+        ptr::null()
+    } else {
+        slice.as_ptr()
     }
 }
 
@@ -3058,6 +3405,435 @@ mod tests {
 
         unsafe {
             mmd_runtime_model_free(model);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Parsed-model (PmxParsedModel) C ABI tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parsed_model_create_from_pmx_bytes_returns_non_null_for_valid_fixture() {
+        // Re-use export_pmx_from_parts to produce a valid PMX byte buffer,
+        // then feed it into the parsed model constructor.
+        let metadata = serde_json::json!({
+            "name": "parsed-ffi-test",
+            "englishName": "parsed-ffi-test-en",
+            "comment": "created for parsed-model C ABI test",
+            "encoding": "utf-8",
+            "indexSizes": {
+                "vertex": 1,
+                "texture": 1,
+                "material": 1,
+                "bone": 1,
+                "morph": 1,
+                "rigidBody": 1
+            },
+            "materialName": "test-mat"
+        })
+        .to_string();
+        let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+
+        let buffer = unsafe {
+            mmd_runtime_export_pmx_from_parts(
+                metadata.as_ptr(),
+                metadata.len(),
+                positions.as_ptr(),
+                3,
+                normals.as_ptr(),
+                uvs.as_ptr(),
+                indices.as_ptr(),
+                indices.len(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        assert!(!buffer.data.is_null());
+        assert!(buffer.len > 0);
+
+        let parsed =
+            unsafe { mmd_runtime_parsed_model_create_from_pmx_bytes(buffer.data, buffer.len) };
+        assert!(!parsed.is_null());
+
+        unsafe {
+            mmd_runtime_parsed_model_free(parsed);
+            mmd_runtime_byte_buffer_free(buffer);
+        }
+    }
+
+    #[test]
+    fn parsed_model_counts_match_fixture() {
+        let metadata = serde_json::json!({
+            "name": "count-test",
+            "encoding": "utf-8",
+            "indexSizes": {
+                "vertex": 1,
+                "texture": 1,
+                "material": 1,
+                "bone": 1,
+                "morph": 1,
+                "rigidBody": 1
+            },
+            "materialName": "mat"
+        })
+        .to_string();
+        let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+
+        let buffer = unsafe {
+            mmd_runtime_export_pmx_from_parts(
+                metadata.as_ptr(),
+                metadata.len(),
+                positions.as_ptr(),
+                3,
+                normals.as_ptr(),
+                uvs.as_ptr(),
+                indices.as_ptr(),
+                indices.len(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        let parsed =
+            unsafe { mmd_runtime_parsed_model_create_from_pmx_bytes(buffer.data, buffer.len) };
+        assert!(!parsed.is_null());
+
+        assert_eq!(unsafe { mmd_runtime_parsed_model_vertex_count(parsed) }, 3);
+        assert_eq!(unsafe { mmd_runtime_parsed_model_index_count(parsed) }, 3);
+        assert_eq!(
+            unsafe { mmd_runtime_parsed_model_material_group_count(parsed) },
+            1
+        );
+
+        unsafe {
+            mmd_runtime_parsed_model_free(parsed);
+            mmd_runtime_byte_buffer_free(buffer);
+        }
+    }
+
+    #[test]
+    fn parsed_model_pointer_accessors_return_non_null_for_valid_model() {
+        let metadata = serde_json::json!({
+            "name": "ptr-test",
+            "encoding": "utf-8",
+            "indexSizes": {
+                "vertex": 1,
+                "texture": 1,
+                "material": 1,
+                "bone": 1,
+                "morph": 1,
+                "rigidBody": 1
+            },
+            "materialName": "mat"
+        })
+        .to_string();
+        let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+
+        let buffer = unsafe {
+            mmd_runtime_export_pmx_from_parts(
+                metadata.as_ptr(),
+                metadata.len(),
+                positions.as_ptr(),
+                3,
+                normals.as_ptr(),
+                uvs.as_ptr(),
+                indices.as_ptr(),
+                indices.len(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        let parsed =
+            unsafe { mmd_runtime_parsed_model_create_from_pmx_bytes(buffer.data, buffer.len) };
+        assert!(!parsed.is_null());
+
+        assert!(!unsafe { mmd_runtime_parsed_model_positions(parsed) }.is_null());
+        assert!(!unsafe { mmd_runtime_parsed_model_normals(parsed) }.is_null());
+        assert!(!unsafe { mmd_runtime_parsed_model_uvs(parsed) }.is_null());
+        assert!(!unsafe { mmd_runtime_parsed_model_edge_scale(parsed) }.is_null());
+        assert!(!unsafe { mmd_runtime_parsed_model_indices(parsed) }.is_null());
+        assert!(!unsafe { mmd_runtime_parsed_model_skin_indices(parsed) }.is_null());
+        assert!(!unsafe { mmd_runtime_parsed_model_skin_weights(parsed) }.is_null());
+        assert!(!unsafe { mmd_runtime_parsed_model_material_groups(parsed) }.is_null());
+
+        unsafe {
+            mmd_runtime_parsed_model_free(parsed);
+            mmd_runtime_byte_buffer_free(buffer);
+        }
+    }
+
+    #[test]
+    fn parsed_model_material_groups_triples_match_fixture() {
+        let metadata = serde_json::json!({
+            "name": "mat-group-test",
+            "encoding": "utf-8",
+            "indexSizes": {
+                "vertex": 1,
+                "texture": 1,
+                "material": 1,
+                "bone": 1,
+                "morph": 1,
+                "rigidBody": 1
+            },
+            "materialName": "only-mat"
+        })
+        .to_string();
+        let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+
+        let buffer = unsafe {
+            mmd_runtime_export_pmx_from_parts(
+                metadata.as_ptr(),
+                metadata.len(),
+                positions.as_ptr(),
+                3,
+                normals.as_ptr(),
+                uvs.as_ptr(),
+                indices.as_ptr(),
+                indices.len(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        let parsed =
+            unsafe { mmd_runtime_parsed_model_create_from_pmx_bytes(buffer.data, buffer.len) };
+        assert!(!parsed.is_null());
+
+        let groups_ptr = unsafe { mmd_runtime_parsed_model_material_groups(parsed) };
+        let group_count = unsafe { mmd_runtime_parsed_model_material_group_count(parsed) };
+        assert_eq!(group_count, 1);
+
+        // Triple: (start=0, count=3, material_index=0)
+        let triples = unsafe { slice::from_raw_parts(groups_ptr, group_count * 3) };
+        assert_eq!(triples[0], 0); // start
+        assert_eq!(triples[1], 3); // count (3 indices = 1 face)
+        assert_eq!(triples[2], 0); // material_index
+
+        unsafe {
+            mmd_runtime_parsed_model_free(parsed);
+            mmd_runtime_byte_buffer_free(buffer);
+        }
+    }
+
+    #[test]
+    fn parsed_model_metadata_json_is_valid_json() {
+        let metadata = serde_json::json!({
+            "name": "json-test",
+            "englishName": "json-test-en",
+            "encoding": "utf-8",
+            "indexSizes": {
+                "vertex": 1,
+                "texture": 1,
+                "material": 1,
+                "bone": 1,
+                "morph": 1,
+                "rigidBody": 1
+            },
+            "materialName": "json-mat"
+        })
+        .to_string();
+        let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+
+        let buffer = unsafe {
+            mmd_runtime_export_pmx_from_parts(
+                metadata.as_ptr(),
+                metadata.len(),
+                positions.as_ptr(),
+                3,
+                normals.as_ptr(),
+                uvs.as_ptr(),
+                indices.as_ptr(),
+                indices.len(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        let parsed =
+            unsafe { mmd_runtime_parsed_model_create_from_pmx_bytes(buffer.data, buffer.len) };
+        assert!(!parsed.is_null());
+
+        let json_buf = unsafe { mmd_runtime_parsed_model_metadata_json(parsed) };
+        assert!(!json_buf.data.is_null());
+        assert!(json_buf.len > 0);
+
+        // Validate it parses as JSON and contains expected keys.
+        let json_bytes = unsafe { slice::from_raw_parts(json_buf.data, json_buf.len) };
+        let json_str = str::from_utf8(json_bytes).expect("metadata JSON must be valid UTF-8");
+        let json_value: serde_json::Value =
+            serde_json::from_str(json_str).expect("metadata JSON must be parseable");
+
+        // Check structure
+        assert_eq!(json_value["name"], "json-test");
+        assert_eq!(json_value["counts"]["vertices"], 3);
+        assert_eq!(json_value["counts"]["materials"], 1);
+        assert_eq!(json_value["counts"]["bones"], 1);
+        assert_eq!(json_value["materials"][0]["name"], "json-mat");
+
+        // Ensure hot arrays are NOT present
+        assert!(json_value.get("positions").is_none());
+        assert!(json_value.get("normals").is_none());
+        assert!(json_value.get("uvs").is_none());
+        assert!(json_value.get("indices").is_none());
+
+        unsafe {
+            mmd_runtime_byte_buffer_free(json_buf);
+            mmd_runtime_parsed_model_free(parsed);
+            mmd_runtime_byte_buffer_free(buffer);
+        }
+    }
+
+    #[test]
+    fn parsed_model_null_input_returns_safe_defaults() {
+        assert!(
+            unsafe { mmd_runtime_parsed_model_create_from_pmx_bytes(ptr::null(), 0) }.is_null()
+        );
+        assert!(
+            unsafe { mmd_runtime_parsed_model_create_from_pmx_bytes(ptr::null(), 100) }.is_null()
+        );
+        let dummy = 0u8;
+        assert!(
+            unsafe { mmd_runtime_parsed_model_create_from_pmx_bytes(&dummy as *const u8, 0) }
+                .is_null()
+        );
+
+        assert_eq!(
+            unsafe { mmd_runtime_parsed_model_vertex_count(ptr::null()) },
+            0
+        );
+        assert_eq!(
+            unsafe { mmd_runtime_parsed_model_index_count(ptr::null()) },
+            0
+        );
+        assert_eq!(
+            unsafe { mmd_runtime_parsed_model_material_group_count(ptr::null()) },
+            0
+        );
+
+        assert!(unsafe { mmd_runtime_parsed_model_positions(ptr::null()) }.is_null());
+        assert!(unsafe { mmd_runtime_parsed_model_normals(ptr::null()) }.is_null());
+        assert!(unsafe { mmd_runtime_parsed_model_uvs(ptr::null()) }.is_null());
+        assert!(unsafe { mmd_runtime_parsed_model_edge_scale(ptr::null()) }.is_null());
+        assert!(unsafe { mmd_runtime_parsed_model_indices(ptr::null()) }.is_null());
+        assert!(unsafe { mmd_runtime_parsed_model_skin_indices(ptr::null()) }.is_null());
+        assert!(unsafe { mmd_runtime_parsed_model_skin_weights(ptr::null()) }.is_null());
+        assert!(unsafe { mmd_runtime_parsed_model_material_groups(ptr::null()) }.is_null());
+
+        // metadata_json on null returns empty buffer
+        let empty = unsafe { mmd_runtime_parsed_model_metadata_json(ptr::null()) };
+        assert!(empty.data.is_null());
+        assert_eq!(empty.len, 0);
+
+        // free of null is safe
+        unsafe { mmd_runtime_parsed_model_free(ptr::null_mut()) };
+    }
+
+    #[test]
+    fn parsed_model_rejects_garbage_bytes() {
+        let garbage = [0u8; 32];
+        let parsed = unsafe {
+            mmd_runtime_parsed_model_create_from_pmx_bytes(garbage.as_ptr(), garbage.len())
+        };
+        assert!(parsed.is_null());
+    }
+
+    #[test]
+    fn parsed_model_data_values_are_correct() {
+        // Verify actual data content through pointer accessors.
+        let metadata = serde_json::json!({
+            "name": "data-test",
+            "encoding": "utf-8",
+            "indexSizes": {
+                "vertex": 1,
+                "texture": 1,
+                "material": 1,
+                "bone": 1,
+                "morph": 1,
+                "rigidBody": 1
+            },
+            "materialName": "data-mat"
+        })
+        .to_string();
+        let positions = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let normals = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs = [0.0, 0.0, 0.5, 0.5, 1.0, 1.0];
+        let indices = [0, 1, 2];
+
+        let buffer = unsafe {
+            mmd_runtime_export_pmx_from_parts(
+                metadata.as_ptr(),
+                metadata.len(),
+                positions.as_ptr(),
+                3,
+                normals.as_ptr(),
+                uvs.as_ptr(),
+                indices.as_ptr(),
+                indices.len(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        let parsed =
+            unsafe { mmd_runtime_parsed_model_create_from_pmx_bytes(buffer.data, buffer.len) };
+        assert!(!parsed.is_null());
+
+        // Check positions
+        let pos_ptr = unsafe { mmd_runtime_parsed_model_positions(parsed) };
+        let pos_slice = unsafe { slice::from_raw_parts(pos_ptr, 9) };
+        assert_eq!(&pos_slice, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+
+        // Check normals
+        let nrm_ptr = unsafe { mmd_runtime_parsed_model_normals(parsed) };
+        let nrm_slice = unsafe { slice::from_raw_parts(nrm_ptr, 9) };
+        assert_eq!(nrm_slice[0..3], [0.0, 0.0, 1.0]);
+
+        // Check UVs
+        let uv_ptr = unsafe { mmd_runtime_parsed_model_uvs(parsed) };
+        let uv_slice = unsafe { slice::from_raw_parts(uv_ptr, 6) };
+        assert_eq!(&uv_slice, &[0.0, 0.0, 0.5, 0.5, 1.0, 1.0]);
+
+        // Check indices
+        let idx_ptr = unsafe { mmd_runtime_parsed_model_indices(parsed) };
+        let idx_slice = unsafe { slice::from_raw_parts(idx_ptr, 3) };
+        assert_eq!(&idx_slice, &[0, 1, 2]);
+
+        // Check edge_scale (should have default 1.0 for all vertices)
+        let es_ptr = unsafe { mmd_runtime_parsed_model_edge_scale(parsed) };
+        let es_slice = unsafe { slice::from_raw_parts(es_ptr, 3) };
+        assert_eq!(&es_slice, &[1.0, 1.0, 1.0]);
+
+        // Check skin indices (should be 0 for all 4 slots per vertex)
+        let si_ptr = unsafe { mmd_runtime_parsed_model_skin_indices(parsed) };
+        let si_slice = unsafe { slice::from_raw_parts(si_ptr, 12) };
+        assert!(si_slice.iter().all(|&v| v == 0));
+
+        // Check skin weights (should be [1,0,0,0] for each vertex)
+        let sw_ptr = unsafe { mmd_runtime_parsed_model_skin_weights(parsed) };
+        let sw_slice = unsafe { slice::from_raw_parts(sw_ptr, 12) };
+        assert_eq!(&sw_slice[0..4], &[1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(&sw_slice[4..8], &[1.0, 0.0, 0.0, 0.0]);
+
+        unsafe {
+            mmd_runtime_parsed_model_free(parsed);
+            mmd_runtime_byte_buffer_free(buffer);
         }
     }
 }

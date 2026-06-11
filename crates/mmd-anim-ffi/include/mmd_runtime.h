@@ -19,9 +19,10 @@ extern "C" {
 /*  Opaque handle types                                               */
 /* ------------------------------------------------------------------ */
 
-typedef struct mmd_runtime_model_t    mmd_runtime_model_t;
-typedef struct mmd_runtime_instance_t mmd_runtime_instance_t;
-typedef struct mmd_runtime_clip_t     mmd_runtime_clip_t;
+typedef struct mmd_runtime_model_t         mmd_runtime_model_t;
+typedef struct mmd_runtime_instance_t      mmd_runtime_instance_t;
+typedef struct mmd_runtime_clip_t          mmd_runtime_clip_t;
+typedef struct mmd_runtime_parsed_model_t  mmd_runtime_parsed_model_t;
 
 /* ------------------------------------------------------------------ */
 /*  Flag constants                                                    */
@@ -357,6 +358,66 @@ bool mmd_runtime_clip_frame_range(
     uint32_t*                 out_last_frame);
 
 void mmd_runtime_clip_free(mmd_runtime_clip_t* clip);
+
+/* ------------------------------------------------------------------ */
+/*  Parsed model (full PMX metadata)                                   */
+/* ------------------------------------------------------------------ */
+
+mmd_runtime_parsed_model_t* mmd_runtime_parsed_model_create_from_pmx_bytes(
+    const uint8_t* data,
+    size_t         len);
+
+void mmd_runtime_parsed_model_free(
+    mmd_runtime_parsed_model_t* model);
+
+size_t mmd_runtime_parsed_model_vertex_count(
+    const mmd_runtime_parsed_model_t* model);
+
+size_t mmd_runtime_parsed_model_index_count(
+    const mmd_runtime_parsed_model_t* model);
+
+size_t mmd_runtime_parsed_model_material_group_count(
+    const mmd_runtime_parsed_model_t* model);
+
+/*  Pointer accessors: returned pointers are valid until free.        */
+/*  Null model or empty array returns NULL.                           */
+
+/*  vertex_count * 3 f32 values */
+const float* mmd_runtime_parsed_model_positions(
+    const mmd_runtime_parsed_model_t* model);
+
+/*  vertex_count * 3 f32 values */
+const float* mmd_runtime_parsed_model_normals(
+    const mmd_runtime_parsed_model_t* model);
+
+/*  vertex_count * 2 f32 values */
+const float* mmd_runtime_parsed_model_uvs(
+    const mmd_runtime_parsed_model_t* model);
+
+/*  vertex_count f32 values */
+const float* mmd_runtime_parsed_model_edge_scale(
+    const mmd_runtime_parsed_model_t* model);
+
+/*  index_count u32 values (three per triangle) */
+const uint32_t* mmd_runtime_parsed_model_indices(
+    const mmd_runtime_parsed_model_t* model);
+
+/*  vertex_count * 4 u32 values */
+const uint32_t* mmd_runtime_parsed_model_skin_indices(
+    const mmd_runtime_parsed_model_t* model);
+
+/*  vertex_count * 4 f32 values */
+const float* mmd_runtime_parsed_model_skin_weights(
+    const mmd_runtime_parsed_model_t* model);
+
+/*  material_group_count * 3 u32 values: (start, count, material_index) */
+const uint32_t* mmd_runtime_parsed_model_material_groups(
+    const mmd_runtime_parsed_model_t* model);
+
+/*  Returns a JSON byte buffer with non-hot metadata (everything except
+    large geometry arrays). Must be freed with mmd_runtime_byte_buffer_free. */
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parsed_model_metadata_json(
+    const mmd_runtime_parsed_model_t* model);
 
 #ifdef __cplusplus
 }

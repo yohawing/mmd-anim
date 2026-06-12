@@ -19,6 +19,6 @@ doc = false
 [dependencies]
 glam.workspace = true
 mmd-anim-runtime.workspace = true
-mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.2" }
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.3" }
 mmd-anim-schema.workspace = true
 serde_json.workspace = true

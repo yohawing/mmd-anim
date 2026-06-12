@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.3 - 2026-06-12
+
+Patch release for limited PMM writing and RabbitHole IK stability.
+
+### Added
+
+- Added limited PMM manifest/header export for the PMM data currently preserved
+  by `PmmParsedManifest`, including project settings, initial model slots, and
+  asset references.
+- Added `export-pmm-scene` CLI support for creating a limited PMMv2 scene from a
+  PMX model and VMD motion, with a reparse check and export summary.
+
+### Changed
+
+- Updated constrained IK solving to apply multi-axis limits during each link
+  step and to use Saba-style total-axis solving for single-axis plane links,
+  improving RabbitHole leg stability without the experimental TwoBone path.
+
+### Fixed
+
+- Fixed a RabbitHole regression where the left knee could visibly jitter around
+  frames 780-800 after repeated IK iterations.
+
 ## 0.1.2 - 2026-06-06
 
 Patch release for IK runtime tuning, diagnostics, and maintainer numeric
@@ -64,5 +87,7 @@ Initial experimental release of `mmd-anim`.
 
 - API, ABI, and WASM surfaces are experimental and may change before `0.2.0`.
 - PMD runtime import is partial and does not claim full renderer-side PMD parity.
-- PMM exporter is not provided until a full project graph DTO exists.
+- Full semantic PMM project graph exporter is not provided until a full project
+  graph DTO exists. Lossless parsed-byte export for parsed PMM data and limited
+  scene export exist; full graph export remains unfinished.
 - MMDDumper / GoldenOracle and real-asset corpus checks are maintainer-local QA references, not public release dependencies.

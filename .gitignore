@@ -35,3 +35,5 @@ crates/mmd-anim-wasm/harness/pkg-web/
 
 # local dev artifacts
 artifacts/
+dist/
+examples/viewer/

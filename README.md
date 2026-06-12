@@ -16,13 +16,11 @@ It is tested against data exported from the original MMD and against several
 PMX/VMD assets, but real-world usage is still limited. APIs and features are not
 frozen yet, and breaking changes may happen before 1.0. Feedback is welcome.
 
-PMM support is partial. The current implementation can inspect PMMv1/PMMv2
-metadata, preserve parsed PMM bytes for lossless round trips, and generate a
-limited single-model PMMv2 scene from PMX/VMD inputs through the maintainer CLI.
-This is not a complete semantic PMM exporter yet. MMD GUI loading currently
-depends on MMD-compatible model assets, such as UTF-16 PMX files, and should be
-validated with the guarded smoke scripts before treating generated PMM files as
-usable in MikuMikuDance.
+PMM support is partial. The current release can inspect PMMv1/PMMv2 metadata,
+preserve parsed PMM bytes for lossless round trips, and generate a limited
+single-model PMMv2 scene from PMX/VMD inputs through the maintainer CLI. It is
+not a complete semantic PMM exporter yet, and generated PMM files should be
+validated in MikuMikuDance before production use.
 
 ## Runtime Evaluation
 
@@ -77,9 +75,9 @@ Format support overview. "Loading" means parsing a file into structured data.
 |--------|---------|---------|
 | PMX | model sections + soft-body header diagnostics | writing / JSON conversion / generation from mesh data |
 | PMD | model structure + partial runtime import | writing / JSON conversion |
-| VMD | animation structure | **supported** |
-| PMM | header, timeline, display state, referenced assets, PMMv2 summaries, and selected keyframe payload metadata | partial: lossless parsed-byte round trip, limited source-byte patches, and experimental single-model PMX/VMD scene generation |
-| VPD | pose structure | **supported** |
+| VMD | **supported** | **supported** |
+| VPD | **supported** | **supported** |
+| PMM | header, timeline, display state, referenced assets, PMMv2 summaries, and selected keyframe payload metadata | partial support: lossless parsed-byte round trip, limited source-byte patches, and experimental single-model PMX/VMD scene generation |
 | X/VAC | text X mesh, material, UV, normal, vertex color + VAC settings and raw lines | text X / VAC wrapper writing |
 
 ## Crates

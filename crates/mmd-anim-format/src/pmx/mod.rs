@@ -890,6 +890,8 @@ pub struct PmxParsedGeometry {
     pub uvs: Vec<f32>,
     pub additional_uvs: Vec<Vec<f32>>,
     pub indices: Vec<u32>,
+    #[serde(default)]
+    pub skinning_kinds: Vec<String>,
     pub skin_indices: Vec<u32>,
     pub skin_weights: Vec<f32>,
     pub edge_scale: Vec<f32>,
@@ -1020,6 +1022,8 @@ pub struct PmxParsedIkLimit {
 pub struct PmxParsedMorph {
     pub name: String,
     pub english_name: String,
+    #[serde(default = "default_pmx_morph_panel")]
+    pub panel: String,
     #[serde(rename = "type")]
     pub kind: String,
     pub vertex_offsets: Vec<PmxParsedVertexMorphOffset>,
@@ -1313,6 +1317,8 @@ pub struct PmxPartsMorphDescriptor {
     pub name: String,
     #[serde(default)]
     pub english_name: String,
+    #[serde(default = "default_pmx_morph_panel")]
+    pub panel: String,
     #[serde(default = "default_pmx_parts_morph_kind", alias = "type")]
     pub kind: String,
     #[serde(default)]
@@ -1500,6 +1506,43 @@ fn default_pmx_parts_morph_kind() -> String {
     "vertex".to_owned()
 }
 
+fn default_pmx_morph_panel() -> String {
+    "other".to_owned()
+}
+
+fn pmx_skinning_kind_name(weight_type: u8) -> &'static str {
+    match weight_type {
+        0 => "bdef1",
+        1 => "bdef2",
+        2 => "bdef4",
+        3 => "sdef",
+        4 => "qdef",
+        _ => "unknown",
+    }
+}
+
+fn pmx_morph_panel_name(panel: u8) -> &'static str {
+    match panel {
+        1 => "brow",
+        2 => "eye",
+        3 => "mouth",
+        4 => "other",
+        0 => "system",
+        _ => "unknown",
+    }
+}
+
+fn pmx_morph_panel_byte(panel: &str) -> u8 {
+    match panel {
+        "brow" => 1,
+        "eye" => 2,
+        "mouth" => 3,
+        "other" => 4,
+        "system" => 0,
+        _ => 4,
+    }
+}
+
 fn default_pmx_parts_rigid_body_shape() -> String {
     "sphere".to_owned()
 }
@@ -1636,6 +1679,7 @@ pub fn build_pmx_model_from_parts(input: PmxPartsInput<'_>) -> Result<PmxParsedM
             uvs: input.uvs_xy.to_vec(),
             additional_uvs: Vec::new(),
             indices: input.indices.to_vec(),
+            skinning_kinds: vec!["bdef4".to_owned(); vertex_count],
             skin_indices,
             skin_weights,
             edge_scale,
@@ -2291,6 +2335,7 @@ fn pmx_parts_morph_from_descriptor(morph: &PmxPartsMorphDescriptor) -> PmxParsed
     let mut parsed = PmxParsedMorph {
         name: morph.name.clone(),
         english_name: morph.english_name.clone(),
+        panel: morph.panel.clone(),
         kind: morph.kind.clone(),
         vertex_offsets: Vec::new(),
         group_offsets: Vec::new(),
@@ -2715,7 +2760,7 @@ pub fn export_pmx_model(model: &PmxParsedModel) -> Vec<u8> {
     for morph in &model.morphs {
         write_pmx_string(&mut out, &morph.name, encoding);
         write_pmx_string(&mut out, &morph.english_name, encoding);
-        out.push(0);
+        out.push(pmx_morph_panel_byte(&morph.panel));
         let morph_type = morph_type_byte(morph);
         out.push(morph_type);
         write_i32(&mut out, morph_offset_count(morph, morph_type) as i32);
@@ -2928,6 +2973,7 @@ fn read_parsed_geometry(
         vec![Vec::with_capacity(skin_capacity); header.extra_uv_count as usize];
     let mut skin_indices = Vec::with_capacity(skin_capacity);
     let mut skin_weights = Vec::with_capacity(skin_capacity);
+    let mut skinning_kinds = Vec::with_capacity(vertex_count);
     let mut edge_scale = Vec::with_capacity(vertex_count);
     let mut sdef_enabled = vec![0.0f32; vertex_count];
     let mut sdef_c = vec![0.0f32; vertex_count * 3];
@@ -2945,6 +2991,7 @@ fn read_parsed_geometry(
             uv.extend_from_slice(&r.read_vec4_array()?);
         }
         let weight_type = r.read_u8()?;
+        skinning_kinds.push(pmx_skinning_kind_name(weight_type).to_owned());
         let mut indices = [0u32; 4];
         let mut weights = [0.0f32; 4];
         match weight_type {
@@ -3016,6 +3063,7 @@ fn read_parsed_geometry(
         uvs,
         additional_uvs,
         indices,
+        skinning_kinds,
         skin_indices,
         skin_weights,
         edge_scale,
@@ -3457,7 +3505,7 @@ fn read_parsed_morphs(
     for _ in 0..count {
         let name = r.read_string(header.encoding)?;
         let english_name = r.read_string(header.encoding)?;
-        let _panel = r.read_u8()?;
+        let panel = pmx_morph_panel_name(r.read_u8()?).to_owned();
         let morph_type = r.read_u8()?;
         let min_offset_size = match morph_type {
             0 => header.morph_index_size as usize + 4,
@@ -3473,6 +3521,7 @@ fn read_parsed_morphs(
         let mut morph = PmxParsedMorph {
             name,
             english_name,
+            panel,
             kind: match morph_type {
                 0 => "group",
                 1 => "vertex",
@@ -4008,6 +4057,7 @@ mod tests {
                 uvs: vec![0.25, 0.75],
                 additional_uvs: vec![vec![1.0, 2.0, 3.0, 4.0]],
                 indices: vec![0, 0, 0],
+                skinning_kinds: vec!["bdef1".to_owned()],
                 skin_indices: vec![0, 0, 0, 0],
                 skin_weights: vec![1.0, 0.0, 0.0, 0.0],
                 edge_scale: vec![1.25],
@@ -4067,6 +4117,7 @@ mod tests {
             morphs: vec![PmxParsedMorph {
                 name: "Smile".to_owned(),
                 english_name: "SmileEn".to_owned(),
+                panel: "brow".to_owned(),
                 kind: "vertex".to_owned(),
                 vertex_offsets: vec![PmxParsedVertexMorphOffset {
                     vertex_index: 0,

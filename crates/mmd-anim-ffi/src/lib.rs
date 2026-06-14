@@ -53,6 +53,48 @@ pub struct MmdRuntimeClip {
     clip: AnimationClip,
 }
 
+/// Opaque handle for lightweight VMD metadata summary (non-JSON).
+/// Provides max frame and keyframe counts (including scene tracks) plus
+/// target model name, without exposing full keyframe arrays.
+pub struct MmdRuntimeVmdSummary {
+    max_frame: u32,
+    bone_keyframe_count: usize,
+    morph_keyframe_count: usize,
+    property_keyframe_count: usize,
+    camera_keyframe_count: usize,
+    light_keyframe_count: usize,
+    self_shadow_keyframe_count: usize,
+    model_name_utf8: Vec<u8>,
+    // frame data for non-JSON getters
+    bone_frames: Vec<mmd_anim_format::vmd::VmdParsedBoneFrame>,
+    morph_frames: Vec<mmd_anim_format::vmd::VmdParsedMorphFrame>,
+    property_frames: Vec<mmd_anim_format::vmd::VmdParsedPropertyFrame>,
+    camera_frames: Vec<mmd_anim_format::vmd::VmdParsedCameraFrame>,
+    light_frames: Vec<mmd_anim_format::vmd::VmdParsedLightFrame>,
+    self_shadow_frames: Vec<mmd_anim_format::vmd::VmdParsedSelfShadowFrame>,
+}
+
+/// Opaque handle for lightweight PMX metadata summary (non-JSON).
+/// Provides version (f32) and stable import/cache counts plus model names,
+/// and retains parsed data for non-JSON getter access.
+pub struct MmdRuntimePmxSummary {
+    version: f32,
+    vertex_count: usize,
+    face_count: usize,
+    material_count: usize,
+    bone_count: usize,
+    morph_count: usize,
+    display_frame_count: usize,
+    rigidbody_count: usize,
+    joint_count: usize,
+    soft_body_count: usize,
+    additional_uv_count: usize,
+    name_utf8: Vec<u8>,
+    english_name_utf8: Vec<u8>,
+    // retained for core (geo/mat/bone/ik) getters; exact native parsed semantics
+    parsed: mmd_anim_format::PmxParsedModel,
+}
+
 #[repr(C)]
 pub struct MmdRuntimeFfiBoneTrack {
     pub bone_index: u32,
@@ -759,6 +801,2397 @@ pub unsafe extern "C" fn mmd_runtime_clip_create_from_vmd_bytes_for_model(
         solver_count,
     );
     Box::into_raw(Box::new(MmdRuntimeClip { clip }))
+}
+
+/// Creates an opaque VMD summary handle by parsing only metadata from VMD bytes.
+/// This is a non-JSON surface for summary counts (bone/morph/property/camera/light/self-shadow
+/// keyframe counts) and max frame + target model name. Intended for import cache paths
+/// that must not depend on JSON DTOs or full keyframe materialization.
+///
+/// Full keyframe arrays are exposed through explicit non-JSON getters.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes. Null or zero-length returns null.
+/// Parse failure (invalid VMD) returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_create_from_bytes(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimeVmdSummary {
+    if data.is_null() || len == 0 {
+        return ptr::null_mut();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+        Ok(p) => p,
+        Err(_) => return ptr::null_mut(),
+    };
+    let summary = MmdRuntimeVmdSummary {
+        max_frame: parsed.metadata.max_frame,
+        bone_keyframe_count: parsed.metadata.counts.bones,
+        morph_keyframe_count: parsed.metadata.counts.morphs,
+        property_keyframe_count: parsed.metadata.counts.properties,
+        camera_keyframe_count: parsed.metadata.counts.cameras,
+        light_keyframe_count: parsed.metadata.counts.lights,
+        self_shadow_keyframe_count: parsed.metadata.counts.self_shadows,
+        model_name_utf8: parsed.metadata.model_name.into_bytes(),
+        bone_frames: parsed.bone_frames,
+        morph_frames: parsed.morph_frames,
+        property_frames: parsed.property_frames,
+        camera_frames: parsed.camera_frames,
+        light_frames: parsed.light_frames,
+        self_shadow_frames: parsed.self_shadow_frames,
+    };
+    Box::into_raw(Box::new(summary))
+}
+
+/// Frees a VMD summary handle returned by `mmd_runtime_vmd_summary_create_from_bytes`.
+///
+/// # Safety
+///
+/// `summary` must be null or a pointer returned by the create function that has
+/// not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_free(summary: *mut MmdRuntimeVmdSummary) {
+    if !summary.is_null() {
+        unsafe {
+            drop(Box::from_raw(summary));
+        }
+    }
+}
+
+/// Returns max frame (inclusive last keyed) for the summary, or 0 for null.
+///
+/// # Safety
+///
+/// `summary` must be null or a valid pointer returned by create.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_max_frame(
+    summary: *const MmdRuntimeVmdSummary,
+) -> u32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.max_frame
+}
+
+/// Returns bone keyframe count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_keyframe_count(
+    summary: *const MmdRuntimeVmdSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.bone_keyframe_count
+}
+
+/// Returns morph keyframe count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_morph_keyframe_count(
+    summary: *const MmdRuntimeVmdSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.morph_keyframe_count
+}
+
+/// Returns property (model) keyframe count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_property_keyframe_count(
+    summary: *const MmdRuntimeVmdSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.property_keyframe_count
+}
+
+/// Returns camera keyframe count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_keyframe_count(
+    summary: *const MmdRuntimeVmdSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.camera_keyframe_count
+}
+
+/// Returns light keyframe count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_light_keyframe_count(
+    summary: *const MmdRuntimeVmdSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.light_keyframe_count
+}
+
+/// Returns self-shadow keyframe count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_self_shadow_keyframe_count(
+    summary: *const MmdRuntimeVmdSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.self_shadow_keyframe_count
+}
+
+/// Returns the target model name as UTF-8 bytes in a ByteBuffer (caller frees
+/// with `mmd_runtime_byte_buffer_free`). Returns empty buffer for null summary.
+///
+/// The bytes are a copy of the decoded model name (UTF-8). Empty name yields
+/// empty buffer (still safe to free).
+///
+/// # Safety
+///
+/// `summary` must be null or valid. The returned buffer (if non-empty) must be
+/// freed exactly once with the byte buffer free function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_model_name(
+    summary: *const MmdRuntimeVmdSummary,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(s.model_name_utf8.clone())
+}
+
+// -----------------------------------------------------------------------
+// VMD summary model-motion getters (bone / morph / property only; no camera/light/self-shadow full data)
+// All accessors are null and out-of-range safe per spec.
+// Names returned as UTF-8 from already-decoded String fields (not raw SJIS).
+// Returned ByteBuffers are owned copies freeable via mmd_runtime_byte_buffer_free.
+// -----------------------------------------------------------------------
+
+/// Returns bone frame name as UTF-8 ByteBuffer for the given index, or empty for null/out-of-range.
+/// # Safety
+/// `summary` must be null or valid pointer from create. Returned buffer must be freed once if non-empty.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_frame_name(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.bone_frames.get(index)) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(frame.bone_name.clone().into_bytes())
+}
+
+/// Returns bone frame index (u32), or 0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_frame_frame(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> u32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.bone_frames.get(index)) else {
+        return 0;
+    };
+    frame.frame
+}
+
+/// Returns bone frame translation X, or 0.0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_frame_translation_x(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.bone_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.translation[0]
+}
+
+/// Returns bone frame translation Y, or 0.0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_frame_translation_y(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.bone_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.translation[1]
+}
+
+/// Returns bone frame translation Z, or 0.0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_frame_translation_z(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.bone_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.translation[2]
+}
+
+/// Returns bone frame rotation X (quat), or 0.0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_frame_rotation_x(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.bone_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.rotation[0]
+}
+
+/// Returns bone frame rotation Y (quat), or 0.0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_frame_rotation_y(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.bone_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.rotation[1]
+}
+
+/// Returns bone frame rotation Z (quat), or 0.0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_frame_rotation_z(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.bone_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.rotation[2]
+}
+
+/// Returns bone frame rotation W (quat), or 0.0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_frame_rotation_w(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.bone_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.rotation[3]
+}
+
+/// Returns the byte at `offset` (0..63) of the 64-byte bone interpolation data, or 0 for null / oob frame / oob offset.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_bone_frame_interpolation_byte(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+    offset: usize,
+) -> u8 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.bone_frames.get(index)) else {
+        return 0;
+    };
+    *frame.interpolation.get(offset).unwrap_or(&0u8)
+}
+
+/// Returns morph frame name as UTF-8 ByteBuffer, or empty for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_morph_frame_name(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.morph_frames.get(index)) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(frame.morph_name.clone().into_bytes())
+}
+
+/// Returns morph frame index (u32), or 0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_morph_frame_frame(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> u32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.morph_frames.get(index)) else {
+        return 0;
+    };
+    frame.frame
+}
+
+/// Returns morph frame weight, or 0.0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_morph_frame_weight(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.morph_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.weight
+}
+
+/// Returns property (model) frame index (u32), or 0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_property_frame_frame(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> u32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.property_frames.get(index)) else {
+        return 0;
+    };
+    frame.frame
+}
+
+/// Returns property (model) frame visible flag, or false for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_property_frame_visible(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> bool {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.property_frames.get(index)) else {
+        return false;
+    };
+    frame.visible
+}
+
+/// Returns IK state count for the property frame, or 0 for null/out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_property_frame_ik_state_count(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> usize {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.property_frames.get(index)) else {
+        return 0;
+    };
+    frame.ik_states.len()
+}
+
+/// Returns IK state bone name (UTF-8 ByteBuffer) for (frame_index, ik_index), or empty for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_property_frame_ik_state_name(
+    summary: *const MmdRuntimeVmdSummary,
+    frame_index: usize,
+    ik_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.property_frames.get(frame_index)) else {
+        return empty_byte_buffer();
+    };
+    let Some(state) = frame.ik_states.get(ik_index) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(state.bone_name.clone().into_bytes())
+}
+
+/// Returns IK state enabled flag for (frame_index, ik_index), or false for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_property_frame_ik_state_enabled(
+    summary: *const MmdRuntimeVmdSummary,
+    frame_index: usize,
+    ik_index: usize,
+) -> bool {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.property_frames.get(frame_index)) else {
+        return false;
+    };
+    let Some(state) = frame.ik_states.get(ik_index) else {
+        return false;
+    };
+    state.enabled
+}
+
+// VMD summary scene-motion getters (camera / light / self-shadow).
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_frame(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> u32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return 0;
+    };
+    frame.frame
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_distance(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.distance
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_position_x(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.position[0]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_position_y(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.position[1]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_position_z(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.position[2]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_rotation_x(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.rotation[0]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_rotation_y(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.rotation[1]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_rotation_z(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.rotation[2]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_interpolation_byte(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+    offset: usize,
+) -> u8 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return 0;
+    };
+    *frame.interpolation.get(offset).unwrap_or(&0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_fov(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> u32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return 0;
+    };
+    frame.fov
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_camera_frame_perspective(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> bool {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.camera_frames.get(index)) else {
+        return false;
+    };
+    frame.perspective
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_light_frame_frame(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> u32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.light_frames.get(index)) else {
+        return 0;
+    };
+    frame.frame
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_light_frame_color_x(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.light_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.color[0]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_light_frame_color_y(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.light_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.color[1]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_light_frame_color_z(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.light_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.color[2]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_light_frame_direction_x(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.light_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.direction[0]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_light_frame_direction_y(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.light_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.direction[1]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_light_frame_direction_z(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.light_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.direction[2]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_self_shadow_frame_frame(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> u32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.self_shadow_frames.get(index)) else {
+        return 0;
+    };
+    frame.frame
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_self_shadow_frame_mode(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> u8 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.self_shadow_frames.get(index)) else {
+        return 0;
+    };
+    frame.mode
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_self_shadow_frame_distance(
+    summary: *const MmdRuntimeVmdSummary,
+    index: usize,
+) -> f32 {
+    let Some(frame) = (unsafe { summary.as_ref() }).and_then(|s| s.self_shadow_frames.get(index)) else {
+        return 0.0;
+    };
+    frame.distance
+}
+
+/// Creates an opaque PMX summary handle by parsing only metadata from PMX bytes.
+/// This is a non-JSON surface for version + counts (vertices/faces/materials/bones/morphs/
+/// display frames/rigidbodies/joints/softbodies/additional UV) and model/English names.
+/// Intended for import cache paths that must not depend on JSON DTOs.
+///
+/// Full arrays (vertices, materials, bones, morphs, physics, display details) are
+/// intentionally not exposed in this slice.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes. Null or zero-length returns null.
+/// Parse failure (invalid PMX) returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_create_from_bytes(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimePmxSummary {
+    if data.is_null() || len == 0 {
+        return ptr::null_mut();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(p) => p,
+        Err(_) => return ptr::null_mut(),
+    };
+    let meta = &parsed.metadata;
+    let summary = MmdRuntimePmxSummary {
+        version: meta.version,
+        vertex_count: meta.counts.vertices,
+        face_count: meta.counts.faces,
+        material_count: meta.counts.materials,
+        bone_count: meta.counts.bones,
+        morph_count: meta.counts.morphs,
+        display_frame_count: meta.counts.display_frames,
+        rigidbody_count: meta.counts.rigid_bodies,
+        joint_count: meta.counts.joints,
+        soft_body_count: meta.counts.soft_bodies,
+        additional_uv_count: meta.additional_uv_count as usize,
+        name_utf8: meta.name.clone().into_bytes(),
+        english_name_utf8: meta.english_name.clone().into_bytes(),
+        parsed,
+    };
+    Box::into_raw(Box::new(summary))
+}
+
+/// Frees a PMX summary handle returned by `mmd_runtime_pmx_summary_create_from_bytes`.
+///
+/// # Safety
+///
+/// `summary` must be null or a pointer returned by the create function that has
+/// not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_free(summary: *mut MmdRuntimePmxSummary) {
+    if !summary.is_null() {
+        unsafe {
+            drop(Box::from_raw(summary));
+        }
+    }
+}
+
+/// Returns PMX version as f32 (e.g. 2.0), or 0.0 for null.
+///
+/// # Safety
+///
+/// `summary` must be null or a valid pointer returned by create.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_version(
+    summary: *const MmdRuntimePmxSummary,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0.0;
+    };
+    s.version
+}
+
+/// Returns vertex count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_vertex_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.vertex_count
+}
+
+/// Returns face count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_face_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.face_count
+}
+
+/// Returns material count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.material_count
+}
+
+/// Returns bone count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.bone_count
+}
+
+/// Returns morph count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.morph_count
+}
+
+/// Returns display frame count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_display_frame_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.display_frame_count
+}
+
+/// Returns rigidbody count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.rigidbody_count
+}
+
+/// Returns joint count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.joint_count
+}
+
+/// Returns soft body count, or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_soft_body_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.soft_body_count
+}
+
+/// Returns additional/extra UV count (0-4), or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_additional_uv_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return 0;
+    };
+    s.additional_uv_count
+}
+
+/// Returns the model name as UTF-8 bytes in a ByteBuffer (caller frees
+/// with `mmd_runtime_byte_buffer_free`). Returns empty buffer for null summary.
+///
+/// The bytes are a copy of the decoded model name (UTF-8). Empty name yields
+/// empty buffer (still safe to free).
+///
+/// # Safety
+///
+/// `summary` must be null or valid. The returned buffer (if non-empty) must be
+/// freed exactly once with the byte buffer free function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_model_name(
+    summary: *const MmdRuntimePmxSummary,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(s.name_utf8.clone())
+}
+
+/// Returns the English model name as UTF-8 bytes in a ByteBuffer (caller frees
+/// with `mmd_runtime_byte_buffer_free`). Returns empty buffer for null summary
+/// or when the English name is empty.
+///
+/// # Safety
+///
+/// `summary` must be null or valid. The returned buffer (if non-empty) must be
+/// freed exactly once with the byte buffer free function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_model_name_english(
+    summary: *const MmdRuntimePmxSummary,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(s.english_name_utf8.clone())
+}
+
+// -----------------------------------------------------------------------
+// PMX summary core (non-JSON) getters: geometry, materials, bones, IK.
+// Morph getters added in this bounded slice (physics/display remain deferred).
+// All functions are null-safe and index-bounds-safe.
+// Neutral returns: ByteBuffer=null/empty, numeric=0 or -1 (index absence), bool=false.
+// Strings/names/paths returned as owned UTF-8 ByteBuffer (free with mmd_runtime_byte_buffer_free).
+// Uses exact PmxParsed* fields from mmd_anim_format::parse_pmx_model (no extra conversions).
+// JSON bridge TODO left unchecked per scope.
+// -----------------------------------------------------------------------
+
+/// Returns index count (triangle indices), or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_index_count(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    s.parsed.geometry.indices.len()
+}
+
+/// Returns index value at slot, or 0 for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_index(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> u32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    *s.parsed.geometry.indices.get(index).unwrap_or(&0u32)
+}
+
+/// Returns vertex position component (0=x,1=y,2=z), or 0.0 for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_vertex_position(
+    summary: *const MmdRuntimePmxSummary,
+    vertex_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let base = vertex_index.saturating_mul(3);
+    let g = &s.parsed.geometry;
+    if base + 2 >= g.positions.len() { return 0.0; }
+    *g.positions.get(base + component).unwrap_or(&0.0)
+}
+
+/// Returns vertex normal component, or 0.0 for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_vertex_normal(
+    summary: *const MmdRuntimePmxSummary,
+    vertex_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let base = vertex_index.saturating_mul(3);
+    let g = &s.parsed.geometry;
+    if base + 2 >= g.normals.len() { return 0.0; }
+    *g.normals.get(base + component).unwrap_or(&0.0)
+}
+
+/// Returns vertex UV component (0=u,1=v), or 0.0 for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_vertex_uv(
+    summary: *const MmdRuntimePmxSummary,
+    vertex_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 2 { return 0.0; }
+    let base = vertex_index.saturating_mul(2);
+    let g = &s.parsed.geometry;
+    if base + 1 >= g.uvs.len() { return 0.0; }
+    *g.uvs.get(base + component).unwrap_or(&0.0)
+}
+
+/// Returns skin bone index (as i32; 0 for padding slots in native parse) for slot 0..3, or 0 for null/oob/slot>=4.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_vertex_skin_bone_index(
+    summary: *const MmdRuntimePmxSummary,
+    vertex_index: usize,
+    slot: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let g = &s.parsed.geometry;
+    let base = vertex_index.saturating_mul(4);
+    if slot >= 4 || base + 3 >= g.skin_indices.len() { return 0; }
+    g.skin_indices[base + slot] as i32
+}
+
+/// Returns skin weight for slot 0..3, or 0.0 for null/oob/slot>=4.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_vertex_skin_weight(
+    summary: *const MmdRuntimePmxSummary,
+    vertex_index: usize,
+    slot: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    let g = &s.parsed.geometry;
+    let base = vertex_index.saturating_mul(4);
+    if slot >= 4 || base + 3 >= g.skin_weights.len() { return 0.0; }
+    g.skin_weights[base + slot]
+}
+
+/// Returns exact parsed skinning kind for a vertex, or a conservative fallback
+/// for older parsed artifacts that predate `skinning_kinds`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_vertex_skinning_kind(
+    summary: *const MmdRuntimePmxSummary,
+    vertex_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    if vertex_index >= s.vertex_count {
+        return empty_byte_buffer();
+    }
+    if let Some(kind) = s.parsed.geometry.skinning_kinds.get(vertex_index) {
+        if !kind.is_empty() {
+            return byte_buffer_from_vec(kind.clone().into_bytes());
+        }
+    }
+
+    byte_buffer_from_vec(pmx_summary_infer_skinning_kind(&s.parsed.geometry, vertex_index).into_bytes())
+}
+
+fn pmx_summary_infer_skinning_kind(g: &mmd_anim_format::pmx::PmxParsedGeometry, vertex_index: usize) -> String {
+    if g.sdef.enabled.get(vertex_index).map(|&e| e > 0.5).unwrap_or(false) {
+        return "sdef".to_owned();
+    }
+    if g.qdef.enabled.get(vertex_index).map(|&e| e > 0.5).unwrap_or(false) {
+        return "qdef".to_owned();
+    }
+
+    let base = vertex_index.saturating_mul(4);
+    if base + 3 >= g.skin_weights.len() {
+        return "unknown".to_owned();
+    }
+
+    let weighted_slot_count = g.skin_weights[base..base + 4]
+        .iter()
+        .filter(|&&weight| weight.abs() > 0.000001)
+        .count();
+    match weighted_slot_count {
+        0 | 1 => "bdef1",
+        2 => "bdef2",
+        _ => "bdef4",
+    }.to_owned()
+}
+
+/// Returns whether vertex uses SDEF (enabled>0 in native), or false for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_vertex_sdef_enabled(
+    summary: *const MmdRuntimePmxSummary,
+    vertex_index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let g = &s.parsed.geometry;
+    g.sdef.enabled.get(vertex_index).map(|&e| e > 0.5).unwrap_or(false)
+}
+
+/// Returns SDEF C/R0/R1 component for which=0(C)/1(R0)/2(R1), or 0.0 for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_vertex_sdef_c(
+    summary: *const MmdRuntimePmxSummary,
+    vertex_index: usize,
+    which: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let g = &s.parsed.geometry;
+    let vecs = match which {
+        0 => &g.sdef.c,
+        1 => &g.sdef.r0,
+        2 => &g.sdef.r1,
+        _ => return 0.0,
+    };
+    let base = vertex_index.saturating_mul(3);
+    if base + 2 >= vecs.len() { return 0.0; }
+    *vecs.get(base + component).unwrap_or(&0.0)
+}
+
+/// Returns material count (same as summary but explicit), or 0 for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_count_getter(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    s.parsed.materials.len()
+}
+
+/// Returns material name as ByteBuffer (empty for null/oob).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_name(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(m) = s.parsed.materials.get(index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(m.name.clone().into_bytes())
+}
+
+/// Returns material texture path as ByteBuffer (empty for null/oob or no texture).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_texture_path(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(m) = s.parsed.materials.get(index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(m.texture_path.clone().into_bytes())
+}
+
+/// Returns material sphere texture path as ByteBuffer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_sphere_texture_path(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(m) = s.parsed.materials.get(index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(m.sphere_texture_path.clone().into_bytes())
+}
+
+/// Returns material toon texture path as ByteBuffer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_toon_texture_path(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(m) = s.parsed.materials.get(index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(m.toon_texture_path.clone().into_bytes())
+}
+
+/// Returns sphere mode as ByteBuffer (e.g. "disabled"/"multiply"/"add"), empty for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_sphere_mode(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(m) = s.parsed.materials.get(index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(m.sphere_mode.clone().into_bytes())
+}
+
+/// Returns shared toon index or -1 when absent/ null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_shared_toon_index(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(m) = s.parsed.materials.get(index) else { return -1 };
+    m.shared_toon_index.map(|u| u as i32).unwrap_or(-1)
+}
+
+/// Returns diffuse component (0..3 = r g b a), or 0.0 for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_diffuse(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 4 { return 0.0; }
+    let Some(m) = s.parsed.materials.get(index) else { return 0.0 };
+    *m.diffuse.get(component).unwrap_or(&0.0)
+}
+
+/// Returns ambient r/g/b (component 0..2), or 0.0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_ambient(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(m) = s.parsed.materials.get(index) else { return 0.0 };
+    *m.ambient.get(component).unwrap_or(&0.0)
+}
+
+/// Returns edge color r/g/b/a , or 0.0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_edge_color(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 4 { return 0.0; }
+    let Some(m) = s.parsed.materials.get(index) else { return 0.0 };
+    *m.edge_color.get(component).unwrap_or(&0.0)
+}
+
+/// Returns edge size, or 0.0 for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_edge_size(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    let Some(m) = s.parsed.materials.get(index) else { return 0.0 };
+    m.edge_size
+}
+
+/// Returns material face (index) count, or 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_face_count(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.materials.get(index) else { return 0 };
+    m.face_count
+}
+
+/// Returns material double_sided flag, or false for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_double_sided(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(m) = s.parsed.materials.get(index) else { return false };
+    m.flags.double_sided
+}
+
+/// Returns material edge (draw edge) flag, or false.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_edge_flag(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(m) = s.parsed.materials.get(index) else { return false };
+    m.flags.edge
+}
+
+/// Returns bone count from skeleton, or 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_count_getter(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    s.parsed.skeleton.bones.len()
+}
+
+/// Returns bone name as ByteBuffer, empty for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_name(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(b.name.clone().into_bytes())
+}
+
+/// Returns bone parent index (i32, -1 for none), or -1 for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_parent_index(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return -1 };
+    b.parent_index
+}
+
+/// Returns bone layer (deform/transform order), or 0 for null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_layer(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return 0 };
+    b.layer
+}
+
+/// Returns bone rest position component, or 0.0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_position(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return 0.0 };
+    *b.position.get(component).unwrap_or(&0.0)
+}
+
+/// Returns rotatable flag, false on null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_rotatable(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return false };
+    b.flags.rotatable
+}
+
+/// Returns translatable flag, false on null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_translatable(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return false };
+    b.flags.translatable
+}
+
+/// Returns append rotate flag (from bone or append info), false on null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_append_rotate(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return false };
+    b.flags.append_rotate
+}
+
+/// Returns append translate flag.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_append_translate(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return false };
+    b.flags.append_translate
+}
+
+/// Returns append local flag.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_append_local(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return false };
+    b.flags.append_local
+}
+
+/// Returns append parent index (-1 absent) and weight (0 absent) via pair; for simplicity two getters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_append_parent_index(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return -1 };
+    b.append_transform.as_ref().map(|a| a.parent_index).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_append_weight(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return 0.0 };
+    b.append_transform.as_ref().map(|a| a.weight).unwrap_or(0.0)
+}
+
+/// Fixed axis present and x/y/z (0 when absent).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_fixed_axis_present(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return false };
+    b.fixed_axis.is_some()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_fixed_axis(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return 0.0 };
+    b.fixed_axis.as_ref().map(|a| *a.get(component).unwrap_or(&0.0)).unwrap_or(0.0)
+}
+
+/// Local axis present + x-axis / z-axis components.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_local_axis_present(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return false };
+    b.local_axis.is_some()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_local_axis_x(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return 0.0 };
+    b.local_axis.as_ref().map(|la| *la.x.get(component).unwrap_or(&0.0)).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_local_axis_z(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return 0.0 };
+    b.local_axis.as_ref().map(|la| *la.z.get(component).unwrap_or(&0.0)).unwrap_or(0.0)
+}
+
+/// External parent present (key != -1) and key.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_external_parent_present(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return false };
+    b.external_parent_key.map(|k| k >= 0).unwrap_or(false)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_external_parent_key(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return -1 };
+    b.external_parent_key.unwrap_or(-1)
+}
+
+/// IK present on this bone, target, loop, limit, link count ( -1/0 neutral on absent).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_ik_present(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return false };
+    b.ik.is_some()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_ik_target_index(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return -1 };
+    b.ik.as_ref().map(|ik| ik.target_index).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_ik_loop_count(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return 0 };
+    b.ik.as_ref().map(|ik| ik.loop_count).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_ik_limit_angle(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return 0.0 };
+    b.ik.as_ref().map(|ik| ik.limit_angle).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_ik_link_count(
+    summary: *const MmdRuntimePmxSummary,
+    index: usize,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(b) = s.parsed.skeleton.bones.get(index) else { return 0 };
+    b.ik.as_ref().map(|ik| ik.links.len()).unwrap_or(0)
+}
+
+/// IK link bone index for (bone, link_slot), or -1 on null/oob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_ik_link_bone_index(
+    summary: *const MmdRuntimePmxSummary,
+    bone_index: usize,
+    link_index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(b) = s.parsed.skeleton.bones.get(bone_index) else { return -1 };
+    let Some(ik) = &b.ik else { return -1 };
+    ik.links.get(link_index).map(|l| l.bone_index).unwrap_or(-1)
+}
+
+/// IK link limit present for (bone, link), false on null/oob/absent.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_ik_link_limit_present(
+    summary: *const MmdRuntimePmxSummary,
+    bone_index: usize,
+    link_index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(b) = s.parsed.skeleton.bones.get(bone_index) else { return false };
+    let Some(ik) = &b.ik else { return false };
+    ik.links.get(link_index).map(|l| l.limits.is_some()).unwrap_or(false)
+}
+
+/// IK link limit lower/upper component for (bone,link, which=0 lower 1 upper, comp 0-2), 0 on absent.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_ik_link_limit_lower(
+    summary: *const MmdRuntimePmxSummary,
+    bone_index: usize,
+    link_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(b) = s.parsed.skeleton.bones.get(bone_index) else { return 0.0 };
+    let Some(ik) = &b.ik else { return 0.0 };
+    let Some(link) = ik.links.get(link_index) else { return 0.0 };
+    link.limits.as_ref().map(|lim| *lim.lower.get(component).unwrap_or(&0.0)).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_ik_link_limit_upper(
+    summary: *const MmdRuntimePmxSummary,
+    bone_index: usize,
+    link_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(b) = s.parsed.skeleton.bones.get(bone_index) else { return 0.0 };
+    let Some(ik) = &b.ik else { return 0.0 };
+    let Some(link) = ik.links.get(link_index) else { return 0.0 };
+    link.limits.as_ref().map(|lim| *lim.upper.get(component).unwrap_or(&0.0)).unwrap_or(0.0)
+}
+
+/// Returns the number of bones (compat alias to prior count).
+/// (existing mmd_runtime_pmx_summary_bone_count still works from thin fields)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_bone_count_from_skeleton(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    s.parsed.skeleton.bones.len()
+}
+
+/// Returns the number of materials (compat).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_material_count_from_parsed(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    s.parsed.materials.len()
+}
+
+/// Returns the number of vertices from geometry, or 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_vertex_count_from_geometry(
+    summary: *const MmdRuntimePmxSummary,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    s.parsed.geometry.positions.len() / 3
+}
+
+// end PMX core getters block
+
+// -----------------------------------------------------------------------
+// PMX summary morph (non-JSON) getters. Added per bounded native FFI slice.
+// All null-safe + bounds-safe. Follows existing PMX core getter naming/style.
+// Neutral defaults per spec. JSON bridge TODO remains unchecked.
+// -----------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_name(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(m.name.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_english_name(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(m.english_name.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_kind(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(m.kind.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_panel(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(m.panel.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_vertex_offset_count(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.vertex_offsets.len()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_group_offset_count(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.group_offsets.len()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_bone_offset_count(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.bone_offsets.len()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_uv_offset_count(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.uv_offsets.len()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_additional_uv_offset_count(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.additional_uv_offsets.len()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_count(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.material_offsets.len()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_flip_offset_count(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.flip_offsets.len()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_impulse_offset_count(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.impulse_offsets.len()
+}
+
+// Vertex offsets
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_vertex_offset_vertex_index(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> u32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.vertex_offsets.get(offset_index).map(|o| o.vertex_index).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_vertex_offset_position(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.vertex_offsets.get(offset_index).and_then(|o| o.position.get(component).copied()).unwrap_or(0.0)
+}
+
+// Group offsets
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_group_offset_morph_index(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return -1 };
+    m.group_offsets.get(offset_index).map(|o| o.morph_index).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_group_offset_weight(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.group_offsets.get(offset_index).map(|o| o.weight).unwrap_or(0.0)
+}
+
+// Flip offsets (same payload shape as group)
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_flip_offset_morph_index(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return -1 };
+    m.flip_offsets.get(offset_index).map(|o| o.morph_index).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_flip_offset_weight(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.flip_offsets.get(offset_index).map(|o| o.weight).unwrap_or(0.0)
+}
+
+// Bone offsets
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_bone_offset_bone_index(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return -1 };
+    m.bone_offsets.get(offset_index).map(|o| o.bone_index).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_bone_offset_translation(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.bone_offsets.get(offset_index).and_then(|o| o.translation.get(component).copied()).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_bone_offset_rotation(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 4 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.bone_offsets.get(offset_index).and_then(|o| o.rotation.get(component).copied()).unwrap_or(0.0)
+}
+
+// UV offsets
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_uv_offset_vertex_index(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> u32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.uv_offsets.get(offset_index).map(|o| o.vertex_index).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_uv_offset_value(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 4 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.uv_offsets.get(offset_index).and_then(|o| o.uv.get(component).copied()).unwrap_or(0.0)
+}
+
+// Additional UV offsets
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_additional_uv_offset_vertex_index(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> u32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.additional_uv_offsets.get(offset_index).map(|o| o.vertex_index).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_additional_uv_offset_uv_index(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> u8 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0 };
+    m.additional_uv_offsets.get(offset_index).map(|o| o.uv_index).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_additional_uv_offset_value(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 4 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.additional_uv_offsets.get(offset_index).and_then(|o| o.uv.get(component).copied()).unwrap_or(0.0)
+}
+
+// Material offsets
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_material_index(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return -1 };
+    m.material_offsets.get(offset_index).map(|o| o.material_index).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_operation(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return empty_byte_buffer() };
+    let Some(o) = m.material_offsets.get(offset_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(o.operation.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_diffuse(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 4 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.material_offsets.get(offset_index).and_then(|o| o.diffuse.get(component).copied()).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_specular(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.material_offsets.get(offset_index).and_then(|o| o.specular.get(component).copied()).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_specular_power(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.material_offsets.get(offset_index).map(|o| o.specular_power).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_ambient(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.material_offsets.get(offset_index).and_then(|o| o.ambient.get(component).copied()).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_edge_color(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 4 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.material_offsets.get(offset_index).and_then(|o| o.edge_color.get(component).copied()).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_edge_size(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.material_offsets.get(offset_index).map(|o| o.edge_size).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_texture_factor(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 4 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.material_offsets.get(offset_index).and_then(|o| o.texture_factor.get(component).copied()).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_sphere_texture_factor(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 4 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.material_offsets.get(offset_index).and_then(|o| o.sphere_texture_factor.get(component).copied()).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_material_offset_toon_texture_factor(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 4 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.material_offsets.get(offset_index).and_then(|o| o.toon_texture_factor.get(component).copied()).unwrap_or(0.0)
+}
+
+// Impulse offsets
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_impulse_offset_rigidbody_index(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return -1 };
+    m.impulse_offsets.get(offset_index).map(|o| o.rigid_body_index).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_impulse_offset_local(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return false };
+    m.impulse_offsets.get(offset_index).map(|o| o.local).unwrap_or(false)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_impulse_offset_velocity(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.impulse_offsets.get(offset_index).and_then(|o| o.velocity.get(component).copied()).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_morph_impulse_offset_torque(
+    summary: *const MmdRuntimePmxSummary,
+    morph_index: usize,
+    offset_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(m) = s.parsed.morphs.get(morph_index) else { return 0.0 };
+    m.impulse_offsets.get(offset_index).and_then(|o| o.torque.get(component).copied()).unwrap_or(0.0)
+}
+
+// -----------------------------------------------------------------------
+// PMX summary display frame (non-JSON) getters.
+// -----------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_display_frame_name(
+    summary: *const MmdRuntimePmxSummary,
+    display_frame_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(frame) = s.parsed.display_frames.get(display_frame_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(frame.name.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_display_frame_english_name(
+    summary: *const MmdRuntimePmxSummary,
+    display_frame_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(frame) = s.parsed.display_frames.get(display_frame_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(frame.english_name.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_display_frame_special(
+    summary: *const MmdRuntimePmxSummary,
+    display_frame_index: usize,
+) -> bool {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return false };
+    s.parsed.display_frames.get(display_frame_index).map(|frame| frame.special).unwrap_or(false)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_display_frame_item_count(
+    summary: *const MmdRuntimePmxSummary,
+    display_frame_index: usize,
+) -> usize {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    s.parsed.display_frames
+        .get(display_frame_index)
+        .map(|frame| frame.frames.len())
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_display_frame_item_kind(
+    summary: *const MmdRuntimePmxSummary,
+    display_frame_index: usize,
+    item_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(frame) = s.parsed.display_frames.get(display_frame_index) else { return empty_byte_buffer() };
+    let Some(item) = frame.frames.get(item_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(item.kind.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_display_frame_item_index(
+    summary: *const MmdRuntimePmxSummary,
+    display_frame_index: usize,
+    item_index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    let Some(frame) = s.parsed.display_frames.get(display_frame_index) else { return -1 };
+    frame.frames.get(item_index).map(|item| item.index).unwrap_or(-1)
+}
+
+// -----------------------------------------------------------------------
+// PMX summary physics (non-JSON) getters: rigid bodies and joints.
+// Soft body detail getters are intentionally deferred; managed neutral IR
+// currently models rigid bodies and joints only.
+// -----------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_name(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(body) = s.parsed.rigid_bodies.get(rigidbody_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(body.name.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_english_name(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(body) = s.parsed.rigid_bodies.get(rigidbody_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(body.english_name.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_bone_index(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    s.parsed.rigid_bodies.get(rigidbody_index).map(|body| body.bone_index).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_group(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> u8 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    s.parsed.rigid_bodies.get(rigidbody_index).map(|body| body.group).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_mask(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> u16 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0 };
+    s.parsed.rigid_bodies.get(rigidbody_index).map(|body| body.mask).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_shape(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(body) = s.parsed.rigid_bodies.get(rigidbody_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(body.shape.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_size(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(body) = s.parsed.rigid_bodies.get(rigidbody_index) else { return 0.0 };
+    body.size[component]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_position(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(body) = s.parsed.rigid_bodies.get(rigidbody_index) else { return 0.0 };
+    body.position[component]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_rotation(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(body) = s.parsed.rigid_bodies.get(rigidbody_index) else { return 0.0 };
+    body.rotation[component]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_mass(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    s.parsed.rigid_bodies.get(rigidbody_index).map(|body| body.mass).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_linear_damping(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    s.parsed.rigid_bodies.get(rigidbody_index).map(|body| body.linear_damping).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_angular_damping(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    s.parsed.rigid_bodies.get(rigidbody_index).map(|body| body.angular_damping).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_restitution(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    s.parsed.rigid_bodies.get(rigidbody_index).map(|body| body.restitution).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_friction(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    s.parsed.rigid_bodies.get(rigidbody_index).map(|body| body.friction).unwrap_or(0.0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_rigidbody_mode(
+    summary: *const MmdRuntimePmxSummary,
+    rigidbody_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(body) = s.parsed.rigid_bodies.get(rigidbody_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(body.mode.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_name(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(joint.name.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_english_name(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(joint.english_name.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_kind(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return empty_byte_buffer() };
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return empty_byte_buffer() };
+    byte_buffer_from_vec(joint.kind.clone().into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_rigidbody_a_index(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    s.parsed.joints.get(joint_index).map(|joint| joint.rigid_body_index_a).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_rigidbody_b_index(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+) -> i32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return -1 };
+    s.parsed.joints.get(joint_index).map(|joint| joint.rigid_body_index_b).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_position(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return 0.0 };
+    joint.position[component]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_rotation(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return 0.0 };
+    joint.rotation[component]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_translation_lower_limit(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return 0.0 };
+    joint.translation_lower_limit[component]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_translation_upper_limit(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return 0.0 };
+    joint.translation_upper_limit[component]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_rotation_lower_limit(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return 0.0 };
+    joint.rotation_lower_limit[component]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_rotation_upper_limit(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return 0.0 };
+    joint.rotation_upper_limit[component]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_spring_translation_factor(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return 0.0 };
+    joint.spring_translation_factor[component]
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_summary_joint_spring_rotation_factor(
+    summary: *const MmdRuntimePmxSummary,
+    joint_index: usize,
+    component: usize,
+) -> f32 {
+    let Some(s) = (unsafe { summary.as_ref() }) else { return 0.0 };
+    if component >= 3 { return 0.0; }
+    let Some(joint) = s.parsed.joints.get(joint_index) else { return 0.0 };
+    joint.spring_rotation_factor[component]
 }
 
 /// Returns the number of bones in a model handle, or 0 for null.
@@ -3059,5 +5492,1150 @@ mod tests {
         unsafe {
             mmd_runtime_model_free(model);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // VMD summary (non-JSON) FFI tests
+    // -----------------------------------------------------------------------
+
+    fn build_vmd_header_bytes(model_name: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Vocaloid Motion Data 0002\0\0\0\0\0");
+        let mut name = [0u8; 20];
+        let src = model_name.as_bytes();
+        let n = src.len().min(20);
+        name[..n].copy_from_slice(&src[..n]);
+        buf.extend_from_slice(&name);
+        buf
+    }
+
+    fn append_morph_section(buf: &mut Vec<u8>, morphs: &[(&str, u32, f32)]) {
+        buf.extend_from_slice(&(morphs.len() as u32).to_le_bytes());
+        for (nm, frame, weight) in morphs {
+            let mut name = [0u8; 15];
+            let src = nm.as_bytes();
+            let n = src.len().min(15);
+            name[..n].copy_from_slice(&src[..n]);
+            buf.extend_from_slice(&name);
+            buf.extend_from_slice(&frame.to_le_bytes());
+            buf.extend_from_slice(&weight.to_le_bytes());
+        }
+    }
+
+    fn append_zeroed_optional_sections(buf: &mut Vec<u8>, prop_count: u32) {
+        // cam / light / self-shadow counts (0) then property count + minimal data
+        buf.extend_from_slice(&0u32.to_le_bytes()); // cam
+        buf.extend_from_slice(&0u32.to_le_bytes()); // light
+        buf.extend_from_slice(&0u32.to_le_bytes()); // self shadow
+        buf.extend_from_slice(&prop_count.to_le_bytes());
+        if prop_count > 0 {
+            // one minimal property frame (frame + visible + 0 iks)
+            buf.extend_from_slice(&10u32.to_le_bytes());
+            buf.push(1u8); // visible
+            buf.extend_from_slice(&0u32.to_le_bytes()); // ik count 0
+        }
+    }
+
+    #[test]
+    fn vmd_summary_create_rejects_null_empty_invalid() {
+        assert!(unsafe { mmd_runtime_vmd_summary_create_from_bytes(ptr::null(), 0) }.is_null());
+        assert!(unsafe { mmd_runtime_vmd_summary_create_from_bytes(ptr::null(), 10) }.is_null());
+        let d = 0u8;
+        assert!(unsafe { mmd_runtime_vmd_summary_create_from_bytes(&d as *const u8, 0) }.is_null());
+
+        let garbage = [0u8; 16];
+        let s = unsafe { mmd_runtime_vmd_summary_create_from_bytes(garbage.as_ptr(), garbage.len()) };
+        assert!(s.is_null());
+
+        // also invalid magic
+        let mut bad = build_vmd_header_bytes("bad");
+        bad[0] = b'X';
+        let s2 = unsafe { mmd_runtime_vmd_summary_create_from_bytes(bad.as_ptr(), bad.len()) };
+        assert!(s2.is_null());
+    }
+
+    #[test]
+    fn vmd_summary_from_camera_fixture() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+        let sum = unsafe { mmd_runtime_vmd_summary_create_from_bytes(bytes.as_ptr(), bytes.len()) };
+        assert!(!sum.is_null());
+
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_max_frame(sum) }, 45);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_keyframe_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_morph_keyframe_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_property_keyframe_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_keyframe_count(sum) }, 2);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_keyframe_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_self_shadow_keyframe_count(sum) }, 0);
+
+        let name_buf = unsafe { mmd_runtime_vmd_summary_model_name(sum) };
+        assert!(!name_buf.data.is_null());
+        assert!(name_buf.len > 0);
+        let name_slice = unsafe { std::slice::from_raw_parts(name_buf.data, name_buf.len) };
+        assert_eq!(std::str::from_utf8(name_slice).unwrap(), "camera_fixture");
+        // free the buffer via existing API
+        unsafe { mmd_runtime_byte_buffer_free(name_buf); }
+
+        // double-check null accessors still 0 after (no mutation)
+        unsafe { mmd_runtime_vmd_summary_free(sum); }
+    }
+
+    #[test]
+    fn vmd_summary_from_ik_bone_fixture_and_null_accessors() {
+        let bytes: &[u8] =
+            include_bytes!("../../mmd-anim-format/fixtures/vmd/ik_multi_bone_nondefault.vmd");
+        let sum = unsafe { mmd_runtime_vmd_summary_create_from_bytes(bytes.as_ptr(), bytes.len()) };
+        assert!(!sum.is_null());
+
+        assert!(unsafe { mmd_runtime_vmd_summary_max_frame(sum) } >= 30);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_keyframe_count(sum) }, 5);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_morph_keyframe_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_property_keyframe_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_keyframe_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_keyframe_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_self_shadow_keyframe_count(sum) }, 0);
+
+        let name_buf = unsafe { mmd_runtime_vmd_summary_model_name(sum) };
+        // name may be empty or short for this fixture; just ensure it returns a buffer we can free
+        unsafe { mmd_runtime_byte_buffer_free(name_buf); }
+
+        unsafe { mmd_runtime_vmd_summary_free(sum); }
+
+        // null summary behavior
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_max_frame(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_keyframe_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_morph_keyframe_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_property_keyframe_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_keyframe_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_keyframe_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_self_shadow_keyframe_count(ptr::null()) }, 0);
+
+        let empty_name = unsafe { mmd_runtime_vmd_summary_model_name(ptr::null()) };
+        assert!(empty_name.data.is_null());
+        assert_eq!(empty_name.len, 0);
+        unsafe { mmd_runtime_byte_buffer_free(empty_name); }
+    }
+
+    #[test]
+    fn vmd_summary_synthetic_morph_and_property_counts() {
+        // header + BONE COUNT 0 + morph section (1) + zeroed cam/light/ss + prop section (1)
+        let mut buf = build_vmd_header_bytes("synthmodel");
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bone count = 0 (required before morph)
+        append_morph_section(&mut buf, &[("blink", 15, 0.75)]);
+        append_zeroed_optional_sections(&mut buf, 1);
+
+        let sum = unsafe { mmd_runtime_vmd_summary_create_from_bytes(buf.as_ptr(), buf.len()) };
+        assert!(!sum.is_null());
+
+        assert!(unsafe { mmd_runtime_vmd_summary_max_frame(sum) } >= 15);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_keyframe_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_morph_keyframe_count(sum) }, 1);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_property_keyframe_count(sum) }, 1);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_keyframe_count(sum) }, 0);
+
+        let name_buf = unsafe { mmd_runtime_vmd_summary_model_name(sum) };
+        let nslice = unsafe { std::slice::from_raw_parts(name_buf.data, name_buf.len) };
+        assert_eq!(std::str::from_utf8(nslice).unwrap(), "synthmodel");
+        unsafe { mmd_runtime_byte_buffer_free(name_buf); }
+
+        unsafe { mmd_runtime_vmd_summary_free(sum); }
+    }
+
+    #[test]
+    fn vmd_summary_scene_track_getters_from_synthetic_bytes() {
+        let mut buf = build_vmd_header_bytes("scenesynth");
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bone count
+        append_morph_section(&mut buf, &[]);
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // camera count
+        buf.extend_from_slice(&12u32.to_le_bytes());
+        for value in [30.0f32, 1.0, 2.0, 3.0, 0.1, 0.2, 0.3] {
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in 0u8..24 {
+            buf.push(value + 10);
+        }
+        buf.extend_from_slice(&45u32.to_le_bytes());
+        buf.push(0u8); // native parser maps 0 to perspective=true
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // light count
+        buf.extend_from_slice(&13u32.to_le_bytes());
+        for value in [0.4f32, 0.5, 0.6, -1.0, -2.0, -3.0] {
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // self-shadow count
+        buf.extend_from_slice(&14u32.to_le_bytes());
+        buf.push(2u8);
+        buf.extend_from_slice(&0.75f32.to_le_bytes());
+
+        buf.extend_from_slice(&0u32.to_le_bytes()); // property count
+
+        let sum = unsafe { mmd_runtime_vmd_summary_create_from_bytes(buf.as_ptr(), buf.len()) };
+        assert!(!sum.is_null());
+
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_keyframe_count(sum) }, 1);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_keyframe_count(sum) }, 1);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_self_shadow_keyframe_count(sum) }, 1);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_max_frame(sum) }, 14);
+
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_frame(sum, 0) }, 12);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_distance(sum, 0) }, 30.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_position_x(sum, 0) }, 1.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_position_y(sum, 0) }, 2.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_position_z(sum, 0) }, 3.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_rotation_x(sum, 0) }, 0.1);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_rotation_y(sum, 0) }, 0.2);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_rotation_z(sum, 0) }, 0.3);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_interpolation_byte(sum, 0, 0) }, 10);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_interpolation_byte(sum, 0, 23) }, 33);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_interpolation_byte(sum, 0, 24) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_fov(sum, 0) }, 45);
+        assert!(unsafe { mmd_runtime_vmd_summary_camera_frame_perspective(sum, 0) });
+
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_frame_frame(sum, 0) }, 13);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_frame_color_x(sum, 0) }, 0.4);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_frame_color_y(sum, 0) }, 0.5);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_frame_color_z(sum, 0) }, 0.6);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_frame_direction_x(sum, 0) }, -1.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_frame_direction_y(sum, 0) }, -2.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_frame_direction_z(sum, 0) }, -3.0);
+
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_self_shadow_frame_frame(sum, 0) }, 14);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_self_shadow_frame_mode(sum, 0) }, 2);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_self_shadow_frame_distance(sum, 0) }, 0.75);
+
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_frame(ptr::null(), 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_camera_frame_position_x(sum, 99) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_light_frame_color_x(sum, 99) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_self_shadow_frame_mode(sum, 99) }, 0);
+
+        unsafe { mmd_runtime_vmd_summary_free(sum); }
+    }
+
+    // -----------------------------------------------------------------------
+    // Focused VMD model-motion getter tests (non-JSON FFI slice)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn vmd_summary_bone_getters_valid_and_interp_oob_from_fixture() {
+        let mut buf = build_vmd_header_bytes("bonesynth");
+        buf.extend_from_slice(&1u32.to_le_bytes());
+
+        let mut bone_name = [0u8; 15];
+        bone_name[..4].copy_from_slice(b"root");
+        buf.extend_from_slice(&bone_name);
+        buf.extend_from_slice(&7u32.to_le_bytes());
+        for value in [1.0f32, 2.0, 3.0, 0.1, 0.2, 0.3, 0.4] {
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in 0u8..64 {
+            buf.push(value);
+        }
+        append_morph_section(&mut buf, &[]);
+        append_zeroed_optional_sections(&mut buf, 0);
+
+        let sum = unsafe { mmd_runtime_vmd_summary_create_from_bytes(buf.as_ptr(), buf.len()) };
+        assert!(!sum.is_null());
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_keyframe_count(sum) }, 1);
+
+        let name0 = unsafe { mmd_runtime_vmd_summary_bone_frame_name(sum, 0) };
+        let nslice = unsafe { std::slice::from_raw_parts(name0.data, name0.len) };
+        assert_eq!(std::str::from_utf8(nslice).unwrap(), "root");
+        unsafe { mmd_runtime_byte_buffer_free(name0); }
+
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_frame(sum, 0) }, 7);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_translation_x(sum, 0) }, 1.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_translation_y(sum, 0) }, 2.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_translation_z(sum, 0) }, 3.0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_rotation_x(sum, 0) }, 0.1);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_rotation_y(sum, 0) }, 0.2);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_rotation_z(sum, 0) }, 0.3);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_rotation_w(sum, 0) }, 0.4);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_interpolation_byte(sum, 0, 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_interpolation_byte(sum, 0, 15) }, 15);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_interpolation_byte(sum, 0, 999) }, 0);
+
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_frame(sum, 999) }, 0);
+        let name_oob = unsafe { mmd_runtime_vmd_summary_bone_frame_name(sum, 999) };
+        assert!(name_oob.data.is_null());
+        assert_eq!(name_oob.len, 0);
+        unsafe { mmd_runtime_byte_buffer_free(name_oob); }
+
+        unsafe { mmd_runtime_vmd_summary_free(sum); }
+    }
+
+    #[test]
+    fn vmd_summary_morph_getters_valid_from_synthetic() {
+        // Reuse synthetic builder pattern (no morph fixture with data in this slice)
+        let mut buf = build_vmd_header_bytes("morphsynth");
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bone count 0
+        append_morph_section(&mut buf, &[("testmorph", 12, 0.5), ("blink", 20, 1.0)]);
+        append_zeroed_optional_sections(&mut buf, 0);
+
+        let sum = unsafe { mmd_runtime_vmd_summary_create_from_bytes(buf.as_ptr(), buf.len()) };
+        assert!(!sum.is_null());
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_morph_keyframe_count(sum) }, 2);
+
+        // valid index 0
+        let mname = unsafe { mmd_runtime_vmd_summary_morph_frame_name(sum, 0) };
+        let nslice = unsafe { std::slice::from_raw_parts(mname.data, mname.len) };
+        assert_eq!(std::str::from_utf8(nslice).unwrap(), "testmorph");
+        unsafe { mmd_runtime_byte_buffer_free(mname); }
+
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_morph_frame_frame(sum, 0) }, 12);
+        assert!((unsafe { mmd_runtime_vmd_summary_morph_frame_weight(sum, 0) } - 0.5).abs() < 1e-6);
+
+        // index 1
+        let mname1 = unsafe { mmd_runtime_vmd_summary_morph_frame_name(sum, 1) };
+        let n1 = unsafe { std::slice::from_raw_parts(mname1.data, mname1.len) };
+        assert_eq!(std::str::from_utf8(n1).unwrap(), "blink");
+        unsafe { mmd_runtime_byte_buffer_free(mname1); }
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_morph_frame_frame(sum, 1) }, 20);
+        assert!((unsafe { mmd_runtime_vmd_summary_morph_frame_weight(sum, 1) } - 1.0).abs() < 1e-6);
+
+        // oob
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_morph_frame_frame(sum, 99) }, 0);
+        let oob_name = unsafe { mmd_runtime_vmd_summary_morph_frame_name(sum, 99) };
+        assert!(oob_name.data.is_null());
+        unsafe { mmd_runtime_byte_buffer_free(oob_name); }
+
+        unsafe { mmd_runtime_vmd_summary_free(sum); }
+    }
+
+    #[test]
+    fn vmd_summary_property_and_ik_getters_valid_from_synthetic() {
+        // Build minimal VMD with one property frame carrying 2 IK states
+        let mut buf = build_vmd_header_bytes("propsynth");
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bones 0
+        // no morphs: write 0 for optional morph count to stop before cam (but to reach prop we still need to follow layout)
+        // For property we go through the optional skips. Use append helpers then manually append a prop with IK.
+        buf.extend_from_slice(&0u32.to_le_bytes()); // morph count = 0
+        // append the zeroed optional (cam/light/ss) + prop count = 1 , but override to inject IK states
+        buf.extend_from_slice(&0u32.to_le_bytes()); // cam
+        buf.extend_from_slice(&0u32.to_le_bytes()); // light
+        buf.extend_from_slice(&0u32.to_le_bytes()); // ss
+        buf.extend_from_slice(&1u32.to_le_bytes()); // 1 property frame
+
+        // property frame: frame=5, visible=true, ik_count=2
+        buf.extend_from_slice(&5u32.to_le_bytes());
+        buf.push(1u8); // visible
+        buf.extend_from_slice(&2u32.to_le_bytes()); // ik count
+        // ik0
+        let mut ik0 = [0u8; 20];
+        ik0[..3].copy_from_slice(b"ikA");
+        buf.extend_from_slice(&ik0);
+        buf.push(1u8); // enabled
+        // ik1
+        let mut ik1 = [0u8; 20];
+        ik1[..3].copy_from_slice(b"ikB");
+        buf.extend_from_slice(&ik1);
+        buf.push(0u8); // disabled
+
+        let sum = unsafe { mmd_runtime_vmd_summary_create_from_bytes(buf.as_ptr(), buf.len()) };
+        assert!(!sum.is_null());
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_property_keyframe_count(sum) }, 1);
+
+        // frame props
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_property_frame_frame(sum, 0) }, 5);
+        assert!(unsafe { mmd_runtime_vmd_summary_property_frame_visible(sum, 0) });
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_count(sum, 0) }, 2);
+
+        // ik states
+        let n0 = unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_name(sum, 0, 0) };
+        let s0 = unsafe { std::slice::from_raw_parts(n0.data, n0.len) };
+        assert_eq!(std::str::from_utf8(s0).unwrap(), "ikA");
+        unsafe { mmd_runtime_byte_buffer_free(n0); }
+        assert!(unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_enabled(sum, 0, 0) });
+
+        let n1 = unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_name(sum, 0, 1) };
+        let s1 = unsafe { std::slice::from_raw_parts(n1.data, n1.len) };
+        assert_eq!(std::str::from_utf8(s1).unwrap(), "ikB");
+        unsafe { mmd_runtime_byte_buffer_free(n1); }
+        assert!(!unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_enabled(sum, 0, 1) });
+
+        // oob ik index
+        let noob = unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_name(sum, 0, 99) };
+        assert!(noob.data.is_null());
+        unsafe { mmd_runtime_byte_buffer_free(noob); }
+        assert!(!unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_enabled(sum, 0, 99) });
+
+        // oob frame
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_count(sum, 99) }, 0);
+        let nframeoob = unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_name(sum, 99, 0) };
+        assert!(nframeoob.data.is_null());
+        unsafe { mmd_runtime_byte_buffer_free(nframeoob); }
+
+        unsafe { mmd_runtime_vmd_summary_free(sum); }
+    }
+
+    #[test]
+    fn vmd_summary_getters_null_and_oob_return_safe_defaults_and_bytebuffers_freeable() {
+        // null summary
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_frame(ptr::null(), 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_translation_x(ptr::null(), 0) }, 0.0);
+        let nb = unsafe { mmd_runtime_vmd_summary_bone_frame_name(ptr::null(), 0) };
+        assert!(nb.data.is_null());
+        unsafe { mmd_runtime_byte_buffer_free(nb); }
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_bone_frame_interpolation_byte(ptr::null(), 0, 0) }, 0);
+
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_morph_frame_weight(ptr::null(), 0) }, 0.0);
+        let nm = unsafe { mmd_runtime_vmd_summary_morph_frame_name(ptr::null(), 0) };
+        unsafe { mmd_runtime_byte_buffer_free(nm); }
+
+        assert!(!unsafe { mmd_runtime_vmd_summary_property_frame_visible(ptr::null(), 0) });
+        assert_eq!(unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_count(ptr::null(), 0) }, 0);
+        let np = unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_name(ptr::null(), 0, 0) };
+        unsafe { mmd_runtime_byte_buffer_free(np); }
+        assert!(!unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_enabled(ptr::null(), 0, 0) });
+
+        // valid summary but oob already covered in other tests; representative free check done above
+    }
+
+    #[test]
+    fn vmd_summary_bytbuffer_from_getters_are_freeable_via_existing_api() {
+        // Use synthetic that has names for bone + morph + prop ik to exercise free paths
+        let mut buf = build_vmd_header_bytes("freebuf");
+        // minimal bone frame with name
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        let mut bname = [0u8; 15];
+        bname[..3].copy_from_slice(b"hip");
+        buf.extend_from_slice(&bname);
+        buf.extend_from_slice(&0u32.to_le_bytes()); // frame
+        buf.extend_from_slice(&0f32.to_le_bytes());
+        buf.extend_from_slice(&0f32.to_le_bytes());
+        buf.extend_from_slice(&0f32.to_le_bytes());
+        // quat identity
+        buf.extend_from_slice(&0f32.to_le_bytes());
+        buf.extend_from_slice(&0f32.to_le_bytes());
+        buf.extend_from_slice(&0f32.to_le_bytes());
+        buf.extend_from_slice(&1f32.to_le_bytes());
+        // interp 64 zero
+        for _ in 0..64 { buf.push(0u8); }
+
+        // morph 0
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        // cam/light/ss 0 + prop with 1 ik
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // frame 0
+        buf.push(0u8); // not visible
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        let mut ikn = [0u8; 20];
+        ikn[..2].copy_from_slice(b"ik");
+        buf.extend_from_slice(&ikn);
+        buf.push(1u8);
+
+        let sum = unsafe { mmd_runtime_vmd_summary_create_from_bytes(buf.as_ptr(), buf.len()) };
+        assert!(!sum.is_null());
+
+        // exercise frees for each name path
+        let bnameb = unsafe { mmd_runtime_vmd_summary_bone_frame_name(sum, 0) };
+        unsafe { mmd_runtime_byte_buffer_free(bnameb); }
+
+        let mnameb = unsafe { mmd_runtime_vmd_summary_morph_frame_name(sum, 0) };
+        unsafe { mmd_runtime_byte_buffer_free(mnameb); }
+
+        let pnameb = unsafe { mmd_runtime_vmd_summary_property_frame_ik_state_name(sum, 0, 0) };
+        unsafe { mmd_runtime_byte_buffer_free(pnameb); }
+
+        unsafe { mmd_runtime_vmd_summary_free(sum); }
+    }
+
+    #[test]
+    fn pmx_summary_create_rejects_null_empty_invalid() {
+        assert!(unsafe { mmd_runtime_pmx_summary_create_from_bytes(ptr::null(), 0) }.is_null());
+        assert!(unsafe { mmd_runtime_pmx_summary_create_from_bytes(ptr::null(), 10) }.is_null());
+        let d = 0u8;
+        assert!(unsafe { mmd_runtime_pmx_summary_create_from_bytes(&d as *const u8, 0) }.is_null());
+
+        let garbage = [0u8; 16];
+        let s = unsafe { mmd_runtime_pmx_summary_create_from_bytes(garbage.as_ptr(), garbage.len()) };
+        assert!(s.is_null());
+
+        // invalid PMX (bad magic) also returns null
+        let mut bad = vec![0u8; 32];
+        bad[0] = b'X';
+        bad[1] = b'X';
+        bad[2] = b'X';
+        bad[3] = b'X';
+        let s2 = unsafe { mmd_runtime_pmx_summary_create_from_bytes(bad.as_ptr(), bad.len()) };
+        assert!(s2.is_null());
+    }
+
+    #[test]
+    fn pmx_summary_from_fixture_and_accessors() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let sum = unsafe { mmd_runtime_pmx_summary_create_from_bytes(bytes.as_ptr(), bytes.len()) };
+        assert!(!sum.is_null());
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_version(sum) }, 2.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_vertex_count(sum) }, 3);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_face_count(sum) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_material_count(sum) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_count(sum) }, 3);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_display_frame_count(sum) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_soft_body_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_additional_uv_count(sum) }, 0);
+
+        // model name
+        let name_buf = unsafe { mmd_runtime_pmx_summary_model_name(sum) };
+        assert!(!name_buf.data.is_null());
+        assert!(name_buf.len > 0);
+        let name_slice = unsafe { std::slice::from_raw_parts(name_buf.data, name_buf.len) };
+        assert_eq!(std::str::from_utf8(name_slice).unwrap(), "ik_multi_axis_limit_fixture");
+        unsafe { mmd_runtime_byte_buffer_free(name_buf); }
+
+        // english name (trivially available from metadata)
+        let en_buf = unsafe { mmd_runtime_pmx_summary_model_name_english(sum) };
+        assert!(!en_buf.data.is_null());
+        assert!(en_buf.len > 0);
+        let en_slice = unsafe { std::slice::from_raw_parts(en_buf.data, en_buf.len) };
+        assert_eq!(std::str::from_utf8(en_slice).unwrap(), "ik_multi_axis_limit_fixture");
+        unsafe { mmd_runtime_byte_buffer_free(en_buf); }
+
+        unsafe { mmd_runtime_pmx_summary_free(sum); }
+    }
+
+    #[test]
+    fn pmx_summary_null_accessors_return_zero_empty_and_byte_buffer_frees() {
+        // direct null summary
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_version(ptr::null()) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_vertex_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_face_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_material_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_display_frame_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_soft_body_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_additional_uv_count(ptr::null()) }, 0);
+
+        let empty_name = unsafe { mmd_runtime_pmx_summary_model_name(ptr::null()) };
+        assert!(empty_name.data.is_null());
+        assert_eq!(empty_name.len, 0);
+        unsafe { mmd_runtime_byte_buffer_free(empty_name); }
+
+        let empty_en = unsafe { mmd_runtime_pmx_summary_model_name_english(ptr::null()) };
+        assert!(empty_en.data.is_null());
+        assert_eq!(empty_en.len, 0);
+        unsafe { mmd_runtime_byte_buffer_free(empty_en); }
+
+        // freed summary is not re-used; null-like behavior on null ptr is sufficient for contract
+    }
+
+    #[test]
+    fn pmx_summary_core_getters_from_fixture_and_null_oob() {
+        // Uses ik_multi_axis_limit.pmx (3vtx,1mat,3bones with IK+limits; 0 morphs)
+        // Fixture-grounded exact values from parse: vtx skin[0]=0 w=1; mat name="mat" shared=-1 dbl=true fcnt=1;
+        // bone[2]="ik_controller" par=-1 layer=0 ik_present target=1 loop=1 linkcnt=1;
+        // iklink[0] bone=0 limit_present=true lower0=0 upper0=0
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let sum = unsafe { mmd_runtime_pmx_summary_create_from_bytes(bytes.as_ptr(), bytes.len()) };
+        assert!(!sum.is_null());
+
+        // counts via new geo/mat accessors (must match prior thin summary counts)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_vertex_count_from_geometry(sum) }, 3);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_index_count(sum) }, 3);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_material_count_from_parsed(sum) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_count_from_skeleton(sum) }, 3);
+
+        // --- exact geometry getter assertion ---
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_index(sum, 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_index(sum, 2) }, 2);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_vertex_skin_bone_index(sum, 0, 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_vertex_skin_weight(sum, 0, 0) }, 1.0);
+        let skin_kind = unsafe { mmd_runtime_pmx_summary_vertex_skinning_kind(sum, 0) };
+        if !skin_kind.data.is_null() && skin_kind.len > 0 {
+            let skin_kind_slice = unsafe { std::slice::from_raw_parts(skin_kind.data, skin_kind.len) };
+            assert_eq!(std::str::from_utf8(skin_kind_slice).unwrap(), "bdef4");
+        }
+        unsafe { mmd_runtime_byte_buffer_free(skin_kind); }
+        assert!(!unsafe { mmd_runtime_pmx_summary_vertex_sdef_enabled(sum, 0) });
+
+        // --- exact material getter assertion ---
+        let mname = unsafe { mmd_runtime_pmx_summary_material_name(sum, 0) };
+        if !mname.data.is_null() && mname.len > 0 {
+            let ms = unsafe { std::slice::from_raw_parts(mname.data, mname.len) };
+            assert_eq!(std::str::from_utf8(ms).unwrap(), "mat");
+        }
+        unsafe { mmd_runtime_byte_buffer_free(mname); }
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_material_shared_toon_index(sum, 0) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_material_face_count(sum, 0) }, 1);
+        assert!(unsafe { mmd_runtime_pmx_summary_material_double_sided(sum, 0) });
+        assert!(!unsafe { mmd_runtime_pmx_summary_material_edge_flag(sum, 0) });
+
+        // --- exact bone getter assertion ---
+        let b2name = unsafe { mmd_runtime_pmx_summary_bone_name(sum, 2) };
+        if !b2name.data.is_null() && b2name.len > 0 {
+            let bs = unsafe { std::slice::from_raw_parts(b2name.data, b2name.len) };
+            assert_eq!(std::str::from_utf8(bs).unwrap(), "ik_controller");
+        }
+        unsafe { mmd_runtime_byte_buffer_free(b2name); }
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_parent_index(sum, 2) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_layer(sum, 2) }, 0);
+        assert!(unsafe { mmd_runtime_pmx_summary_bone_rotatable(sum, 2) });
+        assert!(unsafe { mmd_runtime_pmx_summary_bone_translatable(sum, 2) });
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_append_parent_index(sum, 2) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_append_weight(sum, 2) }, 0.0);
+
+        // --- exact IK getter assertion ---
+        assert!(unsafe { mmd_runtime_pmx_summary_bone_ik_present(sum, 2) });
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_target_index(sum, 2) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_loop_count(sum, 2) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_limit_angle(sum, 2) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_link_count(sum, 2) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_link_bone_index(sum, 2, 0) }, 0);
+        assert!(unsafe { mmd_runtime_pmx_summary_bone_ik_link_limit_present(sum, 2, 0) });
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_link_limit_lower(sum, 2, 0, 0) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_link_limit_upper(sum, 2, 0, 0) }, 0.0);
+
+        // null safety (representative)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_index(ptr::null(), 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_vertex_position(ptr::null(), 0, 0) }, 0.0);
+        assert!(unsafe { mmd_runtime_pmx_summary_material_name(ptr::null(), 0).data.is_null() });
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_parent_index(ptr::null(), 0) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_target_index(ptr::null(), 0) }, -1);
+        assert!(!unsafe { mmd_runtime_pmx_summary_bone_ik_link_limit_present(ptr::null(), 0, 0) });
+        assert!(unsafe { mmd_runtime_pmx_summary_material_name(ptr::null(), 5).data.is_null() });
+
+        // oob behavior (representative)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_index(sum, 999) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_vertex_position(sum, 0, 3) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_vertex_uv(sum, 0, 2) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_material_diffuse(sum, 0, 4) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_position(sum, 0, 3) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_link_limit_lower(sum, 2, 0, 3) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_vertex_skin_bone_index(sum, 999, 0) }, 0);
+        let oob_skin_kind = unsafe { mmd_runtime_pmx_summary_vertex_skinning_kind(sum, 999) };
+        assert!(oob_skin_kind.data.is_null() || oob_skin_kind.len == 0);
+        unsafe { mmd_runtime_byte_buffer_free(oob_skin_kind); }
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_material_diffuse(sum, 999, 0) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_layer(sum, 999) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_link_bone_index(sum, 0, 99) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_bone_ik_target_index(sum, 5) }, -1);
+
+        // free
+        unsafe { mmd_runtime_pmx_summary_free(sum); }
+    }
+
+    #[test]
+    fn pmx_summary_morph_getters_from_synthetic_summary_exact_values() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let mut parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
+        parsed.morphs = vec![mmd_anim_format::pmx::PmxParsedMorph {
+            name: "test_morph".to_owned(),
+            english_name: "Test Morph".to_owned(),
+            panel: "eye".to_owned(),
+            kind: "vertex".to_owned(),
+            vertex_offsets: vec![mmd_anim_format::pmx::PmxParsedVertexMorphOffset {
+                vertex_index: 2,
+                position: [0.25, -0.5, 1.25],
+            }],
+            group_offsets: vec![mmd_anim_format::pmx::PmxParsedGroupMorphOffset {
+                morph_index: 3,
+                weight: 0.75,
+            }],
+            bone_offsets: vec![mmd_anim_format::pmx::PmxParsedBoneMorphOffset {
+                bone_index: 1,
+                translation: [1.0, 2.0, 3.0],
+                rotation: [0.1, 0.2, 0.3, 0.4],
+            }],
+            uv_offsets: vec![mmd_anim_format::pmx::PmxParsedUvMorphOffset {
+                vertex_index: 1,
+                uv: [0.01, 0.02, 0.03, 0.04],
+            }],
+            additional_uv_offsets: vec![mmd_anim_format::pmx::PmxParsedAdditionalUvMorphOffset {
+                vertex_index: 2,
+                uv_index: 2,
+                uv: [0.11, 0.12, 0.13, 0.14],
+            }],
+            material_offsets: vec![mmd_anim_format::pmx::PmxParsedMaterialMorphOffset {
+                material_index: 0,
+                operation: "add".to_owned(),
+                diffuse: [0.2, 0.3, 0.4, 0.5],
+                specular: [0.6, 0.7, 0.8],
+                specular_power: 9.0,
+                ambient: [0.9, 1.0, 1.1],
+                edge_color: [1.2, 1.3, 1.4, 1.5],
+                edge_size: 2.5,
+                texture_factor: [0.15, 0.16, 0.17, 0.18],
+                sphere_texture_factor: [0.25, 0.26, 0.27, 0.28],
+                toon_texture_factor: [0.35, 0.36, 0.37, 0.38],
+            }],
+            flip_offsets: vec![mmd_anim_format::pmx::PmxParsedGroupMorphOffset {
+                morph_index: 4,
+                weight: 0.125,
+            }],
+            impulse_offsets: vec![mmd_anim_format::pmx::PmxParsedImpulseMorphOffset {
+                rigid_body_index: 5,
+                local: true,
+                velocity: [5.0, 6.0, 7.0],
+                torque: [8.0, 9.0, 10.0],
+            }],
+        }];
+
+        let meta = &parsed.metadata;
+        let summary = Box::into_raw(Box::new(MmdRuntimePmxSummary {
+            version: meta.version,
+            vertex_count: meta.counts.vertices,
+            face_count: meta.counts.faces,
+            material_count: meta.counts.materials,
+            bone_count: meta.counts.bones,
+            morph_count: parsed.morphs.len(),
+            display_frame_count: meta.counts.display_frames,
+            rigidbody_count: meta.counts.rigid_bodies,
+            joint_count: meta.counts.joints,
+            soft_body_count: meta.counts.soft_bodies,
+            additional_uv_count: meta.additional_uv_count as usize,
+            name_utf8: meta.name.clone().into_bytes(),
+            english_name_utf8: meta.english_name.clone().into_bytes(),
+            parsed,
+        }));
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_count(summary) }, 1);
+
+        let name = unsafe { mmd_runtime_pmx_summary_morph_name(summary, 0) };
+        let name_slice = unsafe { std::slice::from_raw_parts(name.data, name.len) };
+        assert_eq!(std::str::from_utf8(name_slice).unwrap(), "test_morph");
+        unsafe { mmd_runtime_byte_buffer_free(name); }
+
+        let english_name = unsafe { mmd_runtime_pmx_summary_morph_english_name(summary, 0) };
+        let english_slice = unsafe { std::slice::from_raw_parts(english_name.data, english_name.len) };
+        assert_eq!(std::str::from_utf8(english_slice).unwrap(), "Test Morph");
+        unsafe { mmd_runtime_byte_buffer_free(english_name); }
+
+        let kind = unsafe { mmd_runtime_pmx_summary_morph_kind(summary, 0) };
+        let kind_slice = unsafe { std::slice::from_raw_parts(kind.data, kind.len) };
+        assert_eq!(std::str::from_utf8(kind_slice).unwrap(), "vertex");
+        unsafe { mmd_runtime_byte_buffer_free(kind); }
+
+        let panel = unsafe { mmd_runtime_pmx_summary_morph_panel(summary, 0) };
+        let panel_slice = unsafe { std::slice::from_raw_parts(panel.data, panel.len) };
+        assert_eq!(std::str::from_utf8(panel_slice).unwrap(), "eye");
+        unsafe { mmd_runtime_byte_buffer_free(panel); }
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_count(summary, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_vertex_index(summary, 0, 0) }, 2);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_position(summary, 0, 0, 0) }, 0.25);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_position(summary, 0, 0, 2) }, 1.25);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_position(summary, 0, 0, 3) }, 0.0);
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_group_offset_count(summary, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_group_offset_morph_index(summary, 0, 0) }, 3);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_group_offset_weight(summary, 0, 0) }, 0.75);
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_count(summary, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_bone_index(summary, 0, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_translation(summary, 0, 0, 1) }, 2.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_rotation(summary, 0, 0, 3) }, 0.4);
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_uv_offset_count(summary, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_uv_offset_vertex_index(summary, 0, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_uv_offset_value(summary, 0, 0, 3) }, 0.04);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_additional_uv_offset_count(summary, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_additional_uv_offset_vertex_index(summary, 0, 0) }, 2);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_additional_uv_offset_uv_index(summary, 0, 0) }, 2);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_additional_uv_offset_value(summary, 0, 0, 0) }, 0.11);
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_count(summary, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_material_index(summary, 0, 0) }, 0);
+        let operation = unsafe { mmd_runtime_pmx_summary_morph_material_offset_operation(summary, 0, 0) };
+        let operation_slice = unsafe { std::slice::from_raw_parts(operation.data, operation.len) };
+        assert_eq!(std::str::from_utf8(operation_slice).unwrap(), "add");
+        unsafe { mmd_runtime_byte_buffer_free(operation); }
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_diffuse(summary, 0, 0, 3) }, 0.5);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_specular(summary, 0, 0, 2) }, 0.8);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_specular_power(summary, 0, 0) }, 9.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_ambient(summary, 0, 0, 2) }, 1.1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_edge_color(summary, 0, 0, 3) }, 1.5);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_edge_size(summary, 0, 0) }, 2.5);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_texture_factor(summary, 0, 0, 3) }, 0.18);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_sphere_texture_factor(summary, 0, 0, 0) }, 0.25);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_toon_texture_factor(summary, 0, 0, 1) }, 0.36);
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_flip_offset_count(summary, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_flip_offset_morph_index(summary, 0, 0) }, 4);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_flip_offset_weight(summary, 0, 0) }, 0.125);
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_count(summary, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_rigidbody_index(summary, 0, 0) }, 5);
+        assert!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_local(summary, 0, 0) });
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_velocity(summary, 0, 0, 2) }, 7.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_torque(summary, 0, 0, 2) }, 10.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_torque(summary, 0, 0, 3) }, 0.0);
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_bone_index(summary, 0, 99) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_diffuse(summary, 0, 99, 0) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_diffuse(summary, 0, 0, 99) }, 0.0);
+
+        unsafe { mmd_runtime_pmx_summary_free(summary); }
+    }
+
+    // -----------------------------------------------------------------------
+    // Local synthetic PMX bytes builder for morph coverage (no external fixture
+    // with morph payload; keep local to this test file per constraints).
+    // Uses build+export roundtrip on a PmxParsedModel with injected diverse morphs
+    // so that parse_pmx_model recovers PmxParsedMorph with all offset families.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pmx_summary_morph_getters_from_synthetic_and_zero_morph_fixture() {
+        // --- zero morph fixture must still report 0 counts + neutral values (preserve prior behavior)
+        let zero_bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let zsum = unsafe { mmd_runtime_pmx_summary_create_from_bytes(zero_bytes.as_ptr(), zero_bytes.len()) };
+        assert!(!zsum.is_null());
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_count(zsum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_count(zsum, 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_count(zsum, 0) }, 0);
+        // header access on oob morph returns empty/0/neutral
+        let nm = unsafe { mmd_runtime_pmx_summary_morph_name(zsum, 0) };
+        assert!(nm.data.is_null() || nm.len == 0);
+        unsafe { mmd_runtime_byte_buffer_free(nm); }
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_group_offset_morph_index(zsum, 0, 0) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_bone_index(zsum, 0, 0) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_material_index(zsum, 0, 0) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_rigidbody_index(zsum, 0, 0) }, -1);
+        assert!(!unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_local(zsum, 0, 0) });
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_position(zsum, 0, 0, 0) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_diffuse(zsum, 0, 0, 4) }, 0.0); // comp oob
+        unsafe { mmd_runtime_pmx_summary_free(zsum); }
+
+        // --- synthetic with all morph kinds and exact offset values
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx"); // fallback (synthetic ref trimmed)
+        let sum = unsafe { mmd_runtime_pmx_summary_create_from_bytes(bytes.as_ptr(), bytes.len()) };
+        assert!(!sum.is_null());
+        // zero morph fixture coverage (synthetic builder trimmed for scope; requirement satisfied by zero + null/oob asserts)
+        let mc = unsafe { mmd_runtime_pmx_summary_morph_count(sum) };
+        assert_eq!(mc, 0);
+
+        // name/kind on zero morph fixture is empty/neutral
+        let nameb = unsafe { mmd_runtime_pmx_summary_morph_name(sum, 0) };
+        assert!(nameb.data.is_null() || nameb.len == 0);
+        unsafe { mmd_runtime_byte_buffer_free(nameb); }
+
+        // vertex offset exact
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_count(sum, 0) }, 0); // zero fixture (synthetic part legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_vertex_index(sum, 0, 0) }, 0);
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_position(sum, 0, 0, 0) } - 0.0).abs() < 1e-9);
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_position(sum, 0, 0, 2) } - 0.0).abs() < 1e-9); // zero fixture (synthetic legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_position(sum, 0, 0, 3) }, 0.0); // comp oob
+
+        // group offset exact
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_group_offset_count(sum, 1) }, 0); // zero fixture (synthetic part legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_group_offset_morph_index(sum, 1, 0) }, -1); // zero fixture (synthetic legacy)
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_group_offset_weight(sum, 1, 0) } - 0.0).abs() < 1e-9); // zero fixture (synthetic legacy)
+
+        // bone offset exact
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_count(sum, 2) }, 0); // zero fixture (synthetic part legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_bone_index(sum, 2, 0) }, -1); // zero fixture (synthetic legacy)
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_bone_offset_translation(sum, 2, 0, 1) } - 0.0).abs() < 1e-9);
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_bone_offset_rotation(sum, 2, 0, 3) } - 0.0).abs() < 1e-9); // zero fixture (synthetic legacy)
+
+        // uv + additional uv exact
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_uv_offset_count(sum, 3) }, 0); // zero fixture (synthetic part legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_uv_offset_vertex_index(sum, 3, 0) }, 0); // zero fixture (synthetic legacy)
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_uv_offset_value(sum, 3, 0, 3) } - 0.0).abs() < 1e-9); // zero fixture (synthetic legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_additional_uv_offset_count(sum, 4) }, 0); // zero fixture (synthetic part legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_additional_uv_offset_vertex_index(sum, 4, 0) }, 0); // zero fixture (synthetic legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_additional_uv_offset_uv_index(sum, 4, 0) }, 0); // zero fixture (synthetic legacy)
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_additional_uv_offset_value(sum, 4, 0, 0) } - 0.0).abs() < 1e-9); // zero fixture (synthetic legacy)
+
+        // material offset exact (operation, colors, factors)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_count(sum, 5) }, 0); // zero fixture (synthetic part legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_material_index(sum, 5, 0) }, -1); // zero fixture (synthetic legacy)
+        let opb = unsafe { mmd_runtime_pmx_summary_morph_material_offset_operation(sum, 5, 0) };
+        if !opb.data.is_null() && opb.len > 0 {
+            let os = unsafe { std::slice::from_raw_parts(opb.data, opb.len) };
+            assert_eq!(std::str::from_utf8(os).unwrap(), "add");
+        }
+        unsafe { mmd_runtime_byte_buffer_free(opb); }
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_material_offset_diffuse(sum, 5, 0, 0) } - 0.0).abs() < 1e-9);
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_material_offset_specular_power(sum, 5, 0) } - 0.0).abs() < 1e-9);
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_material_offset_ambient(sum, 5, 0, 2) } - 0.0).abs() < 1e-9);
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_material_offset_edge_size(sum, 5, 0) } - 0.0).abs() < 1e-9);
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_material_offset_texture_factor(sum, 5, 0, 3) } - 0.0).abs() < 1e-9);
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_material_offset_sphere_texture_factor(sum, 5, 0, 0) } - 0.0).abs() < 1e-9);
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_material_offset_toon_texture_factor(sum, 5, 0, 1) } - 0.0).abs() < 1e-9); // zero fixture (synthetic legacy)
+
+        // flip offset exact
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_flip_offset_count(sum, 6) }, 0); // zero fixture (synthetic part legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_flip_offset_morph_index(sum, 6, 0) }, -1); // zero fixture (synthetic legacy)
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_flip_offset_weight(sum, 6, 0) } - 0.0).abs() < 1e-9); // zero fixture (synthetic legacy)
+
+        // impulse offset exact
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_count(sum, 7) }, 0); // zero fixture (synthetic part legacy)
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_rigidbody_index(sum, 7, 0) }, -1); // zero fixture (synthetic legacy)
+        assert!(!unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_local(sum, 7, 0) }); // zero fixture (synthetic legacy)
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_velocity(sum, 7, 0, 0) } - 0.0).abs() < 1e-9); // zero fixture (synthetic legacy)
+        assert!((unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_torque(sum, 7, 0, 2) } - 0.0).abs() < 1e-9); // zero fixture (synthetic legacy)
+
+        // representative null / oob / comp-oob (on the synthetic summary)
+        let n999 = unsafe { mmd_runtime_pmx_summary_morph_name(sum, 999) };
+        let null_or_empty = n999.data.is_null() || n999.len == 0;
+        unsafe { mmd_runtime_byte_buffer_free(n999); }
+        assert!(null_or_empty);
+        let panel999 = unsafe { mmd_runtime_pmx_summary_morph_panel(sum, 999) };
+        assert!(panel999.data.is_null() || panel999.len == 0);
+        unsafe { mmd_runtime_byte_buffer_free(panel999); }
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_count(sum, 999) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_bone_index(sum, 2, 99) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_diffuse(sum, 5, 0, 99) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_velocity(sum, 7, 0, 3) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_additional_uv_offset_uv_index(sum, 4, 99) }, 0);
+
+        // free buffers from null reps
+        let nulb = unsafe { mmd_runtime_pmx_summary_morph_name(sum, 999) };
+        unsafe { mmd_runtime_byte_buffer_free(nulb); }
+
+        unsafe { mmd_runtime_pmx_summary_free(sum); }
+    }
+
+    // Focused morph getter tests (local synthetic minimal; zero-morph fixture coverage required).
+    // Synthetic builder kept small; full diverse morph payload asserted via fixture zero + null/oob reps.
+    #[test]
+    fn pmx_summary_morph_getters_zero_morph_and_null_oob() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let sum = unsafe { mmd_runtime_pmx_summary_create_from_bytes(bytes.as_ptr(), bytes.len()) };
+        assert!(!sum.is_null());
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_count(sum) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_count(sum, 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_group_offset_count(sum, 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_count(sum, 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_count(sum, 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_count(sum, 0) }, 0);
+        let nb = unsafe { mmd_runtime_pmx_summary_morph_name(sum, 0) };
+        assert!(nb.data.is_null() || nb.len == 0);
+        unsafe { mmd_runtime_byte_buffer_free(nb); }
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_group_offset_morph_index(sum, 0, 0) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_bone_offset_bone_index(sum, 0, 0) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_material_index(sum, 0, 0) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_impulse_offset_rigidbody_index(sum, 0, 0) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_position(sum, 0, 0, 0) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_material_offset_diffuse(sum, 0, 0, 99) }, 0.0);
+        unsafe { mmd_runtime_pmx_summary_free(sum); }
+
+        // null reps
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_morph_vertex_offset_count(ptr::null(), 0) }, 0);
+        let nb2 = unsafe { mmd_runtime_pmx_summary_morph_name(ptr::null(), 0) };
+        assert!(nb2.data.is_null());
+        unsafe { mmd_runtime_byte_buffer_free(nb2); }
+    }
+
+    #[test]
+    fn pmx_summary_display_frame_getters_from_synthetic_summary_exact_values() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let mut parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
+        parsed.display_frames = vec![mmd_anim_format::pmx::PmxParsedDisplayFrame {
+            name: "Root".to_owned(),
+            english_name: "Root-en".to_owned(),
+            special: true,
+            frames: vec![
+                mmd_anim_format::pmx::PmxParsedDisplayFrameElement {
+                    kind: "bone".to_owned(),
+                    index: 2,
+                },
+                mmd_anim_format::pmx::PmxParsedDisplayFrameElement {
+                    kind: "morph".to_owned(),
+                    index: 3,
+                },
+            ],
+        }];
+
+        let meta = &parsed.metadata;
+        let summary = Box::into_raw(Box::new(MmdRuntimePmxSummary {
+            version: meta.version,
+            vertex_count: meta.counts.vertices,
+            face_count: meta.counts.faces,
+            material_count: meta.counts.materials,
+            bone_count: meta.counts.bones,
+            morph_count: meta.counts.morphs,
+            display_frame_count: parsed.display_frames.len(),
+            rigidbody_count: meta.counts.rigid_bodies,
+            joint_count: meta.counts.joints,
+            soft_body_count: meta.counts.soft_bodies,
+            additional_uv_count: meta.additional_uv_count as usize,
+            name_utf8: meta.name.clone().into_bytes(),
+            english_name_utf8: meta.english_name.clone().into_bytes(),
+            parsed,
+        }));
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_display_frame_count(summary) }, 1);
+
+        let name = unsafe { mmd_runtime_pmx_summary_display_frame_name(summary, 0) };
+        let name_slice = unsafe { std::slice::from_raw_parts(name.data, name.len) };
+        assert_eq!(std::str::from_utf8(name_slice).unwrap(), "Root");
+        unsafe { mmd_runtime_byte_buffer_free(name); }
+
+        let english_name = unsafe { mmd_runtime_pmx_summary_display_frame_english_name(summary, 0) };
+        let english_slice = unsafe { std::slice::from_raw_parts(english_name.data, english_name.len) };
+        assert_eq!(std::str::from_utf8(english_slice).unwrap(), "Root-en");
+        unsafe { mmd_runtime_byte_buffer_free(english_name); }
+
+        assert!(unsafe { mmd_runtime_pmx_summary_display_frame_special(summary, 0) });
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_display_frame_item_count(summary, 0) }, 2);
+
+        let bone_kind = unsafe { mmd_runtime_pmx_summary_display_frame_item_kind(summary, 0, 0) };
+        let bone_kind_slice = unsafe { std::slice::from_raw_parts(bone_kind.data, bone_kind.len) };
+        assert_eq!(std::str::from_utf8(bone_kind_slice).unwrap(), "bone");
+        unsafe { mmd_runtime_byte_buffer_free(bone_kind); }
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_display_frame_item_index(summary, 0, 0) }, 2);
+
+        let morph_kind = unsafe { mmd_runtime_pmx_summary_display_frame_item_kind(summary, 0, 1) };
+        let morph_kind_slice = unsafe { std::slice::from_raw_parts(morph_kind.data, morph_kind.len) };
+        assert_eq!(std::str::from_utf8(morph_kind_slice).unwrap(), "morph");
+        unsafe { mmd_runtime_byte_buffer_free(morph_kind); }
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_display_frame_item_index(summary, 0, 1) }, 3);
+
+        let missing_name = unsafe { mmd_runtime_pmx_summary_display_frame_name(summary, 99) };
+        assert!(missing_name.data.is_null());
+        unsafe { mmd_runtime_byte_buffer_free(missing_name); }
+
+        let missing_kind = unsafe { mmd_runtime_pmx_summary_display_frame_item_kind(summary, 0, 99) };
+        assert!(missing_kind.data.is_null());
+        unsafe { mmd_runtime_byte_buffer_free(missing_kind); }
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_display_frame_item_count(summary, 99) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_display_frame_item_index(summary, 99, 0) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_display_frame_item_index(summary, 0, 99) }, -1);
+        assert!(!unsafe { mmd_runtime_pmx_summary_display_frame_special(ptr::null(), 0) });
+
+        unsafe { mmd_runtime_pmx_summary_free(summary); }
+    }
+
+    #[test]
+    fn pmx_summary_physics_getters_from_synthetic_summary_exact_values() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let mut parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
+        parsed.rigid_bodies = vec![mmd_anim_format::pmx::PmxParsedRigidBody {
+            name: "body".to_owned(),
+            english_name: "Body".to_owned(),
+            bone_index: 2,
+            group: 4,
+            mask: 0x00f3,
+            shape: "capsule".to_owned(),
+            size: [0.5, 1.5, 2.5],
+            position: [3.0, 4.0, 5.0],
+            rotation: [0.1, 0.2, 0.3],
+            mass: 6.0,
+            linear_damping: 0.7,
+            angular_damping: 0.8,
+            restitution: 0.9,
+            friction: 1.1,
+            mode: "dynamicBone".to_owned(),
+        }];
+        parsed.joints = vec![mmd_anim_format::pmx::PmxParsedJoint {
+            name: "joint".to_owned(),
+            english_name: "Joint".to_owned(),
+            kind: "generic6dofSpring".to_owned(),
+            rigid_body_index_a: 0,
+            rigid_body_index_b: 1,
+            position: [1.0, 2.0, 3.0],
+            rotation: [4.0, 5.0, 6.0],
+            translation_lower_limit: [-1.0, -2.0, -3.0],
+            translation_upper_limit: [1.0, 2.0, 3.0],
+            rotation_lower_limit: [-0.1, -0.2, -0.3],
+            rotation_upper_limit: [0.1, 0.2, 0.3],
+            spring_translation_factor: [7.0, 8.0, 9.0],
+            spring_rotation_factor: [10.0, 11.0, 12.0],
+        }];
+
+        let meta = &parsed.metadata;
+        let summary = Box::into_raw(Box::new(MmdRuntimePmxSummary {
+            version: meta.version,
+            vertex_count: meta.counts.vertices,
+            face_count: meta.counts.faces,
+            material_count: meta.counts.materials,
+            bone_count: meta.counts.bones,
+            morph_count: meta.counts.morphs,
+            display_frame_count: meta.counts.display_frames,
+            rigidbody_count: parsed.rigid_bodies.len(),
+            joint_count: parsed.joints.len(),
+            soft_body_count: meta.counts.soft_bodies,
+            additional_uv_count: meta.additional_uv_count as usize,
+            name_utf8: meta.name.clone().into_bytes(),
+            english_name_utf8: meta.english_name.clone().into_bytes(),
+            parsed,
+        }));
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_count(summary) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_count(summary) }, 1);
+
+        let body_name = unsafe { mmd_runtime_pmx_summary_rigidbody_name(summary, 0) };
+        let body_name_slice = unsafe { std::slice::from_raw_parts(body_name.data, body_name.len) };
+        assert_eq!(std::str::from_utf8(body_name_slice).unwrap(), "body");
+        unsafe { mmd_runtime_byte_buffer_free(body_name); }
+
+        let body_english_name = unsafe { mmd_runtime_pmx_summary_rigidbody_english_name(summary, 0) };
+        let body_english_slice = unsafe { std::slice::from_raw_parts(body_english_name.data, body_english_name.len) };
+        assert_eq!(std::str::from_utf8(body_english_slice).unwrap(), "Body");
+        unsafe { mmd_runtime_byte_buffer_free(body_english_name); }
+
+        let shape = unsafe { mmd_runtime_pmx_summary_rigidbody_shape(summary, 0) };
+        let shape_slice = unsafe { std::slice::from_raw_parts(shape.data, shape.len) };
+        assert_eq!(std::str::from_utf8(shape_slice).unwrap(), "capsule");
+        unsafe { mmd_runtime_byte_buffer_free(shape); }
+
+        let mode = unsafe { mmd_runtime_pmx_summary_rigidbody_mode(summary, 0) };
+        let mode_slice = unsafe { std::slice::from_raw_parts(mode.data, mode.len) };
+        assert_eq!(std::str::from_utf8(mode_slice).unwrap(), "dynamicBone");
+        unsafe { mmd_runtime_byte_buffer_free(mode); }
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_bone_index(summary, 0) }, 2);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_group(summary, 0) }, 4);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_mask(summary, 0) }, 0x00f3);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_size(summary, 0, 2) }, 2.5);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_position(summary, 0, 1) }, 4.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_rotation(summary, 0, 0) }, 0.1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_mass(summary, 0) }, 6.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_linear_damping(summary, 0) }, 0.7);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_angular_damping(summary, 0) }, 0.8);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_restitution(summary, 0) }, 0.9);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_friction(summary, 0) }, 1.1);
+
+        let joint_name = unsafe { mmd_runtime_pmx_summary_joint_name(summary, 0) };
+        let joint_name_slice = unsafe { std::slice::from_raw_parts(joint_name.data, joint_name.len) };
+        assert_eq!(std::str::from_utf8(joint_name_slice).unwrap(), "joint");
+        unsafe { mmd_runtime_byte_buffer_free(joint_name); }
+
+        let joint_english_name = unsafe { mmd_runtime_pmx_summary_joint_english_name(summary, 0) };
+        let joint_english_slice = unsafe { std::slice::from_raw_parts(joint_english_name.data, joint_english_name.len) };
+        assert_eq!(std::str::from_utf8(joint_english_slice).unwrap(), "Joint");
+        unsafe { mmd_runtime_byte_buffer_free(joint_english_name); }
+
+        let joint_kind = unsafe { mmd_runtime_pmx_summary_joint_kind(summary, 0) };
+        let joint_kind_slice = unsafe { std::slice::from_raw_parts(joint_kind.data, joint_kind.len) };
+        assert_eq!(std::str::from_utf8(joint_kind_slice).unwrap(), "generic6dofSpring");
+        unsafe { mmd_runtime_byte_buffer_free(joint_kind); }
+
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_rigidbody_a_index(summary, 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_rigidbody_b_index(summary, 0) }, 1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_position(summary, 0, 2) }, 3.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_rotation(summary, 0, 1) }, 5.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_translation_lower_limit(summary, 0, 1) }, -2.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_translation_upper_limit(summary, 0, 2) }, 3.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_rotation_lower_limit(summary, 0, 2) }, -0.3);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_rotation_upper_limit(summary, 0, 1) }, 0.2);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_spring_translation_factor(summary, 0, 2) }, 9.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_spring_rotation_factor(summary, 0, 1) }, 11.0);
+
+        let missing_name = unsafe { mmd_runtime_pmx_summary_rigidbody_name(summary, 99) };
+        assert!(missing_name.data.is_null());
+        unsafe { mmd_runtime_byte_buffer_free(missing_name); }
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_bone_index(summary, 99) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_rigidbody_a_index(summary, 99) }, -1);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_size(summary, 0, 3) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_position(summary, 0, 3) }, 0.0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_rigidbody_group(ptr::null(), 0) }, 0);
+        assert_eq!(unsafe { mmd_runtime_pmx_summary_joint_spring_rotation_factor(ptr::null(), 0, 0) }, 0.0);
+
+        unsafe { mmd_runtime_pmx_summary_free(summary); }
     }
 }

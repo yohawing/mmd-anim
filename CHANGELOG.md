@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.1.4 - Unreleased
+## 0.1.4 - 2026-06-19
+
+Patch release for host-facing parser JSON and PMX geometry FFI.
+
+### Added
+
+- Added native parser FFI for VMD JSON, PMX non-geometry JSON, PMX skinning-mode
+  JSON, and flat PMX geometry buffers so Unity and other hosts can reuse the
+  Rust parsers without embedding Unity-side JSON parser implementations.
 
 ## 0.1.3 - 2026-06-12
 

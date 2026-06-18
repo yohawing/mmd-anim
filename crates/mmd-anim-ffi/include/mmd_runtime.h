@@ -118,6 +118,64 @@ uint32_t mmd_runtime_abi_version(void);
 void mmd_runtime_byte_buffer_free(
     mmd_runtime_ffi_byte_buffer_t buffer);
 
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_vmd_json(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_non_geometry_json(
+    const uint8_t* data,
+    size_t         len);
+
+/* PMX geometry typed-buffer API.
+   Each function returns one geometry array as a native-endian byte buffer.
+   The caller must free each buffer with mmd_runtime_byte_buffer_free.
+   Returns an empty buffer (data == NULL, len == 0) on any error. */
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_positions_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_normals_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_uvs_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_indices_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_skin_indices_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_skin_weights_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_sdef_enabled_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_sdef_c_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_sdef_r0_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_sdef_r1_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+/* Returns JSON: {"skinningModes": ["bdef1", ...]} */
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_skinning_modes_json(
+    const uint8_t* data,
+    size_t         len);
+
 mmd_runtime_model_t* mmd_runtime_model_create(
     const int32_t* parent_indices,
     const float*   rest_positions_xyz,

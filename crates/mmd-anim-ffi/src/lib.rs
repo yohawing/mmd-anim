@@ -182,6 +182,503 @@ pub unsafe extern "C" fn mmd_runtime_byte_buffer_free(buffer: MmdRuntimeFfiByteB
     }
 }
 
+/// Parses VMD bytes and returns the serialized `VmdParsedAnimation` JSON.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+/// The returned buffer is owned by the caller and must be freed with
+/// `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_vmd_json(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return empty_byte_buffer(),
+    };
+
+    match serde_json::to_vec(&parsed) {
+        Ok(json) => byte_buffer_from_vec(json),
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns JSON for model fields except geometry.
+///
+/// The JSON includes metadata, materials, skeleton, morphs, display frames,
+/// rigid bodies, joints, soft bodies, and diagnostics. Large geometry arrays
+/// are intentionally omitted so Unity can consume them through typed buffers.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+/// The returned buffer is owned by the caller and must be freed with
+/// `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_non_geometry_json(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return empty_byte_buffer(),
+    };
+
+    let mut object = serde_json::Map::with_capacity(9);
+    macro_rules! push_json_field {
+        ($key:expr, $value:expr) => {
+            match serde_json::to_value($value) {
+                Ok(value) => {
+                    object.insert($key.to_owned(), value);
+                }
+                Err(_) => return empty_byte_buffer(),
+            }
+        };
+    }
+
+    push_json_field!("metadata", &parsed.metadata);
+    match unity_pmx_materials_json(&parsed.materials) {
+        Ok(value) => {
+            object.insert("materials".to_owned(), value);
+        }
+        Err(_) => return empty_byte_buffer(),
+    }
+    match unity_pmx_skeleton_json(&parsed.skeleton) {
+        Ok(value) => {
+            object.insert("skeleton".to_owned(), value);
+        }
+        Err(_) => return empty_byte_buffer(),
+    }
+    push_json_field!("morphs", &parsed.morphs);
+    push_json_field!("displayFrames", &parsed.display_frames);
+    push_json_field!("rigidBodies", &parsed.rigid_bodies);
+    push_json_field!("joints", &parsed.joints);
+    push_json_field!("softBodies", &parsed.soft_bodies);
+    push_json_field!("diagnostics", &parsed.diagnostics);
+
+    match serde_json::to_vec(&serde_json::Value::Object(object)) {
+        Ok(json) => byte_buffer_from_vec(json),
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+fn unity_pmx_materials_json(
+    materials: &[mmd_anim_format::pmx::PmxParsedMaterial],
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(materials)?;
+    if let Some(items) = value.as_array_mut() {
+        for item in items {
+            if item
+                .get("sharedToonIndex")
+                .is_some_and(serde_json::Value::is_null)
+            {
+                item["sharedToonIndex"] = serde_json::Value::from(-1);
+            }
+        }
+    }
+    Ok(value)
+}
+
+fn unity_pmx_skeleton_json(
+    skeleton: &mmd_anim_format::pmx::PmxParsedSkeleton,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(skeleton)?;
+    if let Some(bones) = value
+        .get_mut("bones")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for bone in bones {
+            if bone
+                .get("externalParentKey")
+                .is_some_and(serde_json::Value::is_null)
+            {
+                bone["externalParentKey"] = serde_json::Value::from(-1);
+            }
+        }
+    }
+    Ok(value)
+}
+
+// ---------------------------------------------------------------------------
+//  PMX geometry typed-buffer API
+//
+//  Each function parses PMX bytes and returns one geometry array as a raw
+//  native-endian byte buffer.  Parsing is duplicated per call; no handle is
+//  retained.  The caller must free each buffer with `mmd_runtime_byte_buffer_free`.
+// ---------------------------------------------------------------------------
+
+/// Parses PMX bytes and returns vertex positions as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 3` f32 values (x, y, z per vertex).
+/// Returns an empty buffer on parse failure, null input, or zero length.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_positions_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let buf: Vec<u8> = parsed
+                .geometry
+                .positions
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns vertex normals as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 3` f32 values (x, y, z per vertex).
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_normals_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let buf: Vec<u8> = parsed
+                .geometry
+                .normals
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns vertex UVs as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 2` f32 values (u, v per vertex).
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_uvs_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let buf: Vec<u8> = parsed
+                .geometry
+                .uvs
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns face indices as a native-endian byte buffer.
+///
+/// The buffer contains `index_count` u32 values.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_indices_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let buf: Vec<u8> = parsed
+                .geometry
+                .indices
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns skin bone indices as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 4` u32 values (4 bone indices per vertex).
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_skin_indices_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let buf: Vec<u8> = parsed
+                .geometry
+                .skin_indices
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns skin weights as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 4` f32 values (4 weights per vertex).
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_skin_weights_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let buf: Vec<u8> = parsed
+                .geometry
+                .skin_weights
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns SDEF-enabled flags as a byte buffer.
+///
+/// Each byte is `1` when SDEF is enabled for that vertex, or `0` otherwise.
+/// The buffer length equals `vertex_count`.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_enabled_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let buf: Vec<u8> = parsed
+                .geometry
+                .sdef
+                .enabled
+                .iter()
+                .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
+                .collect();
+            byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns SDEF C vectors as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 3` f32 values.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_c_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let buf: Vec<u8> = parsed
+                .geometry
+                .sdef
+                .c
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns SDEF R0 vectors as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 3` f32 values.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_r0_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let buf: Vec<u8> = parsed
+                .geometry
+                .sdef
+                .r0
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns SDEF R1 vectors as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 3` f32 values.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_r1_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let buf: Vec<u8> = parsed
+                .geometry
+                .sdef
+                .r1
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns skinning mode names as a JSON object.
+///
+/// The returned JSON has the shape `{"skinningModes": ["bdef1", ...]}`.
+/// Returns an empty buffer on parse failure, null input, or zero length.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_skinning_modes_json(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let vertex_count = parsed.geometry.positions.len() / 3;
+            let modes: Vec<&str> = (0..vertex_count)
+                .map(|i| {
+                    if parsed.geometry.sdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
+                        "sdef"
+                    } else if parsed.geometry.qdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
+                        "qdef"
+                    } else {
+                        let w2 = parsed
+                            .geometry
+                            .skin_weights
+                            .get(i * 4 + 2)
+                            .copied()
+                            .unwrap_or(0.0);
+                        let w3 = parsed
+                            .geometry
+                            .skin_weights
+                            .get(i * 4 + 3)
+                            .copied()
+                            .unwrap_or(0.0);
+                        let w1 = parsed
+                            .geometry
+                            .skin_weights
+                            .get(i * 4 + 1)
+                            .copied()
+                            .unwrap_or(0.0);
+                        if w2 != 0.0 || w3 != 0.0 {
+                            "bdef4"
+                        } else if w1 != 0.0 {
+                            "bdef2"
+                        } else {
+                            "bdef1"
+                        }
+                    }
+                })
+                .collect();
+            let wrapper = serde_json::json!({ "skinningModes": modes });
+            match serde_json::to_vec(&wrapper) {
+                Ok(json) => byte_buffer_from_vec(json),
+                Err(_) => empty_byte_buffer(),
+            }
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
 /// Exports a minimal PMX model from flat geometry arrays and a JSON descriptor.
 ///
 /// The descriptor is a UTF-8 JSON object matching the WASM `exportPmxFromParts`
@@ -3059,5 +3556,220 @@ mod tests {
         unsafe {
             mmd_runtime_model_free(model);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    //  JSON / geometry buffer API tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn vmd_json_rejects_null_empty_invalid() {
+        let null_empty = unsafe { mmd_runtime_parse_vmd_json(ptr::null(), 0) };
+        assert!(null_empty.data.is_null());
+        assert_eq!(null_empty.len, 0);
+
+        let null_nonempty = unsafe { mmd_runtime_parse_vmd_json(ptr::null(), 10) };
+        assert!(null_nonempty.data.is_null());
+        assert_eq!(null_nonempty.len, 0);
+
+        let d = 0u8;
+        let empty = unsafe { mmd_runtime_parse_vmd_json(&d as *const u8, 0) };
+        assert!(empty.data.is_null());
+        assert_eq!(empty.len, 0);
+
+        let garbage = [0u8; 16];
+        let invalid = unsafe { mmd_runtime_parse_vmd_json(garbage.as_ptr(), garbage.len()) };
+        assert!(invalid.data.is_null());
+        assert_eq!(invalid.len, 0);
+    }
+
+    #[test]
+    fn vmd_json_serializes_camera_fixture() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+        let json_buf = unsafe { mmd_runtime_parse_vmd_json(bytes.as_ptr(), bytes.len()) };
+        assert!(!json_buf.data.is_null());
+        assert!(json_buf.len > 0);
+
+        let json_str =
+            unsafe { str::from_utf8(slice::from_raw_parts(json_buf.data, json_buf.len)) }.unwrap();
+        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert!(v.is_object(), "vmd json must be an object");
+
+        unsafe { mmd_runtime_byte_buffer_free(json_buf) };
+    }
+
+    #[test]
+    fn pmx_non_geometry_json_rejects_null_empty_invalid() {
+        let null_empty = unsafe { mmd_runtime_parse_pmx_non_geometry_json(ptr::null(), 0) };
+        assert!(null_empty.data.is_null());
+        assert_eq!(null_empty.len, 0);
+
+        let null_nonempty = unsafe { mmd_runtime_parse_pmx_non_geometry_json(ptr::null(), 10) };
+        assert!(null_nonempty.data.is_null());
+        assert_eq!(null_nonempty.len, 0);
+
+        let d = 0u8;
+        let empty = unsafe { mmd_runtime_parse_pmx_non_geometry_json(&d as *const u8, 0) };
+        assert!(empty.data.is_null());
+        assert_eq!(empty.len, 0);
+
+        let garbage = [0u8; 16];
+        let invalid =
+            unsafe { mmd_runtime_parse_pmx_non_geometry_json(garbage.as_ptr(), garbage.len()) };
+        assert!(invalid.data.is_null());
+        assert_eq!(invalid.len, 0);
+    }
+
+    #[test]
+    fn pmx_non_geometry_json_omits_geometry_and_normalizes_fields() {
+        let bytes: &[u8] =
+            include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let json_buf =
+            unsafe { mmd_runtime_parse_pmx_non_geometry_json(bytes.as_ptr(), bytes.len()) };
+        assert!(!json_buf.data.is_null());
+        assert!(json_buf.len > 0);
+
+        let json_str =
+            unsafe { str::from_utf8(slice::from_raw_parts(json_buf.data, json_buf.len)) }.unwrap();
+        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
+
+        // geometry field must not be present
+        assert!(v.get("geometry").is_none(), "geometry must be omitted");
+
+        // required non-geometry fields must be present
+        assert!(v.get("metadata").is_some());
+        assert!(v.get("materials").is_some());
+        assert!(v.get("skeleton").is_some());
+        assert!(v.get("morphs").is_some());
+
+        // sharedToonIndex null -> -1
+        if let Some(mats) = v.get("materials").and_then(|m| m.as_array()) {
+            for mat in mats {
+                if let Some(idx) = mat.get("sharedToonIndex") {
+                    assert!(
+                        !idx.is_null(),
+                        "sharedToonIndex must not be null in output JSON"
+                    );
+                }
+            }
+        }
+
+        // externalParentKey null -> -1
+        if let Some(bones) = v
+            .get("skeleton")
+            .and_then(|s| s.get("bones"))
+            .and_then(|b| b.as_array())
+        {
+            for bone in bones {
+                if let Some(key) = bone.get("externalParentKey") {
+                    assert!(
+                        !key.is_null(),
+                        "externalParentKey must not be null in output JSON"
+                    );
+                }
+            }
+        }
+
+        unsafe { mmd_runtime_byte_buffer_free(json_buf) };
+    }
+
+    #[test]
+    fn pmx_geometry_buffers_reject_null_empty_invalid() {
+        macro_rules! check_rejects {
+            ($fn:ident) => {{
+                let null = unsafe { $fn(ptr::null(), 0) };
+                assert!(null.data.is_null(), stringify!($fn null));
+                assert_eq!(null.len, 0, stringify!($fn null len));
+
+                let d = 0u8;
+                let empty = unsafe { $fn(&d as *const u8, 0) };
+                assert!(empty.data.is_null(), stringify!($fn empty));
+
+                let garbage = [0u8; 16];
+                let invalid = unsafe { $fn(garbage.as_ptr(), garbage.len()) };
+                assert!(invalid.data.is_null(), stringify!($fn invalid));
+            }};
+        }
+
+        check_rejects!(mmd_runtime_parse_pmx_positions_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_normals_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_uvs_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_indices_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_skin_indices_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_skin_weights_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_sdef_enabled_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_sdef_c_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_sdef_r0_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_sdef_r1_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_skinning_modes_json);
+    }
+
+    #[test]
+    fn pmx_geometry_buffers_have_correct_dimensions() {
+        let bytes: &[u8] =
+            include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
+        let vertex_count = parsed.metadata.counts.vertices as usize;
+        let index_count = parsed.metadata.counts.faces as usize * 3;
+
+        macro_rules! check_buf {
+            ($fn:ident, $expected_bytes:expr) => {{
+                let buf = unsafe { $fn(bytes.as_ptr(), bytes.len()) };
+                assert!(!buf.data.is_null(), stringify!($fn must not be null));
+                assert_eq!(
+                    buf.len,
+                    $expected_bytes,
+                    stringify!($fn dimension mismatch)
+                );
+                unsafe { mmd_runtime_byte_buffer_free(buf) };
+            }};
+        }
+
+        check_buf!(mmd_runtime_parse_pmx_positions_buffer, vertex_count * 3 * 4);
+        check_buf!(mmd_runtime_parse_pmx_normals_buffer, vertex_count * 3 * 4);
+        check_buf!(mmd_runtime_parse_pmx_uvs_buffer, vertex_count * 2 * 4);
+        check_buf!(mmd_runtime_parse_pmx_indices_buffer, index_count * 4);
+        check_buf!(
+            mmd_runtime_parse_pmx_skin_indices_buffer,
+            vertex_count * 4 * 4
+        );
+        check_buf!(
+            mmd_runtime_parse_pmx_skin_weights_buffer,
+            vertex_count * 4 * 4
+        );
+        check_buf!(mmd_runtime_parse_pmx_sdef_enabled_buffer, vertex_count);
+        check_buf!(mmd_runtime_parse_pmx_sdef_c_buffer, vertex_count * 3 * 4);
+        check_buf!(mmd_runtime_parse_pmx_sdef_r0_buffer, vertex_count * 3 * 4);
+        check_buf!(mmd_runtime_parse_pmx_sdef_r1_buffer, vertex_count * 3 * 4);
+    }
+
+    #[test]
+    fn pmx_skinning_modes_json_has_correct_shape() {
+        let bytes: &[u8] =
+            include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
+        let vertex_count = parsed.metadata.counts.vertices as usize;
+
+        let buf = unsafe { mmd_runtime_parse_pmx_skinning_modes_json(bytes.as_ptr(), bytes.len()) };
+        assert!(!buf.data.is_null());
+        assert!(buf.len > 0);
+
+        let json_str = unsafe { str::from_utf8(slice::from_raw_parts(buf.data, buf.len)) }.unwrap();
+        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
+
+        let modes = v
+            .get("skinningModes")
+            .and_then(|m| m.as_array())
+            .expect("skinningModes array must be present");
+        assert_eq!(modes.len(), vertex_count);
+        for mode in modes {
+            let s = mode.as_str().expect("each skinning mode must be a string");
+            assert!(
+                matches!(s, "bdef1" | "bdef2" | "bdef4" | "sdef" | "qdef"),
+                "unexpected skinning mode: {s}"
+            );
+        }
+
+        unsafe { mmd_runtime_byte_buffer_free(buf) };
     }
 }

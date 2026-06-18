@@ -91,6 +91,19 @@ jobs:
             fi
 
             cargo publish -p "$package"
+
+            for attempt in {1..30}; do
+              if crate_exists "$package" "$version"; then
+                echo "${package} ${version} is visible in the crates.io index."
+                return 0
+              fi
+
+              echo "Waiting for ${package} ${version} to appear in crates.io index (${attempt}/30)."
+              sleep 10
+            done
+
+            echo "${package} ${version} did not appear in the crates.io index in time."
+            exit 1
           }
 
           publish_crate mmd-anim-runtime

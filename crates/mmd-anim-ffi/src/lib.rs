@@ -4295,6 +4295,293 @@ mod tests {
         assert!(invalid.data.is_null(), "additional UV invalid");
     }
 
+    fn ffi_buffer_to_vec(buffer: MmdRuntimeFfiByteBuffer) -> Vec<u8> {
+        let bytes = if buffer.data.is_null() || buffer.len == 0 {
+            Vec::new()
+        } else {
+            unsafe { slice::from_raw_parts(buffer.data, buffer.len).to_vec() }
+        };
+        unsafe { mmd_runtime_byte_buffer_free(buffer) };
+        bytes
+    }
+
+    fn assert_empty_ffi_buffer(buffer: MmdRuntimeFfiByteBuffer, context: &str) {
+        assert!(buffer.data.is_null(), "{context}: data must be null");
+        assert_eq!(buffer.len, 0, "{context}: len must be zero");
+    }
+
+    fn assert_material_split_geometry_invariants(
+        split: *mut MmdRuntimePmxMaterialSplit,
+        manifest: &serde_json::Value,
+        context: &str,
+    ) {
+        let mesh_count = unsafe { mmd_runtime_pmx_material_split_mesh_count(split) };
+        assert!(mesh_count > 0, "{context}: mesh_count must be positive");
+        assert_eq!(
+            manifest.get("meshCount").and_then(|v| v.as_u64()),
+            Some(mesh_count as u64),
+            "{context}: manifest meshCount must match mesh_count"
+        );
+
+        let meshes = manifest
+            .get("meshes")
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| panic!("{context}: manifest meshes must be an array"));
+        assert_eq!(
+            meshes.len(),
+            mesh_count,
+            "{context}: manifest mesh array length must match mesh_count"
+        );
+
+        for mesh_index in 0..mesh_count {
+            let mesh_context = format!("{context}: mesh {mesh_index}");
+            let mesh_manifest = meshes
+                .iter()
+                .find(|mesh| {
+                    mesh.get("meshIndex").and_then(|v| v.as_u64()) == Some(mesh_index as u64)
+                })
+                .unwrap_or_else(|| panic!("{mesh_context}: manifest mesh entry missing"));
+
+            let positions = ffi_buffer_to_vec(unsafe {
+                mmd_runtime_pmx_material_split_positions_buffer(split, mesh_index)
+            });
+            assert_eq!(
+                positions.len() % (3 * 4),
+                0,
+                "{mesh_context}: positions len must be xyz f32 aligned"
+            );
+            let vertex_count = positions.len() / (3 * 4);
+
+            let normals = ffi_buffer_to_vec(unsafe {
+                mmd_runtime_pmx_material_split_normals_buffer(split, mesh_index)
+            });
+            assert_eq!(
+                normals.len(),
+                positions.len(),
+                "{mesh_context}: normals len"
+            );
+
+            let uvs = ffi_buffer_to_vec(unsafe {
+                mmd_runtime_pmx_material_split_uvs_buffer(split, mesh_index)
+            });
+            assert_eq!(uvs.len(), vertex_count * 2 * 4, "{mesh_context}: uvs len");
+
+            let skin_indices = ffi_buffer_to_vec(unsafe {
+                mmd_runtime_pmx_material_split_skin_indices_buffer(split, mesh_index)
+            });
+            assert_eq!(
+                skin_indices.len(),
+                vertex_count * 4 * 4,
+                "{mesh_context}: skin_indices len"
+            );
+
+            let skin_weights = ffi_buffer_to_vec(unsafe {
+                mmd_runtime_pmx_material_split_skin_weights_buffer(split, mesh_index)
+            });
+            assert_eq!(
+                skin_weights.len(),
+                vertex_count * 4 * 4,
+                "{mesh_context}: skin_weights len"
+            );
+
+            let edge_scale = ffi_buffer_to_vec(unsafe {
+                mmd_runtime_pmx_material_split_edge_scale_buffer(split, mesh_index)
+            });
+            assert_eq!(
+                edge_scale.len(),
+                vertex_count * 4,
+                "{mesh_context}: edge_scale len"
+            );
+
+            let sdef_enabled = ffi_buffer_to_vec(unsafe {
+                mmd_runtime_pmx_material_split_sdef_enabled_buffer(split, mesh_index)
+            });
+            assert_eq!(
+                sdef_enabled.len(),
+                vertex_count,
+                "{mesh_context}: sdef_enabled len"
+            );
+
+            let qdef_enabled = ffi_buffer_to_vec(unsafe {
+                mmd_runtime_pmx_material_split_qdef_enabled_buffer(split, mesh_index)
+            });
+            assert_eq!(
+                qdef_enabled.len(),
+                vertex_count,
+                "{mesh_context}: qdef_enabled len"
+            );
+
+            macro_rules! check_vec3_f32_buffer {
+                ($fn:ident, $name:literal) => {{
+                    let buf = ffi_buffer_to_vec(unsafe { $fn(split, mesh_index) });
+                    assert_eq!(
+                        buf.len(),
+                        vertex_count * 3 * 4,
+                        "{}: {} len",
+                        mesh_context,
+                        $name
+                    );
+                }};
+            }
+
+            check_vec3_f32_buffer!(mmd_runtime_pmx_material_split_sdef_c_buffer, "sdef_c");
+            check_vec3_f32_buffer!(mmd_runtime_pmx_material_split_sdef_r0_buffer, "sdef_r0");
+            check_vec3_f32_buffer!(mmd_runtime_pmx_material_split_sdef_r1_buffer, "sdef_r1");
+            check_vec3_f32_buffer!(mmd_runtime_pmx_material_split_sdef_rw0_buffer, "sdef_rw0");
+            check_vec3_f32_buffer!(mmd_runtime_pmx_material_split_sdef_rw1_buffer, "sdef_rw1");
+
+            let indices = ffi_buffer_to_vec(unsafe {
+                mmd_runtime_pmx_material_split_indices_buffer(split, mesh_index)
+            });
+            assert_eq!(
+                indices.len() % 4,
+                0,
+                "{mesh_context}: indices len must be u32 aligned"
+            );
+            for (index_offset, index_bytes) in indices.chunks_exact(4).enumerate() {
+                let index = u32::from_ne_bytes(index_bytes.try_into().unwrap()) as usize;
+                assert!(
+                    index < vertex_count,
+                    "{mesh_context}: index {index_offset} value {index} must be < vertex_count {vertex_count}"
+                );
+            }
+
+            for uv_index in 0..4 {
+                let additional_uvs = ffi_buffer_to_vec(unsafe {
+                    mmd_runtime_pmx_material_split_additional_uvs_buffer(
+                        split, mesh_index, uv_index,
+                    )
+                });
+                if !additional_uvs.is_empty() {
+                    assert_eq!(
+                        additional_uvs.len(),
+                        vertex_count * 4 * 4,
+                        "{mesh_context}: additional_uvs[{uv_index}] len"
+                    );
+                }
+            }
+
+            let original_vertex_indices = mesh_manifest
+                .get("originalVertexIndices")
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| {
+                    panic!("{mesh_context}: originalVertexIndices must be an array")
+                });
+            assert_eq!(
+                original_vertex_indices.len(),
+                vertex_count,
+                "{mesh_context}: originalVertexIndices len"
+            );
+
+            let morph_index_map = mesh_manifest
+                .get("morphIndexMap")
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| panic!("{mesh_context}: morphIndexMap must be an array"));
+            let mut seen_local_indices = vec![false; morph_index_map.len()];
+            for entry in morph_index_map {
+                let local_index = entry
+                    .get("localIndex")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(|| panic!("{mesh_context}: localIndex missing"))
+                    as usize;
+                assert!(
+                    local_index < morph_index_map.len(),
+                    "{mesh_context}: localIndex {local_index} out of range"
+                );
+                assert!(
+                    !seen_local_indices[local_index],
+                    "{mesh_context}: duplicate localIndex {local_index}"
+                );
+                seen_local_indices[local_index] = true;
+            }
+            assert!(
+                seen_local_indices.iter().all(|seen| *seen),
+                "{mesh_context}: localIndex values must be contiguous from zero"
+            );
+        }
+    }
+
+    fn assert_material_split_rejects_null_and_out_of_range(
+        split: *mut MmdRuntimePmxMaterialSplit,
+        mesh_count: usize,
+    ) {
+        assert_eq!(
+            unsafe { mmd_runtime_pmx_material_split_mesh_count(ptr::null()) },
+            0
+        );
+        assert_empty_ffi_buffer(
+            unsafe { mmd_runtime_pmx_material_split_manifest_json(ptr::null()) },
+            "null material split manifest",
+        );
+
+        macro_rules! check_empty_getter {
+            ($fn:ident) => {{
+                assert_empty_ffi_buffer(
+                    unsafe { $fn(ptr::null(), 0) },
+                    concat!(stringify!($fn), " null"),
+                );
+                assert_empty_ffi_buffer(
+                    unsafe { $fn(split, mesh_count) },
+                    concat!(stringify!($fn), " out of range"),
+                );
+            }};
+        }
+
+        check_empty_getter!(mmd_runtime_pmx_material_split_positions_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_normals_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_uvs_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_indices_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_skin_indices_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_skin_weights_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_edge_scale_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_enabled_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_c_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_r0_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_r1_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_rw0_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_rw1_buffer);
+        check_empty_getter!(mmd_runtime_pmx_material_split_qdef_enabled_buffer);
+
+        assert_empty_ffi_buffer(
+            unsafe { mmd_runtime_pmx_material_split_additional_uvs_buffer(ptr::null(), 0, 0) },
+            "additional_uvs null",
+        );
+        assert_empty_ffi_buffer(
+            unsafe { mmd_runtime_pmx_material_split_additional_uvs_buffer(split, mesh_count, 0) },
+            "additional_uvs out of range",
+        );
+    }
+
+    fn material_split_manifest_json(
+        split: *mut MmdRuntimePmxMaterialSplit,
+        context: &str,
+    ) -> serde_json::Value {
+        let manifest_bytes =
+            ffi_buffer_to_vec(unsafe { mmd_runtime_pmx_material_split_manifest_json(split) });
+        assert!(
+            !manifest_bytes.is_empty(),
+            "{context}: manifest_json must not be empty"
+        );
+        serde_json::from_slice(&manifest_bytes)
+            .unwrap_or_else(|err| panic!("{context}: manifest_json parse failed: {err}"))
+    }
+
+    #[test]
+    fn pmx_material_split_buffers_have_consistent_dimensions() {
+        let bytes: &[u8] =
+            include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let split =
+            unsafe { mmd_runtime_pmx_material_split_create(bytes.as_ptr(), bytes.len(), 0) };
+        assert!(!split.is_null(), "material split handle must not be null");
+
+        let mesh_count = unsafe { mmd_runtime_pmx_material_split_mesh_count(split) };
+        let manifest = material_split_manifest_json(split, "fixture material split");
+        assert_material_split_geometry_invariants(split, &manifest, "fixture material split");
+        assert_material_split_rejects_null_and_out_of_range(split, mesh_count);
+
+        unsafe { mmd_runtime_pmx_material_split_free(split) };
+    }
+
     #[test]
     fn pmx_geometry_buffers_have_correct_dimensions() {
         let bytes: &[u8] =

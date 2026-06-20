@@ -27,12 +27,15 @@ pub use pmm::{
     export_pmm_scene_from_pmx_vmd, parse_pmm_manifest,
 };
 pub use pmx::{
-    PmxBoneImport, PmxMorphNames, PmxParsedModel, PmxPartsBoneDescriptor, PmxPartsDescriptor,
-    PmxPartsDisplayFrameDescriptor, PmxPartsDisplayFrameItem, PmxPartsGroupMorphOffset,
-    PmxPartsIndexSizes, PmxPartsInput, PmxPartsJointDescriptor, PmxPartsMaterialDescriptor,
-    PmxPartsMaterialFlags, PmxPartsMorphDescriptor, PmxPartsRigidBodyDescriptor,
-    PmxPartsVertexMorphOffset, PmxRuntimeImport, build_pmx_model_from_parts, export_pmx_model,
-    import_pmx_model, import_pmx_runtime, parse_pmx_model, validate_pmx_export_model,
+    PmxBoneImport, PmxMaterialSplit, PmxMaterialSplitManifest, PmxMaterialSplitManifestMesh,
+    PmxMaterialSplitMesh, PmxMaterialSplitMorphIndexMap, PmxMaterialSplitResult, PmxMorphNames,
+    PmxParsedModel, PmxPartsBoneDescriptor, PmxPartsDescriptor, PmxPartsDisplayFrameDescriptor,
+    PmxPartsDisplayFrameItem, PmxPartsGroupMorphOffset, PmxPartsIndexSizes, PmxPartsInput,
+    PmxPartsJointDescriptor, PmxPartsMaterialDescriptor, PmxPartsMaterialFlags,
+    PmxPartsMorphDescriptor, PmxPartsRigidBodyDescriptor, PmxPartsVertexMorphOffset,
+    PmxRuntimeImport, build_pmx_model_from_parts, export_pmx_model, import_pmx_model,
+    import_pmx_runtime, parse_pmx_material_split, parse_pmx_model, split_pmx_model_by_material,
+    validate_pmx_export_model,
 };
 pub use vmd::{
     VmdCameraState, VmdClipBuildOptions, VmdIkEntry, VmdImportResult, VmdParsedAnimation,

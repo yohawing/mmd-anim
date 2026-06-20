@@ -53,6 +53,11 @@ pub struct MmdRuntimeClip {
     clip: AnimationClip,
 }
 
+pub struct MmdRuntimePmxMaterialSplit {
+    split: mmd_anim_format::PmxMaterialSplitResult,
+    manifest_json: Vec<u8>,
+}
+
 #[repr(C)]
 pub struct MmdRuntimeFfiBoneTrack {
     pub bone_index: u32,
@@ -407,6 +412,56 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_uvs_buffer(
     }
 }
 
+/// Parses PMX bytes and returns the number of additional UV channels.
+///
+/// Returns zero on parse failure, null input, or zero length.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_additional_uv_count(
+    data: *const u8,
+    len: usize,
+) -> usize {
+    if data.is_null() || len == 0 {
+        return 0;
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => parsed.geometry.additional_uvs.len(),
+        Err(_) => 0,
+    }
+}
+
+/// Parses PMX bytes and returns one additional-UV channel as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 4` f32 values for the requested channel.
+/// Returns an empty buffer on parse failure, null input, zero length, or
+/// out-of-range `uv_index`.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_additional_uvs_buffer(
+    data: *const u8,
+    len: usize,
+    uv_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let Some(values) = parsed.geometry.additional_uvs.get(uv_index) else {
+                return empty_byte_buffer();
+            };
+            byte_buffer_from_f32_slice(values)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
 /// Parses PMX bytes and returns face indices as a native-endian byte buffer.
 ///
 /// The buffer contains `index_count` u32 values.
@@ -431,6 +486,42 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_indices_buffer(
                 .flat_map(|v| v.to_ne_bytes())
                 .collect();
             byte_buffer_from_vec(buf)
+        }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns material groups as a native-endian byte buffer.
+///
+/// The buffer contains `group_count * 3` u32 values as
+/// `[start, count, material_index]` triples.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_material_groups_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => {
+            let groups: Vec<u32> = parsed
+                .geometry
+                .material_groups
+                .iter()
+                .flat_map(|group| {
+                    [
+                        group.start as u32,
+                        group.count as u32,
+                        group.material_index as u32,
+                    ]
+                })
+                .collect();
+            byte_buffer_from_u32_slice(&groups)
         }
         Err(_) => empty_byte_buffer(),
     }
@@ -490,6 +581,27 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_skin_weights_buffer(
                 .collect();
             byte_buffer_from_vec(buf)
         }
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns per-vertex edge scale as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count` f32 values.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_edge_scale_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => byte_buffer_from_f32_slice(&parsed.geometry.edge_scale),
         Err(_) => empty_byte_buffer(),
     }
 }
@@ -615,6 +727,78 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_r1_buffer(
     }
 }
 
+/// Parses PMX bytes and returns derived SDEF RW0 vectors as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 3` f32 values.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_rw0_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => byte_buffer_from_f32_slice(&parsed.geometry.sdef.rw0),
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns derived SDEF RW1 vectors as a native-endian byte buffer.
+///
+/// The buffer contains `vertex_count * 3` f32 values.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_rw1_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => byte_buffer_from_f32_slice(&parsed.geometry.sdef.rw1),
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses PMX bytes and returns QDEF-enabled flags as a byte buffer.
+///
+/// Each byte is `1` when QDEF is enabled for that vertex, or `0` otherwise.
+/// The buffer length equals `vertex_count`.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_pmx_qdef_enabled_buffer(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    if data.is_null() || len == 0 {
+        return empty_byte_buffer();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    match mmd_anim_format::parse_pmx_model(bytes) {
+        Ok(parsed) => byte_buffer_from_vec(
+            parsed
+                .geometry
+                .qdef
+                .enabled
+                .iter()
+                .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
+                .collect(),
+        ),
+        Err(_) => empty_byte_buffer(),
+    }
+}
+
 /// Parses PMX bytes and returns skinning mode names as a JSON object.
 ///
 /// The returned JSON has the shape `{"skinningModes": ["bdef1", ...]}`.
@@ -677,6 +861,381 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_skinning_modes_json(
         }
         Err(_) => empty_byte_buffer(),
     }
+}
+
+/// Parses PMX bytes once and creates an opaque material-split handle.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_create(
+    data: *const u8,
+    len: usize,
+    flags: u32,
+) -> *mut MmdRuntimePmxMaterialSplit {
+    if data.is_null() || len == 0 {
+        return ptr::null_mut();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let split = match mmd_anim_format::parse_pmx_material_split(bytes, flags) {
+        Ok(split) => split,
+        Err(_) => return ptr::null_mut(),
+    };
+    let manifest_json = match serde_json::to_vec(&split.manifest) {
+        Ok(json) => json,
+        Err(_) => return ptr::null_mut(),
+    };
+    Box::into_raw(Box::new(MmdRuntimePmxMaterialSplit {
+        split,
+        manifest_json,
+    }))
+}
+
+/// Frees a PMX material-split handle.
+///
+/// # Safety
+/// `split` must be null or a handle returned by
+/// `mmd_runtime_pmx_material_split_create` that has not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_free(
+    split: *mut MmdRuntimePmxMaterialSplit,
+) {
+    if split.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(split));
+    }
+}
+
+/// Returns the number of material-split meshes owned by a split handle.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. A null handle returns zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_mesh_count(
+    split: *const MmdRuntimePmxMaterialSplit,
+) -> usize {
+    let Some(split) = (unsafe { split.as_ref() }) else {
+        return 0;
+    };
+    split.split.meshes.len()
+}
+
+/// Returns the serialized material-split manifest JSON.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_manifest_json(
+    split: *const MmdRuntimePmxMaterialSplit,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(split) = (unsafe { split.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(split.manifest_json.clone())
+}
+
+/// Returns split mesh vertex positions as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_positions_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.positions)
+}
+
+/// Returns split mesh vertex normals as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_normals_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.normals)
+}
+
+/// Returns split mesh vertex UVs as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_uvs_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.uvs)
+}
+
+/// Returns one split mesh additional-UV layer as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_additional_uvs_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+    uv_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(split) = (unsafe { split.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    let Some(mesh) = split.split.meshes.get(mesh_index) else {
+        return empty_byte_buffer();
+    };
+    let Some(values) = mesh.geometry.additional_uvs.get(uv_index) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_f32_slice(values)
+}
+
+/// Returns split mesh triangle indices as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_indices_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_u32_buffer(split, mesh_index, |mesh| &mesh.geometry.indices)
+}
+
+/// Returns split mesh skin bone indices as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_skin_indices_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_u32_buffer(split, mesh_index, |mesh| &mesh.geometry.skin_indices)
+}
+
+/// Returns split mesh skin weights as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_skin_weights_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.skin_weights)
+}
+
+/// Returns split mesh edge scale values as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_edge_scale_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.edge_scale)
+}
+
+/// Returns split mesh SDEF-enabled flags as a byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_enabled_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(split) = (unsafe { split.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    let Some(mesh) = split.split.meshes.get(mesh_index) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(
+        mesh.geometry
+            .sdef
+            .enabled
+            .iter()
+            .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
+            .collect(),
+    )
+}
+
+/// Returns split mesh SDEF C vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_c_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.c)
+}
+
+/// Returns split mesh SDEF R0 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_r0_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.r0)
+}
+
+/// Returns split mesh SDEF R1 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_r1_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.r1)
+}
+
+/// Returns split mesh derived SDEF RW0 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_rw0_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.rw0)
+}
+
+/// Returns split mesh derived SDEF RW1 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_rw1_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.rw1)
+}
+
+/// Returns split mesh QDEF-enabled flags as a byte buffer.
+///
+/// # Safety
+/// `split` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_material_split_create`. Passing any other pointer is
+/// undefined behavior. The returned buffer is owned by the caller and must be
+/// freed with `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_material_split_qdef_enabled_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(split) = (unsafe { split.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    let Some(mesh) = split.split.meshes.get(mesh_index) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(
+        mesh.geometry
+            .qdef
+            .enabled
+            .iter()
+            .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
+            .collect(),
+    )
+}
+
+fn pmx_material_split_f32_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+    accessor: fn(&mmd_anim_format::PmxMaterialSplitMesh) -> &Vec<f32>,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(split) = (unsafe { split.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    let Some(mesh) = split.split.meshes.get(mesh_index) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_f32_slice(accessor(mesh))
+}
+
+fn pmx_material_split_u32_buffer(
+    split: *const MmdRuntimePmxMaterialSplit,
+    mesh_index: usize,
+    accessor: fn(&mmd_anim_format::PmxMaterialSplitMesh) -> &Vec<u32>,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(split) = (unsafe { split.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    let Some(mesh) = split.split.meshes.get(mesh_index) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_u32_slice(accessor(mesh))
+}
+
+fn byte_buffer_from_f32_slice(values: &[f32]) -> MmdRuntimeFfiByteBuffer {
+    byte_buffer_from_vec(values.iter().flat_map(|v| v.to_ne_bytes()).collect())
+}
+
+fn byte_buffer_from_u32_slice(values: &[u32]) -> MmdRuntimeFfiByteBuffer {
+    byte_buffer_from_vec(values.iter().flat_map(|v| v.to_ne_bytes()).collect())
 }
 
 /// Exports a minimal PMX model from flat geometry arrays and a JSON descriptor.
@@ -3695,13 +4254,45 @@ mod tests {
         check_rejects!(mmd_runtime_parse_pmx_normals_buffer);
         check_rejects!(mmd_runtime_parse_pmx_uvs_buffer);
         check_rejects!(mmd_runtime_parse_pmx_indices_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_material_groups_buffer);
         check_rejects!(mmd_runtime_parse_pmx_skin_indices_buffer);
         check_rejects!(mmd_runtime_parse_pmx_skin_weights_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_edge_scale_buffer);
         check_rejects!(mmd_runtime_parse_pmx_sdef_enabled_buffer);
         check_rejects!(mmd_runtime_parse_pmx_sdef_c_buffer);
         check_rejects!(mmd_runtime_parse_pmx_sdef_r0_buffer);
         check_rejects!(mmd_runtime_parse_pmx_sdef_r1_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_sdef_rw0_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_sdef_rw1_buffer);
+        check_rejects!(mmd_runtime_parse_pmx_qdef_enabled_buffer);
         check_rejects!(mmd_runtime_parse_pmx_skinning_modes_json);
+
+        assert_eq!(
+            unsafe { mmd_runtime_parse_pmx_additional_uv_count(ptr::null(), 0) },
+            0
+        );
+        let d = 0u8;
+        assert_eq!(
+            unsafe { mmd_runtime_parse_pmx_additional_uv_count(&d as *const u8, 0) },
+            0
+        );
+        let garbage = [0u8; 16];
+        assert_eq!(
+            unsafe { mmd_runtime_parse_pmx_additional_uv_count(garbage.as_ptr(), garbage.len()) },
+            0
+        );
+
+        let null = unsafe { mmd_runtime_parse_pmx_additional_uvs_buffer(ptr::null(), 0, 0) };
+        assert!(null.data.is_null(), "additional UV null");
+        assert_eq!(null.len, 0, "additional UV null len");
+
+        let empty = unsafe { mmd_runtime_parse_pmx_additional_uvs_buffer(&d as *const u8, 0, 0) };
+        assert!(empty.data.is_null(), "additional UV empty");
+
+        let invalid = unsafe {
+            mmd_runtime_parse_pmx_additional_uvs_buffer(garbage.as_ptr(), garbage.len(), 0)
+        };
+        assert!(invalid.data.is_null(), "additional UV invalid");
     }
 
     #[test]
@@ -3711,6 +4302,8 @@ mod tests {
         let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
         let vertex_count = parsed.metadata.counts.vertices as usize;
         let index_count = parsed.metadata.counts.faces as usize * 3;
+        let additional_uv_count = parsed.geometry.additional_uvs.len();
+        let material_group_count = parsed.geometry.material_groups.len();
 
         macro_rules! check_buf {
             ($fn:ident, $expected_bytes:expr) => {{
@@ -3730,6 +4323,10 @@ mod tests {
         check_buf!(mmd_runtime_parse_pmx_uvs_buffer, vertex_count * 2 * 4);
         check_buf!(mmd_runtime_parse_pmx_indices_buffer, index_count * 4);
         check_buf!(
+            mmd_runtime_parse_pmx_material_groups_buffer,
+            material_group_count * 3 * 4
+        );
+        check_buf!(
             mmd_runtime_parse_pmx_skin_indices_buffer,
             vertex_count * 4 * 4
         );
@@ -3737,10 +4334,43 @@ mod tests {
             mmd_runtime_parse_pmx_skin_weights_buffer,
             vertex_count * 4 * 4
         );
+        check_buf!(mmd_runtime_parse_pmx_edge_scale_buffer, vertex_count * 4);
         check_buf!(mmd_runtime_parse_pmx_sdef_enabled_buffer, vertex_count);
         check_buf!(mmd_runtime_parse_pmx_sdef_c_buffer, vertex_count * 3 * 4);
         check_buf!(mmd_runtime_parse_pmx_sdef_r0_buffer, vertex_count * 3 * 4);
         check_buf!(mmd_runtime_parse_pmx_sdef_r1_buffer, vertex_count * 3 * 4);
+        check_buf!(mmd_runtime_parse_pmx_sdef_rw0_buffer, vertex_count * 3 * 4);
+        check_buf!(mmd_runtime_parse_pmx_sdef_rw1_buffer, vertex_count * 3 * 4);
+        check_buf!(mmd_runtime_parse_pmx_qdef_enabled_buffer, vertex_count);
+
+        assert_eq!(
+            unsafe { mmd_runtime_parse_pmx_additional_uv_count(bytes.as_ptr(), bytes.len()) },
+            additional_uv_count
+        );
+        for uv_index in 0..additional_uv_count {
+            let buf = unsafe {
+                mmd_runtime_parse_pmx_additional_uvs_buffer(bytes.as_ptr(), bytes.len(), uv_index)
+            };
+            assert!(
+                !buf.data.is_null(),
+                "additional UV channel {uv_index} must not be null"
+            );
+            assert_eq!(
+                buf.len,
+                vertex_count * 4 * 4,
+                "additional UV channel {uv_index} dimension mismatch"
+            );
+            unsafe { mmd_runtime_byte_buffer_free(buf) };
+        }
+        let invalid_uv = unsafe {
+            mmd_runtime_parse_pmx_additional_uvs_buffer(
+                bytes.as_ptr(),
+                bytes.len(),
+                additional_uv_count,
+            )
+        };
+        assert!(invalid_uv.data.is_null(), "invalid additional UV index");
+        assert_eq!(invalid_uv.len, 0, "invalid additional UV index len");
     }
 
     #[test]

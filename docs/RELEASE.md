@@ -48,6 +48,10 @@ crate.
   behavior, API examples, limitations, and publish scope. When one README is
   changed, translate the same user-visible change into the other before
   release.
+- If parser APIs changed in `mmd-anim-format`, `mmd-anim-ffi`, or
+  `mmd-anim-wasm`, confirm `docs/PARSER_API.md` Parser API Matrix was updated
+  with the C ABI/WASM mapping, output shape, error behavior, and lifetime/free
+  policy.
 - Confirm the working tree is clean.
 - Confirm `origin` points to `git@github.com:yohawing/mmd-anim.git`.
 - Confirm `develop` is up to date with `origin/develop` before preparing the

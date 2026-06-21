@@ -17,5 +17,5 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 glam.workspace = true
 mmd-anim-runtime.workspace = true
-mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.4" }
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.5" }
 serde_json.workspace = true

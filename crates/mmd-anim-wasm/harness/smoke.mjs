@@ -38,6 +38,20 @@ function assertClose(actual, expected, tol, msg) {
   assert(Math.abs(actual - expected) < tol, `${msg} (got ${actual}, expected ${expected})`);
 }
 
+function buildMinimalVmdBytes() {
+  const magicText = 'Vocaloid Motion Data 0002';
+  const bytes = [];
+  for (let i = 0; i < magicText.length; i++) bytes.push(magicText.charCodeAt(i));
+  while (bytes.length < 30) bytes.push(0);
+  const modelName = 'smoke';
+  for (let i = 0; i < modelName.length; i++) bytes.push(modelName.charCodeAt(i));
+  while (bytes.length < 50) bytes.push(0);
+  for (let section = 0; section < 6; section++) {
+    bytes.push(0, 0, 0, 0);
+  }
+  return new Uint8Array(bytes);
+}
+
 console.log('=== Wasm Smoke Test ===\n');
 
 console.log('1. wasm_wrapper_version');
@@ -141,6 +155,14 @@ assert(runtime2.ikEnabledLen() === 0, 'ikEnabledLen === 0');
 const ikView = runtime2.ikEnabledView();
 assert(ikView instanceof Uint8Array, 'ikEnabledView returns Uint8Array');
 assert(ikView.length === 0, 'ikEnabledView.length === 0');
+
+console.log('\n11. parseVmdAnimationJson dedicated parser API');
+const minimalVmd = buildMinimalVmdBytes();
+const vmdJson = JSON.parse(wasm.parseVmdAnimationJson(minimalVmd));
+assert(vmdJson.kind === 'vmd', 'parseVmdAnimationJson returns VMD DTO kind');
+assert(vmdJson.metadata.format === 'vmd', 'parseVmdAnimationJson metadata.format === vmd');
+assert(vmdJson.boneFrames.length === 0, 'parseVmdAnimationJson bone frame count === 0');
+assert(vmdJson.metadata.counts.bones === 0, 'parseVmdAnimationJson metadata.counts.bones === 0');
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
 if (failed > 0) process.exit(1);

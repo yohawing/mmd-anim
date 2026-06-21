@@ -22,6 +22,7 @@ extern "C" {
 typedef struct mmd_runtime_model_t    mmd_runtime_model_t;
 typedef struct mmd_runtime_instance_t mmd_runtime_instance_t;
 typedef struct mmd_runtime_clip_t     mmd_runtime_clip_t;
+typedef struct mmd_runtime_pmx_material_split_t mmd_runtime_pmx_material_split_t;
 
 /* ------------------------------------------------------------------ */
 /*  Flag constants                                                    */
@@ -143,7 +144,20 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_uvs_buffer(
     const uint8_t* data,
     size_t         len);
 
+size_t mmd_runtime_parse_pmx_additional_uv_count(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_additional_uvs_buffer(
+    const uint8_t* data,
+    size_t         len,
+    size_t         uv_index);
+
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_indices_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_material_groups_buffer(
     const uint8_t* data,
     size_t         len);
 
@@ -152,6 +166,10 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_skin_indices_buffer(
     size_t         len);
 
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_skin_weights_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_edge_scale_buffer(
     const uint8_t* data,
     size_t         len);
 
@@ -171,10 +189,105 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_sdef_r1_buffer(
     const uint8_t* data,
     size_t         len);
 
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_sdef_rw0_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_sdef_rw1_buffer(
+    const uint8_t* data,
+    size_t         len);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_qdef_enabled_buffer(
+    const uint8_t* data,
+    size_t         len);
+
 /* Returns JSON: {"skinningModes": ["bdef1", ...]} */
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_skinning_modes_json(
     const uint8_t* data,
     size_t         len);
+
+/* PMX material split handle API.
+   mmd_runtime_pmx_material_split_create parses PMX bytes once and returns an
+   owned opaque handle. Free it with mmd_runtime_pmx_material_split_free.
+   All returned byte buffers are owned by Rust and must be freed with
+   mmd_runtime_byte_buffer_free. Geometry buffers are native-endian flat arrays.
+   Invalid input, invalid handles, or out-of-range mesh/UV indices return null
+   handles, zero counts, or empty buffers. */
+
+mmd_runtime_pmx_material_split_t* mmd_runtime_pmx_material_split_create(
+    const uint8_t* data,
+    size_t         len,
+    uint32_t       flags);
+
+void mmd_runtime_pmx_material_split_free(
+    mmd_runtime_pmx_material_split_t* split);
+
+size_t mmd_runtime_pmx_material_split_mesh_count(
+    const mmd_runtime_pmx_material_split_t* split);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_manifest_json(
+    const mmd_runtime_pmx_material_split_t* split);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_positions_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_normals_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_uvs_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_additional_uvs_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index,
+    size_t                                  uv_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_indices_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_skin_indices_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_skin_weights_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_edge_scale_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_sdef_enabled_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_sdef_c_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_sdef_r0_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_sdef_r1_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_sdef_rw0_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_sdef_rw1_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_material_split_qdef_enabled_buffer(
+    const mmd_runtime_pmx_material_split_t* split,
+    size_t                                  mesh_index);
 
 mmd_runtime_model_t* mmd_runtime_model_create(
     const int32_t* parent_indices,

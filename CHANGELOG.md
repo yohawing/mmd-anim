@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.5 - 2026-06-21
+
+Patch release for PMX material split host import and parser API parity.
+
+### Added
+
+- Added `split_pmx_model_by_material` and `PmxMaterialSplit` DTOs to
+  `mmd-anim-format` for Maya-style per-material mesh import. Each split mesh
+  remaps vertices to local indices and prunes/remaps morphs: vertex, UV, and
+  material morphs are filtered to the split mesh and remapped to local indices;
+  group/flip morphs are pruned to surviving children through a fixpoint pass
+  that preserves forward references; bone morphs are excluded as
+  skeleton-shared, and impulse morphs are diagnostic-only.
+- Added an opaque PMX material split C ABI handle to `mmd-anim-ffi`
+  (`create`/`free`/`mesh_count`/`manifest_json` plus mesh-indexed geometry
+  getters). `manifest_json` carries `originalMaterialIndex`,
+  `originalVertexIndices`, `morphIndexMap`, and diagnostics.
+- Added one-shot PMX geometry C ABI getters for parity with `WasmPmxGeometry`:
+  `edge_scale`, additional UVs (with count, per channel), `material_groups`,
+  SDEF `rw0`/`rw1`, and `qdef_enabled`.
+- Added `parseVmdAnimationJson` and `WasmPmxGeometry.skinningModes` to
+  `mmd-anim-wasm` for parser surface parity with the C ABI.
+
 ## 0.1.4 - 2026-06-19
 
 Patch release for host-facing parser JSON and PMX geometry FFI.

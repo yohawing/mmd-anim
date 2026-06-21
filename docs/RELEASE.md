@@ -48,6 +48,11 @@ crate.
   behavior, API examples, limitations, and publish scope. When one README is
   changed, translate the same user-visible change into the other before
   release.
+- If parser APIs changed in `mmd-anim-format`, `mmd-anim-ffi`, or
+  `mmd-anim-wasm`, confirm the C ABI and WASM parser surfaces stay in sync:
+  matching semantic names, inputs, output shape, error behavior, and
+  lifetime/free policy, with intentional one-sided APIs noted in the commit or
+  PR.
 - Confirm the working tree is clean.
 - Confirm `origin` points to `git@github.com:yohawing/mmd-anim.git`.
 - Confirm `develop` is up to date with `origin/develop` before preparing the

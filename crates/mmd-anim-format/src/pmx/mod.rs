@@ -1096,6 +1096,56 @@ pub struct PmxParsedImpulseMorphOffset {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PmxMaterialSplitResult {
+    pub meshes: Vec<PmxMaterialSplitMesh>,
+    pub manifest: PmxMaterialSplitManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxMaterialSplitMesh {
+    pub original_material_index: usize,
+    pub original_vertex_indices: Vec<u32>,
+    pub geometry: PmxParsedGeometry,
+    pub material: PmxParsedMaterial,
+    pub morphs: Vec<PmxParsedMorph>,
+    pub morph_index_map: Vec<PmxMaterialSplitMorphIndexMap>,
+    pub diagnostics: Vec<PmxParserDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxMaterialSplit {
+    pub mesh: PmxMaterialSplitMesh,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxMaterialSplitManifest {
+    pub mesh_count: usize,
+    pub meshes: Vec<PmxMaterialSplitManifestMesh>,
+    pub diagnostics: Vec<PmxParserDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxMaterialSplitManifestMesh {
+    pub mesh_index: usize,
+    pub original_material_index: usize,
+    pub original_vertex_indices: Vec<u32>,
+    pub morph_index_map: Vec<PmxMaterialSplitMorphIndexMap>,
+    pub diagnostics: Vec<PmxParserDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxMaterialSplitMorphIndexMap {
+    pub original_index: usize,
+    pub local_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PmxParsedDisplayFrame {
     pub name: String,
     pub english_name: String,
@@ -3038,6 +3088,458 @@ fn normalize_nonnegative_index(index: i32) -> u32 {
     if index < 0 { 0 } else { index as u32 }
 }
 
+pub fn parse_pmx_material_split(
+    data: &[u8],
+    _flags: u32,
+) -> Result<PmxMaterialSplitResult, ImportError> {
+    let model = parse_pmx_model(data)?;
+    Ok(split_pmx_model_by_material(&model))
+}
+
+pub fn split_pmx_model_by_material(model: &PmxParsedModel) -> PmxMaterialSplitResult {
+    let mut meshes = Vec::with_capacity(model.geometry.material_groups.len());
+    let mut manifest_meshes = Vec::with_capacity(model.geometry.material_groups.len());
+    let mut diagnostics = Vec::new();
+
+    for (mesh_index, group) in model.geometry.material_groups.iter().enumerate() {
+        if group.material_index >= model.materials.len() {
+            let diagnostic = pmx_material_split_diagnostic(
+                "PMX_MATERIAL_SPLIT_MATERIAL_INDEX_OUT_OF_RANGE",
+                format!(
+                    "material group {mesh_index} references material {} but material count is {}",
+                    group.material_index,
+                    model.materials.len()
+                ),
+            );
+            diagnostics.push(diagnostic);
+            continue;
+        }
+
+        let mesh = split_pmx_material_group(model, group, mesh_index);
+        manifest_meshes.push(PmxMaterialSplitManifestMesh {
+            mesh_index,
+            original_material_index: mesh.original_material_index,
+            original_vertex_indices: mesh.original_vertex_indices.clone(),
+            morph_index_map: mesh.morph_index_map.clone(),
+            diagnostics: mesh.diagnostics.clone(),
+        });
+        diagnostics.extend(mesh.diagnostics.iter().cloned());
+        meshes.push(mesh);
+    }
+
+    PmxMaterialSplitResult {
+        manifest: PmxMaterialSplitManifest {
+            mesh_count: meshes.len(),
+            meshes: manifest_meshes,
+            diagnostics,
+        },
+        meshes,
+    }
+}
+
+fn split_pmx_material_group(
+    model: &PmxParsedModel,
+    group: &PmxParsedMaterialGroup,
+    mesh_index: usize,
+) -> PmxMaterialSplitMesh {
+    let mut diagnostics = Vec::new();
+    let index_end = group.start.saturating_add(group.count);
+    let index_slice = match model.geometry.indices.get(group.start..index_end) {
+        Some(slice) => slice,
+        None => {
+            diagnostics.push(pmx_material_split_diagnostic(
+                "PMX_MATERIAL_SPLIT_INDEX_RANGE_OUT_OF_RANGE",
+                format!(
+                    "material group {mesh_index} index range {}..{} exceeds index count {}",
+                    group.start,
+                    index_end,
+                    model.geometry.indices.len()
+                ),
+            ));
+            &[][..]
+        }
+    };
+
+    let vertex_count = model.geometry.positions.len() / 3;
+    let mut original_vertex_indices = Vec::new();
+    let mut vertex_remap = HashMap::<u32, u32>::new();
+    let mut local_indices = Vec::with_capacity(index_slice.len());
+    for &original_index in index_slice {
+        if original_index as usize >= vertex_count {
+            diagnostics.push(pmx_material_split_diagnostic(
+                "PMX_MATERIAL_SPLIT_VERTEX_INDEX_OUT_OF_RANGE",
+                format!(
+                    "material group {mesh_index} references vertex {original_index} but vertex count is {vertex_count}"
+                ),
+            ));
+            continue;
+        }
+        let local_index = match vertex_remap.get(&original_index) {
+            Some(&local_index) => local_index,
+            None => {
+                let local_index = original_vertex_indices.len() as u32;
+                vertex_remap.insert(original_index, local_index);
+                original_vertex_indices.push(original_index);
+                local_index
+            }
+        };
+        local_indices.push(local_index);
+    }
+
+    let local_index_count = local_indices.len();
+    let geometry = remap_pmx_geometry(
+        &model.geometry,
+        &original_vertex_indices,
+        local_indices,
+        local_index_count,
+    );
+    let material = {
+        let mut material = model.materials[group.material_index].clone();
+        material.face_count = (geometry.indices.len() / 3) as i32;
+        material
+    };
+    let (morphs, morph_index_map, morph_diagnostics) =
+        remap_pmx_material_split_morphs(model, &vertex_remap, group.material_index, mesh_index);
+    diagnostics.extend(morph_diagnostics);
+
+    PmxMaterialSplitMesh {
+        original_material_index: group.material_index,
+        original_vertex_indices,
+        geometry,
+        material,
+        morphs,
+        morph_index_map,
+        diagnostics,
+    }
+}
+
+fn remap_pmx_geometry(
+    geometry: &PmxParsedGeometry,
+    original_vertex_indices: &[u32],
+    indices: Vec<u32>,
+    local_index_count: usize,
+) -> PmxParsedGeometry {
+    PmxParsedGeometry {
+        positions: gather_vertex_f32(&geometry.positions, 3, original_vertex_indices),
+        normals: gather_vertex_f32(&geometry.normals, 3, original_vertex_indices),
+        uvs: gather_vertex_f32(&geometry.uvs, 2, original_vertex_indices),
+        additional_uvs: geometry
+            .additional_uvs
+            .iter()
+            .map(|uvs| gather_vertex_f32(uvs, 4, original_vertex_indices))
+            .collect(),
+        indices,
+        skin_indices: gather_vertex_u32(&geometry.skin_indices, 4, original_vertex_indices),
+        skin_weights: gather_vertex_f32(&geometry.skin_weights, 4, original_vertex_indices),
+        edge_scale: gather_vertex_f32(&geometry.edge_scale, 1, original_vertex_indices),
+        material_groups: vec![PmxParsedMaterialGroup {
+            start: 0,
+            count: local_index_count,
+            material_index: 0,
+        }],
+        sdef: PmxParsedSdef {
+            enabled: gather_vertex_f32(&geometry.sdef.enabled, 1, original_vertex_indices),
+            c: gather_vertex_f32(&geometry.sdef.c, 3, original_vertex_indices),
+            r0: gather_vertex_f32(&geometry.sdef.r0, 3, original_vertex_indices),
+            r1: gather_vertex_f32(&geometry.sdef.r1, 3, original_vertex_indices),
+            rw0: gather_vertex_f32(&geometry.sdef.rw0, 3, original_vertex_indices),
+            rw1: gather_vertex_f32(&geometry.sdef.rw1, 3, original_vertex_indices),
+        },
+        qdef: PmxParsedQdef {
+            enabled: gather_vertex_f32(&geometry.qdef.enabled, 1, original_vertex_indices),
+        },
+    }
+}
+
+fn gather_vertex_f32(values: &[f32], stride: usize, original_vertex_indices: &[u32]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(original_vertex_indices.len() * stride);
+    for &index in original_vertex_indices {
+        let start = index as usize * stride;
+        let end = start + stride;
+        if let Some(slice) = values.get(start..end) {
+            out.extend_from_slice(slice);
+        }
+    }
+    out
+}
+
+fn gather_vertex_u32(values: &[u32], stride: usize, original_vertex_indices: &[u32]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(original_vertex_indices.len() * stride);
+    for &index in original_vertex_indices {
+        let start = index as usize * stride;
+        let end = start + stride;
+        if let Some(slice) = values.get(start..end) {
+            out.extend_from_slice(slice);
+        }
+    }
+    out
+}
+
+fn remap_pmx_material_split_morphs(
+    model: &PmxParsedModel,
+    vertex_remap: &HashMap<u32, u32>,
+    original_material_index: usize,
+    mesh_index: usize,
+) -> (
+    Vec<PmxParsedMorph>,
+    Vec<PmxMaterialSplitMorphIndexMap>,
+    Vec<PmxParserDiagnostic>,
+) {
+    let mut diagnostics = Vec::new();
+    let mut direct_morphs = vec![None; model.morphs.len()];
+    let mut survives = vec![false; model.morphs.len()];
+    let mut morph_remap = HashMap::<usize, usize>::new();
+
+    for (original_index, morph) in model.morphs.iter().enumerate() {
+        match morph.kind.as_str() {
+            "vertex" | "uv" | "additionalUv" | "material" => {
+                let remapped = remap_direct_pmx_material_split_morph(
+                    morph,
+                    vertex_remap,
+                    original_material_index,
+                );
+                if pmx_material_split_morph_has_offsets(&remapped) {
+                    direct_morphs[original_index] = Some(remapped);
+                    survives[original_index] = true;
+                }
+            }
+            "bone" => {
+                if !morph.bone_offsets.is_empty() {
+                    diagnostics.push(pmx_material_split_diagnostic(
+                        "PMX_MATERIAL_SPLIT_BONE_MORPH_SHARED_SKELETON",
+                        format!(
+                            "mesh {mesh_index} excludes bone morph {original_index} because skeleton morphs are shared"
+                        ),
+                    ));
+                }
+            }
+            "impulse" => {
+                if !morph.impulse_offsets.is_empty() {
+                    diagnostics.push(pmx_material_split_diagnostic(
+                        "PMX_MATERIAL_SPLIT_IMPULSE_MORPH_UNSUPPORTED",
+                        format!(
+                            "mesh {mesh_index} excludes impulse morph {original_index} because physics morphs are not exposed in the initial material split ABI"
+                        ),
+                    ));
+                }
+            }
+            "group" | "flip" => {}
+            _ => {
+                diagnostics.push(pmx_material_split_diagnostic(
+                    "PMX_MATERIAL_SPLIT_MORPH_KIND_UNSUPPORTED",
+                    format!(
+                        "mesh {mesh_index} excludes morph {original_index} with unsupported kind {}",
+                        morph.kind
+                    ),
+                ));
+            }
+        }
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (original_index, morph) in model.morphs.iter().enumerate() {
+            if survives[original_index] || (morph.kind != "group" && morph.kind != "flip") {
+                continue;
+            }
+            if pmx_material_split_reference_offsets(morph)
+                .iter()
+                .any(|offset| {
+                    offset.morph_index >= 0
+                        && survives
+                            .get(offset.morph_index as usize)
+                            .copied()
+                            .unwrap_or(false)
+                })
+            {
+                survives[original_index] = true;
+                changed = true;
+            }
+        }
+    }
+
+    for (original_index, survives) in survives.iter().copied().enumerate() {
+        if survives {
+            let local_index = morph_remap.len();
+            morph_remap.insert(original_index, local_index);
+        }
+    }
+
+    let mut morphs = Vec::with_capacity(morph_remap.len());
+    for (original_index, morph) in model.morphs.iter().enumerate() {
+        if !morph_remap.contains_key(&original_index) {
+            continue;
+        }
+        let remapped = match direct_morphs[original_index].take() {
+            Some(remapped) => remapped,
+            None => remap_reference_pmx_material_split_morph(morph, &morph_remap),
+        };
+        morphs.push((original_index, remapped));
+    }
+
+    let morph_index_map = morphs
+        .iter()
+        .enumerate()
+        .map(
+            |(local_index, (original_index, _))| PmxMaterialSplitMorphIndexMap {
+                original_index: *original_index,
+                local_index,
+            },
+        )
+        .collect();
+    let morphs = morphs
+        .into_iter()
+        .map(|(_, morph)| morph)
+        .collect::<Vec<_>>();
+
+    (morphs, morph_index_map, diagnostics)
+}
+
+fn remap_direct_pmx_material_split_morph(
+    morph: &PmxParsedMorph,
+    vertex_remap: &HashMap<u32, u32>,
+    original_material_index: usize,
+) -> PmxParsedMorph {
+    let mut remapped = empty_pmx_material_split_morph_like(morph);
+    remapped.vertex_offsets = morph
+        .vertex_offsets
+        .iter()
+        .filter_map(|offset| {
+            vertex_remap
+                .get(&offset.vertex_index)
+                .map(|&vertex_index| PmxParsedVertexMorphOffset {
+                    vertex_index,
+                    position: offset.position,
+                })
+        })
+        .collect();
+    remapped.uv_offsets = morph
+        .uv_offsets
+        .iter()
+        .filter_map(|offset| {
+            vertex_remap
+                .get(&offset.vertex_index)
+                .map(|&vertex_index| PmxParsedUvMorphOffset {
+                    vertex_index,
+                    uv: offset.uv,
+                })
+        })
+        .collect();
+    remapped.additional_uv_offsets = morph
+        .additional_uv_offsets
+        .iter()
+        .filter_map(|offset| {
+            vertex_remap.get(&offset.vertex_index).map(|&vertex_index| {
+                PmxParsedAdditionalUvMorphOffset {
+                    vertex_index,
+                    uv_index: offset.uv_index,
+                    uv: offset.uv,
+                }
+            })
+        })
+        .collect();
+    remapped.material_offsets = morph
+        .material_offsets
+        .iter()
+        .filter_map(|offset| {
+            if offset.material_index == -1
+                || offset.material_index as usize == original_material_index
+            {
+                let mut remapped = offset.clone();
+                if remapped.material_index >= 0 {
+                    remapped.material_index = 0;
+                }
+                Some(remapped)
+            } else {
+                None
+            }
+        })
+        .collect();
+    remapped
+}
+
+fn remap_reference_pmx_material_split_morph(
+    morph: &PmxParsedMorph,
+    morph_remap: &HashMap<usize, usize>,
+) -> PmxParsedMorph {
+    let mut remapped = empty_pmx_material_split_morph_like(morph);
+    if morph.kind == "group" {
+        remapped.group_offsets =
+            remap_pmx_material_split_morph_refs(&morph.group_offsets, morph_remap);
+    } else {
+        remapped.flip_offsets =
+            remap_pmx_material_split_morph_refs(&morph.flip_offsets, morph_remap);
+    }
+    remapped
+}
+
+fn pmx_material_split_reference_offsets(morph: &PmxParsedMorph) -> &[PmxParsedGroupMorphOffset] {
+    if morph.kind == "group" {
+        &morph.group_offsets
+    } else {
+        &morph.flip_offsets
+    }
+}
+
+fn remap_pmx_material_split_morph_refs(
+    offsets: &[PmxParsedGroupMorphOffset],
+    morph_remap: &HashMap<usize, usize>,
+) -> Vec<PmxParsedGroupMorphOffset> {
+    offsets
+        .iter()
+        .filter_map(|offset| {
+            if offset.morph_index < 0 {
+                return None;
+            }
+            morph_remap
+                .get(&(offset.morph_index as usize))
+                .map(|&morph_index| PmxParsedGroupMorphOffset {
+                    morph_index: morph_index as i32,
+                    weight: offset.weight,
+                })
+        })
+        .collect()
+}
+
+fn empty_pmx_material_split_morph_like(morph: &PmxParsedMorph) -> PmxParsedMorph {
+    PmxParsedMorph {
+        name: morph.name.clone(),
+        english_name: morph.english_name.clone(),
+        kind: morph.kind.clone(),
+        vertex_offsets: Vec::new(),
+        group_offsets: Vec::new(),
+        bone_offsets: Vec::new(),
+        uv_offsets: Vec::new(),
+        additional_uv_offsets: Vec::new(),
+        material_offsets: Vec::new(),
+        flip_offsets: Vec::new(),
+        impulse_offsets: Vec::new(),
+    }
+}
+
+fn pmx_material_split_morph_has_offsets(morph: &PmxParsedMorph) -> bool {
+    !morph.vertex_offsets.is_empty()
+        || !morph.group_offsets.is_empty()
+        || !morph.bone_offsets.is_empty()
+        || !morph.uv_offsets.is_empty()
+        || !morph.additional_uv_offsets.is_empty()
+        || !morph.material_offsets.is_empty()
+        || !morph.flip_offsets.is_empty()
+        || !morph.impulse_offsets.is_empty()
+}
+
+fn pmx_material_split_diagnostic(
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> PmxParserDiagnostic {
+    PmxParserDiagnostic {
+        level: "info".to_owned(),
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
 fn read_parsed_textures(
     r: &mut Reader<'_>,
     encoding: TextEncoding,
@@ -4132,6 +4634,184 @@ mod tests {
         }
     }
 
+    fn material_morph_offset(material_index: i32) -> PmxParsedMaterialMorphOffset {
+        PmxParsedMaterialMorphOffset {
+            material_index,
+            operation: "add".to_owned(),
+            diffuse: [0.1, 0.2, 0.3, 0.4],
+            specular: [0.5, 0.6, 0.7],
+            specular_power: 0.8,
+            ambient: [0.9, 1.0, 1.1],
+            edge_color: [0.0, 0.1, 0.2, 0.3],
+            edge_size: 0.4,
+            texture_factor: [1.0, 0.0, 0.0, 1.0],
+            sphere_texture_factor: [0.0, 1.0, 0.0, 1.0],
+            toon_texture_factor: [0.0, 0.0, 1.0, 1.0],
+        }
+    }
+
+    fn material_split_fixture() -> PmxParsedModel {
+        let mut model = parsed_pmx_fixture();
+        model.metadata.counts.vertices = 4;
+        model.metadata.counts.faces = 2;
+        model.metadata.counts.materials = 2;
+        model.metadata.counts.morphs = 5;
+        model.metadata.additional_uv_count = 1;
+        model.geometry = PmxParsedGeometry {
+            positions: vec![
+                0.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, //
+                1.0, 1.0, 0.0,
+            ],
+            normals: vec![
+                0.0, 0.0, 1.0, //
+                0.0, 0.0, 1.0, //
+                0.0, 0.0, 1.0, //
+                0.0, 0.0, 1.0,
+            ],
+            uvs: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            additional_uvs: vec![vec![
+                0.0, 0.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                1.0, 1.0, 0.0, 0.0,
+            ]],
+            indices: vec![0, 1, 2, 2, 3, 0],
+            skin_indices: vec![
+                0, 0, 0, 0, //
+                0, 0, 0, 0, //
+                0, 0, 0, 0, //
+                0, 0, 0, 0,
+            ],
+            skin_weights: vec![
+                1.0, 0.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, 0.0,
+            ],
+            edge_scale: vec![1.0, 1.1, 1.2, 1.3],
+            material_groups: vec![
+                PmxParsedMaterialGroup {
+                    start: 0,
+                    count: 3,
+                    material_index: 0,
+                },
+                PmxParsedMaterialGroup {
+                    start: 3,
+                    count: 3,
+                    material_index: 1,
+                },
+            ],
+            sdef: PmxParsedSdef {
+                enabled: vec![0.0, 1.0, 0.0, 0.0],
+                c: vec![0.0; 12],
+                r0: vec![0.0; 12],
+                r1: vec![0.0; 12],
+                rw0: vec![0.0; 12],
+                rw1: vec![0.0; 12],
+            },
+            qdef: PmxParsedQdef {
+                enabled: vec![0.0, 0.0, 0.0, 1.0],
+            },
+        };
+        let mut material_b = model.materials[0].clone();
+        material_b.name = "mat-b".to_owned();
+        material_b.english_name = "mat-b-en".to_owned();
+        model.materials = vec![model.materials[0].clone(), material_b];
+        model.morphs = vec![
+            PmxParsedMorph {
+                name: "left-raise".to_owned(),
+                english_name: "left-raise-en".to_owned(),
+                kind: "vertex".to_owned(),
+                vertex_offsets: vec![PmxParsedVertexMorphOffset {
+                    vertex_index: 1,
+                    position: [0.0, 0.5, 0.0],
+                }],
+                group_offsets: Vec::new(),
+                bone_offsets: Vec::new(),
+                uv_offsets: Vec::new(),
+                additional_uv_offsets: Vec::new(),
+                material_offsets: Vec::new(),
+                flip_offsets: Vec::new(),
+                impulse_offsets: Vec::new(),
+            },
+            PmxParsedMorph {
+                name: "right-raise".to_owned(),
+                english_name: "right-raise-en".to_owned(),
+                kind: "vertex".to_owned(),
+                vertex_offsets: vec![PmxParsedVertexMorphOffset {
+                    vertex_index: 3,
+                    position: [0.0, 0.75, 0.0],
+                }],
+                group_offsets: Vec::new(),
+                bone_offsets: Vec::new(),
+                uv_offsets: Vec::new(),
+                additional_uv_offsets: Vec::new(),
+                material_offsets: Vec::new(),
+                flip_offsets: Vec::new(),
+                impulse_offsets: Vec::new(),
+            },
+            PmxParsedMorph {
+                name: "right-material".to_owned(),
+                english_name: "right-material-en".to_owned(),
+                kind: "material".to_owned(),
+                vertex_offsets: Vec::new(),
+                group_offsets: Vec::new(),
+                bone_offsets: Vec::new(),
+                uv_offsets: Vec::new(),
+                additional_uv_offsets: Vec::new(),
+                material_offsets: vec![material_morph_offset(1)],
+                flip_offsets: Vec::new(),
+                impulse_offsets: Vec::new(),
+            },
+            PmxParsedMorph {
+                name: "all-material".to_owned(),
+                english_name: "all-material-en".to_owned(),
+                kind: "material".to_owned(),
+                vertex_offsets: Vec::new(),
+                group_offsets: Vec::new(),
+                bone_offsets: Vec::new(),
+                uv_offsets: Vec::new(),
+                additional_uv_offsets: Vec::new(),
+                material_offsets: vec![material_morph_offset(-1)],
+                flip_offsets: Vec::new(),
+                impulse_offsets: Vec::new(),
+            },
+            PmxParsedMorph {
+                name: "combo".to_owned(),
+                english_name: "combo-en".to_owned(),
+                kind: "group".to_owned(),
+                vertex_offsets: Vec::new(),
+                group_offsets: vec![
+                    PmxParsedGroupMorphOffset {
+                        morph_index: 0,
+                        weight: 0.25,
+                    },
+                    PmxParsedGroupMorphOffset {
+                        morph_index: 1,
+                        weight: 0.5,
+                    },
+                    PmxParsedGroupMorphOffset {
+                        morph_index: 2,
+                        weight: 0.75,
+                    },
+                    PmxParsedGroupMorphOffset {
+                        morph_index: 3,
+                        weight: 1.0,
+                    },
+                ],
+                bone_offsets: Vec::new(),
+                uv_offsets: Vec::new(),
+                additional_uv_offsets: Vec::new(),
+                material_offsets: Vec::new(),
+                flip_offsets: Vec::new(),
+                impulse_offsets: Vec::new(),
+            },
+        ];
+        model
+    }
+
     fn ik_multi_axis_limit_pmx_fixture() -> &'static [u8] {
         include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx")
     }
@@ -4152,6 +4832,199 @@ mod tests {
             .collect::<Vec<_>>();
         keys.sort();
         keys
+    }
+
+    #[test]
+    fn pmx_material_split_remaps_geometry_and_prunes_morphs() {
+        let model = material_split_fixture();
+        let split = split_pmx_model_by_material(&model);
+
+        assert_eq!(split.meshes.len(), 2);
+        assert_eq!(split.manifest.mesh_count, 2);
+        assert_eq!(split.manifest.meshes[0].original_material_index, 0);
+        assert_eq!(
+            split.manifest.meshes[0].original_vertex_indices,
+            vec![0, 1, 2]
+        );
+        assert_eq!(split.manifest.meshes[1].original_material_index, 1);
+        assert_eq!(
+            split.manifest.meshes[1].original_vertex_indices,
+            vec![2, 3, 0]
+        );
+
+        let left = &split.meshes[0];
+        assert_eq!(left.geometry.indices, vec![0, 1, 2]);
+        assert_eq!(
+            left.geometry.positions,
+            vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        );
+        assert_eq!(left.geometry.uvs, vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(left.geometry.edge_scale, vec![1.0, 1.1, 1.2]);
+        assert_eq!(left.geometry.sdef.enabled, vec![0.0, 1.0, 0.0]);
+        assert_eq!(left.geometry.qdef.enabled, vec![0.0, 0.0, 0.0]);
+        assert_eq!(
+            left.morph_index_map,
+            vec![
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 0,
+                    local_index: 0,
+                },
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 3,
+                    local_index: 1,
+                },
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 4,
+                    local_index: 2,
+                },
+            ]
+        );
+        assert_eq!(left.morphs.len(), 3);
+        assert_eq!(left.morphs[0].name, "left-raise");
+        assert_eq!(left.morphs[0].vertex_offsets[0].vertex_index, 1);
+        assert_eq!(left.morphs[1].name, "all-material");
+        assert_eq!(left.morphs[1].material_offsets[0].material_index, -1);
+        assert_eq!(left.morphs[2].name, "combo");
+        assert_eq!(
+            left.morphs[2]
+                .group_offsets
+                .iter()
+                .map(|offset| (offset.morph_index, offset.weight))
+                .collect::<Vec<_>>(),
+            vec![(0, 0.25), (1, 1.0)]
+        );
+
+        let right = &split.meshes[1];
+        assert_eq!(right.geometry.indices, vec![0, 1, 2]);
+        assert_eq!(
+            right.geometry.positions,
+            vec![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(right.geometry.uvs, vec![0.0, 1.0, 1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(right.geometry.edge_scale, vec![1.2, 1.3, 1.0]);
+        assert_eq!(right.geometry.sdef.enabled, vec![0.0, 0.0, 0.0]);
+        assert_eq!(right.geometry.qdef.enabled, vec![0.0, 1.0, 0.0]);
+        assert_eq!(
+            right.morph_index_map,
+            vec![
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 1,
+                    local_index: 0,
+                },
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 2,
+                    local_index: 1,
+                },
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 3,
+                    local_index: 2,
+                },
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 4,
+                    local_index: 3,
+                },
+            ]
+        );
+        assert_eq!(right.morphs.len(), 4);
+        assert_eq!(right.morphs[0].name, "right-raise");
+        assert_eq!(right.morphs[0].vertex_offsets[0].vertex_index, 1);
+        assert_eq!(right.morphs[1].name, "right-material");
+        assert_eq!(right.morphs[1].material_offsets[0].material_index, 0);
+        assert_eq!(right.morphs[2].name, "all-material");
+        assert_eq!(right.morphs[2].material_offsets[0].material_index, -1);
+        assert_eq!(
+            right.morphs[3]
+                .group_offsets
+                .iter()
+                .map(|offset| (offset.morph_index, offset.weight))
+                .collect::<Vec<_>>(),
+            vec![(0, 0.5), (1, 0.75), (2, 1.0)]
+        );
+    }
+
+    #[test]
+    fn pmx_material_split_preserves_forward_group_morph_references() {
+        let mut model = material_split_fixture();
+        model.morphs.push(PmxParsedMorph {
+            name: "forward-combo".to_owned(),
+            english_name: "forward-combo-en".to_owned(),
+            kind: "group".to_owned(),
+            vertex_offsets: Vec::new(),
+            group_offsets: vec![PmxParsedGroupMorphOffset {
+                morph_index: 6,
+                weight: 0.8,
+            }],
+            bone_offsets: Vec::new(),
+            uv_offsets: Vec::new(),
+            additional_uv_offsets: Vec::new(),
+            material_offsets: Vec::new(),
+            flip_offsets: Vec::new(),
+            impulse_offsets: Vec::new(),
+        });
+        model.morphs.push(PmxParsedMorph {
+            name: "later-combo".to_owned(),
+            english_name: "later-combo-en".to_owned(),
+            kind: "group".to_owned(),
+            vertex_offsets: Vec::new(),
+            group_offsets: vec![PmxParsedGroupMorphOffset {
+                morph_index: 0,
+                weight: 0.4,
+            }],
+            bone_offsets: Vec::new(),
+            uv_offsets: Vec::new(),
+            additional_uv_offsets: Vec::new(),
+            material_offsets: Vec::new(),
+            flip_offsets: Vec::new(),
+            impulse_offsets: Vec::new(),
+        });
+        model.metadata.counts.morphs = model.morphs.len();
+
+        let split = split_pmx_model_by_material(&model);
+        let left = &split.meshes[0];
+
+        assert_eq!(
+            left.morph_index_map,
+            vec![
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 0,
+                    local_index: 0,
+                },
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 3,
+                    local_index: 1,
+                },
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 4,
+                    local_index: 2,
+                },
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 5,
+                    local_index: 3,
+                },
+                PmxMaterialSplitMorphIndexMap {
+                    original_index: 6,
+                    local_index: 4,
+                },
+            ]
+        );
+        assert_eq!(left.morphs[3].name, "forward-combo");
+        assert_eq!(
+            left.morphs[3]
+                .group_offsets
+                .iter()
+                .map(|offset| (offset.morph_index, offset.weight))
+                .collect::<Vec<_>>(),
+            vec![(4, 0.8)]
+        );
+        assert_eq!(left.morphs[4].name, "later-combo");
+        assert_eq!(
+            left.morphs[4]
+                .group_offsets
+                .iter()
+                .map(|offset| (offset.morph_index, offset.weight))
+                .collect::<Vec<_>>(),
+            vec![(0, 0.4)]
+        );
     }
 
     #[test]

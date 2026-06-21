@@ -83,6 +83,16 @@ pub fn parse_pmx_model_non_geometry_json(data: &[u8]) -> Result<String, JsValue>
         .map_err(|error| js_parser_error("PMX", "parsePmxModelNonGeometryJson", None, error))
 }
 
+#[wasm_bindgen(js_name = parseVmdAnimationJson)]
+pub fn parse_vmd_animation_json(data: &[u8]) -> Result<String, JsValue> {
+    if data.is_empty() {
+        return Err(JsValue::from_str("VMD data is empty"));
+    }
+    let parsed = mmd_anim_format::parse_vmd_animation(data)
+        .map_err(|error| js_parser_error("VMD", "parseVmdAnimationJson", None, error))?;
+    serde_json::to_string(&parsed).map_err(js_error)
+}
+
 #[wasm_bindgen(js_name = parseMmdFormatJson)]
 pub fn parse_mmd_format_json(data: &[u8], file_name: Option<String>) -> Result<String, JsValue> {
     if data.is_empty() {
@@ -273,6 +283,7 @@ pub struct WasmPmxGeometry {
     sdef_rw0: Vec<f32>,
     sdef_rw1: Vec<f32>,
     qdef_enabled: Vec<u8>,
+    skinning_modes: Vec<String>,
 }
 
 impl WasmPmxGeometry {
@@ -305,6 +316,7 @@ impl WasmPmxGeometry {
             sdef_rw0: g.sdef.rw0.clone(),
             sdef_rw1: g.sdef.rw1.clone(),
             qdef_enabled: g.qdef.enabled.iter().map(|&v| u8::from(v != 0.0)).collect(),
+            skinning_modes: pmx_skinning_modes(g),
         }
     }
 
@@ -441,6 +453,40 @@ impl WasmPmxGeometry {
     pub fn qdef_enabled(&self) -> Vec<u8> {
         self.qdef_enabled.clone()
     }
+
+    /// Copy of derived per-vertex skinning mode names.
+    ///
+    /// Values match the C ABI `mmd_runtime_parse_pmx_skinning_modes_json`
+    /// payload: `bdef1`, `bdef2`, `bdef4`, `sdef`, or `qdef`.
+    #[wasm_bindgen(js_name = skinningModes)]
+    pub fn skinning_modes(&self) -> Vec<String> {
+        self.skinning_modes.clone()
+    }
+}
+
+fn pmx_skinning_modes(g: &mmd_anim_format::pmx::PmxParsedGeometry) -> Vec<String> {
+    let vertex_count = g.positions.len() / 3;
+    (0..vertex_count)
+        .map(|i| {
+            if g.sdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
+                "sdef"
+            } else if g.qdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
+                "qdef"
+            } else {
+                let w2 = g.skin_weights.get(i * 4 + 2).copied().unwrap_or(0.0);
+                let w3 = g.skin_weights.get(i * 4 + 3).copied().unwrap_or(0.0);
+                let w1 = g.skin_weights.get(i * 4 + 1).copied().unwrap_or(0.0);
+                if w2 != 0.0 || w3 != 0.0 {
+                    "bdef4"
+                } else if w1 != 0.0 {
+                    "bdef2"
+                } else {
+                    "bdef1"
+                }
+            }
+            .to_owned()
+        })
+        .collect()
 }
 
 /// Parsed PMX handle for the split loader ABI.
@@ -1622,6 +1668,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_vmd_animation_json_through_wasm_wrapper() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+        let json = parse_vmd_animation_json(bytes).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["kind"], "vmd");
+        assert_eq!(value["metadata"]["format"], "vmd");
+        assert!(value["cameraFrames"].as_array().unwrap().len() >= 2);
+    }
+
+    #[test]
     fn exports_pmx_json_bytes_through_wasm_wrapper() {
         let json = serde_json::json!({
             "metadata": {
@@ -2466,6 +2523,7 @@ TextureFilename { "tex/main.png"; }
         assert_eq!(geo.sdef_rw0().len(), 9);
         assert_eq!(geo.sdef_rw1().len(), 9);
         assert_eq!(geo.qdef_enabled(), vec![0u8, 0, 0]);
+        assert_eq!(geo.skinning_modes(), vec!["bdef1", "bdef1", "bdef1"]);
     }
 
     #[test]

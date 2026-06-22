@@ -1017,6 +1017,153 @@ pub struct PmxParsedIkLimit {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PmxRigSpec {
+    pub bone_count: usize,
+    pub ik_chain_count: usize,
+    pub grant_count: usize,
+    pub bones: Vec<PmxRigSpecBone>,
+    pub ik_chains: Vec<PmxRigSpecIkChain>,
+    pub grants: Vec<PmxRigSpecGrant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxRigSpecBone {
+    pub name: String,
+    pub name_bytes: String,
+    pub parent_index: i32,
+    pub rest_position: [f32; 3],
+    pub deform_layer: i32,
+    pub fixed_axis: Option<[f32; 3]>,
+    pub local_axis: Option<PmxRigSpecLocalAxis>,
+    pub transform_after_physics: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PmxRigSpecLocalAxis {
+    pub x: [f32; 3],
+    pub z: [f32; 3],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxRigSpecIkChain {
+    pub controller_bone_index: i32,
+    pub target_bone_index: i32,
+    pub iteration_count: u32,
+    pub limit_angle: f32,
+    pub links: Vec<PmxRigSpecIkLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxRigSpecIkLink {
+    pub bone_index: i32,
+    pub has_angle_limit: bool,
+    pub angle_limit_min: [f32; 3],
+    pub angle_limit_max: [f32; 3],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmxRigSpecGrant {
+    pub target_bone_index: i32,
+    pub source_bone_index: i32,
+    pub ratio: f32,
+    pub affect_rotation: bool,
+    pub affect_translation: bool,
+    pub local: bool,
+}
+
+pub fn parse_pmx_rig_spec(data: &[u8]) -> Result<PmxRigSpec, ImportError> {
+    let model = parse_pmx_model(data)?;
+    Ok(pmx_model_to_rig_spec(&model))
+}
+
+pub fn pmx_model_to_rig_spec(model: &PmxParsedModel) -> PmxRigSpec {
+    let mut bones = Vec::with_capacity(model.skeleton.bones.len());
+    let mut ik_chains = Vec::new();
+    let mut grants = Vec::new();
+
+    for (index, bone) in model.skeleton.bones.iter().enumerate() {
+        bones.push(PmxRigSpecBone {
+            name: bone.name.clone(),
+            name_bytes: shift_jis_hex(&bone.name),
+            parent_index: bone.parent_index,
+            rest_position: bone.position,
+            deform_layer: bone.layer,
+            fixed_axis: bone.fixed_axis,
+            local_axis: bone.local_axis.as_ref().map(|axis| PmxRigSpecLocalAxis {
+                x: axis.x,
+                z: axis.z,
+            }),
+            transform_after_physics: bone.flags.transform_after_physics,
+        });
+
+        if let Some(ik) = &bone.ik {
+            ik_chains.push(PmxRigSpecIkChain {
+                controller_bone_index: index as i32,
+                target_bone_index: ik.target_index,
+                iteration_count: ik.loop_count.max(0) as u32,
+                limit_angle: ik.limit_angle,
+                links: ik
+                    .links
+                    .iter()
+                    .map(|link| {
+                        let (angle_limit_min, angle_limit_max) =
+                            link.limits.as_ref().map_or(([0.0; 3], [0.0; 3]), |limit| {
+                                (limit.lower, limit.upper)
+                            });
+                        PmxRigSpecIkLink {
+                            bone_index: link.bone_index,
+                            has_angle_limit: link.limits.is_some(),
+                            angle_limit_min,
+                            angle_limit_max,
+                        }
+                    })
+                    .collect(),
+            });
+        }
+
+        if let Some(append) = &bone.append_transform {
+            grants.push(PmxRigSpecGrant {
+                target_bone_index: index as i32,
+                source_bone_index: append.parent_index,
+                ratio: append.weight,
+                affect_rotation: bone.flags.append_rotate,
+                affect_translation: bone.flags.append_translate,
+                local: bone.flags.append_local,
+            });
+        }
+    }
+
+    PmxRigSpec {
+        bone_count: bones.len(),
+        ik_chain_count: ik_chains.len(),
+        grant_count: grants.len(),
+        bones,
+        ik_chains,
+        grants,
+    }
+}
+
+fn shift_jis_hex(text: &str) -> String {
+    let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(text);
+    bytes_to_hex(&encoded)
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PmxParsedMorph {
     pub name: String,
     pub english_name: String,

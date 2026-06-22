@@ -55,6 +55,9 @@ cargo doc --workspace --no-deps
 
 - [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): `mmd-anim` を
   アニメーション・形式処理 backend として利用する Three.js 向け MMD loader。
+- [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools):
+  Maya 向け MMD アニメーション編集ツールとして利用する Maya プラグイン。 VMDインポート時のフルベイク用と、リグ実装にあたっての正本として利用。
+- [unity-mmd-loader](https://github.com/yohawing/unity-mmd-loader): Unity6、URPに最適化Unity向けMMD Loader。インポーターと、コアアニメーションランタイムとして利用。
 
 Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同じ機能を組み込めます。
 

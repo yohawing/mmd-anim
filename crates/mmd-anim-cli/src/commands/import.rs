@@ -1,10 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::Path,
-    process::ExitCode,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, fs, path::Path, process::ExitCode, sync::Arc};
 
 use glam::Vec3A;
 use mmd_anim_runtime::RuntimeInstance;

@@ -4,7 +4,7 @@ use std::{
     process::ExitCode,
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 mod commands;
 
@@ -16,7 +16,8 @@ mod commands;
 #[command(
     name = "mmd-anim",
     version,
-    about = "CLI diagnostics and roundtrip tools for mmd-anim"
+    about = "CLI diagnostics and roundtrip tools for mmd-anim\n\nExit codes: 0 = success, 1 = runtime error, 2 = usage error",
+    arg_required_else_help = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -25,275 +26,189 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    // -- Parse commands ------------------------------------------------------
-    /// Parse a PMX model and show summary counts
-    #[command(name = "parse-pmx-summary")]
-    ParsePmxSummary {
-        /// Path to the PMX model file
+    /// Inspect an MMD asset without changing it.
+    #[command(
+        long_about = "Parse an MMD asset and print a compact summary by default.\nUse this for quick format triage, JSON dumps, or PMX IK solver inspection.",
+        after_help = "Examples:\n  mmd-anim inspect model.pmx\n  mmd-anim inspect motion.vmd --json\n  mmd-anim inspect model.pmx --ik"
+    )]
+    Inspect {
+        /// Path to the asset to inspect
         asset: PathBuf,
+        /// Output parsed data as JSON
+        #[arg(long)]
+        json: bool,
+        /// Show PMX IK solver details
+        #[arg(long)]
+        ik: bool,
     },
 
-    /// Parse any MMD asset and show a human-readable summary
-    #[command(name = "parse-format-summary")]
-    ParseFormatSummary {
-        /// Path to the MMD asset file
+    /// Import model and optional motion into runtime structures.
+    #[command(
+        long_about = "Run the runtime importer for a model, or a model/motion pair.\nUse this when checking runtime names, clip build stats, or a single evaluated frame.",
+        after_help = "Examples:\n  mmd-anim import model.pmx\n  mmd-anim import model.pmx motion.vmd --clip\n  mmd-anim import model.pmx motion.vmd --frame 120"
+    )]
+    Import {
+        /// Path to the PMX/PMD model file
+        model: PathBuf,
+        /// Optional path to the VMD motion file
+        motion: Option<PathBuf>,
+        /// Request JSON output where supported
+        #[arg(long)]
+        json: bool,
+        /// Show clip build statistics for a model/motion pair
+        #[arg(long)]
+        clip: bool,
+        /// Evaluate a single frame for a model/motion pair
+        #[arg(long)]
+        frame: Option<f32>,
+    },
+
+    /// Verify parse/export/re-parse stability.
+    #[command(
+        long_about = "Parse an asset, export it, then re-parse the exported bytes.\nUse this before changing readers, writers, or JSON DTO conversion paths.",
+        after_help = "Examples:\n  mmd-anim roundtrip model.pmx\n  mmd-anim roundtrip motion.vmd --json\n  mmd-anim roundtrip model.pmx --via-json"
+    )]
+    Roundtrip {
+        /// Path to the asset to roundtrip
         asset: PathBuf,
+        /// Output roundtrip report as JSON
+        #[arg(long)]
+        json: bool,
+        /// Roundtrip through JSON serialization before binary export
+        #[arg(long)]
+        via_json: bool,
     },
 
-    /// Parse any MMD asset and output full parsed data as JSON
-    #[command(name = "parse-format-json")]
-    ParseFormatJson {
-        /// Path to the MMD asset file
-        asset: PathBuf,
-    },
-
-    // -- Import commands -----------------------------------------------------
-    /// Import a PMX model into runtime format and show summary
-    #[command(name = "import-pmx-summary")]
-    ImportPmxSummary {
-        /// Path to the PMX model file
-        model: PathBuf,
-    },
-
-    /// Import a PMX model and show IK solver details
-    #[command(name = "import-pmx-ik-summary")]
-    ImportPmxIkSummary {
-        /// Path to the PMX model file
-        model: PathBuf,
-    },
-
-    /// Import a PMD model into runtime format and show summary
-    #[command(name = "import-pmd-summary")]
-    ImportPmdSummary {
-        /// Path to the PMD model file
-        model: PathBuf,
-    },
-
-    /// Import a VMD motion and show summary
-    #[command(name = "import-vmd-summary")]
-    ImportVmdSummary {
-        /// Path to the VMD motion file
-        motion: PathBuf,
-    },
-
-    /// Import a PMX/VMD pair and show matching statistics
-    #[command(name = "import-pair-summary")]
-    ImportPairSummary {
-        /// Path to the PMX model file
-        model: PathBuf,
-        /// Path to the VMD motion file
-        motion: PathBuf,
-    },
-
-    /// Import a PMX/VMD pair and show clip build statistics
-    #[command(name = "import-pair-clip-summary")]
-    ImportPairClipSummary {
-        /// Path to the PMX model file
-        model: PathBuf,
-        /// Path to the VMD motion file
-        motion: PathBuf,
-    },
-
-    /// Import a PMX/VMD pair and evaluate a single frame
-    #[command(name = "import-pair-frame-summary")]
-    ImportPairFrameSummary {
-        /// Path to the PMX model file
-        model: PathBuf,
-        /// Path to the VMD motion file
-        motion: PathBuf,
-        /// Frame number to evaluate
-        frame: f32,
-    },
-
-    // -- Export commands ------------------------------------------------------
-    /// Export roundtrip: parse, export, re-parse and verify
-    #[command(name = "export-roundtrip-summary")]
-    ExportRoundtripSummary {
-        /// Path to the MMD asset file
-        asset: PathBuf,
-    },
-
-    /// Export roundtrip with JSON output
-    #[command(name = "export-roundtrip-json")]
-    ExportRoundtripJson {
-        /// Path to the MMD asset file
-        asset: PathBuf,
-    },
-
-    /// JSON roundtrip: parse, JSON serialize/deserialize, export, re-parse and verify
-    #[command(name = "export-json-roundtrip-summary")]
-    ExportJsonRoundtripSummary {
-        /// Path to the MMD asset file
-        asset: PathBuf,
-    },
-
-    /// JSON roundtrip with JSON output
-    #[command(name = "export-json-roundtrip-json")]
-    ExportJsonRoundtripJson {
-        /// Path to the MMD asset file
-        asset: PathBuf,
-    },
-
-    /// Export a parsed MMD asset to a binary file
-    #[command(name = "export-format")]
-    ExportFormat {
-        /// Path to the input asset file
-        input: PathBuf,
-        /// Path to the output asset file
-        output: PathBuf,
-    },
-
-    /// Export a JSON-serialized asset to a binary file
-    #[command(name = "export-json-format")]
-    ExportJsonFormat {
-        /// Path to the input JSON file
-        input: PathBuf,
-        /// Path to the output asset file
-        output: PathBuf,
-    },
-
-    /// Build a PMM scene from a PMX model and VMD motion
-    #[command(name = "export-pmm-scene")]
-    ExportPmmScene {
-        /// Path to the PMX model file
-        model: PathBuf,
-        /// Path to the VMD motion file
-        motion: PathBuf,
-        /// Path to the output PMM file
-        output: PathBuf,
-    },
-
-    // -- Bench commands ------------------------------------------------------
-    /// Benchmark animation evaluation with a PMX/VMD pair
-    #[command(name = "bench-pair")]
-    BenchPair {
-        /// All arguments (model, motion, options) passed as raw args
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Benchmark animation evaluation with synthetic data
-    #[command(name = "bench-synthetic")]
-    BenchSynthetic {
-        /// All arguments passed as raw args
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    // -- Patch commands ------------------------------------------------------
-    /// Patch a PMM file's document model path
-    #[command(name = "patch-pmm-document-model-path")]
-    PatchPmmDocumentModelPath {
-        /// Path to the input PMM file
-        input: PathBuf,
-        /// Document model index (0-255)
-        document_model_index: String,
-        /// New model path to set
-        model_path: String,
-        /// Path to the output PMM file
-        output: PathBuf,
-    },
-
-    /// Patch a PMM file's scene frame range settings
-    #[command(name = "patch-pmm-scene-frame-range")]
-    PatchPmmSceneFrameRange {
-        /// Path to the input PMM file
-        input: PathBuf,
-        /// Path to the output PMM file
-        output: PathBuf,
-        /// Additional options
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        options: Vec<String>,
-    },
-
-    // -- Rig commands ---------------------------------------------------------
-    /// Inspect rig structure (IK chains, grants, deform layers) of a PMX model
-    #[command(name = "rig-inspect")]
-    RigInspect {
+    /// Inspect PMX rig structure.
+    #[command(
+        long_about = "Inspect IK chains, grant/append transforms, and deform layer distribution.\nUse this for rig debugging before runtime import or solver comparison.",
+        after_help = "Examples:\n  mmd-anim rig model.pmx\n  mmd-anim rig model.pmx --bones\n  mmd-anim rig model.pmx --json --bones"
+    )]
+    Rig {
         /// Path to the PMX model file
         model: PathBuf,
         /// Output as JSON
         #[arg(long)]
         json: bool,
-        /// Include full bone list
+        /// Include the full bone list
         #[arg(long)]
         bones: bool,
     },
 
-    // -- Compare commands ----------------------------------------------------
-    /// Run numeric comparison against oracle data
-    #[command(name = "compare-numeric")]
-    CompareNumeric {
-        /// Path to the comparison manifest JSON file
-        manifest: PathBuf,
+    /// Benchmark runtime evaluation.
+    #[command(
+        long_about = "Benchmark a PMX/VMD pair by default, or synthetic runtime data with --synthetic.\nUse this for local performance checks around import, clip build, and evaluation.",
+        after_help = "Examples:\n  mmd-anim bench model.pmx motion.vmd\n  mmd-anim bench --synthetic"
+    )]
+    Bench {
+        /// Path to the PMX model file
+        model: Option<PathBuf>,
+        /// Path to the VMD motion file
+        motion: Option<PathBuf>,
+        /// Run the synthetic benchmark instead of a PMX/VMD pair
+        #[arg(long)]
+        synthetic: bool,
     },
 
-    /// Run camera VMD numeric comparison against oracle data
-    #[command(name = "compare-camera-vmd-numeric")]
-    CompareCameraVmdNumeric {
-        /// Path to the comparison manifest JSON file
-        manifest: PathBuf,
+    /// Verify oracle, golden, parser, or numeric comparison data.
+    #[command(
+        long_about = "Run comparison and oracle diagnostics from a manifest, oracle file, or golden root.\nUse this for numeric, camera, IK, parser, and focused diagnosis workflows.",
+        after_help = "Examples:\n  mmd-anim verify oracle.jsonl\n  mmd-anim verify manifest.json --mode numeric\n  mmd-anim verify golden-root --mode ik --compare\n  mmd-anim verify manifest.json --mode numeric --diagnose case-a 120 左足ＩＫ"
+    )]
+    Verify {
+        /// Path to a manifest, oracle JSONL file, or golden root directory
+        target: PathBuf,
+        /// Verification mode
+        #[arg(long, value_enum)]
+        mode: Option<VerifyMode>,
+        /// Diagnose a specific case/frame, with optional bone name
+        #[arg(long, num_args = 2..=3, value_names = ["CASE", "FRAME", "BONE"])]
+        diagnose: Option<Vec<String>>,
+        /// Compare IK golden data instead of printing the IK summary
+        #[arg(long)]
+        compare: bool,
+        /// Request JSON output where supported
+        #[arg(long)]
+        json: bool,
+        /// Numeric diagnosis evaluation frame override
+        #[arg(long)]
+        eval_frame: Option<f32>,
+        /// IK comparison/diagnosis sample frame offset
+        #[arg(long)]
+        sample_frame_offset: Option<f32>,
     },
 
-    /// Diagnose numeric comparison results for specific bones
-    #[command(name = "diagnose-numeric-bone")]
-    DiagnoseNumericBone {
-        /// Path to the comparison manifest JSON file
-        manifest: PathBuf,
-        /// Case name from the manifest
-        case_name: String,
-        /// Oracle frame number
-        frame: f32,
-        /// Additional options and bone names
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
+    /// Patch PMM fields in place to a new output file.
+    #[command(
+        long_about = "Rewrite selected PMM document fields while preserving the rest of the file.\nUse this for model path and scene frame range fixes in generated PMM scenes.",
+        after_help = "Examples:\n  mmd-anim patch scene.pmm --model-path 0 model.pmx out.pmm\n  mmd-anim patch scene.pmm --frame-range out.pmm --current-frame 120\n  mmd-anim patch scene.pmm --frame-range out.pmm --begin-frame 0 --end-frame 240"
+    )]
+    Patch {
+        /// Path to the input PMM file
+        pmm: PathBuf,
+        /// Patch a document model path: <idx> <path> <out>
+        #[arg(long, num_args = 3, value_names = ["IDX", "PATH", "OUT"])]
+        model_path: Option<Vec<String>>,
+        /// Patch scene frame range settings and write to this output path
+        #[arg(long, value_name = "OUT")]
+        frame_range: Option<PathBuf>,
+        /// Set current frame index
+        #[arg(long)]
+        current_frame: Option<i32>,
+        /// Set current frame text field index
+        #[arg(long)]
+        current_frame_text: Option<i32>,
+        /// Set begin frame index
+        #[arg(long)]
+        begin_frame: Option<i32>,
+        /// Set end frame index
+        #[arg(long)]
+        end_frame: Option<i32>,
+        /// Enable or disable begin frame range
+        #[arg(long)]
+        begin_frame_enabled: Option<String>,
+        /// Enable or disable end frame range
+        #[arg(long)]
+        end_frame_enabled: Option<String>,
     },
 
-    // -- Golden commands -----------------------------------------------------
-    /// Show golden IK oracle summary
-    #[command(name = "golden-ik-summary")]
-    GoldenIkSummary {
-        /// Path to the golden IK oracle root directory
-        root: PathBuf,
+    /// Export an asset to another binary file.
+    #[command(
+        long_about = "Write an MMD asset to an output path, optionally starting from JSON.\nUse this for parser/exporter smoke checks and JSON-to-binary conversion.",
+        after_help = "Examples:\n  mmd-anim export input.vmd output.vmd\n  mmd-anim export input.json output.vmd --from-json"
+    )]
+    Export {
+        /// Path to the input asset or JSON file
+        input: PathBuf,
+        /// Path to the output asset file
+        output: PathBuf,
+        /// Treat input as JSON and export binary format
+        #[arg(long)]
+        from_json: bool,
     },
 
-    /// Compare runtime IK results against golden oracle
-    #[command(name = "golden-ik-compare")]
-    GoldenIkCompare {
-        /// All arguments passed as raw args
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+    /// Build a PMM scene from a model and motion.
+    #[command(
+        name = "build-pmm",
+        long_about = "Create a PMM scene from a PMX model and VMD motion.\nUse this when preparing MMD GUI-compatible scenes from runtime fixtures.",
+        after_help = "Examples:\n  mmd-anim build-pmm model.pmx motion.vmd scene.pmm\n  mmd-anim build-pmm ./model.pmx ./motion.vmd ./out/scene.pmm"
+    )]
+    BuildPmm {
+        /// Path to the PMX model file
+        model: PathBuf,
+        /// Path to the VMD motion file
+        motion: PathBuf,
+        /// Path to the output PMM file
+        output: PathBuf,
     },
+}
 
-    /// Diagnose a specific IK comparison case
-    #[command(name = "golden-ik-diagnose")]
-    GoldenIkDiagnose {
-        /// Path to the golden IK oracle root directory
-        root: PathBuf,
-        /// Case name
-        case_name: String,
-        /// Frame number
-        frame: i32,
-        /// Bone name to diagnose
-        bone_name: String,
-        /// Optional sample frame offset
-        offset: Option<f32>,
-    },
-
-    /// Show golden parser summary
-    #[command(name = "golden-parser-summary")]
-    GoldenParserSummary {
-        /// Path to the golden run root directory
-        root: PathBuf,
-    },
-
-    // -- Oracle commands -----------------------------------------------------
-    /// Show MMDDumper oracle file summary
-    #[command(name = "oracle-summary")]
-    OracleSummary {
-        /// Path to the oracle JSONL file
-        path: PathBuf,
-    },
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum VerifyMode {
+    Numeric,
+    Camera,
+    Ik,
+    Parser,
 }
 
 // ---------------------------------------------------------------------------
@@ -309,136 +224,77 @@ fn main() -> ExitCode {
             Ok(ExitCode::SUCCESS)
         }
 
-        Some(Commands::ParsePmxSummary { asset }) => {
-            commands::parse::parse_pmx_summary(&asset)
-        }
-        Some(Commands::ParseFormatSummary { asset }) => {
-            commands::parse::parse_format_summary(&asset)
-        }
-        Some(Commands::ParseFormatJson { asset }) => {
-            commands::parse::parse_format_json(&asset)
-        }
-
-        Some(Commands::ImportPmxSummary { model }) => {
-            commands::import::import_pmx_summary(&model)
-        }
-        Some(Commands::ImportPmxIkSummary { model }) => {
-            commands::import::import_pmx_ik_summary(&model)
-        }
-        Some(Commands::ImportPmdSummary { model }) => {
-            commands::import::import_pmd_summary(&model)
-        }
-        Some(Commands::ImportVmdSummary { motion }) => {
-            commands::import::import_vmd_summary(&motion)
-        }
-        Some(Commands::ImportPairSummary { model, motion }) => {
-            commands::import::import_pair_summary(&model, &motion)
-        }
-        Some(Commands::ImportPairClipSummary { model, motion }) => {
-            commands::import::import_pair_clip_summary(&model, &motion)
-        }
-        Some(Commands::ImportPairFrameSummary { model, motion, frame }) => {
-            commands::import::import_pair_frame_summary(&model, &motion, frame)
-        }
-
-        Some(Commands::ExportRoundtripSummary { asset }) => {
-            commands::export::export_roundtrip_summary(&asset)
-        }
-        Some(Commands::ExportRoundtripJson { asset }) => {
-            commands::export::export_roundtrip_json(&asset)
-        }
-        Some(Commands::ExportJsonRoundtripSummary { asset }) => {
-            commands::export::export_json_roundtrip_summary(&asset)
-        }
-        Some(Commands::ExportJsonRoundtripJson { asset }) => {
-            commands::export::export_json_roundtrip_json(&asset)
-        }
-        Some(Commands::ExportFormat { input, output }) => {
-            commands::export::export_format(&input, &output)
-        }
-        Some(Commands::ExportJsonFormat { input, output }) => {
-            commands::export::export_json_format(&input, &output)
-        }
-        Some(Commands::ExportPmmScene { model, motion, output }) => {
-            commands::export::export_pmm_scene(&model, &motion, &output)
-        }
-
-        Some(Commands::BenchPair { args }) => {
-            let mut iter = args.into_iter();
-            commands::bench::parse_bench_pair_args(&mut iter)
-                .and_then(commands::bench::bench_pair)
-        }
-        Some(Commands::BenchSynthetic { args }) => {
-            let mut iter = args.into_iter();
-            commands::bench::parse_bench_synthetic_args(&mut iter)
-                .and_then(commands::bench::bench_synthetic)
-        }
-
-        Some(Commands::PatchPmmDocumentModelPath { input, document_model_index, model_path, output }) => {
-            commands::patch::patch_pmm_document_model_path(&input, &document_model_index, &model_path, &output)
-        }
-        Some(Commands::PatchPmmSceneFrameRange { input, output, options }) => {
-            commands::patch::patch_pmm_scene_frame_range(&input, &output, &options)
-        }
-
-        Some(Commands::RigInspect { model, json, bones }) => {
+        Some(Commands::Inspect { asset, json, ik }) => dispatch_inspect(&asset, json, ik),
+        Some(Commands::Import {
+            model,
+            motion,
+            json,
+            clip,
+            frame,
+        }) => dispatch_import(&model, motion.as_deref(), json, clip, frame),
+        Some(Commands::Roundtrip {
+            asset,
+            json,
+            via_json,
+        }) => dispatch_roundtrip(&asset, json, via_json),
+        Some(Commands::Rig { model, json, bones }) => {
             commands::rig::rig_inspect(&model, json, bones)
         }
-
-        Some(Commands::CompareNumeric { manifest }) => {
-            commands::compare::compare_numeric_manifest(&manifest)
-        }
-        Some(Commands::CompareCameraVmdNumeric { manifest }) => {
-            commands::compare::compare_numeric_manifest(&manifest)
-        }
-        Some(Commands::DiagnoseNumericBone { manifest, case_name, frame, rest }) => {
-            let diagnose_options = commands::compare::parse_diagnose_numeric_bone_rest(rest, frame);
-            let eval_frame = diagnose_options.eval_frame;
-            let bone_names = diagnose_options.bone_names;
-            if bone_names.is_empty() {
-                eprintln!("{}", commands::compare::DIAGNOSE_NUMERIC_BONE_USAGE);
-                return ExitCode::from(2);
-            }
-            commands::compare::diagnose_numeric_bones(
-                &manifest,
-                &case_name,
-                frame,
-                eval_frame,
-                &bone_names,
-            )
-        }
-
-        Some(Commands::GoldenIkSummary { root }) => {
-            golden_ik_summary(&root)
-        }
-        Some(Commands::GoldenIkCompare { args }) => {
-            let mut iter = args.into_iter();
-            match commands::golden::parse_golden_ik_compare_args(&mut iter) {
-                Ok((root, offset, use_json)) => {
-                    commands::golden::golden_ik_compare(Path::new(&root), offset, use_json)
-                }
-                Err(error) => {
-                    eprintln!("{error}");
-                    return ExitCode::from(2);
-                }
-            }
-        }
-        Some(Commands::GoldenIkDiagnose { root, case_name, frame, bone_name, offset }) => {
-            commands::golden::golden_ik_diagnose(
-                &root,
-                &case_name,
-                frame,
-                &bone_name,
-                offset.unwrap_or(0.0),
-            )
-        }
-        Some(Commands::GoldenParserSummary { root }) => {
-            golden_parser_summary(&root)
-        }
-
-        Some(Commands::OracleSummary { path }) => {
-            commands::oracle::oracle_summary(&path.to_string_lossy())
-        }
+        Some(Commands::Bench {
+            model,
+            motion,
+            synthetic,
+        }) => dispatch_bench(model, motion, synthetic),
+        Some(Commands::Verify {
+            target,
+            mode,
+            diagnose,
+            compare,
+            json,
+            eval_frame,
+            sample_frame_offset,
+        }) => dispatch_verify(
+            &target,
+            mode,
+            diagnose,
+            compare,
+            json,
+            eval_frame,
+            sample_frame_offset,
+        ),
+        Some(Commands::Patch {
+            pmm,
+            model_path,
+            frame_range,
+            current_frame,
+            current_frame_text,
+            begin_frame,
+            end_frame,
+            begin_frame_enabled,
+            end_frame_enabled,
+        }) => dispatch_patch(
+            &pmm,
+            model_path,
+            frame_range,
+            PmmFrameRangeArgs {
+                current_frame,
+                current_frame_text,
+                begin_frame,
+                end_frame,
+                begin_frame_enabled,
+                end_frame_enabled,
+            },
+        ),
+        Some(Commands::Export {
+            input,
+            output,
+            from_json,
+        }) => dispatch_export(&input, &output, from_json),
+        Some(Commands::BuildPmm {
+            model,
+            motion,
+            output,
+        }) => commands::export::export_pmm_scene(&model, &motion, &output),
     };
 
     match result {
@@ -448,6 +304,360 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn dispatch_inspect(
+    asset: &Path,
+    use_json: bool,
+    show_ik: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if use_json && show_ik {
+        return usage_error("inspect --json and --ik cannot be combined");
+    }
+    if show_ik {
+        if !has_extension(asset, "pmx") {
+            return usage_error("inspect --ik requires a PMX model file");
+        }
+        return commands::import::import_pmx_ik_summary(asset);
+    }
+    if use_json {
+        return commands::parse::parse_format_json(asset);
+    }
+    if has_extension(asset, "pmx") {
+        commands::parse::parse_pmx_summary(asset)
+    } else {
+        commands::parse::parse_format_summary(asset)
+    }
+}
+
+fn dispatch_import(
+    model: &Path,
+    motion: Option<&Path>,
+    use_json: bool,
+    show_clip: bool,
+    frame: Option<f32>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if use_json {
+        return usage_error("import --json is not supported by the existing import summaries");
+    }
+    if show_clip && frame.is_some() {
+        return usage_error("import --clip and --frame cannot be combined");
+    }
+
+    if let Some(motion) = motion {
+        if show_clip {
+            return commands::import::import_pair_clip_summary(model, motion);
+        }
+        if let Some(frame) = frame {
+            return commands::import::import_pair_frame_summary(model, motion, frame);
+        }
+        return commands::import::import_pair_summary(model, motion);
+    }
+
+    if show_clip || frame.is_some() {
+        return usage_error("import --clip and --frame require a motion argument");
+    }
+    if has_extension(model, "pmx") {
+        commands::import::import_pmx_summary(model)
+    } else if has_extension(model, "pmd") {
+        commands::import::import_pmd_summary(model)
+    } else if has_extension(model, "vmd") {
+        commands::import::import_vmd_summary(model)
+    } else {
+        usage_error("import requires a PMX, PMD, or VMD input when no motion is provided")
+    }
+}
+
+fn dispatch_roundtrip(
+    asset: &Path,
+    use_json: bool,
+    via_json: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    match (via_json, use_json) {
+        (true, true) => commands::export::export_json_roundtrip_json(asset),
+        (true, false) => commands::export::export_json_roundtrip_summary(asset),
+        (false, true) => commands::export::export_roundtrip_json(asset),
+        (false, false) => commands::export::export_roundtrip_summary(asset),
+    }
+}
+
+fn dispatch_bench(
+    model: Option<PathBuf>,
+    motion: Option<PathBuf>,
+    synthetic: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if synthetic {
+        if model.is_some() || motion.is_some() {
+            return usage_error("bench --synthetic does not accept model or motion arguments");
+        }
+        let mut iter = Vec::<String>::new().into_iter();
+        commands::bench::parse_bench_synthetic_args(&mut iter)
+            .and_then(commands::bench::bench_synthetic)
+    } else {
+        let Some(model) = model else {
+            return usage_error("bench requires <model> <motion> unless --synthetic is set");
+        };
+        let Some(motion) = motion else {
+            return usage_error("bench requires <model> <motion> unless --synthetic is set");
+        };
+        let mut iter = vec![
+            model.to_string_lossy().into_owned(),
+            motion.to_string_lossy().into_owned(),
+        ]
+        .into_iter();
+        commands::bench::parse_bench_pair_args(&mut iter).and_then(commands::bench::bench_pair)
+    }
+}
+
+fn dispatch_verify(
+    target: &Path,
+    mode: Option<VerifyMode>,
+    diagnose: Option<Vec<String>>,
+    compare: bool,
+    use_json: bool,
+    eval_frame: Option<f32>,
+    sample_frame_offset: Option<f32>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let Some(mode) = mode else {
+        if diagnose.is_some() || compare || use_json || eval_frame.is_some() || sample_frame_offset.is_some() {
+            return usage_error("verify without --mode only supports oracle summary files");
+        }
+        return commands::oracle::oracle_summary(&target.to_string_lossy());
+    };
+
+    match mode {
+        VerifyMode::Numeric | VerifyMode::Camera => {
+            if compare || use_json {
+                return usage_error(
+                    "verify --mode numeric|camera does not support --compare or --json",
+                );
+            }
+            if sample_frame_offset.is_some() {
+                return usage_error(
+                    "verify --mode numeric|camera does not support --sample-frame-offset",
+                );
+            }
+            if let Some(parts) = diagnose {
+                return dispatch_numeric_diagnose(target, parts, eval_frame);
+            }
+            if eval_frame.is_some() {
+                return usage_error("verify --eval-frame requires --diagnose");
+            }
+            commands::compare::compare_numeric_manifest(target)
+        }
+        VerifyMode::Ik => dispatch_verify_ik(target, diagnose, compare, use_json, sample_frame_offset),
+        VerifyMode::Parser => {
+            if diagnose.is_some()
+                || compare
+                || use_json
+                || eval_frame.is_some()
+                || sample_frame_offset.is_some()
+            {
+                return usage_error(
+                    "verify --mode parser only supports parser golden summary for the target root",
+                );
+            }
+            golden_parser_summary(target)
+        }
+    }
+}
+
+fn dispatch_numeric_diagnose(
+    manifest: &Path,
+    parts: Vec<String>,
+    eval_frame: Option<f32>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let mut parts = parts.into_iter();
+    let case_name = parts.next().ok_or("missing diagnose case name")?;
+    let frame_text = parts.next().ok_or("missing diagnose frame")?;
+    let frame = frame_text
+        .parse::<f32>()
+        .map_err(|_| format!("invalid diagnose frame: {frame_text}"))?;
+    let mut rest = Vec::new();
+    if let Some(bone_name) = parts.next() {
+        rest.push(bone_name);
+    }
+    if let Some(eval_frame) = eval_frame {
+        rest.push("--eval-frame".to_owned());
+        rest.push(eval_frame.to_string());
+    }
+
+    let diagnose_options = commands::compare::parse_diagnose_numeric_bone_rest(rest, frame);
+    let eval_frame = diagnose_options.eval_frame;
+    let bone_names = diagnose_options.bone_names;
+    if bone_names.is_empty() {
+        eprintln!("{}", commands::compare::DIAGNOSE_NUMERIC_BONE_USAGE);
+        return Ok(ExitCode::from(2));
+    }
+    commands::compare::diagnose_numeric_bones(manifest, &case_name, frame, eval_frame, &bone_names)
+}
+
+fn dispatch_verify_ik(
+    root: &Path,
+    diagnose: Option<Vec<String>>,
+    compare: bool,
+    use_json: bool,
+    sample_frame_offset: Option<f32>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if let Some(parts) = diagnose {
+        if compare || use_json {
+            return usage_error(
+                "verify --mode ik --diagnose cannot be combined with --compare or --json",
+            );
+        }
+        return dispatch_ik_diagnose(root, parts, sample_frame_offset);
+    }
+
+    if compare || use_json || sample_frame_offset.is_some() {
+        let mut raw = vec![root.to_string_lossy().into_owned()];
+        if let Some(offset) = sample_frame_offset {
+            raw.push(offset.to_string());
+        }
+        if use_json {
+            raw.push("--json".to_owned());
+        }
+        let mut iter = raw.into_iter();
+        return match commands::golden::parse_golden_ik_compare_args(&mut iter) {
+            Ok((root, offset, use_json)) => {
+                commands::golden::golden_ik_compare(Path::new(&root), offset, use_json)
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                Ok(ExitCode::from(2))
+            }
+        };
+    }
+
+    golden_ik_summary(root)
+}
+
+fn dispatch_ik_diagnose(
+    root: &Path,
+    parts: Vec<String>,
+    sample_frame_offset: Option<f32>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let mut parts = parts.into_iter();
+    let case_name = parts.next().ok_or("missing diagnose case name")?;
+    let frame_text = parts.next().ok_or("missing diagnose frame")?;
+    let frame = frame_text
+        .parse::<i32>()
+        .map_err(|_| format!("invalid IK diagnose frame: {frame_text}"))?;
+    let bone_name = parts
+        .next()
+        .ok_or("verify --mode ik --diagnose requires a bone name")?;
+    let offset = sample_frame_offset.unwrap_or(0.0);
+
+    commands::golden::golden_ik_diagnose(root, &case_name, frame, &bone_name, offset)
+}
+
+struct PmmFrameRangeArgs {
+    current_frame: Option<i32>,
+    current_frame_text: Option<i32>,
+    begin_frame: Option<i32>,
+    end_frame: Option<i32>,
+    begin_frame_enabled: Option<String>,
+    end_frame_enabled: Option<String>,
+}
+
+impl PmmFrameRangeArgs {
+    fn has_any(&self) -> bool {
+        self.current_frame.is_some()
+            || self.current_frame_text.is_some()
+            || self.begin_frame.is_some()
+            || self.end_frame.is_some()
+            || self.begin_frame_enabled.is_some()
+            || self.end_frame_enabled.is_some()
+    }
+
+    fn to_option_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(value) = self.current_frame {
+            args.push("--current-frame".to_owned());
+            args.push(value.to_string());
+        }
+        if let Some(value) = self.current_frame_text {
+            args.push("--current-frame-text".to_owned());
+            args.push(value.to_string());
+        }
+        if let Some(value) = self.begin_frame {
+            args.push("--begin-frame".to_owned());
+            args.push(value.to_string());
+        }
+        if let Some(value) = self.end_frame {
+            args.push("--end-frame".to_owned());
+            args.push(value.to_string());
+        }
+        if let Some(value) = &self.begin_frame_enabled {
+            args.push("--begin-frame-enabled".to_owned());
+            args.push(value.clone());
+        }
+        if let Some(value) = &self.end_frame_enabled {
+            args.push("--end-frame-enabled".to_owned());
+            args.push(value.clone());
+        }
+        args
+    }
+}
+
+fn dispatch_patch(
+    input: &Path,
+    model_path: Option<Vec<String>>,
+    frame_range: Option<PathBuf>,
+    frame_args: PmmFrameRangeArgs,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    match (model_path, frame_range) {
+        (Some(values), None) => {
+            if frame_args.has_any() {
+                return usage_error("patch --model-path does not accept trailing options");
+            }
+            let [index, path, output]: [String; 3] = values
+                .try_into()
+                .map_err(|_| "patch --model-path requires <idx> <path> <out>")?;
+            commands::patch::patch_pmm_document_model_path(
+                input,
+                &index,
+                &path,
+                &PathBuf::from(output),
+            )
+        }
+        (None, Some(output)) => {
+            if !frame_args.has_any() {
+                return usage_error("patch --frame-range requires at least one frame range option");
+            }
+            commands::patch::patch_pmm_scene_frame_range(
+                input,
+                &output,
+                &frame_args.to_option_args(),
+            )
+        }
+        (Some(_), Some(_)) => {
+            usage_error("patch --model-path and --frame-range cannot be combined")
+        }
+        (None, None) => usage_error("patch requires --model-path or --frame-range"),
+    }
+}
+
+fn dispatch_export(
+    input: &Path,
+    output: &Path,
+    from_json: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if from_json {
+        commands::export::export_json_format(input, output)
+    } else {
+        commands::export::export_format(input, output)
+    }
+}
+
+fn has_extension(path: &Path, expected: &str) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(expected))
+}
+
+fn usage_error(message: impl AsRef<str>) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    eprintln!("{}", message.as_ref());
+    Ok(ExitCode::from(2))
 }
 
 // ---------------------------------------------------------------------------

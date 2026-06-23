@@ -5,9 +5,15 @@ pub(crate) fn rig_inspect(
     use_json: bool,
     show_bones: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(pmx_path)
-        .map_err(|e| format!("failed to read {}: {}", pmx_path.display(), e))?;
-    let parsed = mmd_anim_format::parse_pmx_model(&data)?;
+    let data =
+        fs::read(pmx_path).map_err(|e| format!("failed to read {}: {}", pmx_path.display(), e))?;
+    let parsed = mmd_anim_format::parse_pmx_model(&data).map_err(|e| {
+        format!(
+            "rig-inspect requires a PMX model file: {}: {}",
+            pmx_path.display(),
+            e
+        )
+    })?;
     let bones = &parsed.skeleton.bones;
     let bone_count = bones.len();
 
@@ -183,7 +189,7 @@ fn print_human(
     show_bones: bool,
 ) {
     println!(
-        "rig-inspect: model={} bones={} ikChains={} grants={}",
+        "rig-inspect: model={} bones={} ikChains={} grantCount={}",
         parsed.metadata.name,
         bone_count,
         ik_bones.len(),
@@ -206,7 +212,7 @@ fn print_human(
                 .map(|b| b.name.as_str())
                 .unwrap_or("<unknown>");
             println!(
-                "  [{idx}] {} -> target={} links={} iterations={} limitAngle={:.6}",
+                "  [{idx}] {} -> target={} links={} loopCount={} limitAngle={}",
                 bone.name,
                 target_name,
                 ik.links.len(),
@@ -255,7 +261,7 @@ fn print_human(
         println!("\nbones ({bone_count}):");
         for (idx, bone) in bones.iter().enumerate() {
             let parent_str = if bone.parent_index < 0 {
-                "root".to_owned()
+                "-1".to_owned()
             } else {
                 format!("{}", bone.parent_index)
             };
@@ -303,6 +309,9 @@ mod tests {
         let result = rig_inspect(Path::new("nonexistent.pmx"), false, false);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("nonexistent.pmx"), "error should contain path: {err}");
+        assert!(
+            err.contains("nonexistent.pmx"),
+            "error should contain path: {err}"
+        );
     }
 }

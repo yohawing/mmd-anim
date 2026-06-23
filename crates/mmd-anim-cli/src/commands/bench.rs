@@ -1,15 +1,9 @@
-use std::{
-    fs,
-    path::PathBuf,
-    process::ExitCode,
-    sync::Arc,
-    time::Instant,
-};
+use std::{fs, path::PathBuf, process::ExitCode, sync::Arc, time::Instant};
 
 use glam::{Quat, Vec3A};
 use mmd_anim_runtime::{
-    AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, IkSolveOptions,
-    ModelArena, MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
+    AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, IkSolveOptions, ModelArena,
+    MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
 };
 
 use crate::{copy_world_matrices_to_f32, f32_checksum, translation_checksum};
@@ -253,7 +247,9 @@ pub(crate) struct BenchSyntheticConfig {
     pub(crate) use_json: bool,
 }
 
-pub(crate) fn bench_synthetic(cfg: BenchSyntheticConfig) -> Result<ExitCode, Box<dyn std::error::Error>> {
+pub(crate) fn bench_synthetic(
+    cfg: BenchSyntheticConfig,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let model_count = cfg.models;
     let bone_count = cfg.bones;
     let frame_count = cfg.frames;

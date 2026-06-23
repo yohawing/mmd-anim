@@ -4,8 +4,8 @@ use glam::Vec3A;
 use mmd_anim_format::VmdClipBuildOptions;
 use mmd_anim_runtime::{BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance};
 use mmd_anim_schema::{
-    DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
-    MmdDumperOracleModel,
+    GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump, MmdDumperOracleModel,
+    DEFAULT_FOCUSED_IK_BONE_NAMES,
 };
 use serde_json::json;
 

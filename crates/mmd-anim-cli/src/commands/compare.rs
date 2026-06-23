@@ -9,15 +9,16 @@ use std::{
 use mmd_anim_format::vmd::VmdBoneKeyframeRaw;
 use mmd_anim_runtime::{BoneIndex, IkSolveOptions, ModelArena, MorphIndex, RuntimeInstance};
 use mmd_anim_schema::{
-    DEFAULT_FOCUSED_IK_BONE_NAMES, MmdDumperOracleBone, MmdDumperOracleDump,
-    MmdDumperOracleModel,
+    MmdDumperOracleBone, MmdDumperOracleDump, MmdDumperOracleModel, DEFAULT_FOCUSED_IK_BONE_NAMES,
 };
 
 use super::golden;
 
 pub(crate) const DIAGNOSE_NUMERIC_BONE_USAGE: &str = "usage: mmd-anim diagnose-numeric-bone <manifest.json> <case-name> <oracle-frame> [--eval-frame <frame>] <bone-name> [bone-name...]";
 
-pub(crate) fn compare_numeric_manifest(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+pub(crate) fn compare_numeric_manifest(
+    path: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     const EPSILON: f64 = 0.003;
 
     let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));

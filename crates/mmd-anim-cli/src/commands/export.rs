@@ -2,7 +2,9 @@ use std::{fs, path::Path, process::ExitCode};
 
 use serde_json::json;
 
-pub(crate) fn export_roundtrip_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+pub(crate) fn export_roundtrip_summary(
+    path: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data = fs::read(path)?;
     match mmd_anim_format::detect_mmd_format(&data, path.file_name().and_then(|v| v.to_str())) {
         mmd_anim_format::MmdFormatKind::Vmd => {
@@ -212,7 +214,9 @@ pub(crate) fn export_roundtrip_json(path: &Path) -> Result<ExitCode, Box<dyn std
     Ok(ExitCode::SUCCESS)
 }
 
-pub(crate) fn export_json_roundtrip_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+pub(crate) fn export_json_roundtrip_summary(
+    path: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data = fs::read(path)?;
     match mmd_anim_format::detect_mmd_format(&data, path.file_name().and_then(|v| v.to_str())) {
         mmd_anim_format::MmdFormatKind::Vmd => {
@@ -325,7 +329,9 @@ pub(crate) fn export_json_roundtrip_summary(path: &Path) -> Result<ExitCode, Box
     }
 }
 
-pub(crate) fn export_json_roundtrip_json(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+pub(crate) fn export_json_roundtrip_json(
+    path: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data = fs::read(path)?;
     let result = match mmd_anim_format::detect_mmd_format(
         &data,
@@ -421,7 +427,10 @@ pub(crate) fn export_json_roundtrip_json(path: &Path) -> Result<ExitCode, Box<dy
     Ok(ExitCode::SUCCESS)
 }
 
-pub(crate) fn export_format(input: &Path, output: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+pub(crate) fn export_format(
+    input: &Path,
+    output: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data = fs::read(input)?;
     let kind =
         mmd_anim_format::detect_mmd_format(&data, input.file_name().and_then(|v| v.to_str()));
@@ -465,7 +474,9 @@ pub(crate) fn export_format(input: &Path, output: &Path) -> Result<ExitCode, Box
 }
 
 /// Resolves a PMX model path for PMM export to a canonical path string that MMD can open.
-pub(crate) fn resolve_pmx_path_for_pmm(model_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+pub(crate) fn resolve_pmx_path_for_pmm(
+    model_path: &Path,
+) -> Result<String, Box<dyn std::error::Error>> {
     let canonical = model_path.canonicalize().map_err(|e| {
         format!(
             "failed to canonicalize PMX model path {}: {}",
@@ -530,7 +541,10 @@ pub(crate) fn export_pmm_scene(
     Ok(ExitCode::SUCCESS)
 }
 
-pub(crate) fn export_json_format(input: &Path, output: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+pub(crate) fn export_json_format(
+    input: &Path,
+    output: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let json = fs::read_to_string(input)?;
     let ext = output
         .extension()

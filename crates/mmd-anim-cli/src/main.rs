@@ -206,6 +206,20 @@ enum Commands {
         options: Vec<String>,
     },
 
+    // -- Rig commands ---------------------------------------------------------
+    /// Inspect rig structure (IK chains, grants, deform layers) of a PMX model
+    #[command(name = "rig-inspect")]
+    RigInspect {
+        /// Path to the PMX model file
+        model: PathBuf,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Include full bone list
+        #[arg(long)]
+        bones: bool,
+    },
+
     // -- Compare commands ----------------------------------------------------
     /// Run numeric comparison against oracle data
     #[command(name = "compare-numeric")]
@@ -365,6 +379,10 @@ fn main() -> ExitCode {
         }
         Some(Commands::PatchPmmSceneFrameRange { input, output, options }) => {
             commands::patch::patch_pmm_scene_frame_range(&input, &output, &options)
+        }
+
+        Some(Commands::RigInspect { model, json, bones }) => {
+            commands::rig::rig_inspect(&model, json, bones)
         }
 
         Some(Commands::CompareNumeric { manifest }) => {

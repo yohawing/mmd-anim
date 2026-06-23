@@ -6,3 +6,4 @@ pub(crate) mod import;
 pub(crate) mod oracle;
 pub(crate) mod parse;
 pub(crate) mod patch;
+pub(crate) mod rig;

@@ -17,6 +17,7 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 glam.workspace = true
 mmd-anim-runtime.workspace = true
 mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.5" }

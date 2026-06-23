@@ -9,7 +9,7 @@ use std::{
 use mmd_anim_format::vmd::VmdBoneKeyframeRaw;
 use mmd_anim_runtime::{BoneIndex, IkSolveOptions, ModelArena, MorphIndex, RuntimeInstance};
 use mmd_anim_schema::{
-    MmdDumperOracleBone, MmdDumperOracleDump, MmdDumperOracleModel, DEFAULT_FOCUSED_IK_BONE_NAMES,
+    DEFAULT_FOCUSED_IK_BONE_NAMES, MmdDumperOracleBone, MmdDumperOracleDump, MmdDumperOracleModel,
 };
 
 use super::golden;

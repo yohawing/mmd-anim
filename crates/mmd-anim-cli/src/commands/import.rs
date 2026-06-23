@@ -1,12 +1,12 @@
-use std::{collections::BTreeMap, fs, path::Path, process::ExitCode, sync::Arc};
+use std::{collections::BTreeMap, path::Path, process::ExitCode, sync::Arc};
 
 use glam::Vec3A;
 use mmd_anim_runtime::RuntimeInstance;
 
-use crate::{f32_checksum, translation_checksum};
+use crate::{diagnostics_suffix, f32_checksum, read_file, translation_checksum};
 
 pub(crate) fn import_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let data = read_file(path)?;
     let imported = mmd_anim_format::import_pmx_runtime(&data)?;
     println!(
         "PMX runtime import: bones={} append={} fixedAxis={} ik={} boneNames={} morphNames={} ikNameMap={}",
@@ -22,7 +22,7 @@ pub(crate) fn import_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::e
 }
 
 pub(crate) fn import_pmx_ik_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let data = read_file(path)?;
     let imported = mmd_anim_format::import_pmx_runtime(&data)?;
     let solvers = imported.model.ik_solvers();
     let max_iterations = solvers
@@ -70,10 +70,10 @@ pub(crate) fn import_pmx_ik_summary(path: &Path) -> Result<ExitCode, Box<dyn std
 }
 
 pub(crate) fn import_pmd_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let data = read_file(path)?;
     let imported = mmd_anim_format::import_pmd_runtime(&data)?;
     println!(
-        "PMD runtime import: bones={} ik={} morphSlots={} vertexMorphOffsets={} boneNames={} morphNames={} ikNameMap={} diagnostics={}",
+        "PMD runtime import: bones={} ik={} morphSlots={} vertexMorphOffsets={} boneNames={} morphNames={} ikNameMap={}{}",
         imported.model.bone_count(),
         imported.model.ik_count(),
         imported.model.morph_count(),
@@ -81,13 +81,13 @@ pub(crate) fn import_pmd_summary(path: &Path) -> Result<ExitCode, Box<dyn std::e
         imported.bone_name_to_index.len(),
         imported.morph_name_to_index.len(),
         imported.ik_solver_bone_name_to_index.len(),
-        imported.diagnostics.len()
+        diagnostics_suffix(imported.diagnostics.len())
     );
     Ok(ExitCode::SUCCESS)
 }
 
 pub(crate) fn import_vmd_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let data = read_file(path)?;
     let imported = mmd_anim_format::import_vmd_motion(&data)?;
     let property_ik_entries: usize = imported
         .property_ik_frames
@@ -108,8 +108,8 @@ pub(crate) fn import_pair_summary(
     pmx_path: &Path,
     vmd_path: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let pmx = mmd_anim_format::import_pmx_runtime(&fs::read(pmx_path)?)?;
-    let vmd = mmd_anim_format::import_vmd_motion(&fs::read(vmd_path)?)?;
+    let pmx = mmd_anim_format::import_pmx_runtime(&read_file(pmx_path)?)?;
+    let vmd = mmd_anim_format::import_vmd_motion(&read_file(vmd_path)?)?;
 
     let matched_bone_keys = vmd
         .bone_keyframes
@@ -163,8 +163,8 @@ pub(crate) fn import_pair_clip_summary(
     pmx_path: &Path,
     vmd_path: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let pmx = mmd_anim_format::import_pmx_runtime(&fs::read(pmx_path)?)?;
-    let vmd = mmd_anim_format::import_vmd_motion(&fs::read(vmd_path)?)?;
+    let pmx = mmd_anim_format::import_pmx_runtime(&read_file(pmx_path)?)?;
+    let vmd = mmd_anim_format::import_vmd_motion(&read_file(vmd_path)?)?;
 
     let solver_count = pmx.model.ik_count();
     let clip = mmd_anim_format::build_pair_clip(
@@ -199,8 +199,8 @@ pub(crate) fn import_pair_frame_summary(
     vmd_path: &Path,
     frame: f32,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let pmx = mmd_anim_format::import_pmx_runtime(&fs::read(pmx_path)?)?;
-    let vmd = mmd_anim_format::import_vmd_motion(&fs::read(vmd_path)?)?;
+    let pmx = mmd_anim_format::import_pmx_runtime(&read_file(pmx_path)?)?;
+    let vmd = mmd_anim_format::import_vmd_motion(&read_file(vmd_path)?)?;
 
     let bone_count = pmx.model.bone_count();
     let solver_count = pmx.model.ik_count();

@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    fs, io,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -17,6 +18,7 @@ mod commands;
     name = "mmd-anim",
     version,
     about = "CLI diagnostics and roundtrip tools for mmd-anim\n\nExit codes: 0 = success, 1 = runtime error, 2 = usage error",
+    after_help = "Quick start:\n  mmd-anim inspect model.pmx              Show model summary\n  mmd-anim import model.pmx motion.vmd    Import and inspect pair\n  mmd-anim roundtrip model.pmx            Verify parse-export stability",
     arg_required_else_help = true
 )]
 struct Cli {
@@ -40,12 +42,15 @@ enum Commands {
         /// Show PMX IK solver details
         #[arg(long)]
         ik: bool,
+        /// Write inspect output to a file instead of stdout
+        #[arg(long, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
 
     /// Import model and optional motion into runtime structures.
     #[command(
         long_about = "Run the runtime importer for a model, or a model/motion pair.\nUse this when checking runtime names, clip build stats, or a single evaluated frame.",
-        after_help = "Examples:\n  mmd-anim import model.pmx\n  mmd-anim import model.pmx motion.vmd --clip\n  mmd-anim import model.pmx motion.vmd --frame 120"
+        after_help = "Examples:\n  mmd-anim import model.pmx\n  mmd-anim import model.pmx motion.vmd --clip\n  mmd-anim import model.pmx motion.vmd --frame 120\n    (unit: MMD coordinate)"
     )]
     Import {
         /// Path to the PMX/PMD model file
@@ -65,7 +70,7 @@ enum Commands {
 
     /// Verify parse/export/re-parse stability.
     #[command(
-        long_about = "Parse an asset, export it, then re-parse the exported bytes.\nUse this before changing readers, writers, or JSON DTO conversion paths.",
+        long_about = "Parse an asset, export it, then re-parse the exported bytes.\nUse this before changing readers, writers, or JSON DTO conversion paths.\nJSON reports use jsonBytes for the JSON serialized byte count when --via-json is set.",
         after_help = "Examples:\n  mmd-anim roundtrip model.pmx\n  mmd-anim roundtrip motion.vmd --json\n  mmd-anim roundtrip model.pmx --via-json"
     )]
     Roundtrip {
@@ -97,8 +102,8 @@ enum Commands {
 
     /// Benchmark runtime evaluation.
     #[command(
-        long_about = "Benchmark a PMX/VMD pair by default, or synthetic runtime data with --synthetic.\nUse this for local performance checks around import, clip build, and evaluation.",
-        after_help = "Examples:\n  mmd-anim bench model.pmx motion.vmd\n  mmd-anim bench --synthetic"
+        long_about = "Benchmark a PMX/VMD pair by default, or synthetic runtime data with --synthetic.\nUse this for local performance checks around import, clip build, and evaluation.\nPair mode positional arguments: <model.pmx> <motion.vmd> [start-frame] [frame-count] [step]. Pair flags: --no-ik, --ik-tolerance <value>, --ik-max-iterations-cap <count>.\nSynthetic mode arguments: [models] [bones] [frames] [--json]. Defaults are models=1, bones=32, frames=1000.",
+        after_help = "Examples:\n  mmd-anim bench model.pmx motion.vmd\n  mmd-anim bench model.pmx motion.vmd 0 240 1 --no-ik\n  mmd-anim bench --synthetic\n  mmd-anim bench --synthetic 4 64 2000\n  mmd-anim bench --synthetic 4 64 2000 --json"
     )]
     Bench {
         /// Path to the PMX model file
@@ -108,12 +113,19 @@ enum Commands {
         /// Run the synthetic benchmark instead of a PMX/VMD pair
         #[arg(long)]
         synthetic: bool,
+        /// Additional pair or synthetic benchmark arguments
+        #[arg(
+            value_name = "ARGS",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        extra_args: Vec<String>,
     },
 
     /// Verify oracle, golden, parser, or numeric comparison data.
     #[command(
-        long_about = "Run comparison and oracle diagnostics from a manifest, oracle file, or golden root.\nUse this for numeric, camera, IK, parser, and focused diagnosis workflows.",
-        after_help = "Examples:\n  mmd-anim verify oracle.jsonl\n  mmd-anim verify manifest.json --mode numeric\n  mmd-anim verify golden-root --mode ik --compare\n  mmd-anim verify manifest.json --mode numeric --diagnose case-a 120 左足ＩＫ"
+        long_about = "Run comparison and oracle diagnostics from a manifest, oracle file, or golden root.\nWhen --mode is omitted, verify reads the target as an oracle JSONL summary file.\nMode inputs:\n  numeric: manifest JSON for numeric model/motion/oracle cases\n  camera: manifest JSON for camera comparison cases\n  ik: golden root directory containing IK fixture/oracle data\n  parser: golden root directory containing parser golden data\n  omitted: oracle JSONL summary file\nUse this for numeric, camera, IK, parser, and focused diagnosis workflows.",
+        after_help = "Examples:\n  mmd-anim verify oracle.jsonl\n  mmd-anim verify manifest.json --mode numeric\n  mmd-anim verify camera-manifest.json --mode camera\n  mmd-anim verify golden-root --mode ik\n  mmd-anim verify golden-root --mode ik --compare\n  mmd-anim verify golden-root --mode parser\n  mmd-anim verify manifest.json --mode numeric --diagnose case-a 120 左足ＩＫ"
     )]
     Verify {
         /// Path to a manifest, oracle JSONL file, or golden root directory
@@ -140,8 +152,8 @@ enum Commands {
 
     /// Patch PMM fields in place to a new output file.
     #[command(
-        long_about = "Rewrite selected PMM document fields while preserving the rest of the file.\nUse this for model path and scene frame range fixes in generated PMM scenes.",
-        after_help = "Examples:\n  mmd-anim patch scene.pmm --model-path 0 model.pmx out.pmm\n  mmd-anim patch scene.pmm --frame-range out.pmm --current-frame 120\n  mmd-anim patch scene.pmm --frame-range out.pmm --begin-frame 0 --end-frame 240"
+        long_about = "Rewrite selected PMM document fields while preserving the rest of the file.\nUse --model-path when a PMM document model slot points at the wrong model path.\nUse --frame-range when the scene timeline current frame, begin/end frame, or range enabled flags need correction.\nThe flag structure is intentionally stable: --model-path takes <idx> <path> <out>, and --frame-range takes <out> plus one or more frame-range options.",
+        after_help = "Examples:\n  mmd-anim patch scene.pmm --model-path 0 model.pmx out.pmm\n  mmd-anim patch scene.pmm --frame-range out.pmm --current-frame 120\n  mmd-anim patch scene.pmm --frame-range out.pmm --begin-frame 0 --end-frame 240\n  mmd-anim patch scene.pmm --frame-range out.pmm --begin-frame-enabled true --end-frame-enabled true"
     )]
     Patch {
         /// Path to the input PMM file
@@ -174,7 +186,7 @@ enum Commands {
 
     /// Export an asset to another binary file.
     #[command(
-        long_about = "Write an MMD asset to an output path, optionally starting from JSON.\nUse this for parser/exporter smoke checks and JSON-to-binary conversion.",
+        long_about = "Write an MMD asset to an output path, optionally starting from JSON.\nWith --from-json, the input must be UTF-8 JSON text and the output extension selects the binary format.\nUse this for parser/exporter smoke checks and JSON-to-binary conversion.",
         after_help = "Examples:\n  mmd-anim export input.vmd output.vmd\n  mmd-anim export input.json output.vmd --from-json"
     )]
     Export {
@@ -224,7 +236,12 @@ fn main() -> ExitCode {
             Ok(ExitCode::SUCCESS)
         }
 
-        Some(Commands::Inspect { asset, json, ik }) => dispatch_inspect(&asset, json, ik),
+        Some(Commands::Inspect {
+            asset,
+            json,
+            ik,
+            output,
+        }) => dispatch_inspect(&asset, json, ik, output.as_deref()),
         Some(Commands::Import {
             model,
             motion,
@@ -244,7 +261,8 @@ fn main() -> ExitCode {
             model,
             motion,
             synthetic,
-        }) => dispatch_bench(model, motion, synthetic),
+            extra_args,
+        }) => dispatch_bench(model, motion, synthetic, extra_args),
         Some(Commands::Verify {
             target,
             mode,
@@ -300,7 +318,7 @@ fn main() -> ExitCode {
     match result {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("{error}");
+            eprintln!("{}", format_cli_error(error.as_ref()));
             ExitCode::FAILURE
         }
     }
@@ -310,7 +328,11 @@ fn dispatch_inspect(
     asset: &Path,
     use_json: bool,
     show_ik: bool,
+    output: Option<&Path>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if output.is_some() && !use_json {
+        return usage_error("inspect --output requires --json");
+    }
     if use_json && show_ik {
         return usage_error("inspect --json and --ik cannot be combined");
     }
@@ -321,6 +343,9 @@ fn dispatch_inspect(
         return commands::import::import_pmx_ik_summary(asset);
     }
     if use_json {
+        if let Some(output) = output {
+            return commands::parse::parse_format_json_to_file(asset, output);
+        }
         return commands::parse::parse_format_json(asset);
     }
     if has_extension(asset, "pmx") {
@@ -364,7 +389,10 @@ fn dispatch_import(
     } else if has_extension(model, "vmd") {
         commands::import::import_vmd_summary(model)
     } else {
-        usage_error("import requires a PMX, PMD, or VMD input when no motion is provided")
+        usage_error(format!(
+            "unsupported or unrecognized file format: {}; import requires a PMX, PMD, or VMD input when no motion is provided",
+            model.display()
+        ))
     }
 }
 
@@ -385,12 +413,18 @@ fn dispatch_bench(
     model: Option<PathBuf>,
     motion: Option<PathBuf>,
     synthetic: bool,
+    extra_args: Vec<String>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     if synthetic {
-        if model.is_some() || motion.is_some() {
-            return usage_error("bench --synthetic does not accept model or motion arguments");
+        let mut raw = Vec::<String>::new();
+        if let Some(model) = model {
+            raw.push(model.to_string_lossy().into_owned());
         }
-        let mut iter = Vec::<String>::new().into_iter();
+        if let Some(motion) = motion {
+            raw.push(motion.to_string_lossy().into_owned());
+        }
+        raw.extend(extra_args);
+        let mut iter = raw.into_iter();
         commands::bench::parse_bench_synthetic_args(&mut iter)
             .and_then(commands::bench::bench_synthetic)
     } else {
@@ -400,11 +434,12 @@ fn dispatch_bench(
         let Some(motion) = motion else {
             return usage_error("bench requires <model> <motion> unless --synthetic is set");
         };
-        let mut iter = vec![
+        let mut raw = vec![
             model.to_string_lossy().into_owned(),
             motion.to_string_lossy().into_owned(),
-        ]
-        .into_iter();
+        ];
+        raw.extend(extra_args);
+        let mut iter = raw.into_iter();
         commands::bench::parse_bench_pair_args(&mut iter).and_then(commands::bench::bench_pair)
     }
 }
@@ -419,7 +454,12 @@ fn dispatch_verify(
     sample_frame_offset: Option<f32>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let Some(mode) = mode else {
-        if diagnose.is_some() || compare || use_json || eval_frame.is_some() || sample_frame_offset.is_some() {
+        if diagnose.is_some()
+            || compare
+            || use_json
+            || eval_frame.is_some()
+            || sample_frame_offset.is_some()
+        {
             return usage_error("verify without --mode only supports oracle summary files");
         }
         return commands::oracle::oracle_summary(&target.to_string_lossy());
@@ -445,7 +485,9 @@ fn dispatch_verify(
             }
             commands::compare::compare_numeric_manifest(target)
         }
-        VerifyMode::Ik => dispatch_verify_ik(target, diagnose, compare, use_json, sample_frame_offset),
+        VerifyMode::Ik => {
+            dispatch_verify_ik(target, diagnose, compare, use_json, sample_frame_offset)
+        }
         VerifyMode::Parser => {
             if diagnose.is_some()
                 || compare
@@ -660,6 +702,79 @@ fn usage_error(message: impl AsRef<str>) -> Result<ExitCode, Box<dyn std::error:
     Ok(ExitCode::from(2))
 }
 
+pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    fs::read(path).map_err(|error| {
+        format!(
+            "failed to read {}: {}",
+            path.display(),
+            io_error_label(error.kind())
+        )
+        .into()
+    })
+}
+
+pub(crate) fn read_text_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read {}: {}",
+            path.display(),
+            io_error_label(error.kind())
+        )
+        .into()
+    })
+}
+
+pub(crate) fn write_file(
+    path: &Path,
+    data: impl AsRef<[u8]>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::write(path, data).map_err(|error| {
+        format!(
+            "failed to write {}: {}",
+            path.display(),
+            io_error_label(error.kind())
+        )
+        .into()
+    })
+}
+
+pub(crate) fn diagnostics_suffix(count: usize) -> String {
+    if count == 0 {
+        String::new()
+    } else {
+        format!(" diagnostics={count}")
+    }
+}
+
+pub(crate) fn unsupported_format_error(path: &Path) -> Box<dyn std::error::Error> {
+    format!(
+        "unsupported or unrecognized file format: {}",
+        path.display()
+    )
+    .into()
+}
+
+fn format_cli_error(error: &(dyn std::error::Error + 'static)) -> String {
+    if let Some(io_error) = error.downcast_ref::<io::Error>() {
+        return format!("I/O error: {}", io_error_label(io_error.kind()));
+    }
+    error.to_string()
+}
+
+fn io_error_label(kind: io::ErrorKind) -> &'static str {
+    match kind {
+        io::ErrorKind::NotFound => "file not found",
+        io::ErrorKind::PermissionDenied => "permission denied",
+        io::ErrorKind::InvalidData => "invalid data",
+        io::ErrorKind::UnexpectedEof => "unexpected end of file",
+        io::ErrorKind::AlreadyExists => "already exists",
+        io::ErrorKind::WouldBlock => "operation would block",
+        io::ErrorKind::TimedOut => "operation timed out",
+        io::ErrorKind::Interrupted => "operation interrupted",
+        _ => "I/O error",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Functions that remain in the crate root (used by multiple modules)
 // ---------------------------------------------------------------------------
@@ -708,11 +823,12 @@ pub(crate) fn copy_world_matrices_to_f32(matrices: &[glam::Mat4], out: &mut [f32
 // ---------------------------------------------------------------------------
 
 fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    use std::fs;
-    use mmd_anim_schema::{DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump};
+    use mmd_anim_schema::{
+        DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
+    };
 
     let manifest_path = root.join("oracle-batch.json");
-    let manifest = GoldenIkBatchManifest::from_json_str(&fs::read_to_string(&manifest_path)?)?;
+    let manifest = GoldenIkBatchManifest::from_json_str(&read_text_file(&manifest_path)?)?;
     let mut parsed_cases = 0usize;
     let mut parsed_frames = 0usize;
     let mut parsed_bones = 0usize;
@@ -727,7 +843,7 @@ fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>
             continue;
         }
 
-        let fixture = GoldenIkFixture::from_json_str(&fs::read_to_string(&fixture_path)?)?;
+        let fixture = GoldenIkFixture::from_json_str(&read_text_file(&fixture_path)?)?;
         let oracle_path = resolve_maybe_absolute(&case_root, &fixture.output);
         if !oracle_path.exists() {
             missing.push(oracle_path);
@@ -740,7 +856,7 @@ fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>
             fixture.frames.as_slice()
         };
         let dump =
-            MmdDumperOracleDump::from_jsonl_str(&fs::read_to_string(&oracle_path)?, Some(frames))?;
+            MmdDumperOracleDump::from_jsonl_str(&read_text_file(&oracle_path)?, Some(frames))?;
         parsed_cases += 1;
         parsed_frames += dump.frames.len();
         parsed_bones += dump
@@ -785,11 +901,10 @@ fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>
 }
 
 fn golden_parser_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    use std::fs;
     use mmd_anim_schema::{GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump};
 
     let manifest_path = root.join("oracle-batch.json");
-    let manifest = GoldenIkBatchManifest::from_json_str(&fs::read_to_string(&manifest_path)?)?;
+    let manifest = GoldenIkBatchManifest::from_json_str(&read_text_file(&manifest_path)?)?;
     let mut parsed_cases = 0usize;
     let mut skipped_unsupported = 0usize;
     let mut missing_files = Vec::new();
@@ -819,14 +934,14 @@ fn golden_parser_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Er
             missing_files.push(fixture_path);
             continue;
         }
-        let fixture = GoldenIkFixture::from_json_str(&fs::read_to_string(&fixture_path)?)?;
+        let fixture = GoldenIkFixture::from_json_str(&read_text_file(&fixture_path)?)?;
         let oracle_path = resolve_maybe_absolute(&case_root, &fixture.output);
         if !oracle_path.exists() {
             missing_files.push(oracle_path);
             continue;
         }
 
-        let parsed = mmd_anim_format::parse_pmx_model(&fs::read(&pmx_path)?)?;
+        let parsed = mmd_anim_format::parse_pmx_model(&read_file(&pmx_path)?)?;
         let bone_names = parsed
             .skeleton
             .bones
@@ -845,7 +960,7 @@ fn golden_parser_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Er
             fixture.frames.as_slice()
         };
         let dump =
-            MmdDumperOracleDump::from_jsonl_str(&fs::read_to_string(&oracle_path)?, Some(frames))?;
+            MmdDumperOracleDump::from_jsonl_str(&read_text_file(&oracle_path)?, Some(frames))?;
         parsed_cases += 1;
 
         let Some(model) = dump.frames.first().and_then(|frame| frame.models.first()) else {
@@ -893,12 +1008,16 @@ fn golden_parser_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Er
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{env, fs, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        env, fs,
+        sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use glam::{Quat, Vec3A};
     use mmd_anim_runtime::{
-        AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, ModelArena,
-        MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
+        AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, ModelArena, MovableBoneKeyframe,
+        MovableBoneTrack, RuntimeInstance,
     };
 
     use crate::commands::{bench, compare, export, patch};
@@ -1172,7 +1291,10 @@ mod tests {
         let case = serde_json::json!({});
         let defaults = vec!["右腕".to_owned(), "左腕".to_owned()];
 
-        assert_eq!(compare::motion_case_focus_bones(&case, Some(&defaults)), defaults);
+        assert_eq!(
+            compare::motion_case_focus_bones(&case, Some(&defaults)),
+            defaults
+        );
     }
 
     #[test]
@@ -1183,7 +1305,10 @@ mod tests {
             }
         });
 
-        assert_eq!(compare::json_f32(&value, "/compare/evalFrameOffset"), Some(1.25));
+        assert_eq!(
+            compare::json_f32(&value, "/compare/evalFrameOffset"),
+            Some(1.25)
+        );
     }
 
     #[test]
@@ -1870,16 +1995,19 @@ mod tests {
 
     #[test]
     fn parse_pmm_scene_frame_range_patch_options_rejects_unknown_and_invalid_values() {
-        let unknown =
-            patch::parse_pmm_scene_frame_range_patch_options(&["--unknown".to_string(), "1".to_string()])
-                .unwrap_err();
+        let unknown = patch::parse_pmm_scene_frame_range_patch_options(&[
+            "--unknown".to_string(),
+            "1".to_string(),
+        ])
+        .unwrap_err();
         assert!(
             unknown.contains("unknown option"),
             "unexpected unknown-option error: {unknown}"
         );
 
         let missing_value =
-            patch::parse_pmm_scene_frame_range_patch_options(&["--begin-frame".to_string()]).unwrap_err();
+            patch::parse_pmm_scene_frame_range_patch_options(&["--begin-frame".to_string()])
+                .unwrap_err();
         assert!(
             missing_value.contains("missing value"),
             "unexpected missing-value error: {missing_value}"

@@ -1,11 +1,13 @@
-use std::{fs, path::Path, process::ExitCode};
+use std::{path::Path, process::ExitCode};
 
 use serde_json::json;
+
+use crate::{diagnostics_suffix, read_file, read_text_file, unsupported_format_error, write_file};
 
 pub(crate) fn export_roundtrip_summary(
     path: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let data = read_file(path)?;
     match mmd_anim_format::detect_mmd_format(&data, path.file_name().and_then(|v| v.to_str())) {
         mmd_anim_format::MmdFormatKind::Vmd => {
             let parsed = mmd_anim_format::parse_vmd_animation(&data)?;
@@ -87,13 +89,13 @@ pub(crate) fn export_roundtrip_summary(
             let _reparsed = mmd_anim_format::parse_pmm_manifest(&exported)?;
             ensure_pmm_lossless_roundtrip(&data, &exported)?;
             println!(
-                "PMM export roundtrip: ok bytesIn={} bytesOut={} version={} modelReferences={} assetReferences={} diagnostics={}",
+                "PMM export roundtrip: ok bytesIn={} bytesOut={} version={} modelReferences={} assetReferences={}{}",
                 data.len(),
                 exported.len(),
                 parsed.version,
                 parsed.model_paths.len(),
                 parsed.asset_summary.reference_count,
-                parsed.diagnostics.len()
+                diagnostics_suffix(parsed.diagnostics.len())
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -104,21 +106,22 @@ pub(crate) fn export_roundtrip_summary(
             let reparsed = mmd_anim_format::parse_accessory_manifest(&exported, file_name)?;
             ensure_accessory_roundtrip(&parsed, &reparsed)?;
             println!(
-                "{} export roundtrip: ok bytesIn={} bytesOut={} textures={} diagnostics={}",
+                "{} export roundtrip: ok bytesIn={} bytesOut={} textures={}{}",
                 parsed.format.to_ascii_uppercase(),
                 data.len(),
                 exported.len(),
                 parsed.texture_references.len(),
-                parsed.diagnostics.len()
+                diagnostics_suffix(parsed.diagnostics.len())
             );
             Ok(ExitCode::SUCCESS)
         }
+        mmd_anim_format::MmdFormatKind::Unknown => Err(unsupported_format_error(path)),
         kind => Err(format!("export roundtrip is not implemented for {kind:?}").into()),
     }
 }
 
 pub(crate) fn export_roundtrip_json(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let data = read_file(path)?;
     let result = match mmd_anim_format::detect_mmd_format(
         &data,
         path.file_name().and_then(|v| v.to_str()),
@@ -208,6 +211,7 @@ pub(crate) fn export_roundtrip_json(path: &Path) -> Result<ExitCode, Box<dyn std
                 &parsed,
             )
         }
+        mmd_anim_format::MmdFormatKind::Unknown => return Err(unsupported_format_error(path)),
         kind => return Err(format!("export roundtrip is not implemented for {kind:?}").into()),
     };
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -217,7 +221,7 @@ pub(crate) fn export_roundtrip_json(path: &Path) -> Result<ExitCode, Box<dyn std
 pub(crate) fn export_json_roundtrip_summary(
     path: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let data = read_file(path)?;
     match mmd_anim_format::detect_mmd_format(&data, path.file_name().and_then(|v| v.to_str())) {
         mmd_anim_format::MmdFormatKind::Vmd => {
             let parsed = mmd_anim_format::parse_vmd_animation(&data)?;
@@ -315,16 +319,17 @@ pub(crate) fn export_json_roundtrip_summary(
             let reparsed = mmd_anim_format::parse_accessory_manifest(&exported, file_name)?;
             ensure_accessory_roundtrip(&parsed, &reparsed)?;
             println!(
-                "{} export JSON roundtrip: ok jsonBytes={} bytesIn={} bytesOut={} textures={} diagnostics={}",
+                "{} export JSON roundtrip: ok jsonBytes={} bytesIn={} bytesOut={} textures={}{}",
                 parsed.format.to_ascii_uppercase(),
                 json.len(),
                 data.len(),
                 exported.len(),
                 parsed.texture_references.len(),
-                parsed.diagnostics.len()
+                diagnostics_suffix(parsed.diagnostics.len())
             );
             Ok(ExitCode::SUCCESS)
         }
+        mmd_anim_format::MmdFormatKind::Unknown => Err(unsupported_format_error(path)),
         kind => Err(format!("export JSON roundtrip is not implemented for {kind:?}").into()),
     }
 }
@@ -332,7 +337,7 @@ pub(crate) fn export_json_roundtrip_summary(
 pub(crate) fn export_json_roundtrip_json(
     path: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let data = read_file(path)?;
     let result = match mmd_anim_format::detect_mmd_format(
         &data,
         path.file_name().and_then(|v| v.to_str()),
@@ -419,6 +424,9 @@ pub(crate) fn export_json_roundtrip_json(
                 &parsed,
             )
         }
+        mmd_anim_format::MmdFormatKind::Unknown => {
+            return Err(unsupported_format_error(path));
+        }
         kind => {
             return Err(format!("export JSON roundtrip is not implemented for {kind:?}").into());
         }
@@ -431,7 +439,7 @@ pub(crate) fn export_format(
     input: &Path,
     output: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(input)?;
+    let data = read_file(input)?;
     let kind =
         mmd_anim_format::detect_mmd_format(&data, input.file_name().and_then(|v| v.to_str()));
     let (exported, kind_label): (Vec<u8>, &str) = match kind {
@@ -461,9 +469,10 @@ pub(crate) fn export_format(
             let label: &'static str = if parsed.format == "vac" { "VAC" } else { "X" };
             (mmd_anim_format::export_accessory_manifest(&parsed), label)
         }
+        mmd_anim_format::MmdFormatKind::Unknown => return Err(unsupported_format_error(input)),
         kind => return Err(format!("export is not supported for {kind:?}").into()),
     };
-    fs::write(output, &exported)?;
+    write_file(output, &exported)?;
     println!(
         "{kind_label} export: ok bytesIn={} bytesOut={} output={}",
         data.len(),
@@ -506,8 +515,8 @@ pub(crate) fn export_pmm_scene(
     motion_path: &Path,
     output_path: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let model_data = fs::read(model_path)?;
-    let motion_data = fs::read(motion_path)?;
+    let model_data = read_file(model_path)?;
+    let motion_data = read_file(motion_path)?;
     let model = mmd_anim_format::parse_pmx_model(&model_data)?;
     let motion = mmd_anim_format::parse_vmd_animation(&motion_data)?;
     let model_path_text = resolve_pmx_path_for_pmm(model_path)?;
@@ -517,7 +526,7 @@ pub(crate) fn export_pmm_scene(
         &model_path_text,
         &mmd_anim_format::PmmSceneExportOptions::default(),
     );
-    fs::write(output_path, &report.bytes)?;
+    write_file(output_path, &report.bytes)?;
 
     let reparsed = mmd_anim_format::parse_pmm_manifest(&report.bytes)?;
     let document = reparsed
@@ -545,7 +554,7 @@ pub(crate) fn export_json_format(
     input: &Path,
     output: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let json = fs::read_to_string(input)?;
+    let json = read_json_input(input)?;
     let ext = output
         .extension()
         .and_then(|v| v.to_str())
@@ -582,7 +591,7 @@ pub(crate) fn export_json_format(
             .into());
         }
     };
-    fs::write(output, &exported)?;
+    write_file(output, &exported)?;
     println!(
         "{kind_label} export from JSON: ok jsonBytes={} bytesOut={} output={}",
         json.len(),
@@ -590,6 +599,12 @@ pub(crate) fn export_json_format(
         output.display()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+fn read_json_input(input: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    read_text_file(input).map_err(|error| {
+        format!("{error}; --from-json expects UTF-8 JSON text such as inspect --json output").into()
+    })
 }
 
 pub(crate) fn vmd_roundtrip_json(
@@ -976,14 +991,14 @@ pub(crate) fn ensure_vmd_roundtrip(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if left.metadata.model_name != right.metadata.model_name {
         return Err(format!(
-            "VMD metadata.model_name changed: expected={:?} got={:?}",
+            "VMD metadata.modelName changed: expected={:?} got={:?}",
             left.metadata.model_name, right.metadata.model_name
         )
         .into());
     }
     if left.metadata.max_frame != right.metadata.max_frame {
         return Err(format!(
-            "VMD metadata.max_frame changed: expected={} got={}",
+            "VMD metadata.maxFrame changed: expected={} got={}",
             left.metadata.max_frame, right.metadata.max_frame
         )
         .into());
@@ -1009,35 +1024,35 @@ pub(crate) fn ensure_vmd_roundtrip(
     for (i, (l, r)) in left.bone_frames.iter().zip(&right.bone_frames).enumerate() {
         if l.bone_name != r.bone_name {
             return Err(format!(
-                "VMD bone_frames[{i}] bone_name: expected={:?} got={:?}",
+                "VMD boneFrames[{i}] boneName: expected={:?} got={:?}",
                 l.bone_name, r.bone_name
             )
             .into());
         }
         if l.frame != r.frame {
             return Err(format!(
-                "VMD bone_frames[{i}] bone={:?} frame: expected={} got={}",
+                "VMD boneFrames[{i}] bone={:?} frame: expected={} got={}",
                 l.bone_name, l.frame, r.frame
             )
             .into());
         }
         if l.translation != r.translation {
             return Err(format!(
-                "VMD bone_frames[{i}] bone={:?} frame={} translation: expected={:?} got={:?}",
+                "VMD boneFrames[{i}] bone={:?} frame={} translation: expected={:?} got={:?}",
                 l.bone_name, l.frame, l.translation, r.translation
             )
             .into());
         }
         if l.rotation != r.rotation {
             return Err(format!(
-                "VMD bone_frames[{i}] bone={:?} frame={} rotation: expected={:?} got={:?}",
+                "VMD boneFrames[{i}] bone={:?} frame={} rotation: expected={:?} got={:?}",
                 l.bone_name, l.frame, l.rotation, r.rotation
             )
             .into());
         }
         if l.interpolation != r.interpolation {
             return Err(format!(
-                "VMD bone_frames[{i}] bone={:?} frame={} interpolation changed",
+                "VMD boneFrames[{i}] bone={:?} frame={} interpolation changed",
                 l.bone_name, l.frame
             )
             .into());
@@ -1052,21 +1067,21 @@ pub(crate) fn ensure_vmd_roundtrip(
     {
         if l.morph_name != r.morph_name {
             return Err(format!(
-                "VMD morph_frames[{i}] morph_name: expected={:?} got={:?}",
+                "VMD morphFrames[{i}] morphName: expected={:?} got={:?}",
                 l.morph_name, r.morph_name
             )
             .into());
         }
         if l.frame != r.frame {
             return Err(format!(
-                "VMD morph_frames[{i}] morph={:?} frame: expected={} got={}",
+                "VMD morphFrames[{i}] morph={:?} frame: expected={} got={}",
                 l.morph_name, l.frame, r.frame
             )
             .into());
         }
         if l.weight != r.weight {
             return Err(format!(
-                "VMD morph_frames[{i}] morph={:?} frame={} weight: expected={} got={}",
+                "VMD morphFrames[{i}] morph={:?} frame={} weight: expected={} got={}",
                 l.morph_name, l.frame, l.weight, r.weight
             )
             .into());
@@ -1081,49 +1096,49 @@ pub(crate) fn ensure_vmd_roundtrip(
     {
         if l.frame != r.frame {
             return Err(format!(
-                "VMD camera_frames[{i}] frame: expected={} got={}",
+                "VMD cameraFrames[{i}] frame: expected={} got={}",
                 l.frame, r.frame
             )
             .into());
         }
         if l.distance != r.distance {
             return Err(format!(
-                "VMD camera_frames[{i}] frame={} distance: expected={} got={}",
+                "VMD cameraFrames[{i}] frame={} distance: expected={} got={}",
                 l.frame, l.distance, r.distance
             )
             .into());
         }
         if l.position != r.position {
             return Err(format!(
-                "VMD camera_frames[{i}] frame={} position: expected={:?} got={:?}",
+                "VMD cameraFrames[{i}] frame={} position: expected={:?} got={:?}",
                 l.frame, l.position, r.position
             )
             .into());
         }
         if l.rotation != r.rotation {
             return Err(format!(
-                "VMD camera_frames[{i}] frame={} rotation: expected={:?} got={:?}",
+                "VMD cameraFrames[{i}] frame={} rotation: expected={:?} got={:?}",
                 l.frame, l.rotation, r.rotation
             )
             .into());
         }
         if l.interpolation != r.interpolation {
             return Err(format!(
-                "VMD camera_frames[{i}] frame={} interpolation changed",
+                "VMD cameraFrames[{i}] frame={} interpolation changed",
                 l.frame
             )
             .into());
         }
         if l.fov != r.fov {
             return Err(format!(
-                "VMD camera_frames[{i}] frame={} fov: expected={} got={}",
+                "VMD cameraFrames[{i}] frame={} fov: expected={} got={}",
                 l.frame, l.fov, r.fov
             )
             .into());
         }
         if l.perspective != r.perspective {
             return Err(format!(
-                "VMD camera_frames[{i}] frame={} perspective: expected={} got={}",
+                "VMD cameraFrames[{i}] frame={} perspective: expected={} got={}",
                 l.frame, l.perspective, r.perspective
             )
             .into());
@@ -1138,21 +1153,21 @@ pub(crate) fn ensure_vmd_roundtrip(
     {
         if l.frame != r.frame {
             return Err(format!(
-                "VMD light_frames[{i}] frame: expected={} got={}",
+                "VMD lightFrames[{i}] frame: expected={} got={}",
                 l.frame, r.frame
             )
             .into());
         }
         if l.color != r.color {
             return Err(format!(
-                "VMD light_frames[{i}] frame={} color: expected={:?} got={:?}",
+                "VMD lightFrames[{i}] frame={} color: expected={:?} got={:?}",
                 l.frame, l.color, r.color
             )
             .into());
         }
         if l.direction != r.direction {
             return Err(format!(
-                "VMD light_frames[{i}] frame={} direction: expected={:?} got={:?}",
+                "VMD lightFrames[{i}] frame={} direction: expected={:?} got={:?}",
                 l.frame, l.direction, r.direction
             )
             .into());
@@ -1167,21 +1182,21 @@ pub(crate) fn ensure_vmd_roundtrip(
     {
         if l.frame != r.frame {
             return Err(format!(
-                "VMD self_shadow_frames[{i}] frame: expected={} got={}",
+                "VMD selfShadowFrames[{i}] frame: expected={} got={}",
                 l.frame, r.frame
             )
             .into());
         }
         if l.mode != r.mode {
             return Err(format!(
-                "VMD self_shadow_frames[{i}] frame={} mode: expected={} got={}",
+                "VMD selfShadowFrames[{i}] frame={} mode: expected={} got={}",
                 l.frame, l.mode, r.mode
             )
             .into());
         }
         if l.distance != r.distance {
             return Err(format!(
-                "VMD self_shadow_frames[{i}] frame={} distance: expected={} got={}",
+                "VMD selfShadowFrames[{i}] frame={} distance: expected={} got={}",
                 l.frame, l.distance, r.distance
             )
             .into());
@@ -1196,21 +1211,21 @@ pub(crate) fn ensure_vmd_roundtrip(
     {
         if l.frame != r.frame {
             return Err(format!(
-                "VMD property_frames[{i}] frame: expected={} got={}",
+                "VMD propertyFrames[{i}] frame: expected={} got={}",
                 l.frame, r.frame
             )
             .into());
         }
         if l.visible != r.visible {
             return Err(format!(
-                "VMD property_frames[{i}] frame={} visible: expected={} got={}",
+                "VMD propertyFrames[{i}] frame={} visible: expected={} got={}",
                 l.frame, l.visible, r.visible
             )
             .into());
         }
         if l.ik_states.len() != r.ik_states.len() {
             return Err(format!(
-                "VMD property_frames[{i}] frame={} ik_states count: expected={} got={}",
+                "VMD propertyFrames[{i}] frame={} ikStates count: expected={} got={}",
                 l.frame,
                 l.ik_states.len(),
                 r.ik_states.len()
@@ -1220,14 +1235,14 @@ pub(crate) fn ensure_vmd_roundtrip(
         for (j, (lk, rk)) in l.ik_states.iter().zip(&r.ik_states).enumerate() {
             if lk.bone_name != rk.bone_name {
                 return Err(format!(
-                    "VMD property_frames[{i}] frame={} ik_states[{j}] bone_name: expected={:?} got={:?}",
+                    "VMD propertyFrames[{i}] frame={} ikStates[{j}] boneName: expected={:?} got={:?}",
                     l.frame, lk.bone_name, rk.bone_name
                 )
                 .into());
             }
             if lk.enabled != rk.enabled {
                 return Err(format!(
-                    "VMD property_frames[{i}] frame={} ik_states[{j}] bone={:?} enabled: expected={} got={}",
+                    "VMD propertyFrames[{i}] frame={} ikStates[{j}] bone={:?} enabled: expected={} got={}",
                     l.frame, lk.bone_name, lk.enabled, rk.enabled
                 )
                 .into());
@@ -1243,14 +1258,14 @@ pub(crate) fn ensure_vpd_roundtrip(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if left.model_file != right.model_file {
         return Err(format!(
-            "VPD model_file changed: expected={:?} got={:?}",
+            "VPD modelFile changed: expected={:?} got={:?}",
             left.model_file, right.model_file
         )
         .into());
     }
     if left.bone_count != right.bone_count {
         return Err(format!(
-            "VPD bone_count changed: expected={} got={}",
+            "VPD boneCount changed: expected={} got={}",
             left.bone_count, right.bone_count
         )
         .into());

@@ -1,10 +1,12 @@
-use std::{fs, path::Path, process::ExitCode};
+use std::{path::Path, process::ExitCode};
+
+use crate::{diagnostics_suffix, read_file, unsupported_format_error, write_file};
 
 pub(crate) fn parse_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let data = read_file(path)?;
     let parsed = mmd_anim_format::parse_pmx_model(&data)?;
     println!(
-        "PMX parser: vertices={} faces={} materials={} bones={} morphs={} displayFrames={} rigidBodies={} joints={} softBodies={} diagnostics={}",
+        "PMX parser: vertices={} faces={} materials={} bones={} morphs={} displayFrames={} rigidBodies={} joints={} softBodies={}{}",
         parsed.metadata.counts.vertices,
         parsed.metadata.counts.faces,
         parsed.metadata.counts.materials,
@@ -14,13 +16,13 @@ pub(crate) fn parse_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::er
         parsed.metadata.counts.rigid_bodies,
         parsed.metadata.counts.joints,
         parsed.metadata.counts.soft_bodies,
-        parsed.diagnostics.len()
+        diagnostics_suffix(parsed.diagnostics.len())
     );
     Ok(ExitCode::SUCCESS)
 }
 
 pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let data = read_file(path)?;
     match mmd_anim_format::detect_mmd_format(&data, path.file_name().and_then(|v| v.to_str())) {
         mmd_anim_format::MmdFormatKind::Pmx => parse_pmx_summary(path),
         mmd_anim_format::MmdFormatKind::Pmd => {
@@ -56,9 +58,9 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
         mmd_anim_format::MmdFormatKind::Vpd => {
             let parsed = mmd_anim_format::parse_vpd_pose(&data)?;
             println!(
-                "VPD parser: bones={} diagnostics={}",
+                "VPD parser: bones={}{}",
                 parsed.bone_count,
-                parsed.diagnostics.len()
+                diagnostics_suffix(parsed.diagnostics.len())
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -157,7 +159,7 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
                 .map(|g| (!g.settings.background_image_path.is_empty()).to_string())
                 .unwrap_or_else(|| "unknown".to_owned());
             println!(
-                "PMM parser: references={} version={} parsedVersion={} models={} accessories={} motions={} audio={} images={} videos={} modelAssets={} modelSlots={} firstModelSlotPadding={} firstModelSlotNextNonZeroOffset={} documentModels={} documentBoneKeyframes={} documentMorphKeyframes={} headerTextEntries={} audioAssets={} assetConfidence=high:{} medium:{} low:{} assetKindCounts={} assetExtensionCounts={} screen={}x{} timelineFrames={} timelineRange={}..{} frameRate={} durationSeconds={} displayLayout={} selectedModelIndex={} documentModelCount={} declaredModelSlotCount={} modelSlotCount={} nonZeroModelSlotCount={} modelSlotFlags={} activeModelSlotIndices={} emptyModelSlotIndices={} modelSlotFlagCounts={} accessorySlotCount={} globalCameraKeyframes={} globalLightKeyframes={} globalAccessoryCount={} globalAccessoryKeyframes={} globalGravityKeyframes={} globalSelfShadowKeyframes={} globalAudioPath={} globalBgVideoPath={} globalBgImagePath={} diagnostics={}",
+                "PMM parser: references={} version={} parsedVersion={} models={} accessories={} motions={} audio={} images={} videos={} modelAssets={} modelSlots={} firstModelSlotPadding={} firstModelSlotNextNonZeroOffset={} documentModels={} documentBoneKeyframes={} documentMorphKeyframes={} headerTextEntries={} audioAssets={} assetConfidence=high:{} medium:{} low:{} assetKindCounts={} assetExtensionCounts={} screen={}x{} timelineFrames={} timelineRange={}..{} frameRate={} durationSeconds={} displayLayout={} selectedModelIndex={} documentModelCount={} declaredModelSlotCount={} modelSlotCount={} nonZeroModelSlotCount={} modelSlotFlags={} activeModelSlotIndices={} emptyModelSlotIndices={} modelSlotFlagCounts={} accessorySlotCount={} globalCameraKeyframes={} globalLightKeyframes={} globalAccessoryCount={} globalAccessoryKeyframes={} globalGravityKeyframes={} globalSelfShadowKeyframes={} globalAudioPath={} globalBgVideoPath={} globalBgImagePath={}{}",
                 parsed.asset_summary.reference_count,
                 parsed.version,
                 parsed
@@ -273,7 +275,7 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
                 global_audio_path,
                 global_bg_video_path,
                 global_bg_image_path,
-                parsed.diagnostics.len()
+                diagnostics_suffix(parsed.diagnostics.len())
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -283,20 +285,20 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
                 path.file_name().and_then(|v| v.to_str()),
             )?;
             println!(
-                "{} parser: byteLength={} meshes={} materials={} textures={} diagnostics={}",
+                "{} parser: byteLength={} meshes={} materials={} textures={}{}",
                 parsed.format.to_uppercase(),
                 parsed.byte_length,
                 parsed.mesh_count,
                 parsed.material_count,
                 parsed.texture_references.len(),
-                parsed.diagnostics.len()
+                diagnostics_suffix(parsed.diagnostics.len())
             );
             Ok(ExitCode::SUCCESS)
         }
         mmd_anim_format::MmdFormatKind::Nmd => {
             let parsed = mmd_anim_format::parse_nmd_manifest(&data)?;
             println!(
-                "NMD parser: byteLength={} annotations={} globalTracks={} bundles={{accessory:{}, bone:{}, camera:{}, light:{}, model:{}, morph:{}, selfShadow:{}, unknown:{}}} diagnostics={}",
+                "NMD parser: byteLength={} annotations={} globalTracks={} bundles={{accessory:{}, bone:{}, camera:{}, light:{}, model:{}, morph:{}, selfShadow:{}, unknown:{}}}{}",
                 parsed.byte_length,
                 parsed.metadata.annotation_count,
                 parsed.global_track_count,
@@ -308,16 +310,36 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
                 parsed.keyframe_bundles.morph,
                 parsed.keyframe_bundles.self_shadow,
                 parsed.keyframe_bundles.unknown,
-                parsed.diagnostics.len()
+                diagnostics_suffix(parsed.diagnostics.len())
             );
             Ok(ExitCode::SUCCESS)
         }
-        mmd_anim_format::MmdFormatKind::Unknown => Err("unknown MMD format".into()),
+        mmd_anim_format::MmdFormatKind::Unknown => Err(unsupported_format_error(path)),
     }
 }
 
 pub(crate) fn parse_format_json(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
+    let text = parse_format_json_text(path)?;
+    println!("{text}");
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) fn parse_format_json_to_file(
+    path: &Path,
+    output: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let text = parse_format_json_text(path)?;
+    write_file(output, text.as_bytes())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) fn parse_format_json_text(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let value = parse_format_json_value(path)?;
+    Ok(serde_json::to_string_pretty(&value)?)
+}
+
+fn parse_format_json_value(path: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let data = read_file(path)?;
     let value = match mmd_anim_format::detect_mmd_format(
         &data,
         path.file_name().and_then(|v| v.to_str()),
@@ -346,8 +368,7 @@ pub(crate) fn parse_format_json(path: &Path) -> Result<ExitCode, Box<dyn std::er
         mmd_anim_format::MmdFormatKind::Nmd => {
             serde_json::to_value(mmd_anim_format::parse_nmd_manifest(&data)?)?
         }
-        mmd_anim_format::MmdFormatKind::Unknown => return Err("unknown MMD format".into()),
+        mmd_anim_format::MmdFormatKind::Unknown => return Err(unsupported_format_error(path)),
     };
-    println!("{}", serde_json::to_string_pretty(&value)?);
-    Ok(ExitCode::SUCCESS)
+    Ok(value)
 }

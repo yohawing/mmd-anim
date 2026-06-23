@@ -1,4 +1,6 @@
-use std::{fs, path::Path, process::ExitCode};
+use std::{path::Path, process::ExitCode};
+
+use crate::{read_file, write_file};
 
 pub(crate) const PATCH_PMM_SCENE_FRAME_RANGE_USAGE: &str = "usage: mmd-anim patch-pmm-scene-frame-range <input.pmm> <output.pmm> [--current-frame <i32>] [--current-frame-text <i32>] [--begin-frame <i32>] [--end-frame <i32>] [--begin-frame-enabled <bool>] [--end-frame-enabled <bool>]";
 
@@ -121,7 +123,7 @@ pub(crate) fn patch_pmm_scene_frame_range(
     option_args: &[String],
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let patch = parse_pmm_scene_frame_range_patch_options(option_args)?;
-    let data = fs::read(input)?;
+    let data = read_file(input)?;
     let bytes_in = data.len();
     let parsed = mmd_anim_format::parse_pmm_manifest(&data)?;
     let exported =
@@ -129,7 +131,7 @@ pub(crate) fn patch_pmm_scene_frame_range(
             .map_err(|e| format!("PMM scene frame range patch failed: {e}"))?;
     let bytes_out = exported.len();
     let changed_fields = count_pmm_scene_frame_range_patch_fields(&patch);
-    fs::write(output, &exported)?;
+    write_file(output, &exported)?;
     println!(
         "PMM scene frame range patch: ok bytesIn={} bytesOut={} changedFields={} output={}",
         bytes_in,
@@ -146,7 +148,7 @@ pub(crate) fn patch_pmm_document_model_path(
     model_path: &str,
     output: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = fs::read(input)?;
+    let data = read_file(input)?;
     let bytes_in = data.len();
     let parsed = mmd_anim_format::parse_pmm_manifest(&data)?;
     let index: u8 = document_model_index.parse().map_err(|_| {
@@ -161,7 +163,7 @@ pub(crate) fn patch_pmm_document_model_path(
     )
     .map_err(|e| format!("PMM document model path patch failed: {e}"))?;
     let bytes_out = exported.len();
-    fs::write(output, &exported)?;
+    write_file(output, &exported)?;
     println!(
         "PMM document model path patch: ok bytesIn={} bytesOut={} documentModelIndex={} output={}",
         bytes_in,

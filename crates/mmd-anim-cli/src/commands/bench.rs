@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, process::ExitCode, sync::Arc, time::Instant};
+use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Instant};
 
 use glam::{Quat, Vec3A};
 use mmd_anim_runtime::{
@@ -6,7 +6,7 @@ use mmd_anim_runtime::{
     MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
 };
 
-use crate::{copy_world_matrices_to_f32, f32_checksum, translation_checksum};
+use crate::{copy_world_matrices_to_f32, f32_checksum, read_file, translation_checksum};
 
 pub(crate) const BENCH_PAIR_USAGE: &str = "usage: mmd-anim bench-pair <model.pmx> <motion.vmd> [start-frame] [frame-count] [step] [--no-ik] [--ik-tolerance <value>] [--ik-max-iterations-cap <count>]";
 
@@ -25,8 +25,8 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
     let total_start = Instant::now();
 
     let read_start = Instant::now();
-    let pmx_bytes = fs::read(&cfg.pmx_path)?;
-    let vmd_bytes = fs::read(&cfg.vmd_path)?;
+    let pmx_bytes = read_file(&cfg.pmx_path)?;
+    let vmd_bytes = read_file(&cfg.vmd_path)?;
     let read_elapsed = read_start.elapsed();
 
     let pmx_start = Instant::now();

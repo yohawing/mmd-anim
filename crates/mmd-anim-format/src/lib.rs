@@ -16,7 +16,7 @@ pub mod vmd;
 pub mod vpd;
 pub mod xfile;
 
-pub use format::{MmdFormatKind, detect_mmd_format};
+pub use format::{MmdFormatKind, detect_mmd_format, sniff};
 pub use nmd::{NmdParsedManifest, parse_nmd_manifest};
 pub use normalize::normalize_vmd_name;
 pub use pmd::{

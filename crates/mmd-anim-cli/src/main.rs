@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -186,7 +187,7 @@ enum Commands {
 
     /// Export an asset to another binary file.
     #[command(
-        long_about = "Write an MMD asset to an output path, optionally starting from JSON.\nWith --from-json, the input must be UTF-8 JSON text and the output extension selects the binary format.\nUse this for parser/exporter smoke checks and JSON-to-binary conversion.\n\nSupported formats: .pmx, .pmd, .vmd",
+        long_about = "Write an MMD asset to an output path, optionally starting from JSON.\nWith --from-json, the input must be UTF-8 JSON text and the output extension selects the binary format.\nThe JSON shape is the raw parsed DTO emitted by `mmd-anim inspect <asset> --json`, for example PmxParsedModel for .pmx, PmdParsedModel for .pmd, or VmdParsedAnimation for .vmd.\nUse this for parser/exporter smoke checks and JSON-to-binary conversion.\n\nSupported formats: .pmx, .pmd, .vmd",
         after_help = "Examples:\n  mmd-anim export input.vmd output.vmd\n  mmd-anim export input.json output.vmd --from-json"
     )]
     Export {
@@ -337,7 +338,7 @@ fn dispatch_inspect(
         return usage_error("inspect --json and --ik cannot be combined");
     }
     if show_ik {
-        if !has_extension(asset, "pmx") {
+        if detect_path_format(asset)? != mmd_anim_format::MmdFormatKind::Pmx {
             return usage_error("inspect --ik requires a PMX model file");
         }
         return commands::import::import_pmx_ik_summary(asset);
@@ -348,7 +349,7 @@ fn dispatch_inspect(
         }
         return commands::parse::parse_format_json(asset);
     }
-    if has_extension(asset, "pmx") {
+    if detect_path_format(asset)? == mmd_anim_format::MmdFormatKind::Pmx {
         commands::parse::parse_pmx_summary(asset)
     } else {
         commands::parse::parse_format_summary(asset)
@@ -382,17 +383,14 @@ fn dispatch_import(
     if show_clip || frame.is_some() {
         return usage_error("import --clip and --frame require a motion argument");
     }
-    if has_extension(model, "pmx") {
-        commands::import::import_pmx_summary(model)
-    } else if has_extension(model, "pmd") {
-        commands::import::import_pmd_summary(model)
-    } else if has_extension(model, "vmd") {
-        commands::import::import_vmd_summary(model)
-    } else {
-        usage_error(format!(
+    match detect_path_format(model)? {
+        mmd_anim_format::MmdFormatKind::Pmx => commands::import::import_pmx_summary(model),
+        mmd_anim_format::MmdFormatKind::Pmd => commands::import::import_pmd_summary(model),
+        mmd_anim_format::MmdFormatKind::Vmd => commands::import::import_vmd_summary(model),
+        _ => usage_error(format!(
             "unsupported or unrecognized file format: {}; import requires a PMX, PMD, or VMD input when no motion is provided",
             model.display()
-        ))
+        )),
     }
 }
 
@@ -691,10 +689,30 @@ fn dispatch_export(
     }
 }
 
-fn has_extension(path: &Path, expected: &str) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case(expected))
+const FORMAT_SNIFF_BYTES: usize = 64;
+
+fn detect_path_format(
+    path: &Path,
+) -> Result<mmd_anim_format::MmdFormatKind, Box<dyn std::error::Error>> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        format!(
+            "failed to read {}: {}",
+            path.display(),
+            io_error_label(error.kind())
+        )
+    })?;
+    let mut data = [0u8; FORMAT_SNIFF_BYTES];
+    let len = file.read(&mut data).map_err(|error| {
+        format!(
+            "failed to read {}: {}",
+            path.display(),
+            io_error_label(error.kind())
+        )
+    })?;
+    Ok(mmd_anim_format::detect_mmd_format(
+        &data[..len],
+        path.file_name().and_then(|v| v.to_str()),
+    ))
 }
 
 fn usage_error(message: impl AsRef<str>) -> Result<ExitCode, Box<dyn std::error::Error>> {

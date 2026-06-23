@@ -562,23 +562,28 @@ pub(crate) fn export_json_format(
         .to_ascii_lowercase();
     let (exported, kind_label): (Vec<u8>, &str) = match ext.as_str() {
         "vmd" => {
-            let dto: mmd_anim_format::VmdParsedAnimation = serde_json::from_str(&json)?;
+            let dto: mmd_anim_format::VmdParsedAnimation =
+                serde_json::from_str(&json).map_err(|e| format_json_deser_error("VMD", e))?;
             (mmd_anim_format::export_vmd_animation(&dto), "VMD")
         }
         "vpd" => {
-            let dto: mmd_anim_format::VpdParsedPose = serde_json::from_str(&json)?;
+            let dto: mmd_anim_format::VpdParsedPose =
+                serde_json::from_str(&json).map_err(|e| format_json_deser_error("VPD", e))?;
             (mmd_anim_format::export_vpd_pose(&dto), "VPD")
         }
         "pmx" => {
-            let dto: mmd_anim_format::PmxParsedModel = serde_json::from_str(&json)?;
+            let dto: mmd_anim_format::PmxParsedModel =
+                serde_json::from_str(&json).map_err(|e| format_json_deser_error("PMX", e))?;
             (mmd_anim_format::export_pmx_model(&dto), "PMX")
         }
         "pmd" => {
-            let dto: mmd_anim_format::PmdParsedModel = serde_json::from_str(&json)?;
+            let dto: mmd_anim_format::PmdParsedModel =
+                serde_json::from_str(&json).map_err(|e| format_json_deser_error("PMD", e))?;
             (mmd_anim_format::export_pmd_model(&dto), "PMD")
         }
         "x" | "vac" => {
-            let dto: mmd_anim_format::AccessoryParsedManifest = serde_json::from_str(&json)?;
+            let dto: mmd_anim_format::AccessoryParsedManifest =
+                serde_json::from_str(&json).map_err(|e| format_json_deser_error("accessory", e))?;
             let label: &'static str = if ext == "vac" { "VAC" } else { "X" };
             (mmd_anim_format::export_accessory_manifest(&dto), label)
         }
@@ -603,8 +608,22 @@ pub(crate) fn export_json_format(
 
 fn read_json_input(input: &Path) -> Result<String, Box<dyn std::error::Error>> {
     read_text_file(input).map_err(|error| {
-        format!("{error}; --from-json expects UTF-8 JSON text such as inspect --json output").into()
+        format!(
+            "{error}; --from-json expects UTF-8 JSON text, typically from `mmd-anim inspect <asset> --json`"
+        )
+        .into()
     })
+}
+
+fn format_json_deser_error(
+    format_label: &str,
+    error: serde_json::Error,
+) -> Box<dyn std::error::Error> {
+    format!(
+        "{format_label} JSON deserialization failed: {error}; \
+         --from-json expects the raw JSON emitted by `mmd-anim inspect <asset> --json`"
+    )
+    .into()
 }
 
 pub(crate) fn vmd_roundtrip_json(

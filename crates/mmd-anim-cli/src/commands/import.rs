@@ -142,19 +142,38 @@ pub(crate) fn import_pair_summary(
         })
         .count();
 
+    let bone_match_pct = if vmd.bone_keyframes.is_empty() {
+        100.0
+    } else {
+        matched_bone_keys as f64 / vmd.bone_keyframes.len() as f64 * 100.0
+    };
+    let morph_match_pct = if vmd.morph_keyframes.is_empty() {
+        100.0
+    } else {
+        matched_morph_keys as f64 / vmd.morph_keyframes.len() as f64 * 100.0
+    };
+    println!("PMX/VMD runtime import:");
     println!(
-        "PMX/VMD runtime import: bones={} append={} fixedAxis={} ik={} vmdBoneKeys={} matchedBoneKeys={} vmdMorphKeys={} matchedMorphKeys={} propertyFrames={} propertyIkEntries={} matchedPropertyIkEntries={}",
+        "  model:    bones={} append={} fixedAxis={} ik={}",
         pmx.model.bone_count(),
         pmx.model.append_transforms().len(),
         pmx.model.fixed_axis_count(),
         pmx.model.ik_count(),
+    );
+    println!(
+        "  motion:   vmdBoneKeys={} matchedBoneKeys={} ({:.1}%) vmdMorphKeys={} matchedMorphKeys={} ({:.1}%)",
         vmd.bone_keyframes.len(),
         matched_bone_keys,
+        bone_match_pct,
         vmd.morph_keyframes.len(),
         matched_morph_keys,
+        morph_match_pct,
+    );
+    println!(
+        "  property: propertyFrames={} propertyIkEntries={} matchedPropertyIkEntries={}",
         vmd.property_ik_frames.len(),
         property_ik_entries,
-        matched_property_ik_entries
+        matched_property_ik_entries,
     );
     Ok(ExitCode::SUCCESS)
 }

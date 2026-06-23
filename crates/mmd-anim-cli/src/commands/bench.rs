@@ -106,40 +106,32 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
     let ms_per_frame = eval_ms / cfg.frame_count as f64;
     let fps = cfg.frame_count as f64 / eval_elapsed.as_secs_f64();
 
+    let ik_display = if cfg.solve_ik {
+        solver_count.to_string()
+    } else {
+        "disabled".to_owned()
+    };
+    let ik_cap_display = cfg
+        .ik_options
+        .max_iterations_cap
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_owned());
+    println!("bench-pair:");
     println!(
-        "bench-pair: bones={} ik={} ikTolerance={:.8} ikMaxIterationsCap={} append={} fixedAxis={} vmdBoneKeys={} vmdMorphKeys={} clipBoneTracks={} clipMorphTracks={} propertyTrack={} clipFrameRange={} frames={} startFrame={:.3} step={:.3} readMs={:.3} pmxImportMs={:.3} vmdImportMs={:.3} clipBuildMs={:.3} evalMs={:.3} msPerFrame={:.6} fps={:.1} totalMs={:.3} checksum={:08x} morphChecksum={:08x}",
-        bone_count,
-        if cfg.solve_ik {
-            solver_count.to_string()
-        } else {
-            "disabled".to_owned()
-        },
-        cfg.ik_options.tolerance,
-        cfg.ik_options
-            .max_iterations_cap
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "none".to_owned()),
-        append_count,
-        fixed_axis_count,
-        vmd.bone_keyframes.len(),
-        vmd.morph_keyframes.len(),
-        clip.bone_track_count(),
-        clip.morph_track_count(),
-        clip.has_property_track(),
-        frame_range,
-        cfg.frame_count,
-        cfg.start_frame,
-        cfg.step,
-        read_elapsed.as_secs_f64() * 1000.0,
-        pmx_elapsed.as_secs_f64() * 1000.0,
-        vmd_elapsed.as_secs_f64() * 1000.0,
-        clip_elapsed.as_secs_f64() * 1000.0,
-        eval_ms,
-        ms_per_frame,
-        fps,
-        total_elapsed.as_secs_f64() * 1000.0,
-        checksum,
-        morph_checksum,
+        "  model:   bones={} ik={} ikTolerance={:.8} ikMaxIterationsCap={} append={} fixedAxis={}",
+        bone_count, ik_display, cfg.ik_options.tolerance, ik_cap_display, append_count, fixed_axis_count,
+    );
+    println!(
+        "  motion:  vmdBoneKeys={} vmdMorphKeys={} clipBoneTracks={} clipMorphTracks={} propertyTrack={} clipFrameRange={}",
+        vmd.bone_keyframes.len(), vmd.morph_keyframes.len(), clip.bone_track_count(), clip.morph_track_count(), clip.has_property_track(), frame_range,
+    );
+    println!(
+        "  timing:  readMs={:.3} pmxImportMs={:.3} vmdImportMs={:.3} clipBuildMs={:.3} evalMs={:.3} totalMs={:.3}",
+        read_elapsed.as_secs_f64() * 1000.0, pmx_elapsed.as_secs_f64() * 1000.0, vmd_elapsed.as_secs_f64() * 1000.0, clip_elapsed.as_secs_f64() * 1000.0, eval_ms, total_elapsed.as_secs_f64() * 1000.0,
+    );
+    println!(
+        "  result:  frames={} startFrame={:.3} step={:.3} msPerFrame={:.6} fps={:.1} checksum={:08x} morphChecksum={:08x}",
+        cfg.frame_count, cfg.start_frame, cfg.step, ms_per_frame, fps, checksum, morph_checksum,
     );
     if cfg.solve_ik {
         let stats = runtime.ik_runtime_stats();

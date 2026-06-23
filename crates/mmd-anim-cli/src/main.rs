@@ -30,7 +30,7 @@ struct Cli {
 enum Commands {
     /// Inspect an MMD asset without changing it.
     #[command(
-        long_about = "Parse an MMD asset and print a compact summary by default.\nUse this for quick format triage, JSON dumps, or PMX IK solver inspection.",
+        long_about = "Parse an MMD asset and print a compact summary by default.\nUse this for quick format triage, JSON dumps, or PMX IK solver inspection.\nFor detailed rig structure (IK chains, grants, bone hierarchy), use the rig command instead.\n\nSupported formats: .pmx, .pmd, .vmd, .pmm",
         after_help = "Examples:\n  mmd-anim inspect model.pmx\n  mmd-anim inspect motion.vmd --json\n  mmd-anim inspect model.pmx --ik"
     )]
     Inspect {
@@ -49,7 +49,7 @@ enum Commands {
 
     /// Import model and optional motion into runtime structures.
     #[command(
-        long_about = "Run the runtime importer for a model, or a model/motion pair.\nUse this when checking runtime names, clip build stats, or a single evaluated frame.",
+        long_about = "Run the runtime importer for a model, or a model/motion pair.\nUse this when checking runtime names, clip build stats, or a single evaluated frame.\n\nSupported formats: .pmx + .vmd, .pmd + .vmd",
         after_help = "Examples:\n  mmd-anim import model.pmx\n  mmd-anim import model.pmx motion.vmd --clip\n  mmd-anim import model.pmx motion.vmd --frame 120\n    (unit: MMD coordinate)"
     )]
     Import {
@@ -70,7 +70,7 @@ enum Commands {
 
     /// Verify parse/export/re-parse stability.
     #[command(
-        long_about = "Parse an asset, export it, then re-parse the exported bytes.\nUse this before changing readers, writers, or JSON DTO conversion paths.\nJSON reports use jsonBytes for the JSON serialized byte count when --via-json is set.",
+        long_about = "Parse an asset, export it, then re-parse the exported bytes.\nUse this to verify that the parser and exporter produce consistent output.\nJSON reports use jsonBytes for the JSON serialized byte count when --via-json is set.\n\nSupported formats: .pmx, .pmd, .vmd, .pmm",
         after_help = "Examples:\n  mmd-anim roundtrip model.pmx\n  mmd-anim roundtrip motion.vmd --json\n  mmd-anim roundtrip model.pmx --via-json"
     )]
     Roundtrip {
@@ -86,7 +86,7 @@ enum Commands {
 
     /// Inspect PMX rig structure.
     #[command(
-        long_about = "Inspect IK chains, grant/append transforms, and deform layer distribution.\nUse this for rig debugging before runtime import or solver comparison.",
+        long_about = "Inspect IK chains, grant/append transforms, and deform layer distribution.\nUse this for detailed rig analysis; for a quick file overview, use inspect instead.\n\nSupported formats: .pmx only",
         after_help = "Examples:\n  mmd-anim rig model.pmx\n  mmd-anim rig model.pmx --bones\n  mmd-anim rig model.pmx --json --bones"
     )]
     Rig {
@@ -102,7 +102,7 @@ enum Commands {
 
     /// Benchmark runtime evaluation.
     #[command(
-        long_about = "Benchmark a PMX/VMD pair by default, or synthetic runtime data with --synthetic.\nUse this for local performance checks around import, clip build, and evaluation.\nPair mode positional arguments: <model.pmx> <motion.vmd> [start-frame] [frame-count] [step]. Pair flags: --no-ik, --ik-tolerance <value>, --ik-max-iterations-cap <count>.\nSynthetic mode arguments: [models] [bones] [frames] [--json]. Defaults are models=1, bones=32, frames=1000.",
+        long_about = "Benchmark a PMX/VMD pair by default, or synthetic runtime data with --synthetic.\nUse this for local performance checks around import, clip build, and evaluation.\n\nPair mode: <model.pmx> <motion.vmd> [start-frame] [frame-count] [step]\n  Flags: --no-ik, --ik-tolerance <value>, --ik-max-iterations-cap <count>\n\nSynthetic mode: --synthetic [models] [bones] [frames] [--json]\n  Defaults: models=1, bones=32, frames=1000\n\nSupported formats: .pmx + .vmd",
         after_help = "Examples:\n  mmd-anim bench model.pmx motion.vmd\n  mmd-anim bench model.pmx motion.vmd 0 240 1 --no-ik\n  mmd-anim bench --synthetic\n  mmd-anim bench --synthetic 4 64 2000\n  mmd-anim bench --synthetic 4 64 2000 --json"
     )]
     Bench {
@@ -186,7 +186,7 @@ enum Commands {
 
     /// Export an asset to another binary file.
     #[command(
-        long_about = "Write an MMD asset to an output path, optionally starting from JSON.\nWith --from-json, the input must be UTF-8 JSON text and the output extension selects the binary format.\nUse this for parser/exporter smoke checks and JSON-to-binary conversion.",
+        long_about = "Write an MMD asset to an output path, optionally starting from JSON.\nWith --from-json, the input must be UTF-8 JSON text and the output extension selects the binary format.\nUse this for parser/exporter smoke checks and JSON-to-binary conversion.\n\nSupported formats: .pmx, .pmd, .vmd",
         after_help = "Examples:\n  mmd-anim export input.vmd output.vmd\n  mmd-anim export input.json output.vmd --from-json"
     )]
     Export {
@@ -202,7 +202,7 @@ enum Commands {
     /// Build a PMM scene from a model and motion.
     #[command(
         name = "build-pmm",
-        long_about = "Create a PMM scene from a PMX model and VMD motion.\nUse this when preparing MMD GUI-compatible scenes from runtime fixtures.",
+        long_about = "Create a PMM scene from a PMX model and VMD motion.\nUse this when preparing MMD GUI-compatible scenes from runtime fixtures.\n\nSupported formats: .pmx + .vmd → .pmm",
         after_help = "Examples:\n  mmd-anim build-pmm model.pmx motion.vmd scene.pmm\n  mmd-anim build-pmm ./model.pmx ./motion.vmd ./out/scene.pmm"
     )]
     BuildPmm {
@@ -1561,7 +1561,7 @@ mod tests {
         actual.texture_references.clear();
 
         let error = export::ensure_accessory_json_roundtrip(&expected, &actual).unwrap_err();
-        assert_eq!(error, "Accessory JSON DTO changed before export");
+        assert_eq!(error, "Accessory JSON data differs after re-encoding");
     }
 
     #[test]

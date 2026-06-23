@@ -812,7 +812,7 @@ pub(crate) fn ensure_pmx_roundtrip(
     let left = serde_json::to_value(left)?;
     let right = serde_json::to_value(right)?;
     if left != right {
-        return Err("PMX parse/export/parse DTO changed".into());
+        return Err("PMX data differs after re-encoding (parse/export/re-parse mismatch)".into());
     }
     Ok(())
 }
@@ -824,7 +824,7 @@ pub(crate) fn ensure_pmd_roundtrip(
     let left = serde_json::to_value(left)?;
     let right = serde_json::to_value(right)?;
     if left != right {
-        return Err("PMD parse/export/parse DTO changed".into());
+        return Err("PMD data differs after re-encoding (parse/export/re-parse mismatch)".into());
     }
     Ok(())
 }
@@ -899,7 +899,7 @@ pub(crate) fn ensure_accessory_json_roundtrip(
         format!("Accessory JSON roundtrip actual serialization failed: {error}")
     })?;
     if expected != actual {
-        return Err("Accessory JSON DTO changed before export".to_owned());
+        return Err("Accessory JSON data differs after re-encoding".to_owned());
     }
     Ok(())
 }

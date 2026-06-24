@@ -14,21 +14,28 @@ pub enum MmdFormatKind {
     Unknown,
 }
 
-pub fn detect_mmd_format(data: &[u8], file_name: Option<&str>) -> MmdFormatKind {
+pub fn sniff(data: &[u8]) -> Option<MmdFormatKind> {
     if data.starts_with(b"PMX ") {
-        return MmdFormatKind::Pmx;
+        return Some(MmdFormatKind::Pmx);
     }
     if data.starts_with(b"Pmd") {
-        return MmdFormatKind::Pmd;
+        return Some(MmdFormatKind::Pmd);
     }
     if data.starts_with(b"Vocaloid Motion Data") {
-        return MmdFormatKind::Vmd;
+        return Some(MmdFormatKind::Vmd);
+    }
+    if data.starts_with(b"Polygon Movie maker ") {
+        return Some(MmdFormatKind::Pmm);
+    }
+    None
+}
+
+pub fn detect_mmd_format(data: &[u8], file_name: Option<&str>) -> MmdFormatKind {
+    if let Some(kind) = sniff(data) {
+        return kind;
     }
     if data.starts_with(b"Vocaloid Pose Data") {
         return MmdFormatKind::Vpd;
-    }
-    if data.starts_with(b"Polygon Movie maker ") {
-        return MmdFormatKind::Pmm;
     }
     if data.starts_with(b"xof ") {
         return MmdFormatKind::X;
@@ -89,6 +96,22 @@ mod tests {
             detect_mmd_format(b"Nanoem Motion Data", None),
             MmdFormatKind::Nmd
         );
+    }
+
+    #[test]
+    fn sniffs_core_binary_formats_from_magic_bytes() {
+        assert_eq!(sniff(b"PMX test"), Some(MmdFormatKind::Pmx));
+        assert_eq!(sniff(b"Pmd\x00"), Some(MmdFormatKind::Pmd));
+        assert_eq!(
+            sniff(b"Vocaloid Motion Data 0002\0\0\0\0\0model"),
+            Some(MmdFormatKind::Vmd)
+        );
+        assert_eq!(
+            sniff(b"Polygon Movie maker 0002\0"),
+            Some(MmdFormatKind::Pmm)
+        );
+        assert_eq!(sniff(b"Vocaloid Pose Data file"), None);
+        assert_eq!(sniff(b""), None);
     }
 
     #[test]

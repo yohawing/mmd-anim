@@ -515,7 +515,7 @@ pub(crate) fn golden_ik_compare(
         }
 
         let fixture = GoldenIkFixture::from_json_str(&fs::read_to_string(&fixture_path)?)?;
-        let oracle_path = super::resolve_maybe_absolute(&case_root, &fixture.output);
+        let oracle_path = crate::resolve_maybe_absolute(&case_root, &fixture.output);
         if !oracle_path.exists() {
             missing += 1;
             eprintln!("missing: {}", oracle_path.display());
@@ -899,7 +899,7 @@ pub(crate) fn golden_ik_diagnose(
     }
 
     let fixture = GoldenIkFixture::from_json_str(&fs::read_to_string(&fixture_path)?)?;
-    let oracle_path = super::resolve_maybe_absolute(&case_root, &fixture.output);
+    let oracle_path = crate::resolve_maybe_absolute(&case_root, &fixture.output);
     if !oracle_path.exists() {
         return Err("oracle file not found".into());
     }

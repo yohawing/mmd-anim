@@ -10,6 +10,8 @@ use mmd_anim_runtime::{
 
 use crate::error::ImportError;
 
+mod json_f32;
+
 const PMX_MAGIC: [u8; 4] = [0x50, 0x4D, 0x58, 0x20];
 
 const BONE_FLAG_TAIL_INDEX: u16 = 0x0001;
@@ -829,6 +831,7 @@ pub struct PmxParsedModel {
 pub struct PmxParsedMetadata {
     #[serde(default = "default_pmx_format")]
     pub format: String,
+    #[serde(with = "json_f32")]
     pub version: f32,
     pub encoding: String,
     pub name: String,
@@ -868,30 +871,43 @@ pub struct PmxParsedIndexSizes {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedSdef {
+    #[serde(with = "json_f32::vec_f32")]
     pub enabled: Vec<f32>,
+    #[serde(with = "json_f32::vec_f32")]
     pub c: Vec<f32>,
+    #[serde(with = "json_f32::vec_f32")]
     pub r0: Vec<f32>,
+    #[serde(with = "json_f32::vec_f32")]
     pub r1: Vec<f32>,
+    #[serde(with = "json_f32::vec_f32")]
     pub rw0: Vec<f32>,
+    #[serde(with = "json_f32::vec_f32")]
     pub rw1: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedQdef {
+    #[serde(with = "json_f32::vec_f32")]
     pub enabled: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedGeometry {
+    #[serde(with = "json_f32::vec_f32")]
     pub positions: Vec<f32>,
+    #[serde(with = "json_f32::vec_f32")]
     pub normals: Vec<f32>,
+    #[serde(with = "json_f32::vec_f32")]
     pub uvs: Vec<f32>,
+    #[serde(with = "json_f32::nested_vec")]
     pub additional_uvs: Vec<Vec<f32>>,
     pub indices: Vec<u32>,
     pub skin_indices: Vec<u32>,
+    #[serde(with = "json_f32::vec_f32")]
     pub skin_weights: Vec<f32>,
+    #[serde(with = "json_f32::vec_f32")]
     pub edge_scale: Vec<f32>,
     pub material_groups: Vec<PmxParsedMaterialGroup>,
     pub sdef: PmxParsedSdef,
@@ -916,11 +932,17 @@ pub struct PmxParsedMaterial {
     pub sphere_mode: String,
     pub toon_texture_path: String,
     pub shared_toon_index: Option<u8>,
+    #[serde(with = "json_f32::array4")]
     pub diffuse: [f32; 4],
+    #[serde(with = "json_f32::array3")]
     pub specular: [f32; 3],
+    #[serde(with = "json_f32")]
     pub specular_power: f32,
+    #[serde(with = "json_f32::array3")]
     pub ambient: [f32; 3],
+    #[serde(with = "json_f32::array4")]
     pub edge_color: [f32; 4],
+    #[serde(with = "json_f32")]
     pub edge_size: f32,
     pub flags: PmxParsedMaterialFlags,
     pub face_count: i32,
@@ -951,11 +973,14 @@ pub struct PmxParsedBone {
     pub english_name: String,
     pub parent_index: i32,
     pub layer: i32,
+    #[serde(with = "json_f32::array3")]
     pub position: [f32; 3],
     pub tail_index: i32,
+    #[serde(with = "json_f32::option_array3")]
     pub tail_position: Option<[f32; 3]>,
     pub flags: PmxParsedBoneFlags,
     pub append_transform: Option<PmxParsedAppendTransform>,
+    #[serde(with = "json_f32::option_array3")]
     pub fixed_axis: Option<[f32; 3]>,
     pub local_axis: Option<PmxParsedLocalAxis>,
     pub external_parent_key: Option<i32>,
@@ -984,12 +1009,15 @@ pub struct PmxParsedBoneFlags {
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedAppendTransform {
     pub parent_index: i32,
+    #[serde(with = "json_f32")]
     pub weight: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PmxParsedLocalAxis {
+    #[serde(with = "json_f32::array3")]
     pub x: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub z: [f32; 3],
 }
 
@@ -998,6 +1026,7 @@ pub struct PmxParsedLocalAxis {
 pub struct PmxParsedIk {
     pub target_index: i32,
     pub loop_count: i32,
+    #[serde(with = "json_f32")]
     pub limit_angle: f32,
     pub links: Vec<PmxParsedIkLink>,
 }
@@ -1011,7 +1040,9 @@ pub struct PmxParsedIkLink {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PmxParsedIkLimit {
+    #[serde(with = "json_f32::array3")]
     pub lower: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub upper: [f32; 3],
 }
 
@@ -1032,8 +1063,10 @@ pub struct PmxRigSpecBone {
     pub name: String,
     pub name_bytes: String,
     pub parent_index: i32,
+    #[serde(with = "json_f32::array3")]
     pub rest_position: [f32; 3],
     pub deform_layer: i32,
+    #[serde(with = "json_f32::option_array3")]
     pub fixed_axis: Option<[f32; 3]>,
     pub local_axis: Option<PmxRigSpecLocalAxis>,
     pub transform_after_physics: bool,
@@ -1041,7 +1074,9 @@ pub struct PmxRigSpecBone {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PmxRigSpecLocalAxis {
+    #[serde(with = "json_f32::array3")]
     pub x: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub z: [f32; 3],
 }
 
@@ -1051,6 +1086,7 @@ pub struct PmxRigSpecIkChain {
     pub controller_bone_index: i32,
     pub target_bone_index: i32,
     pub iteration_count: u32,
+    #[serde(with = "json_f32")]
     pub limit_angle: f32,
     pub links: Vec<PmxRigSpecIkLink>,
 }
@@ -1060,7 +1096,9 @@ pub struct PmxRigSpecIkChain {
 pub struct PmxRigSpecIkLink {
     pub bone_index: i32,
     pub has_angle_limit: bool,
+    #[serde(with = "json_f32::array3")]
     pub angle_limit_min: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub angle_limit_max: [f32; 3],
 }
 
@@ -1069,6 +1107,7 @@ pub struct PmxRigSpecIkLink {
 pub struct PmxRigSpecGrant {
     pub target_bone_index: i32,
     pub source_bone_index: i32,
+    #[serde(with = "json_f32")]
     pub ratio: f32,
     pub affect_rotation: bool,
     pub affect_translation: bool,
@@ -1183,6 +1222,7 @@ pub struct PmxParsedMorph {
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedVertexMorphOffset {
     pub vertex_index: u32,
+    #[serde(with = "json_f32::array3")]
     pub position: [f32; 3],
 }
 
@@ -1190,6 +1230,7 @@ pub struct PmxParsedVertexMorphOffset {
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedGroupMorphOffset {
     pub morph_index: i32,
+    #[serde(with = "json_f32")]
     pub weight: f32,
 }
 
@@ -1197,7 +1238,9 @@ pub struct PmxParsedGroupMorphOffset {
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedBoneMorphOffset {
     pub bone_index: i32,
+    #[serde(with = "json_f32::array3")]
     pub translation: [f32; 3],
+    #[serde(with = "json_f32::array4")]
     pub rotation: [f32; 4],
 }
 
@@ -1205,6 +1248,7 @@ pub struct PmxParsedBoneMorphOffset {
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedUvMorphOffset {
     pub vertex_index: u32,
+    #[serde(with = "json_f32::array4")]
     pub uv: [f32; 4],
 }
 
@@ -1213,6 +1257,7 @@ pub struct PmxParsedUvMorphOffset {
 pub struct PmxParsedAdditionalUvMorphOffset {
     pub vertex_index: u32,
     pub uv_index: u8,
+    #[serde(with = "json_f32::array4")]
     pub uv: [f32; 4],
 }
 
@@ -1221,14 +1266,23 @@ pub struct PmxParsedAdditionalUvMorphOffset {
 pub struct PmxParsedMaterialMorphOffset {
     pub material_index: i32,
     pub operation: String,
+    #[serde(with = "json_f32::array4")]
     pub diffuse: [f32; 4],
+    #[serde(with = "json_f32::array3")]
     pub specular: [f32; 3],
+    #[serde(with = "json_f32")]
     pub specular_power: f32,
+    #[serde(with = "json_f32::array3")]
     pub ambient: [f32; 3],
+    #[serde(with = "json_f32::array4")]
     pub edge_color: [f32; 4],
+    #[serde(with = "json_f32")]
     pub edge_size: f32,
+    #[serde(with = "json_f32::array4")]
     pub texture_factor: [f32; 4],
+    #[serde(with = "json_f32::array4")]
     pub sphere_texture_factor: [f32; 4],
+    #[serde(with = "json_f32::array4")]
     pub toon_texture_factor: [f32; 4],
 }
 
@@ -1237,7 +1291,9 @@ pub struct PmxParsedMaterialMorphOffset {
 pub struct PmxParsedImpulseMorphOffset {
     pub rigid_body_index: i32,
     pub local: bool,
+    #[serde(with = "json_f32::array3")]
     pub velocity: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub torque: [f32; 3],
 }
 
@@ -1316,13 +1372,21 @@ pub struct PmxParsedRigidBody {
     pub group: u8,
     pub mask: u16,
     pub shape: String,
+    #[serde(with = "json_f32::array3")]
     pub size: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub position: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub rotation: [f32; 3],
+    #[serde(with = "json_f32")]
     pub mass: f32,
+    #[serde(with = "json_f32")]
     pub linear_damping: f32,
+    #[serde(with = "json_f32")]
     pub angular_damping: f32,
+    #[serde(with = "json_f32")]
     pub restitution: f32,
+    #[serde(with = "json_f32")]
     pub friction: f32,
     pub mode: String,
 }
@@ -1336,13 +1400,21 @@ pub struct PmxParsedJoint {
     pub kind: String,
     pub rigid_body_index_a: i32,
     pub rigid_body_index_b: i32,
+    #[serde(with = "json_f32::array3")]
     pub position: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub rotation: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub translation_lower_limit: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub translation_upper_limit: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub rotation_lower_limit: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub rotation_upper_limit: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub spring_translation_factor: [f32; 3],
+    #[serde(with = "json_f32::array3")]
     pub spring_rotation_factor: [f32; 3],
 }
 
@@ -1359,7 +1431,9 @@ pub struct PmxParsedSoftBody {
     pub flags: u8,
     pub bending_constraints_distance: i32,
     pub cluster_count: i32,
+    #[serde(with = "json_f32")]
     pub total_mass: f32,
+    #[serde(with = "json_f32")]
     pub collision_margin: f32,
 }
 
@@ -1374,6 +1448,7 @@ pub struct PmxParserDiagnostic {
 #[serde(rename_all = "camelCase")]
 pub struct PmxPartsDescriptor {
     #[serde(default = "default_pmx_parts_version")]
+    #[serde(with = "json_f32")]
     pub version: f32,
     #[serde(default = "default_pmx_parts_encoding")]
     pub encoding: String,
@@ -1423,16 +1498,22 @@ pub struct PmxPartsMaterialDescriptor {
     #[serde(default = "default_pmx_parts_shared_toon_index")]
     pub shared_toon_index: Option<u8>,
     #[serde(default = "default_pmx_parts_diffuse")]
+    #[serde(with = "json_f32::array4")]
     pub diffuse: [f32; 4],
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub specular: [f32; 3],
     #[serde(default = "default_pmx_parts_specular_power")]
+    #[serde(with = "json_f32")]
     pub specular_power: f32,
     #[serde(default = "default_pmx_parts_ambient")]
+    #[serde(with = "json_f32::array3")]
     pub ambient: [f32; 3],
     #[serde(default = "default_pmx_parts_edge_color")]
+    #[serde(with = "json_f32::array4")]
     pub edge_color: [f32; 4],
     #[serde(default = "default_pmx_parts_edge_size")]
+    #[serde(with = "json_f32")]
     pub edge_size: f32,
     #[serde(default)]
     pub flags: PmxPartsMaterialFlags,
@@ -1488,10 +1569,12 @@ pub struct PmxPartsBoneDescriptor {
     #[serde(default)]
     pub layer: i32,
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub position: [f32; 3],
     #[serde(default = "default_negative_index")]
     pub tail_index: i32,
     #[serde(default)]
+    #[serde(with = "json_f32::option_array3")]
     pub tail_position: Option<[f32; 3]>,
     #[serde(default)]
     pub rotatable: bool,
@@ -1522,6 +1605,7 @@ pub struct PmxPartsMorphDescriptor {
 #[serde(rename_all = "camelCase")]
 pub struct PmxPartsVertexMorphOffset {
     pub vertex_index: u32,
+    #[serde(with = "json_f32::array3")]
     pub position: [f32; 3],
 }
 
@@ -1529,6 +1613,7 @@ pub struct PmxPartsVertexMorphOffset {
 #[serde(rename_all = "camelCase")]
 pub struct PmxPartsGroupMorphOffset {
     pub morph_index: i32,
+    #[serde(with = "json_f32")]
     pub weight: f32,
 }
 
@@ -1570,20 +1655,28 @@ pub struct PmxPartsRigidBodyDescriptor {
     #[serde(default = "default_pmx_parts_rigid_body_shape")]
     pub shape: String,
     #[serde(default = "default_unit_vec3")]
+    #[serde(with = "json_f32::array3")]
     pub size: [f32; 3],
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub position: [f32; 3],
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub rotation: [f32; 3],
     #[serde(default = "default_pmx_parts_mass")]
+    #[serde(with = "json_f32")]
     pub mass: f32,
     #[serde(default)]
+    #[serde(with = "json_f32")]
     pub linear_damping: f32,
     #[serde(default)]
+    #[serde(with = "json_f32")]
     pub angular_damping: f32,
     #[serde(default)]
+    #[serde(with = "json_f32")]
     pub restitution: f32,
     #[serde(default)]
+    #[serde(with = "json_f32")]
     pub friction: f32,
     #[serde(default = "default_pmx_parts_rigid_body_mode")]
     pub mode: String,
@@ -1607,20 +1700,28 @@ pub struct PmxPartsJointDescriptor {
     #[serde(default = "default_negative_index")]
     pub rigid_body_index_b: i32,
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub position: [f32; 3],
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub rotation: [f32; 3],
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub translation_lower_limit: [f32; 3],
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub translation_upper_limit: [f32; 3],
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub rotation_lower_limit: [f32; 3],
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub rotation_upper_limit: [f32; 3],
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub spring_translation_factor: [f32; 3],
     #[serde(default)]
+    #[serde(with = "json_f32::array3")]
     pub spring_rotation_factor: [f32; 3],
 }
 
@@ -5785,6 +5886,47 @@ mod tests {
         let reparsed = parse_pmx_model(&exported).unwrap();
 
         assert_pmx_roundtrip_eq(&parsed, &reparsed);
+    }
+
+    #[test]
+    fn pmx_json_dto_roundtrips_non_finite_f32_values() {
+        let mut parsed = parsed_pmx_fixture();
+        let finite_position = parsed.geometry.positions[1];
+        parsed.geometry.positions[0] = f32::NAN;
+        parsed.geometry.normals[1] = f32::INFINITY;
+        parsed.geometry.uvs[0] = f32::NEG_INFINITY;
+        parsed.materials[0].diffuse[0] = f32::INFINITY;
+        parsed.materials[0].edge_size = f32::NAN;
+        parsed.skeleton.bones[0].position[0] = f32::NEG_INFINITY;
+        parsed.morphs[0].vertex_offsets[0].position[1] = f32::NAN;
+
+        let json = serde_json::to_string(&parsed).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(json.contains("\"NaN\""));
+        assert!(json.contains("\"Infinity\""));
+        assert!(json.contains("\"-Infinity\""));
+        assert_eq!(value["geometry"]["positions"][0], serde_json::json!("NaN"));
+        assert_eq!(
+            value["geometry"]["normals"][1],
+            serde_json::json!("Infinity")
+        );
+        assert_eq!(value["geometry"]["uvs"][0], serde_json::json!("-Infinity"));
+        assert_eq!(
+            value["geometry"]["positions"][1],
+            serde_json::json!(finite_position)
+        );
+
+        let from_json: PmxParsedModel = serde_json::from_str(&json).unwrap();
+
+        assert!(from_json.geometry.positions[0].is_nan());
+        assert_eq!(from_json.geometry.normals[1], f32::INFINITY);
+        assert_eq!(from_json.geometry.uvs[0], f32::NEG_INFINITY);
+        assert_eq!(from_json.materials[0].diffuse[0], f32::INFINITY);
+        assert!(from_json.materials[0].edge_size.is_nan());
+        assert_eq!(from_json.skeleton.bones[0].position[0], f32::NEG_INFINITY);
+        assert!(from_json.morphs[0].vertex_offsets[0].position[1].is_nan());
+        assert_eq!(from_json.geometry.positions[1], finite_position);
     }
 
     #[test]

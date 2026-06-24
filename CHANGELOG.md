@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.6 - 2026-06-25
+
+Patch release for CLI overhaul, rig primitives, crates.io CLI publishing, and
+PMX roundtrip fixes.
+
+### Added
+
+- Restructured CLI from flat subcommands to operation-based groups (parse,
+  export, import, compare, bench, rig, golden, oracle, patch) with clap derive.
+- Added magic byte format detection so the CLI can identify files without
+  relying on file extensions.
+- Added IK and append transform evaluation primitives extracted from the
+  runtime, enabling host-side rig solvers to call individual solve steps.
+- Added rig primitive C ABI (`mmd-anim-ffi`) and PMX rig spec extraction for
+  native host integration.
+- Added `rig inspect` CLI command for diagnosing rig specs from PMX files.
+- Enabled crates.io publishing for `mmd-anim-cli` and `mmd-anim-schema`.
+  `mmd-anim-cli` is now installable via `cargo install mmd-anim-cli`.
+
+### Fixed
+
+- Fixed PMX roundtrip DTO precision loss where vertex deform types
+  (BDEF1/BDEF2/SDEF/QDEF) were not preserved, causing all vertices to be
+  re-exported as BDEF4.
+- Fixed JSON roundtrip serialization of non-finite f32 values (NaN, Infinity,
+  -Infinity) in PMX DTOs. Added `json_f32` serde helper that encodes these as
+  JSON strings and restores them on deserialization.
+- Improved CLI output readability and help text.
+
 ## 0.1.5 - 2026-06-21
 
 Patch release for PMX material split host import and parser API parity.

@@ -119,15 +119,30 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
     println!("bench-pair:");
     println!(
         "  model:   bones={} ik={} ikTolerance={:.8} ikMaxIterationsCap={} append={} fixedAxis={}",
-        bone_count, ik_display, cfg.ik_options.tolerance, ik_cap_display, append_count, fixed_axis_count,
+        bone_count,
+        ik_display,
+        cfg.ik_options.tolerance,
+        ik_cap_display,
+        append_count,
+        fixed_axis_count,
     );
     println!(
         "  motion:  vmdBoneKeys={} vmdMorphKeys={} clipBoneTracks={} clipMorphTracks={} propertyTrack={} clipFrameRange={}",
-        vmd.bone_keyframes.len(), vmd.morph_keyframes.len(), clip.bone_track_count(), clip.morph_track_count(), clip.has_property_track(), frame_range,
+        vmd.bone_keyframes.len(),
+        vmd.morph_keyframes.len(),
+        clip.bone_track_count(),
+        clip.morph_track_count(),
+        clip.has_property_track(),
+        frame_range,
     );
     println!(
         "  timing:  readMs={:.3} pmxImportMs={:.3} vmdImportMs={:.3} clipBuildMs={:.3} evalMs={:.3} totalMs={:.3}",
-        read_elapsed.as_secs_f64() * 1000.0, pmx_elapsed.as_secs_f64() * 1000.0, vmd_elapsed.as_secs_f64() * 1000.0, clip_elapsed.as_secs_f64() * 1000.0, eval_ms, total_elapsed.as_secs_f64() * 1000.0,
+        read_elapsed.as_secs_f64() * 1000.0,
+        pmx_elapsed.as_secs_f64() * 1000.0,
+        vmd_elapsed.as_secs_f64() * 1000.0,
+        clip_elapsed.as_secs_f64() * 1000.0,
+        eval_ms,
+        total_elapsed.as_secs_f64() * 1000.0,
     );
     println!(
         "  result:  frames={} startFrame={:.3} step={:.3} msPerFrame={:.6} fps={:.1} checksum={:08x} morphChecksum={:08x}",

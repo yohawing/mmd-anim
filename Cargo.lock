@@ -187,7 +187,7 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
 name = "mmd-anim"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "mmd-anim-format",
  "mmd-anim-runtime",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "mmd-anim-cli"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "glam",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "mmd-anim-ffi"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "glam",
  "mmd-anim-format",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "mmd-anim-format"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "encoding_rs",
  "glam",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "mmd-anim-runtime"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "glam",
  "thiserror",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "mmd-anim-schema"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "glam",
  "serde",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "mmd-anim-wasm"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "glam",
  "js-sys",

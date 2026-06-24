@@ -1,8 +1,22 @@
 use std::sync::Arc;
 
-use glam::{Mat4, Quat, Vec3A};
+use glam::{Mat4, Quat};
 
 use crate::{AnimationClip, ModelArena, MorphIndex, PoseArena};
+use crate::{
+    append_primitive::{AppendPrimitiveInput, solve_append_transform},
+    ik_primitive::{
+        ChainLinkState, LinkStepInput, constrain_rotation_to_axis, rotation, solve_link_step,
+        translation,
+    },
+};
+
+#[cfg(test)]
+use crate::ik_primitive::{
+    LimitedAxesLinkStepInput, PlaneLinkStepInput, axis_vec, decompose_euler_xyz, euler_xyz_to_quat,
+    limit_axis_bounds, quat_to_rotation_mat3, signed_projected_angle, solve_limited_axes_link_step,
+    solve_plane_link_step,
+};
 
 #[derive(Debug)]
 struct IkScratch {
@@ -178,39 +192,36 @@ impl RuntimeInstance {
 
             if let Some(append_index) = self.model.append_transform_index(*bone) {
                 let append = self.model.append_transform(append_index);
+                let use_source_append = !append.local
+                    && self
+                        .model
+                        .append_transform_index(append.source_bone)
+                        .is_some();
+                let source_rotation = if use_source_append {
+                    self.pose.append_rotation(append.source_bone)
+                } else {
+                    self.pose.local_rotation(append.source_bone)
+                };
+                let source_position_offset = if use_source_append {
+                    self.pose.append_position_offset(append.source_bone)
+                } else {
+                    self.pose.local_position_offset(append.source_bone)
+                };
+                let append_output = solve_append_transform(AppendPrimitiveInput {
+                    source_position_offset,
+                    source_rotation,
+                    ratio: append.ratio,
+                    affect_rotation: append.affect_rotation,
+                    affect_translation: append.affect_translation,
+                });
+                self.pose.set_append_rotation(*bone, append_output.rotation);
+                self.pose
+                    .set_append_position_offset(*bone, append_output.position_offset);
                 if append.affect_rotation {
-                    let source_rotation = if !append.local
-                        && self
-                            .model
-                            .append_transform_index(append.source_bone)
-                            .is_some()
-                    {
-                        self.pose.append_rotation(append.source_bone)
-                    } else {
-                        self.pose.local_rotation(append.source_bone)
-                    };
-                    let append_rotation = Quat::IDENTITY
-                        .slerp(source_rotation, append.ratio)
-                        .normalize();
-                    self.pose.set_append_rotation(*bone, append_rotation);
-                    local_rotation = (local_rotation * append_rotation).normalize();
+                    local_rotation = (local_rotation * append_output.rotation).normalize();
                 }
-
                 if append.affect_translation {
-                    let source_position_offset = if !append.local
-                        && self
-                            .model
-                            .append_transform_index(append.source_bone)
-                            .is_some()
-                    {
-                        self.pose.append_position_offset(append.source_bone)
-                    } else {
-                        self.pose.local_position_offset(append.source_bone)
-                    };
-                    let append_position_offset = source_position_offset * append.ratio;
-                    self.pose
-                        .set_append_position_offset(*bone, append_position_offset);
-                    local_position += append_position_offset;
+                    local_position += append_output.position_offset;
                 }
             }
 
@@ -349,69 +360,17 @@ impl RuntimeInstance {
                         continue;
                     }
 
-                    let single_axis = get_single_axis_limit(link.angle_limit);
-
-                    if let (Some(angle_limit), Some(axis_index)) = (link.angle_limit, single_axis) {
-                        solve_plane_link_step(PlaneLinkStepInput {
-                            local_effector: &local_effector,
-                            local_target: &local_target,
-                            link_index,
-                            base_rotations: &base_rotations,
-                            ik_rotations: &mut ik_rotations,
-                            chain_states: &mut chain_states,
-                            axis_index,
-                            limits: angle_limit,
-                            iteration: _iteration,
-                            limit_angle,
-                        });
-                    } else if let Some(angle_limit) = link.angle_limit {
-                        solve_limited_axes_link_step(LimitedAxesLinkStepInput {
-                            local_effector: &local_effector,
-                            local_target: &local_target,
-                            link_index,
-                            base_rotations: &base_rotations,
-                            ik_rotations: &mut ik_rotations,
-                            chain_states: &mut chain_states,
-                            limits: angle_limit,
-                            limit_angle,
-                        });
-                    } else {
-                        let local_eff_n = local_effector.normalize();
-                        let local_tgt_n = local_target.normalize();
-                        let dot = local_eff_n.dot(local_tgt_n).clamp(-1.0, 1.0);
-                        let mut angle = dot.acos();
-
-                        let tiny_angle = 1e-3 * std::f32::consts::PI / 180.0;
-                        if angle < tiny_angle {
-                            continue;
-                        }
-
-                        if limit_angle > 0.0 {
-                            angle = angle.min(limit_angle);
-                        }
-
-                        let axis = local_eff_n.cross(local_tgt_n);
-                        let axis_vec = if axis.length() < 1e-5 {
-                            if dot > -1.0 + 1e-5 {
-                                continue;
-                            }
-                            let basis = if local_eff_n.x.abs() < 0.9 {
-                                Vec3A::new(1.0, 0.0, 0.0)
-                            } else {
-                                Vec3A::new(0.0, 1.0, 0.0)
-                            };
-                            local_eff_n.cross(basis).normalize()
-                        } else {
-                            axis.normalize()
-                        };
-
-                        let delta = Quat::from_axis_angle(axis_vec.into(), angle);
-                        let base = base_rotations[link_index];
-                        let ik = ik_rotations[link_index];
-                        let chain_rotation = (ik * base * delta).normalize();
-
-                        ik_rotations[link_index] = (chain_rotation * base.inverse()).normalize();
-                    }
+                    solve_link_step(LinkStepInput {
+                        local_effector: &local_effector,
+                        local_target: &local_target,
+                        link_index,
+                        base_rotations: &base_rotations,
+                        ik_rotations: &mut ik_rotations,
+                        chain_states: &mut chain_states,
+                        angle_limit: link.angle_limit,
+                        iteration: _iteration,
+                        limit_angle,
+                    });
 
                     self.apply_ik_link_rotations(&links, &base_rotations, &ik_rotations);
                     self.update_world_matrices_from_bone(link_bone);
@@ -642,337 +601,6 @@ fn expand_group_morph_weight(
             expand_group_morph_weight(child, contribution, spans, offsets, expanded_weights);
         }
     }
-}
-
-fn translation(matrix: Mat4) -> Vec3A {
-    Vec3A::from_vec4(matrix.w_axis)
-}
-
-fn rotation(matrix: Mat4) -> Quat {
-    matrix.to_scale_rotation_translation().1
-}
-
-fn constrain_rotation_to_axis(rotation: Quat, axis: Vec3A) -> Quat {
-    let axis = axis.normalize();
-    let vector = Vec3A::new(rotation.x, rotation.y, rotation.z);
-    let projected = axis * vector.dot(axis);
-    let twist = Quat::from_xyzw(projected.x, projected.y, projected.z, rotation.w);
-    if twist.length_squared() <= f32::EPSILON {
-        Quat::IDENTITY
-    } else {
-        twist.normalize()
-    }
-}
-
-#[derive(Debug)]
-struct ChainLinkState {
-    previous_euler: [f32; 3],
-    plane_mode_angle: f32,
-}
-
-fn get_single_axis_limit(limit: Option<crate::IkAngleLimit>) -> Option<usize> {
-    let limit = limit?;
-    let has = [
-        limit.min.x != 0.0 || limit.max.x != 0.0,
-        limit.min.y != 0.0 || limit.max.y != 0.0,
-        limit.min.z != 0.0 || limit.max.z != 0.0,
-    ];
-    if has[0]
-        && limit.min.y == 0.0
-        && limit.max.y == 0.0
-        && limit.min.z == 0.0
-        && limit.max.z == 0.0
-    {
-        return Some(0);
-    }
-    if has[1]
-        && limit.min.x == 0.0
-        && limit.max.x == 0.0
-        && limit.min.z == 0.0
-        && limit.max.z == 0.0
-    {
-        return Some(1);
-    }
-    if has[2]
-        && limit.min.x == 0.0
-        && limit.max.x == 0.0
-        && limit.min.y == 0.0
-        && limit.max.y == 0.0
-    {
-        return Some(2);
-    }
-    None
-}
-
-fn quat_to_rotation_mat3(rotation: Quat) -> [f32; 9] {
-    let [x, y, z, w] = rotation.normalize().to_array();
-    let x2 = x + x;
-    let y2 = y + y;
-    let z2 = z + z;
-    let xx = x * x2;
-    let xy = x * y2;
-    let xz = x * z2;
-    let yy = y * y2;
-    let yz = y * z2;
-    let zz = z * z2;
-    let wx = w * x2;
-    let wy = w * y2;
-    let wz = w * z2;
-    [
-        1.0 - (yy + zz),
-        xy + wz,
-        xz - wy,
-        xy - wz,
-        1.0 - (xx + zz),
-        yz + wx,
-        xz + wy,
-        yz - wx,
-        1.0 - (xx + yy),
-    ]
-}
-
-fn decompose_euler_xyz(mat: &[f32; 9], before: &[f32; 3]) -> [f32; 3] {
-    let sy = -mat[2];
-    let mut result: [f32; 3];
-    if 1.0 - sy.abs() < 1e-6 {
-        let y = sy.asin();
-        let sx = before[0].sin();
-        let sz = before[2].sin();
-        if sx.abs() < sz.abs() {
-            let cx = before[0].cos();
-            result = if cx > 0.0 {
-                [0.0, y, (-mat[3]).asin()]
-            } else {
-                [std::f32::consts::PI, y, mat[3].asin()]
-            };
-        } else {
-            let cz = before[2].cos();
-            result = if cz > 0.0 {
-                [(-mat[7]).asin(), y, 0.0]
-            } else {
-                [mat[7].asin(), y, std::f32::consts::PI]
-            };
-        }
-    } else {
-        result = [mat[5].atan2(mat[8]), (-mat[2]).asin(), mat[1].atan2(mat[0])];
-    }
-
-    let pi = std::f32::consts::PI;
-    let candidates: [[f32; 3]; 8] = [
-        [result[0] + pi, pi - result[1], result[2] + pi],
-        [result[0] + pi, pi - result[1], result[2] - pi],
-        [result[0] + pi, -pi - result[1], result[2] + pi],
-        [result[0] + pi, -pi - result[1], result[2] - pi],
-        [result[0] - pi, pi - result[1], result[2] + pi],
-        [result[0] - pi, pi - result[1], result[2] - pi],
-        [result[0] - pi, -pi - result[1], result[2] + pi],
-        [result[0] - pi, -pi - result[1], result[2] - pi],
-    ];
-    let mut min_error = diff_angle(result[0], before[0]).abs()
-        + diff_angle(result[1], before[1]).abs()
-        + diff_angle(result[2], before[2]).abs();
-    for candidate in &candidates {
-        let error = diff_angle(candidate[0], before[0]).abs()
-            + diff_angle(candidate[1], before[1]).abs()
-            + diff_angle(candidate[2], before[2]).abs();
-        if error < min_error {
-            min_error = error;
-            result = *candidate;
-        }
-    }
-    result
-}
-
-fn diff_angle(a: f32, b: f32) -> f32 {
-    let diff = normalize_angle(a) - normalize_angle(b);
-    if diff > std::f32::consts::PI {
-        diff - std::f32::consts::TAU
-    } else if diff < -std::f32::consts::PI {
-        diff + std::f32::consts::TAU
-    } else {
-        diff
-    }
-}
-
-fn normalize_angle(angle: f32) -> f32 {
-    let mut result = angle;
-    while result >= std::f32::consts::TAU {
-        result -= std::f32::consts::TAU;
-    }
-    while result < 0.0 {
-        result += std::f32::consts::TAU;
-    }
-    result
-}
-
-fn euler_xyz_to_quat(euler: &[f32; 3]) -> Quat {
-    let [x, y, z] = *euler;
-    let c1 = (x / 2.0).cos();
-    let c2 = (y / 2.0).cos();
-    let c3 = (z / 2.0).cos();
-    let s1 = (x / 2.0).sin();
-    let s2 = (y / 2.0).sin();
-    let s3 = (z / 2.0).sin();
-    Quat::from_xyzw(
-        s1 * c2 * c3 + c1 * s2 * s3,
-        c1 * s2 * c3 - s1 * c2 * s3,
-        c1 * c2 * s3 + s1 * s2 * c3,
-        c1 * c2 * c3 - s1 * s2 * s3,
-    )
-}
-
-struct LimitedAxesLinkStepInput<'a> {
-    local_effector: &'a Vec3A,
-    local_target: &'a Vec3A,
-    link_index: usize,
-    base_rotations: &'a [Quat],
-    ik_rotations: &'a mut [Quat],
-    chain_states: &'a mut [ChainLinkState],
-    limits: crate::IkAngleLimit,
-    limit_angle: f32,
-}
-
-fn solve_limited_axes_link_step(input: LimitedAxesLinkStepInput<'_>) {
-    let state = &mut input.chain_states[input.link_index];
-    let base = input.base_rotations[input.link_index];
-    let current = (input.ik_rotations[input.link_index] * base).normalize();
-    let current_mat = quat_to_rotation_mat3(current);
-    let mut total_euler = decompose_euler_xyz(&current_mat, &state.previous_euler);
-    let mut working_effector = *input.local_effector;
-    let target = input.local_target.normalize();
-
-    for axis_index in [2usize, 1, 0] {
-        let (lower, upper) = limit_axis_bounds(input.limits, axis_index);
-        if lower == 0.0 && upper == 0.0 {
-            let next = total_euler[axis_index].clamp(lower, upper);
-            let applied = next - total_euler[axis_index];
-            total_euler[axis_index] = next;
-            if applied.abs() > 0.0 {
-                working_effector = Quat::from_axis_angle(axis_vec(axis_index).into(), applied)
-                    .mul_vec3a(working_effector);
-            }
-            continue;
-        }
-
-        let axis = axis_vec(axis_index);
-        let signed_angle = signed_projected_angle(working_effector, target, axis);
-        if signed_angle.abs() <= 1.0e-6 {
-            continue;
-        }
-        let step = if input.limit_angle > 0.0 {
-            signed_angle.clamp(-input.limit_angle, input.limit_angle)
-        } else {
-            signed_angle
-        };
-        let next = (total_euler[axis_index] + step).clamp(lower, upper);
-        let applied = next - total_euler[axis_index];
-        total_euler[axis_index] = next;
-        if applied.abs() > 0.0 {
-            working_effector =
-                Quat::from_axis_angle(axis.into(), applied).mul_vec3a(working_effector);
-        }
-    }
-
-    state.previous_euler = total_euler;
-    let chain_rotation = euler_xyz_to_quat(&total_euler).normalize();
-    input.ik_rotations[input.link_index] = (chain_rotation * base.inverse()).normalize();
-}
-
-fn limit_axis_bounds(limits: crate::IkAngleLimit, axis_index: usize) -> (f32, f32) {
-    match axis_index {
-        0 => (limits.min.x, limits.max.x),
-        1 => (limits.min.y, limits.max.y),
-        _ => (limits.min.z, limits.max.z),
-    }
-}
-
-fn axis_vec(axis_index: usize) -> Vec3A {
-    match axis_index {
-        0 => Vec3A::new(1.0, 0.0, 0.0),
-        1 => Vec3A::new(0.0, 1.0, 0.0),
-        _ => Vec3A::new(0.0, 0.0, 1.0),
-    }
-}
-
-fn signed_projected_angle(from: Vec3A, to: Vec3A, axis: Vec3A) -> f32 {
-    let projected_from = from - axis * from.dot(axis);
-    let projected_to = to - axis * to.dot(axis);
-    if projected_from.length_squared() <= f32::EPSILON
-        || projected_to.length_squared() <= f32::EPSILON
-    {
-        return 0.0;
-    }
-    let from_n = projected_from.normalize();
-    let to_n = projected_to.normalize();
-    let dot = from_n.dot(to_n).clamp(-1.0, 1.0);
-    let angle = dot.acos();
-    let sign = axis.dot(from_n.cross(to_n)).signum();
-    angle * if sign == 0.0 { 1.0 } else { sign }
-}
-
-struct PlaneLinkStepInput<'a> {
-    local_effector: &'a Vec3A,
-    local_target: &'a Vec3A,
-    link_index: usize,
-    base_rotations: &'a [Quat],
-    ik_rotations: &'a mut [Quat],
-    chain_states: &'a mut [ChainLinkState],
-    axis_index: usize,
-    limits: crate::IkAngleLimit,
-    iteration: usize,
-    limit_angle: f32,
-}
-
-fn solve_plane_link_step(input: PlaneLinkStepInput<'_>) {
-    let rotate_axis = match input.axis_index {
-        0 => Vec3A::new(1.0, 0.0, 0.0),
-        1 => Vec3A::new(0.0, 1.0, 0.0),
-        _ => Vec3A::new(0.0, 0.0, 1.0),
-    };
-    let local_eff_n = input.local_effector.normalize();
-    let local_tgt_n = input.local_target.normalize();
-
-    let dot = local_eff_n.dot(local_tgt_n).clamp(-1.0, 1.0);
-    let raw_angle = dot.acos();
-    let capped_angle = if input.limit_angle > 0.0 {
-        raw_angle.min(input.limit_angle)
-    } else {
-        raw_angle
-    };
-
-    let target_vec1 =
-        Quat::from_axis_angle(rotate_axis.into(), capped_angle).mul_vec3a(local_eff_n);
-    let target_vec2 =
-        Quat::from_axis_angle(rotate_axis.into(), -capped_angle).mul_vec3a(local_eff_n);
-    let signed_angle = if target_vec1.dot(local_tgt_n) > target_vec2.dot(local_tgt_n) {
-        capped_angle
-    } else {
-        -capped_angle
-    };
-
-    let state = &mut input.chain_states[input.link_index];
-    let mut next_angle = state.plane_mode_angle + signed_angle;
-    let (lower, upper) = match input.axis_index {
-        0 => (input.limits.min.x, input.limits.max.x),
-        1 => (input.limits.min.y, input.limits.max.y),
-        _ => (input.limits.min.z, input.limits.max.z),
-    };
-    let base = input.base_rotations[input.link_index];
-
-    if input.iteration == 0 && (next_angle < lower || next_angle > upper) {
-        if -next_angle > lower && -next_angle < upper {
-            next_angle = -next_angle;
-        } else {
-            let half = (lower + upper) * 0.5;
-            if (half - next_angle).abs() > (half + next_angle).abs() {
-                next_angle = -next_angle;
-            }
-        }
-    }
-
-    state.plane_mode_angle = next_angle.clamp(lower, upper);
-    let chain_rotation = Quat::from_axis_angle(rotate_axis.into(), state.plane_mode_angle);
-    input.ik_rotations[input.link_index] = (chain_rotation * base.inverse()).normalize();
 }
 
 #[cfg(test)]

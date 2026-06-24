@@ -55,6 +55,9 @@ cargo doc --workspace --no-deps
 
 - [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): `mmd-anim` を
   アニメーション・形式処理 backend として利用する Three.js 向け MMD loader。
+- [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools):
+  Maya 向け MMD アニメーション編集ツールとして利用する Maya プラグイン。 VMDインポート時のフルベイク用と、リグ実装にあたっての正本として利用。
+- [unity-mmd-loader](https://github.com/yohawing/unity-mmd-loader): Unity6、URPに最適化Unity向けMMD Loader。インポーターと、コアアニメーションランタイムとして利用。
 
 Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同じ機能を組み込めます。
 
@@ -81,8 +84,8 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 | `mmd-anim-format` | PMX/VMD のランタイム取り込み、形式判定、読み込み（構造化）、PMX/PMD/VMD/VPD/X/VAC の書き出しを提供する。 |
 | `mmd-anim-ffi` | ネイティブホスト向けの C ABI。ランタイム操作と PMX パーツ書き出しを公開する。0.1.x 系ではリポジトリ内専用。 |
 | `mmd-anim-wasm` | ブラウザ向けの `wasm-bindgen` ラッパー。ランタイム操作、読み込み/書き出し、PMX パーツ書き出しを公開する。0.1.x 系ではワークスペース内専用。 |
-| `mmd-anim-cli` | メンテナ向けの診断・検証コマンド。0.1.x 系ではリポジトリ内専用。 |
-| `mmd-anim-schema` | メンテナ向けの品質確認用スキーマ補助クレート。0.1.x 系ではリポジトリ内専用。 |
+| `mmd-anim-cli` | MMD 形式ファイルの検査・変換・診断コマンド。`cargo install mmd-anim-cli` でインストール可能。 |
+| `mmd-anim-schema` | CLI や診断ツールが使用する共有 IR・トレーススキーマ。 |
 
 通常のライブラリ利用では `mmd-anim` を依存に追加してください。低レイヤだけを直接使いたい場合は
 `mmd-anim-format` や `mmd-anim-runtime` に直接依存できます。
@@ -191,16 +194,25 @@ const generatedPmxBytes = exportPmxFromParts(
 );
 ```
 
-## CLI で読み込み / 書き出しを確認する
+## CLI
 
-形式の読み込みや書き出しを手元で確認したい場合は、リポジトリ内専用の `mmd-anim-cli` が使えます。
-利用できるサブコマンドの一覧は次のコマンドで確認できます。
+`mmd-anim-cli` は MMD 形式ファイル（PMX, VMD, VPD, PMM, X/VAC）の検査・変換・診断を行うコマンドラインツールです。
+
+```powershell
+cargo install mmd-anim-cli
+```
+
+インストール後、`mmd-anim` コマンドが使えます。
+
+```powershell
+mmd-anim --help
+```
+
+開発中はワークスペースから直接実行することもできます。
 
 ```powershell
 cargo run -p mmd-anim-cli -- --help
 ```
-
-このコマンドラインツールはメンテナ向けの診断ツールで、公開リリースの前提条件にはしていません。
 
 ## 現在の制限と注意点
 

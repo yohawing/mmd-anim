@@ -9,7 +9,6 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Shared IR and trace schema for mmd-anim"
-publish = false
 
 [dependencies]
 glam.workspace = true

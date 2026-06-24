@@ -89,8 +89,8 @@ Format support overview. "Loading" means parsing a file into structured data.
 | `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
 | `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for the 0.1.x line. |
 | `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for the 0.1.x line. |
-| `mmd-anim-cli` | Maintainer diagnostics and verification command-line tool. Repository-local for the 0.1.x line. |
-| `mmd-anim-schema` | Maintainer quality-check schema helper crate. Repository-local for the 0.1.x line. |
+| `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files. Installable via `cargo install mmd-anim-cli`. |
+| `mmd-anim-schema` | Shared IR and trace schema used by the CLI and diagnostic tools. |
 
 For normal library use, depend on `mmd-anim`. Advanced users who only need a
 lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
@@ -207,17 +207,26 @@ const generatedPmxBytes = exportPmxFromParts(
 The WASM package is not published to crates.io for the 0.1.x line. It is kept in the Rust
 workspace for builds and checks.
 
-## CLI Checks
+## CLI
 
-For local loading and writing checks, use the repository-local `mmd-anim-cli`.
-Available subcommands can be listed with:
+`mmd-anim-cli` is a command-line tool for inspecting, converting, and diagnosing
+MMD format files (PMX, VMD, VPD, PMM, X/VAC).
+
+```powershell
+cargo install mmd-anim-cli
+```
+
+After installation, the `mmd-anim` command is available:
+
+```powershell
+mmd-anim --help
+```
+
+For development, you can also run directly from the workspace:
 
 ```powershell
 cargo run -p mmd-anim-cli -- --help
 ```
-
-This command-line tool is for maintainer diagnostics and is not required for
-public releases.
 
 ## Current Limitations
 

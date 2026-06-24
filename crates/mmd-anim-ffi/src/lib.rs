@@ -5,12 +5,12 @@ use std::{ptr, slice, str, sync::Arc};
 
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    solve_append_transform, AnimationClip, AppendPrimitiveInput, AppendTransformInit,
-    BoneAnimationBinding, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit,
-    IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkLinkInit,
-    IkSolveOptions, IkSolverInit, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe,
-    MorphOffsetSpan, MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding,
-    PropertyKeyframe, RuntimeInstance,
+    AnimationClip, AppendPrimitiveInput, AppendTransformInit, BoneAnimationBinding, BoneIndex,
+    BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit, IkChainDefinition,
+    IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkLinkInit, IkSolveOptions,
+    IkSolverInit, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan,
+    MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
+    RuntimeInstance, solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 1;
@@ -5296,10 +5296,7 @@ mod tests {
             .unwrap_or_else(|err| panic!("{context}: manifest_json parse failed: {err}"))
     }
 
-    fn rig_spec_manifest_json(
-        spec: *mut MmdRuntimePmxRigSpec,
-        context: &str,
-    ) -> serde_json::Value {
+    fn rig_spec_manifest_json(spec: *mut MmdRuntimePmxRigSpec, context: &str) -> serde_json::Value {
         let manifest_bytes =
             ffi_buffer_to_vec(unsafe { mmd_runtime_pmx_rig_spec_manifest_json(spec) });
         assert!(
@@ -5362,7 +5359,10 @@ mod tests {
             "ikChainCount mismatch"
         );
         assert_eq!(grants.len(), grant_count as usize, "grantCount mismatch");
-        assert!(bone_count > 0, "fixture rig spec: boneCount must be positive");
+        assert!(
+            bone_count > 0,
+            "fixture rig spec: boneCount must be positive"
+        );
         assert!(
             ik_chain_count > 0,
             "fixture rig spec: ikChainCount must be positive"
@@ -5370,7 +5370,10 @@ mod tests {
 
         for (bone_index, bone) in bones.iter().enumerate() {
             let context = format!("fixture rig spec: bone {bone_index}");
-            assert!(bone.get("name").is_some_and(|v| v.is_string()), "{context}: name");
+            assert!(
+                bone.get("name").is_some_and(|v| v.is_string()),
+                "{context}: name"
+            );
             assert!(
                 bone.get("nameBytes").is_some_and(|v| v.is_string()),
                 "{context}: nameBytes"
@@ -5388,8 +5391,14 @@ mod tests {
                 bone.get("deformLayer").is_some_and(|v| v.is_number()),
                 "{context}: deformLayer"
             );
-            assert!(bone.get("fixedAxis").is_some(), "{context}: fixedAxis missing");
-            assert!(bone.get("localAxis").is_some(), "{context}: localAxis missing");
+            assert!(
+                bone.get("fixedAxis").is_some(),
+                "{context}: fixedAxis missing"
+            );
+            assert!(
+                bone.get("localAxis").is_some(),
+                "{context}: localAxis missing"
+            );
             assert!(
                 bone.get("transformAfterPhysics")
                     .is_some_and(|v| v.is_boolean()),

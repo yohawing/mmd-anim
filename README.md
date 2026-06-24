@@ -62,6 +62,8 @@ cargo doc --workspace --no-deps
 
 - [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): A Three.js
   MMD loader that uses `mmd-anim` as its animation and format backend.
+- [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools): Maya plugin for
+  MMD model and motion handling, using `mmd-anim` as its native runtime.
 
 More integrations can share the same runtime core through the Rust API, C ABI,
 or WASM wrapper.

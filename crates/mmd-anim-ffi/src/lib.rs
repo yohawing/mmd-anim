@@ -5,11 +5,12 @@ use std::{ptr, slice, str, sync::Arc};
 
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneInit, BoneMorphOffset,
-    GroupMorphOffset, IkAngleLimit, IkLinkInit, IkSolveOptions, IkSolverInit,
-    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan, MorphTrack,
-    MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
-    RuntimeInstance,
+    solve_append_transform, AnimationClip, AppendPrimitiveInput, AppendTransformInit,
+    BoneAnimationBinding, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit,
+    IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkLinkInit,
+    IkSolveOptions, IkSolverInit, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe,
+    MorphOffsetSpan, MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding,
+    PropertyKeyframe, RuntimeInstance,
 };
 
 pub const ABI_VERSION: u32 = 1;
@@ -56,6 +57,23 @@ pub struct MmdRuntimeClip {
 pub struct MmdRuntimePmxMaterialSplit {
     split: mmd_anim_format::PmxMaterialSplitResult,
     manifest_json: Vec<u8>,
+}
+
+pub struct MmdRuntimePmxRigSpec {
+    spec: mmd_anim_format::PmxRigSpec,
+    manifest_json: Vec<u8>,
+}
+
+pub struct MmdRuntimeIkChain {
+    solver: IkChainSolver,
+    bone_count: usize,
+    link_count: usize,
+}
+
+pub struct MmdRuntimeAppendSolver {
+    ratio: f32,
+    affect_rotation: bool,
+    affect_translation: bool,
 }
 
 #[repr(C)]
@@ -119,6 +137,37 @@ pub struct MmdRuntimeFfiIkLink {
 }
 
 #[repr(C)]
+pub struct MmdRuntimeFfiRigIkLink {
+    pub bone_slot: u32,
+    pub has_angle_limit: bool,
+    pub angle_limit_min_xyz: [f32; 3],
+    pub angle_limit_max_xyz: [f32; 3],
+}
+
+#[repr(C)]
+pub struct MmdRuntimeFfiRigBone {
+    pub parent_slot: i32,
+    pub rest_position_xyz: [f32; 3],
+    pub flags: u32,
+    pub fixed_axis_xyz: [f32; 3],
+}
+
+#[repr(C)]
+pub struct MmdRuntimeFfiIkSolveStats {
+    pub executed_iterations: u32,
+    pub link_steps: u32,
+    pub final_distance: f32,
+    pub break_reason: u32,
+}
+
+#[repr(C)]
+pub struct MmdRuntimeFfiAppendConfig {
+    pub ratio: f32,
+    pub affect_rotation: bool,
+    pub affect_translation: bool,
+}
+
+#[repr(C)]
 pub struct MmdRuntimeFfiBoneMorphOffset {
     pub morph_index: u32,
     pub target_bone_index: u32,
@@ -143,6 +192,7 @@ const APPEND_FLAG_ROTATION: u32 = 1;
 const APPEND_FLAG_TRANSLATION: u32 = 1 << 1;
 const APPEND_FLAG_LOCAL: u32 = 1 << 2;
 const IK_LINK_FLAG_ANGLE_LIMIT: u32 = 1;
+const RIG_BONE_FIXED_AXIS: u32 = 1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mmd_runtime_abi_version() -> u32 {
@@ -185,6 +235,271 @@ pub unsafe extern "C" fn mmd_runtime_byte_buffer_free(buffer: MmdRuntimeFfiByteB
             buffer.len,
         )));
     }
+}
+
+/// Creates a stateful per-chain IK primitive solver.
+///
+/// # Safety
+///
+/// `bones` must point to `bone_count` readable entries and `links` must point
+/// to `link_count` readable entries when their counts are non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_ik_chain_create(
+    bones: *const MmdRuntimeFfiRigBone,
+    bone_count: usize,
+    target_bone_slot: u32,
+    links: *const MmdRuntimeFfiRigIkLink,
+    link_count: usize,
+    iteration_count: u32,
+    limit_angle: f32,
+) -> *mut MmdRuntimeIkChain {
+    let definition = unsafe {
+        build_ik_chain_definition(
+            bones,
+            bone_count,
+            target_bone_slot,
+            links,
+            link_count,
+            iteration_count,
+            limit_angle,
+        )
+    };
+    let Some(definition) = definition else {
+        return ptr::null_mut();
+    };
+    let solver = IkChainSolver::new(definition);
+    Box::into_raw(Box::new(MmdRuntimeIkChain {
+        solver,
+        bone_count,
+        link_count,
+    }))
+}
+
+/// Frees an IK primitive solver handle.
+///
+/// # Safety
+///
+/// `chain` must be null or a pointer returned by `mmd_runtime_ik_chain_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_ik_chain_free(chain: *mut MmdRuntimeIkChain) {
+    if chain.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(chain));
+    }
+}
+
+/// Solves one IK chain into caller-owned link-rotation output.
+///
+/// # Safety
+///
+/// Required input and output pointers must point to readable/writable arrays
+/// matching the documented C header lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_ik_chain_solve(
+    chain: *mut MmdRuntimeIkChain,
+    parent_world_matrix: *const f32,
+    local_position_offsets_xyz: *const f32,
+    local_rotations_xyzw: *const f32,
+    goal_position_xyz: *const f32,
+    tolerance: f32,
+    max_iterations_cap: u32,
+    out_link_rotations_xyzw: *mut f32,
+    out_link_rotation_f32_len: usize,
+    out_stats: *mut MmdRuntimeFfiIkSolveStats,
+) -> bool {
+    if chain.is_null()
+        || local_rotations_xyzw.is_null()
+        || goal_position_xyz.is_null()
+        || out_link_rotations_xyzw.is_null()
+    {
+        return false;
+    }
+    let chain = unsafe { &mut *chain };
+    let required_output_len = match chain.link_count.checked_mul(4) {
+        Some(len) => len,
+        None => return false,
+    };
+    if out_link_rotation_f32_len < required_output_len {
+        return false;
+    }
+
+    let parent_world_matrix = if parent_world_matrix.is_null() {
+        None
+    } else {
+        let raw = unsafe { slice::from_raw_parts(parent_world_matrix, 16) };
+        if !all_finite(raw) {
+            return false;
+        }
+        let Ok(raw) = raw.try_into() else {
+            return false;
+        };
+        Some(glam::Mat4::from_cols_array(raw))
+    };
+
+    let position_offsets = if local_position_offsets_xyz.is_null() {
+        vec![glam::Vec3A::ZERO; chain.bone_count]
+    } else {
+        let Some(len) = chain.bone_count.checked_mul(3) else {
+            return false;
+        };
+        let raw = unsafe { slice::from_raw_parts(local_position_offsets_xyz, len) };
+        if !all_finite(raw) {
+            return false;
+        }
+        raw.chunks_exact(3)
+            .map(|v| glam::Vec3A::new(v[0], v[1], v[2]))
+            .collect()
+    };
+
+    let Some(rotation_len) = chain.bone_count.checked_mul(4) else {
+        return false;
+    };
+    let raw_rotations = unsafe { slice::from_raw_parts(local_rotations_xyzw, rotation_len) };
+    if !all_finite(raw_rotations) {
+        return false;
+    }
+    let mut rotations = Vec::with_capacity(chain.bone_count);
+    for q in raw_rotations.chunks_exact(4) {
+        let rotation = glam::Quat::from_xyzw(q[0], q[1], q[2], q[3]);
+        if rotation.length_squared() <= f32::EPSILON {
+            return false;
+        }
+        rotations.push(rotation.normalize());
+    }
+
+    let goal = unsafe { slice::from_raw_parts(goal_position_xyz, 3) };
+    if !all_finite(goal) || !tolerance.is_finite() {
+        return false;
+    }
+    let max_iterations_cap = if max_iterations_cap == 0 {
+        None
+    } else {
+        Some(max_iterations_cap)
+    };
+
+    let output = chain.solver.solve(IkChainPoseInput {
+        parent_world_matrix,
+        local_position_offsets: &position_offsets,
+        local_rotations: &rotations,
+        goal_position: glam::Vec3A::new(goal[0], goal[1], goal[2]),
+        tolerance,
+        max_iterations_cap,
+    });
+    if output.solved_link_rotations.len() != chain.link_count {
+        return false;
+    }
+
+    let out = unsafe { slice::from_raw_parts_mut(out_link_rotations_xyzw, required_output_len) };
+    for (rotation, dst) in output
+        .solved_link_rotations
+        .iter()
+        .zip(out.chunks_exact_mut(4))
+    {
+        dst.copy_from_slice(&rotation.to_array());
+    }
+    if !out_stats.is_null() {
+        unsafe {
+            *out_stats = MmdRuntimeFfiIkSolveStats {
+                executed_iterations: output.executed_iterations,
+                link_steps: output.link_steps,
+                final_distance: output.final_distance,
+                break_reason: if output.final_distance <= tolerance.max(0.0) {
+                    0
+                } else {
+                    1
+                },
+            };
+        }
+    }
+    true
+}
+
+/// Creates a per-bone append/grant primitive solver.
+///
+/// # Safety
+///
+/// `config` must point to a readable config struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_append_solver_create(
+    config: *const MmdRuntimeFfiAppendConfig,
+) -> *mut MmdRuntimeAppendSolver {
+    if config.is_null() {
+        return ptr::null_mut();
+    }
+    let config = unsafe { &*config };
+    if !config.ratio.is_finite() {
+        return ptr::null_mut();
+    }
+    Box::into_raw(Box::new(MmdRuntimeAppendSolver {
+        ratio: config.ratio,
+        affect_rotation: config.affect_rotation,
+        affect_translation: config.affect_translation,
+    }))
+}
+
+/// Frees an append primitive solver handle.
+///
+/// # Safety
+///
+/// `solver` must be null or a pointer returned by
+/// `mmd_runtime_append_solver_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_append_solver_free(solver: *mut MmdRuntimeAppendSolver) {
+    if solver.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(solver));
+    }
+}
+
+/// Solves one append/grant primitive into caller-owned output arrays.
+///
+/// # Safety
+///
+/// Pointers must reference readable/writable arrays matching the documented
+/// C header lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_append_solver_solve(
+    solver: *const MmdRuntimeAppendSolver,
+    source_position_offset_xyz: *const f32,
+    source_rotation_xyzw: *const f32,
+    out_position_offset_xyz: *mut f32,
+    out_rotation_xyzw: *mut f32,
+) -> bool {
+    if solver.is_null()
+        || source_position_offset_xyz.is_null()
+        || source_rotation_xyzw.is_null()
+        || out_position_offset_xyz.is_null()
+        || out_rotation_xyzw.is_null()
+    {
+        return false;
+    }
+    let solver = unsafe { &*solver };
+    let position = unsafe { slice::from_raw_parts(source_position_offset_xyz, 3) };
+    let rotation = unsafe { slice::from_raw_parts(source_rotation_xyzw, 4) };
+    if !all_finite(position) || !all_finite(rotation) {
+        return false;
+    }
+    let source_rotation = glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
+    if source_rotation.length_squared() <= f32::EPSILON {
+        return false;
+    }
+
+    let output = solve_append_transform(AppendPrimitiveInput {
+        source_position_offset: glam::Vec3A::new(position[0], position[1], position[2]),
+        source_rotation: source_rotation.normalize(),
+        ratio: solver.ratio,
+        affect_rotation: solver.affect_rotation,
+        affect_translation: solver.affect_translation,
+    });
+    let out_position = unsafe { slice::from_raw_parts_mut(out_position_offset_xyz, 3) };
+    out_position.copy_from_slice(&output.position_offset.to_array());
+    let out_rotation = unsafe { slice::from_raw_parts_mut(out_rotation_xyzw, 4) };
+    out_rotation.copy_from_slice(&output.rotation.to_array());
+    true
 }
 
 /// Parses VMD bytes and returns the serialized `VmdParsedAnimation` JSON.
@@ -891,6 +1206,33 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_create(
     }))
 }
 
+/// Parses PMX bytes once and creates an opaque rig-spec handle.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_rig_spec_create(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimePmxRigSpec {
+    if data.is_null() || len == 0 {
+        return ptr::null_mut();
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let spec = match mmd_anim_format::parse_pmx_rig_spec(bytes) {
+        Ok(spec) => spec,
+        Err(_) => return ptr::null_mut(),
+    };
+    let manifest_json = match serde_json::to_vec(&spec) {
+        Ok(json) => json,
+        Err(_) => return ptr::null_mut(),
+    };
+    Box::into_raw(Box::new(MmdRuntimePmxRigSpec {
+        spec,
+        manifest_json,
+    }))
+}
+
 /// Frees a PMX material-split handle.
 ///
 /// # Safety
@@ -905,6 +1247,21 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_free(
     }
     unsafe {
         drop(Box::from_raw(split));
+    }
+}
+
+/// Frees a PMX rig-spec handle.
+///
+/// # Safety
+/// `spec` must be null or a handle returned by
+/// `mmd_runtime_pmx_rig_spec_create` that has not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_rig_spec_free(spec: *mut MmdRuntimePmxRigSpec) {
+    if spec.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(spec));
     }
 }
 
@@ -939,6 +1296,24 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_manifest_json(
         return empty_byte_buffer();
     };
     byte_buffer_from_vec(split.manifest_json.clone())
+}
+
+/// Returns the serialized rig-spec manifest JSON.
+///
+/// # Safety
+/// `spec` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_rig_spec_create`. Passing any other pointer is undefined
+/// behavior. The returned buffer is owned by the caller and must be freed with
+/// `mmd_runtime_byte_buffer_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_rig_spec_manifest_json(
+    spec: *const MmdRuntimePmxRigSpec,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(spec) = (unsafe { spec.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    debug_assert_eq!(spec.spec.bone_count, spec.spec.bones.len());
+    byte_buffer_from_vec(spec.manifest_json.clone())
 }
 
 /// Returns split mesh vertex positions as a native-endian byte buffer.
@@ -2543,6 +2918,109 @@ unsafe fn checked_slice<'a, T>(ptr: *const T, len: usize) -> Option<&'a [T]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
+fn all_finite(values: &[f32]) -> bool {
+    values.iter().all(|value| value.is_finite())
+}
+
+unsafe fn build_ik_chain_definition(
+    bones: *const MmdRuntimeFfiRigBone,
+    bone_count: usize,
+    target_bone_slot: u32,
+    links: *const MmdRuntimeFfiRigIkLink,
+    link_count: usize,
+    iteration_count: u32,
+    limit_angle: f32,
+) -> Option<IkChainDefinition> {
+    if bone_count == 0
+        || link_count == 0
+        || target_bone_slot as usize >= bone_count
+        || !limit_angle.is_finite()
+    {
+        return None;
+    }
+    let bones = unsafe { checked_slice(bones, bone_count) }?;
+    let links = unsafe { checked_slice(links, link_count) }?;
+    let mut parent_slots = Vec::with_capacity(bone_count);
+    let mut rest_positions = Vec::with_capacity(bone_count);
+    let mut fixed_axes = Vec::with_capacity(bone_count);
+    for (slot, bone) in bones.iter().enumerate() {
+        if !all_finite(&bone.rest_position_xyz) {
+            return None;
+        }
+        let parent = match bone.parent_slot {
+            -1 => None,
+            parent if parent >= 0 && (parent as usize) < slot => Some(parent as usize),
+            _ => return None,
+        };
+        let fixed_axis = if bone.flags & RIG_BONE_FIXED_AXIS != 0 {
+            if !all_finite(&bone.fixed_axis_xyz) {
+                return None;
+            }
+            let axis = glam::Vec3A::new(
+                bone.fixed_axis_xyz[0],
+                bone.fixed_axis_xyz[1],
+                bone.fixed_axis_xyz[2],
+            );
+            if axis.length_squared() <= f32::EPSILON {
+                return None;
+            }
+            Some(axis.normalize())
+        } else {
+            None
+        };
+        parent_slots.push(parent);
+        rest_positions.push(glam::Vec3A::new(
+            bone.rest_position_xyz[0],
+            bone.rest_position_xyz[1],
+            bone.rest_position_xyz[2],
+        ));
+        fixed_axes.push(fixed_axis);
+    }
+
+    let links = links
+        .iter()
+        .map(|link| {
+            if link.bone_slot as usize >= bone_count {
+                return None;
+            }
+            let angle_limit = if link.has_angle_limit {
+                if !all_finite(&link.angle_limit_min_xyz) || !all_finite(&link.angle_limit_max_xyz)
+                {
+                    return None;
+                }
+                Some(IkAngleLimit::new(
+                    glam::Vec3A::new(
+                        link.angle_limit_min_xyz[0],
+                        link.angle_limit_min_xyz[1],
+                        link.angle_limit_min_xyz[2],
+                    ),
+                    glam::Vec3A::new(
+                        link.angle_limit_max_xyz[0],
+                        link.angle_limit_max_xyz[1],
+                        link.angle_limit_max_xyz[2],
+                    ),
+                ))
+            } else {
+                None
+            };
+            Some(IkChainLinkDefinition {
+                bone_slot: link.bone_slot as usize,
+                angle_limit,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(IkChainDefinition {
+        parent_slots,
+        rest_positions,
+        fixed_axes,
+        target_slot: target_bone_slot as usize,
+        links,
+        iteration_count,
+        limit_angle,
+    })
+}
+
 fn checked_range<T>(slice: &[T], offset: usize, count: usize) -> Option<&[T]> {
     let end = offset.checked_add(count)?;
     slice.get(offset..end)
@@ -2776,6 +3254,258 @@ fn build_morph_init_from_ffi(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_near(actual: f32, expected: f32, tolerance: f32) {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual={actual} expected={expected} tolerance={tolerance}"
+        );
+    }
+
+    fn assert_slice_near(actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (*actual - *expected).abs() <= tolerance,
+                "index={index} actual={actual} expected={expected} tolerance={tolerance}"
+            );
+        }
+    }
+
+    fn simple_ik_chain() -> *mut MmdRuntimeIkChain {
+        let bones = [
+            MmdRuntimeFfiRigBone {
+                parent_slot: -1,
+                rest_position_xyz: [0.0, 0.0, 0.0],
+                flags: 0,
+                fixed_axis_xyz: [0.0, 0.0, 0.0],
+            },
+            MmdRuntimeFfiRigBone {
+                parent_slot: 0,
+                rest_position_xyz: [1.0, 0.0, 0.0],
+                flags: 0,
+                fixed_axis_xyz: [0.0, 0.0, 0.0],
+            },
+        ];
+        let links = [MmdRuntimeFfiRigIkLink {
+            bone_slot: 0,
+            has_angle_limit: false,
+            angle_limit_min_xyz: [0.0, 0.0, 0.0],
+            angle_limit_max_xyz: [0.0, 0.0, 0.0],
+        }];
+        unsafe {
+            mmd_runtime_ik_chain_create(
+                bones.as_ptr(),
+                bones.len(),
+                1,
+                links.as_ptr(),
+                links.len(),
+                4,
+                0.0,
+            )
+        }
+    }
+
+    #[test]
+    fn append_solver_lifecycle_and_expected_output_use_xyzw_quaternion() {
+        let config = MmdRuntimeFfiAppendConfig {
+            ratio: 0.5,
+            affect_rotation: true,
+            affect_translation: true,
+        };
+        let solver = unsafe { mmd_runtime_append_solver_create(&config) };
+        assert!(!solver.is_null());
+
+        let source_position = [2.0, 4.0, -6.0];
+        let source_rotation = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2).to_array();
+        let mut out_position = [0.0; 3];
+        let mut out_rotation = [0.0; 4];
+        assert!(unsafe {
+            mmd_runtime_append_solver_solve(
+                solver,
+                source_position.as_ptr(),
+                source_rotation.as_ptr(),
+                out_position.as_mut_ptr(),
+                out_rotation.as_mut_ptr(),
+            )
+        });
+
+        assert_slice_near(&out_position, &[1.0, 2.0, -3.0], 1.0e-5);
+        let solved = glam::Quat::from_xyzw(
+            out_rotation[0],
+            out_rotation[1],
+            out_rotation[2],
+            out_rotation[3],
+        );
+        let rotated_x = solved.mul_vec3(glam::Vec3::X);
+        assert_near(rotated_x.x, std::f32::consts::FRAC_1_SQRT_2, 1.0e-5);
+        assert_near(rotated_x.y, std::f32::consts::FRAC_1_SQRT_2, 1.0e-5);
+        assert_near(out_rotation[3], solved.w, 0.0);
+
+        unsafe { mmd_runtime_append_solver_free(solver) };
+    }
+
+    #[test]
+    fn append_solver_rejects_null_inputs() {
+        let config = MmdRuntimeFfiAppendConfig {
+            ratio: 1.0,
+            affect_rotation: true,
+            affect_translation: true,
+        };
+        assert!(unsafe { mmd_runtime_append_solver_create(ptr::null()) }.is_null());
+        let solver = unsafe { mmd_runtime_append_solver_create(&config) };
+        assert!(!solver.is_null());
+
+        let source_position = [0.0; 3];
+        let source_rotation = [0.0, 0.0, 0.0, 1.0];
+        let mut out_position = [0.0; 3];
+        let mut out_rotation = [0.0; 4];
+        assert!(!unsafe {
+            mmd_runtime_append_solver_solve(
+                ptr::null(),
+                source_position.as_ptr(),
+                source_rotation.as_ptr(),
+                out_position.as_mut_ptr(),
+                out_rotation.as_mut_ptr(),
+            )
+        });
+        assert!(!unsafe {
+            mmd_runtime_append_solver_solve(
+                solver,
+                ptr::null(),
+                source_rotation.as_ptr(),
+                out_position.as_mut_ptr(),
+                out_rotation.as_mut_ptr(),
+            )
+        });
+        assert!(!unsafe {
+            mmd_runtime_append_solver_solve(
+                solver,
+                source_position.as_ptr(),
+                ptr::null(),
+                out_position.as_mut_ptr(),
+                out_rotation.as_mut_ptr(),
+            )
+        });
+
+        unsafe { mmd_runtime_append_solver_free(solver) };
+    }
+
+    #[test]
+    fn ik_chain_lifecycle_solve_converges_and_uses_column_major_parent_matrix() {
+        let chain = simple_ik_chain();
+        assert!(!chain.is_null());
+
+        let parent_world =
+            glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.0, 0.0)).to_cols_array();
+        let local_rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let goal = [2.0, 1.0, 0.0];
+        let mut out_rotations = [0.0; 4];
+        let mut stats = MmdRuntimeFfiIkSolveStats {
+            executed_iterations: 0,
+            link_steps: 0,
+            final_distance: f32::MAX,
+            break_reason: u32::MAX,
+        };
+
+        assert!(unsafe {
+            mmd_runtime_ik_chain_solve(
+                chain,
+                parent_world.as_ptr(),
+                ptr::null(),
+                local_rotations.as_ptr(),
+                goal.as_ptr(),
+                1.0e-3,
+                0,
+                out_rotations.as_mut_ptr(),
+                out_rotations.len(),
+                &mut stats,
+            )
+        });
+        assert!(
+            stats.final_distance <= 1.0e-3,
+            "IK should converge to the goal, stats={:?}",
+            (
+                stats.executed_iterations,
+                stats.link_steps,
+                stats.final_distance,
+                stats.break_reason
+            )
+        );
+        assert_eq!(stats.break_reason, 0);
+
+        let solved = glam::Quat::from_xyzw(
+            out_rotations[0],
+            out_rotations[1],
+            out_rotations[2],
+            out_rotations[3],
+        );
+        let rotated_x = solved.mul_vec3(glam::Vec3::X);
+        assert_near(rotated_x.x, 0.0, 1.0e-3);
+        assert_near(rotated_x.y, 1.0, 1.0e-3);
+        assert_near(out_rotations[3], solved.w, 0.0);
+
+        unsafe { mmd_runtime_ik_chain_free(chain) };
+    }
+
+    #[test]
+    fn ik_chain_rejects_null_and_short_buffer_inputs() {
+        let chain = simple_ik_chain();
+        assert!(!chain.is_null());
+
+        let local_rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let goal = [0.0, 1.0, 0.0];
+        let mut out_rotations = [0.0; 4];
+
+        assert!(
+            unsafe { mmd_runtime_ik_chain_create(ptr::null(), 2, 1, ptr::null(), 1, 1, 0.0) }
+                .is_null()
+        );
+        assert!(!unsafe {
+            mmd_runtime_ik_chain_solve(
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null(),
+                local_rotations.as_ptr(),
+                goal.as_ptr(),
+                1.0e-3,
+                0,
+                out_rotations.as_mut_ptr(),
+                out_rotations.len(),
+                ptr::null_mut(),
+            )
+        });
+        assert!(!unsafe {
+            mmd_runtime_ik_chain_solve(
+                chain,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                goal.as_ptr(),
+                1.0e-3,
+                0,
+                out_rotations.as_mut_ptr(),
+                out_rotations.len(),
+                ptr::null_mut(),
+            )
+        });
+        assert!(!unsafe {
+            mmd_runtime_ik_chain_solve(
+                chain,
+                ptr::null(),
+                ptr::null(),
+                local_rotations.as_ptr(),
+                goal.as_ptr(),
+                1.0e-3,
+                0,
+                out_rotations.as_mut_ptr(),
+                out_rotations.len() - 1,
+                ptr::null_mut(),
+            )
+        });
+
+        unsafe { mmd_runtime_ik_chain_free(chain) };
+    }
 
     #[test]
     fn exports_pmx_from_parts_through_c_abi() {
@@ -4564,6 +5294,225 @@ mod tests {
         );
         serde_json::from_slice(&manifest_bytes)
             .unwrap_or_else(|err| panic!("{context}: manifest_json parse failed: {err}"))
+    }
+
+    fn rig_spec_manifest_json(
+        spec: *mut MmdRuntimePmxRigSpec,
+        context: &str,
+    ) -> serde_json::Value {
+        let manifest_bytes =
+            ffi_buffer_to_vec(unsafe { mmd_runtime_pmx_rig_spec_manifest_json(spec) });
+        assert!(
+            !manifest_bytes.is_empty(),
+            "{context}: manifest_json must not be empty"
+        );
+        serde_json::from_slice(&manifest_bytes)
+            .unwrap_or_else(|err| panic!("{context}: manifest_json parse failed: {err}"))
+    }
+
+    fn assert_json_array3(value: &serde_json::Value, context: &str) {
+        let array = value
+            .as_array()
+            .unwrap_or_else(|| panic!("{context}: must be an array"));
+        assert_eq!(array.len(), 3, "{context}: must have three elements");
+        assert!(
+            array.iter().all(|item| item.is_number()),
+            "{context}: elements must be numbers"
+        );
+    }
+
+    #[test]
+    fn rig_spec_manifest_json_has_expected_shape() {
+        let bytes: &[u8] =
+            include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+        let spec = unsafe { mmd_runtime_pmx_rig_spec_create(bytes.as_ptr(), bytes.len()) };
+        assert!(!spec.is_null(), "rig spec handle must not be null");
+
+        let manifest = rig_spec_manifest_json(spec, "fixture rig spec");
+        let bone_count = manifest
+            .get("boneCount")
+            .and_then(|v| v.as_u64())
+            .expect("fixture rig spec: boneCount must be a number");
+        let ik_chain_count = manifest
+            .get("ikChainCount")
+            .and_then(|v| v.as_u64())
+            .expect("fixture rig spec: ikChainCount must be a number");
+        let grant_count = manifest
+            .get("grantCount")
+            .and_then(|v| v.as_u64())
+            .expect("fixture rig spec: grantCount must be a number");
+
+        let bones = manifest
+            .get("bones")
+            .and_then(|v| v.as_array())
+            .expect("fixture rig spec: bones must be an array");
+        let ik_chains = manifest
+            .get("ikChains")
+            .and_then(|v| v.as_array())
+            .expect("fixture rig spec: ikChains must be an array");
+        let grants = manifest
+            .get("grants")
+            .and_then(|v| v.as_array())
+            .expect("fixture rig spec: grants must be an array");
+
+        assert_eq!(bones.len(), bone_count as usize, "boneCount mismatch");
+        assert_eq!(
+            ik_chains.len(),
+            ik_chain_count as usize,
+            "ikChainCount mismatch"
+        );
+        assert_eq!(grants.len(), grant_count as usize, "grantCount mismatch");
+        assert!(bone_count > 0, "fixture rig spec: boneCount must be positive");
+        assert!(
+            ik_chain_count > 0,
+            "fixture rig spec: ikChainCount must be positive"
+        );
+
+        for (bone_index, bone) in bones.iter().enumerate() {
+            let context = format!("fixture rig spec: bone {bone_index}");
+            assert!(bone.get("name").is_some_and(|v| v.is_string()), "{context}: name");
+            assert!(
+                bone.get("nameBytes").is_some_and(|v| v.is_string()),
+                "{context}: nameBytes"
+            );
+            assert!(
+                bone.get("parentIndex").is_some_and(|v| v.is_number()),
+                "{context}: parentIndex"
+            );
+            assert_json_array3(
+                bone.get("restPosition")
+                    .unwrap_or_else(|| panic!("{context}: restPosition missing")),
+                &format!("{context}: restPosition"),
+            );
+            assert!(
+                bone.get("deformLayer").is_some_and(|v| v.is_number()),
+                "{context}: deformLayer"
+            );
+            assert!(bone.get("fixedAxis").is_some(), "{context}: fixedAxis missing");
+            assert!(bone.get("localAxis").is_some(), "{context}: localAxis missing");
+            assert!(
+                bone.get("transformAfterPhysics")
+                    .is_some_and(|v| v.is_boolean()),
+                "{context}: transformAfterPhysics"
+            );
+            if let Some(local_axis) = bone.get("localAxis").filter(|v| !v.is_null()) {
+                assert_json_array3(
+                    local_axis
+                        .get("x")
+                        .unwrap_or_else(|| panic!("{context}: localAxis.x missing")),
+                    &format!("{context}: localAxis.x"),
+                );
+                assert_json_array3(
+                    local_axis
+                        .get("z")
+                        .unwrap_or_else(|| panic!("{context}: localAxis.z missing")),
+                    &format!("{context}: localAxis.z"),
+                );
+            }
+        }
+
+        for (chain_index, chain) in ik_chains.iter().enumerate() {
+            let context = format!("fixture rig spec: ik chain {chain_index}");
+            assert!(
+                chain
+                    .get("controllerBoneIndex")
+                    .is_some_and(|v| v.is_number()),
+                "{context}: controllerBoneIndex"
+            );
+            assert!(
+                chain.get("targetBoneIndex").is_some_and(|v| v.is_number()),
+                "{context}: targetBoneIndex"
+            );
+            assert!(
+                chain.get("iterationCount").is_some_and(|v| v.is_number()),
+                "{context}: iterationCount"
+            );
+            assert!(
+                chain.get("limitAngle").is_some_and(|v| v.is_number()),
+                "{context}: limitAngle"
+            );
+            let links = chain
+                .get("links")
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| panic!("{context}: links must be an array"));
+            for (link_index, link) in links.iter().enumerate() {
+                let context = format!("{context}: link {link_index}");
+                assert!(
+                    link.get("boneIndex").is_some_and(|v| v.is_number()),
+                    "{context}: boneIndex"
+                );
+                assert!(
+                    link.get("hasAngleLimit").is_some_and(|v| v.is_boolean()),
+                    "{context}: hasAngleLimit"
+                );
+                assert_json_array3(
+                    link.get("angleLimitMin")
+                        .unwrap_or_else(|| panic!("{context}: angleLimitMin missing")),
+                    &format!("{context}: angleLimitMin"),
+                );
+                assert_json_array3(
+                    link.get("angleLimitMax")
+                        .unwrap_or_else(|| panic!("{context}: angleLimitMax missing")),
+                    &format!("{context}: angleLimitMax"),
+                );
+            }
+        }
+
+        for (grant_index, grant) in grants.iter().enumerate() {
+            let context = format!("fixture rig spec: grant {grant_index}");
+            assert!(
+                grant.get("targetBoneIndex").is_some_and(|v| v.is_number()),
+                "{context}: targetBoneIndex"
+            );
+            assert!(
+                grant.get("sourceBoneIndex").is_some_and(|v| v.is_number()),
+                "{context}: sourceBoneIndex"
+            );
+            assert!(
+                grant.get("ratio").is_some_and(|v| v.is_number()),
+                "{context}: ratio"
+            );
+            assert!(
+                grant.get("affectRotation").is_some_and(|v| v.is_boolean()),
+                "{context}: affectRotation"
+            );
+            assert!(
+                grant
+                    .get("affectTranslation")
+                    .is_some_and(|v| v.is_boolean()),
+                "{context}: affectTranslation"
+            );
+            assert!(
+                grant.get("local").is_some_and(|v| v.is_boolean()),
+                "{context}: local"
+            );
+        }
+
+        unsafe { mmd_runtime_pmx_rig_spec_free(spec) };
+    }
+
+    #[test]
+    fn rig_spec_rejects_null_and_invalid_input() {
+        let null_spec = unsafe { mmd_runtime_pmx_rig_spec_create(ptr::null(), 1) };
+        assert!(null_spec.is_null(), "null input must return null handle");
+
+        let byte = 0_u8;
+        let empty_spec = unsafe { mmd_runtime_pmx_rig_spec_create(&byte as *const u8, 0) };
+        assert!(empty_spec.is_null(), "empty input must return null handle");
+
+        let garbage = b"not a pmx";
+        let invalid_spec =
+            unsafe { mmd_runtime_pmx_rig_spec_create(garbage.as_ptr(), garbage.len()) };
+        assert!(
+            invalid_spec.is_null(),
+            "invalid input must return null handle"
+        );
+
+        assert_empty_ffi_buffer(
+            unsafe { mmd_runtime_pmx_rig_spec_manifest_json(ptr::null()) },
+            "null rig spec manifest",
+        );
+        unsafe { mmd_runtime_pmx_rig_spec_free(ptr::null_mut()) };
     }
 
     #[test]

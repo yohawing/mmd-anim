@@ -19,6 +19,7 @@ target/package/
 .codex/
 .claude/
 .agents/
+.ai/
 AGENTS.md
 CLAUDE.md
 
@@ -35,5 +36,4 @@ crates/mmd-anim-wasm/harness/pkg-web/
 
 # local dev artifacts
 artifacts/
-dist/
-examples/viewer/
+viewer/

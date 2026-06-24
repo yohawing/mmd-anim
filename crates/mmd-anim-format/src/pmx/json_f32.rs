@@ -1,9 +1,9 @@
 use std::fmt;
 
 use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
     de::{self, SeqAccess, Visitor},
     ser::SerializeSeq,
-    Deserialize, Deserializer, Serialize, Serializer,
 };
 
 const NAN_TOKEN: &str = "NaN";

@@ -20,6 +20,11 @@ const BONE_FLAG_APPEND_TRANSLATE: u16 = 0x0200;
 const BONE_FLAG_FIXED_AXIS: u16 = 0x0400;
 const BONE_FLAG_LOCAL_AXIS: u16 = 0x0800;
 const BONE_FLAG_EXTERNAL_PARENT: u16 = 0x2000;
+const PMX_SKINNING_MODE_BDEF1: &str = "bdef1";
+const PMX_SKINNING_MODE_BDEF2: &str = "bdef2";
+const PMX_SKINNING_MODE_BDEF4: &str = "bdef4";
+const PMX_SKINNING_MODE_SDEF: &str = "sdef";
+const PMX_SKINNING_MODE_QDEF: &str = "qdef";
 
 fn decode_utf16le_lossy(bytes: &[u8]) -> String {
     let end = bytes.len().saturating_sub(bytes.len() % 2);
@@ -868,6 +873,8 @@ pub struct PmxParsedIndexSizes {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PmxParsedSdef {
+    #[serde(default)]
+    pub skinning_modes: Vec<String>,
     pub enabled: Vec<f32>,
     pub c: Vec<f32>,
     pub r0: Vec<f32>,
@@ -1110,10 +1117,10 @@ pub fn pmx_model_to_rig_spec(model: &PmxParsedModel) -> PmxRigSpec {
                     .links
                     .iter()
                     .map(|link| {
-                        let (angle_limit_min, angle_limit_max) =
-                            link.limits.as_ref().map_or(([0.0; 3], [0.0; 3]), |limit| {
-                                (limit.lower, limit.upper)
-                            });
+                        let (angle_limit_min, angle_limit_max) = link
+                            .limits
+                            .as_ref()
+                            .map_or(([0.0; 3], [0.0; 3]), |limit| (limit.lower, limit.upper));
                         PmxRigSpecIkLink {
                             bone_index: link.bone_index,
                             has_angle_limit: link.limits.is_some(),
@@ -1789,6 +1796,7 @@ pub fn build_pmx_model_from_parts(input: PmxPartsInput<'_>) -> Result<PmxParsedM
     } else {
         input.edge_scale.to_vec()
     };
+    let skinning_modes = vec![PMX_SKINNING_MODE_BDEF4.to_owned(); vertex_count];
     let face_count = input.indices.len() / 3;
     let (materials, material_groups) = build_pmx_parts_materials(&input.descriptor, face_count);
     let bones = build_pmx_parts_bones(&input.descriptor);
@@ -1837,7 +1845,10 @@ pub fn build_pmx_model_from_parts(input: PmxPartsInput<'_>) -> Result<PmxParsedM
             skin_weights,
             edge_scale,
             material_groups,
-            sdef: PmxParsedSdef::default(),
+            sdef: PmxParsedSdef {
+                skinning_modes,
+                ..PmxParsedSdef::default()
+            },
             qdef: PmxParsedQdef::default(),
         },
         materials,
@@ -1918,6 +1929,29 @@ pub fn validate_pmx_export_model(model: &PmxParsedModel) -> Result<(), String> {
             expected_skin_len,
             geometry.skin_weights.len()
         ));
+    }
+    if !geometry.sdef.skinning_modes.is_empty()
+        && geometry.sdef.skinning_modes.len() != vertex_count
+    {
+        return Err(format!(
+            "PMX export skinningModes length mismatch: expected {}, got {}",
+            vertex_count,
+            geometry.sdef.skinning_modes.len()
+        ));
+    }
+    for (index, mode) in geometry.sdef.skinning_modes.iter().enumerate() {
+        if !matches!(
+            mode.as_str(),
+            PMX_SKINNING_MODE_BDEF1
+                | PMX_SKINNING_MODE_BDEF2
+                | PMX_SKINNING_MODE_BDEF4
+                | PMX_SKINNING_MODE_SDEF
+                | PMX_SKINNING_MODE_QDEF
+        ) {
+            return Err(format!(
+                "PMX export skinningModes[{index}] must be bdef1, bdef2, bdef4, sdef, or qdef, got {mode}"
+            ));
+        }
     }
     Ok(())
 }
@@ -2764,30 +2798,7 @@ pub fn export_pmx_model(model: &PmxParsedModel) -> Vec<u8> {
         for uv in &model.geometry.additional_uvs {
             write_f32_slice(&mut out, &uv[index * 4..index * 4 + 4]);
         }
-        out.push(2); // BDEF4 preserves the parsed skin index/weight arrays.
-        for slot in 0..4 {
-            write_sized_index(
-                &mut out,
-                model
-                    .geometry
-                    .skin_indices
-                    .get(index * 4 + slot)
-                    .copied()
-                    .unwrap_or(0) as i32,
-                model.metadata.index_sizes.bone,
-            );
-        }
-        for slot in 0..4 {
-            write_f32(
-                &mut out,
-                model
-                    .geometry
-                    .skin_weights
-                    .get(index * 4 + slot)
-                    .copied()
-                    .unwrap_or(if slot == 0 { 1.0 } else { 0.0 }),
-            );
-        }
+        write_pmx_vertex_skinning(&mut out, model, index);
         write_f32(
             &mut out,
             model.geometry.edge_scale.get(index).copied().unwrap_or(1.0),
@@ -3125,6 +3136,7 @@ fn read_parsed_geometry(
         vec![Vec::with_capacity(skin_capacity); header.extra_uv_count as usize];
     let mut skin_indices = Vec::with_capacity(skin_capacity);
     let mut skin_weights = Vec::with_capacity(skin_capacity);
+    let mut skinning_modes = Vec::with_capacity(vertex_count);
     let mut edge_scale = Vec::with_capacity(vertex_count);
     let mut sdef_enabled = vec![0.0f32; vertex_count];
     let mut sdef_c = vec![0.0f32; vertex_count * 3];
@@ -3146,11 +3158,20 @@ fn read_parsed_geometry(
         let mut weights = [0.0f32; 4];
         match weight_type {
             0 => {
+                skinning_modes.push(PMX_SKINNING_MODE_BDEF1.to_owned());
                 indices[0] =
                     normalize_nonnegative_index(r.read_sized_index(header.bone_index_size)?);
                 weights[0] = 1.0;
             }
             1 | 3 => {
+                skinning_modes.push(
+                    if weight_type == 3 {
+                        PMX_SKINNING_MODE_SDEF
+                    } else {
+                        PMX_SKINNING_MODE_BDEF2
+                    }
+                    .to_owned(),
+                );
                 indices[0] =
                     normalize_nonnegative_index(r.read_sized_index(header.bone_index_size)?);
                 indices[1] =
@@ -3176,6 +3197,7 @@ fn read_parsed_geometry(
                 }
             }
             2 => {
+                skinning_modes.push(PMX_SKINNING_MODE_BDEF4.to_owned());
                 for index in &mut indices {
                     *index =
                         normalize_nonnegative_index(r.read_sized_index(header.bone_index_size)?);
@@ -3185,6 +3207,7 @@ fn read_parsed_geometry(
                 }
             }
             4 => {
+                skinning_modes.push(PMX_SKINNING_MODE_QDEF.to_owned());
                 for index in &mut indices {
                     *index =
                         normalize_nonnegative_index(r.read_sized_index(header.bone_index_size)?);
@@ -3218,6 +3241,7 @@ fn read_parsed_geometry(
         edge_scale,
         material_groups: Vec::new(),
         sdef: PmxParsedSdef {
+            skinning_modes,
             enabled: sdef_enabled,
             c: sdef_c,
             r0: sdef_r0,
@@ -3385,6 +3409,10 @@ fn remap_pmx_geometry(
             material_index: 0,
         }],
         sdef: PmxParsedSdef {
+            skinning_modes: gather_vertex_string(
+                &geometry.sdef.skinning_modes,
+                original_vertex_indices,
+            ),
             enabled: gather_vertex_f32(&geometry.sdef.enabled, 1, original_vertex_indices),
             c: gather_vertex_f32(&geometry.sdef.c, 3, original_vertex_indices),
             r0: gather_vertex_f32(&geometry.sdef.r0, 3, original_vertex_indices),
@@ -3405,6 +3433,16 @@ fn gather_vertex_f32(values: &[f32], stride: usize, original_vertex_indices: &[u
         let end = start + stride;
         if let Some(slice) = values.get(start..end) {
             out.extend_from_slice(slice);
+        }
+    }
+    out
+}
+
+fn gather_vertex_string(values: &[String], original_vertex_indices: &[u32]) -> Vec<String> {
+    let mut out = Vec::with_capacity(original_vertex_indices.len());
+    for &index in original_vertex_indices {
+        if let Some(value) = values.get(index as usize) {
+            out.push(value.clone());
         }
     }
     out
@@ -3848,6 +3886,127 @@ fn write_vertex_index(out: &mut Vec<u8>, value: u32, size: u8) {
         4 => out.extend_from_slice(&(value as i32).to_le_bytes()),
         _ => {}
     }
+}
+
+fn write_pmx_vertex_skinning(out: &mut Vec<u8>, model: &PmxParsedModel, vertex_index: usize) {
+    match pmx_vertex_skinning_mode(&model.geometry, vertex_index) {
+        PMX_SKINNING_MODE_BDEF1 => {
+            out.push(0);
+            write_pmx_vertex_bone_index(out, model, vertex_index, 0);
+        }
+        PMX_SKINNING_MODE_BDEF2 => {
+            out.push(1);
+            write_pmx_vertex_bone_index(out, model, vertex_index, 0);
+            write_pmx_vertex_bone_index(out, model, vertex_index, 1);
+            write_f32(
+                out,
+                pmx_vertex_skin_weight(&model.geometry, vertex_index, 0),
+            );
+        }
+        PMX_SKINNING_MODE_SDEF => {
+            out.push(3);
+            write_pmx_vertex_bone_index(out, model, vertex_index, 0);
+            write_pmx_vertex_bone_index(out, model, vertex_index, 1);
+            write_f32(
+                out,
+                pmx_vertex_skin_weight(&model.geometry, vertex_index, 0),
+            );
+            write_f32_slice(
+                out,
+                &pmx_vertex_sdef_vec3(&model.geometry.sdef.c, vertex_index),
+            );
+            write_f32_slice(
+                out,
+                &pmx_vertex_sdef_vec3(&model.geometry.sdef.r0, vertex_index),
+            );
+            write_f32_slice(
+                out,
+                &pmx_vertex_sdef_vec3(&model.geometry.sdef.r1, vertex_index),
+            );
+        }
+        PMX_SKINNING_MODE_QDEF => {
+            out.push(4);
+            write_pmx_vertex_bdef4_skinning(out, model, vertex_index);
+        }
+        _ => {
+            out.push(2);
+            write_pmx_vertex_bdef4_skinning(out, model, vertex_index);
+        }
+    }
+}
+
+fn pmx_vertex_skinning_mode(geometry: &PmxParsedGeometry, vertex_index: usize) -> &str {
+    if let Some(mode) = geometry.sdef.skinning_modes.get(vertex_index) {
+        return mode.as_str();
+    }
+    if geometry
+        .sdef
+        .enabled
+        .get(vertex_index)
+        .copied()
+        .unwrap_or(0.0)
+        > 0.5
+    {
+        PMX_SKINNING_MODE_SDEF
+    } else if geometry
+        .qdef
+        .enabled
+        .get(vertex_index)
+        .copied()
+        .unwrap_or(0.0)
+        > 0.5
+    {
+        PMX_SKINNING_MODE_QDEF
+    } else {
+        PMX_SKINNING_MODE_BDEF4
+    }
+}
+
+fn write_pmx_vertex_bdef4_skinning(out: &mut Vec<u8>, model: &PmxParsedModel, vertex_index: usize) {
+    for slot in 0..4 {
+        write_pmx_vertex_bone_index(out, model, vertex_index, slot);
+    }
+    for slot in 0..4 {
+        write_f32(
+            out,
+            pmx_vertex_skin_weight(&model.geometry, vertex_index, slot),
+        );
+    }
+}
+
+fn write_pmx_vertex_bone_index(
+    out: &mut Vec<u8>,
+    model: &PmxParsedModel,
+    vertex_index: usize,
+    slot: usize,
+) {
+    write_sized_index(
+        out,
+        model
+            .geometry
+            .skin_indices
+            .get(vertex_index * 4 + slot)
+            .copied()
+            .unwrap_or(0) as i32,
+        model.metadata.index_sizes.bone,
+    );
+}
+
+fn pmx_vertex_skin_weight(geometry: &PmxParsedGeometry, vertex_index: usize, slot: usize) -> f32 {
+    geometry
+        .skin_weights
+        .get(vertex_index * 4 + slot)
+        .copied()
+        .unwrap_or(if slot == 0 { 1.0 } else { 0.0 })
+}
+
+fn pmx_vertex_sdef_vec3(values: &[f32], vertex_index: usize) -> [f32; 3] {
+    let start = vertex_index * 3;
+    [
+        values.get(start).copied().unwrap_or(0.0),
+        values.get(start + 1).copied().unwrap_or(0.0),
+        values.get(start + 2).copied().unwrap_or(0.0),
+    ]
 }
 
 fn material_flag_bits(flags: &PmxParsedMaterialFlags) -> u8 {
@@ -4666,6 +4825,7 @@ mod tests {
                     material_index: 0,
                 }],
                 sdef: PmxParsedSdef {
+                    skinning_modes: vec![PMX_SKINNING_MODE_BDEF4.to_owned()],
                     enabled: vec![0.0],
                     c: vec![0.0, 0.0, 0.0],
                     r0: vec![0.0, 0.0, 0.0],
@@ -4851,6 +5011,12 @@ mod tests {
                 },
             ],
             sdef: PmxParsedSdef {
+                skinning_modes: vec![
+                    PMX_SKINNING_MODE_BDEF4.to_owned(),
+                    PMX_SKINNING_MODE_SDEF.to_owned(),
+                    PMX_SKINNING_MODE_BDEF4.to_owned(),
+                    PMX_SKINNING_MODE_QDEF.to_owned(),
+                ],
                 enabled: vec![0.0, 1.0, 0.0, 0.0],
                 c: vec![0.0; 12],
                 r0: vec![0.0; 12],
@@ -6466,6 +6632,10 @@ mod tests {
     fn pmx_sdef_geometry_json_includes_sdef_fields() {
         let buf = build_sdef_vertex_pmx();
         let model = parse_pmx_model(&buf).unwrap();
+        assert_eq!(
+            model.geometry.sdef.skinning_modes,
+            vec![PMX_SKINNING_MODE_SDEF.to_owned()]
+        );
         assert_eq!(model.geometry.sdef.enabled.len(), 1);
         assert!((model.geometry.sdef.enabled[0] - 1.0).abs() < 1e-5);
         assert_eq!(model.geometry.sdef.c, vec![1.0, 2.0, 3.0]);
@@ -6508,8 +6678,21 @@ mod tests {
     fn pmx_qdef_vertex_marks_enabled() {
         let buf = build_qdef_vertex_pmx();
         let model = parse_pmx_model(&buf).unwrap();
+        assert_eq!(
+            model.geometry.sdef.skinning_modes,
+            vec![PMX_SKINNING_MODE_QDEF.to_owned()]
+        );
         assert_eq!(model.geometry.qdef.enabled.len(), 1);
         assert!((model.geometry.qdef.enabled[0] - 1.0).abs() < 1e-5);
         assert_eq!(model.geometry.sdef.enabled[0], 0.0);
+    }
+
+    #[test]
+    fn exports_parsed_pmx_deform_type_binary_roundtrip() {
+        for original in [build_sdef_vertex_pmx(), build_qdef_vertex_pmx()] {
+            let parsed = parse_pmx_model(&original).unwrap();
+            let exported = export_pmx_model(&parsed);
+            assert_eq!(exported, original);
+        }
     }
 }

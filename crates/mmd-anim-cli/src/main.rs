@@ -215,17 +215,20 @@ enum Commands {
         output: PathBuf,
     },
 
-    /// Convert a PMX static mesh to FBX 7.4 binary.
+    /// Convert a PMX model to FBX 7.4 binary.
     #[command(
         name = "convert-fbx",
-        long_about = "Convert a PMX model to a minimal FBX 7.4 binary static mesh.\nThis spike exports geometry and materials only; bones, skinning, morphs, animation, and texture embedding are intentionally out of scope.",
-        after_help = "Examples:\n  mmd-anim convert-fbx model.pmx model.fbx"
+        long_about = "Convert a PMX model to a minimal FBX 7.4 binary file.\nWith --vmd, bone motion is baked to FBX AnimationStack/AnimationLayer/AnimCurve channels.",
+        after_help = "Examples:\n  mmd-anim convert-fbx model.pmx model.fbx\n  mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd"
     )]
     ConvertFbx {
         /// Path to the input PMX model file
         input: PathBuf,
         /// Path to the output FBX file
         output: PathBuf,
+        /// Optional VMD motion file to bake as FBX animation
+        #[arg(long)]
+        vmd: Option<PathBuf>,
     },
 }
 
@@ -327,8 +330,8 @@ fn main() -> ExitCode {
             motion,
             output,
         }) => commands::export::export_pmm_scene(&model, &motion, &output),
-        Some(Commands::ConvertFbx { input, output }) => {
-            commands::fbx::convert_pmx_to_fbx(&input, &output)
+        Some(Commands::ConvertFbx { input, output, vmd }) => {
+            commands::fbx::convert_pmx_to_fbx(&input, &output, vmd.as_deref())
         }
     };
 

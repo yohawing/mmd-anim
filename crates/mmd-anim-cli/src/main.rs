@@ -9,6 +9,8 @@ use std::{
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod commands;
+mod mmd_dumper_oracle;
+mod schema;
 
 // ---------------------------------------------------------------------------
 // Clap CLI definition
@@ -841,7 +843,7 @@ pub(crate) fn copy_world_matrices_to_f32(matrices: &[glam::Mat4], out: &mut [f32
 // ---------------------------------------------------------------------------
 
 fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    use mmd_anim_schema::{
+    use crate::schema::{
         DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
     };
 
@@ -919,7 +921,7 @@ fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>
 }
 
 fn golden_parser_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    use mmd_anim_schema::{GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump};
+    use crate::schema::{GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump};
 
     let manifest_path = root.join("oracle-batch.json");
     let manifest = GoldenIkBatchManifest::from_json_str(&read_text_file(&manifest_path)?)?;

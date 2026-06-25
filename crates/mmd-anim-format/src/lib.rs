@@ -6,6 +6,8 @@
 //! rigid body, joint, and soft-body metadata are dropped during import.
 
 pub mod error;
+#[cfg(feature = "fbx")]
+pub mod fbx;
 pub mod format;
 pub mod nmd;
 pub mod normalize;

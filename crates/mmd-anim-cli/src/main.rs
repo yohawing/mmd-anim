@@ -214,6 +214,19 @@ enum Commands {
         /// Path to the output PMM file
         output: PathBuf,
     },
+
+    /// Convert a PMX static mesh to FBX 7.4 binary.
+    #[command(
+        name = "convert-fbx",
+        long_about = "Convert a PMX model to a minimal FBX 7.4 binary static mesh.\nThis spike exports geometry and materials only; bones, skinning, morphs, animation, and texture embedding are intentionally out of scope.",
+        after_help = "Examples:\n  mmd-anim convert-fbx model.pmx model.fbx"
+    )]
+    ConvertFbx {
+        /// Path to the input PMX model file
+        input: PathBuf,
+        /// Path to the output FBX file
+        output: PathBuf,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -314,6 +327,9 @@ fn main() -> ExitCode {
             motion,
             output,
         }) => commands::export::export_pmm_scene(&model, &motion, &output),
+        Some(Commands::ConvertFbx { input, output }) => {
+            commands::fbx::convert_pmx_to_fbx(&input, &output)
+        }
     };
 
     match result {

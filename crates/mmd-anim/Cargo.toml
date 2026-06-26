@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 description = "Rust MMD animation runtime foundation for formats, evaluation, and host integration"
 
+[features]
+fbx = ["mmd-anim-format/fbx"]
+
 [dependencies]
 mmd-anim-format.workspace = true
 mmd-anim-runtime.workspace = true

@@ -1,11 +1,15 @@
 #![cfg(feature = "fbx")]
 
-use std::io::{Cursor, Seek, Write};
+use std::{
+    io::{Cursor, Seek, Write},
+    sync::Arc,
+};
 
 use fbxcel::{
     low::{v7400::ArrayAttributeEncoding, FbxVersion},
     writer::v7400::binary::{AttributesWriter, FbxFooter, Writer},
 };
+use mmd_anim_runtime::{AnimationClip, BoneIndex, ModelArena, RuntimeInstance};
 
 use crate::{
     pmx::{PmxParsedBone, PmxParsedMaterial, PmxParsedModel},
@@ -29,6 +33,7 @@ const ANIM_CURVENODE_TRANS_BASE: i64 = 80_000;
 const ANIM_CURVE_BASE: i64 = 100_000;
 const FBX_TIME_ONE_SECOND: i64 = 46_186_158_000;
 const FBX_FRAME_DURATION: i64 = FBX_TIME_ONE_SECOND / 30;
+const STATIC_BONE_EPSILON: f32 = 1.0e-5;
 
 #[derive(Debug, Clone)]
 pub struct FbxExportOptions {
@@ -70,15 +75,35 @@ pub fn export_pmx_fbx_binary(
     vmd: Option<&VmdParsedAnimation>,
     options: &FbxExportOptions,
 ) -> Result<Vec<u8>, FbxExportError> {
-    let mesh = MeshData::from_pmx(model, options)?;
     let animation = vmd.map(|vmd| FbxAnimationData::from_vmd(model, vmd, options));
+    export_pmx_fbx_binary_with_animation(model, animation, options)
+}
+
+pub fn export_pmx_fbx_binary_with_runtime_bake(
+    model: &PmxParsedModel,
+    runtime_model: Arc<ModelArena>,
+    clip: &AnimationClip,
+    last_frame: u32,
+    options: &FbxExportOptions,
+) -> Result<Vec<u8>, FbxExportError> {
+    let animation =
+        Some(FbxAnimationData::from_runtime_bake(model, runtime_model, clip, last_frame, options));
+    export_pmx_fbx_binary_with_animation(model, animation, options)
+}
+
+fn export_pmx_fbx_binary_with_animation(
+    model: &PmxParsedModel,
+    animation: Option<FbxAnimationData>,
+    options: &FbxExportOptions,
+) -> Result<Vec<u8>, FbxExportError> {
+    let mesh = MeshData::from_pmx(model, options)?;
     let sink = Cursor::new(Vec::new());
     let mut writer = Writer::new(sink, FbxVersion::V7_4)?;
 
     write_fbx_header_extension(&mut writer)?;
     write_top_level_fields(&mut writer)?;
     write_global_settings(&mut writer)?;
-    write_documents(&mut writer, vmd.is_some())?;
+    write_documents(&mut writer, animation.is_some())?;
     write_references(&mut writer)?;
     write_definitions(
         &mut writer,
@@ -115,6 +140,16 @@ pub fn export_fbx(
     options: &FbxExportOptions,
 ) -> Result<Vec<u8>, FbxExportError> {
     export_pmx_fbx_binary(model, vmd, options)
+}
+
+pub fn export_fbx_with_runtime_bake(
+    model: &PmxParsedModel,
+    runtime_model: Arc<ModelArena>,
+    clip: &AnimationClip,
+    last_frame: u32,
+    options: &FbxExportOptions,
+) -> Result<Vec<u8>, FbxExportError> {
+    export_pmx_fbx_binary_with_runtime_bake(model, runtime_model, clip, last_frame, options)
 }
 
 struct MeshData {
@@ -222,6 +257,34 @@ struct FbxAnimationTrack {
     translation_values: [Vec<f32>; 3],
 }
 
+struct RuntimeBakeTrack {
+    bone_index: usize,
+    rotation_values: [Vec<f32>; 3],
+    translation_values: [Vec<f32>; 3],
+    previous_euler: Option<[f64; 3]>,
+    changed_from_rest: bool,
+}
+
+impl RuntimeBakeTrack {
+    fn new(bone_index: usize, frame_count: usize) -> Self {
+        Self {
+            bone_index,
+            rotation_values: [
+                Vec::with_capacity(frame_count),
+                Vec::with_capacity(frame_count),
+                Vec::with_capacity(frame_count),
+            ],
+            translation_values: [
+                Vec::with_capacity(frame_count),
+                Vec::with_capacity(frame_count),
+                Vec::with_capacity(frame_count),
+            ],
+            previous_euler: None,
+            changed_from_rest: false,
+        }
+    }
+}
+
 struct BoneTrack {
     bone_index: usize,
     keyframes: Vec<SortedKeyframe>,
@@ -236,6 +299,92 @@ struct SortedKeyframe {
 }
 
 impl FbxAnimationData {
+    fn from_runtime_bake(
+        model: &PmxParsedModel,
+        runtime_model: Arc<ModelArena>,
+        clip: &AnimationClip,
+        max_frame: u32,
+        options: &FbxExportOptions,
+    ) -> Self {
+        let bone_count = model.skeleton.bones.len().min(runtime_model.bone_count());
+        let frame_count = max_frame as usize + 1;
+        let frame_times: Vec<i64> = (0..=max_frame)
+            .map(|frame| frame as i64 * FBX_FRAME_DURATION)
+            .collect();
+        let rest_translations: Vec<_> = (0..bone_count)
+            .map(|index| runtime_model.rest_position(BoneIndex(index as u32)))
+            .collect();
+        let mut tracks: Vec<RuntimeBakeTrack> = (0..bone_count)
+            .map(|index| RuntimeBakeTrack::new(index, frame_count))
+            .collect();
+        let mut runtime = RuntimeInstance::new(Arc::clone(&runtime_model));
+
+        for frame in 0..=max_frame {
+            runtime.evaluate_clip_frame(clip, frame as f32);
+            let world_matrices = runtime.world_matrices();
+
+            for track in &mut tracks {
+                let bone = BoneIndex(track.bone_index as u32);
+                let bone_world = world_matrices[track.bone_index];
+                let local_matrix = match runtime_model.parent_index(bone) {
+                    Some(parent) => world_matrices[parent.as_usize()].inverse() * bone_world,
+                    None => bone_world,
+                };
+                let (_scale, rotation, translation) =
+                    local_matrix.to_scale_rotation_translation();
+
+                if translation_changed(translation, rest_translations[track.bone_index])
+                    || rotation_changed(rotation)
+                {
+                    track.changed_from_rest = true;
+                }
+
+                let converted_translation = convert_position_to_fbx(
+                    [
+                        translation.x as f64,
+                        translation.y as f64,
+                        translation.z as f64,
+                    ],
+                    options,
+                );
+                let rotation = rotation.normalize();
+                let converted_rotation = convert_quat_to_fbx(
+                    [
+                        rotation.x as f64,
+                        rotation.y as f64,
+                        rotation.z as f64,
+                        rotation.w as f64,
+                    ],
+                    options,
+                );
+                let euler = quat_to_euler_xyz(converted_rotation);
+                let filtered_euler = track
+                    .previous_euler
+                    .map(|previous| euler_filter(euler, previous))
+                    .unwrap_or(euler);
+                track.previous_euler = Some(filtered_euler);
+
+                for axis in 0..3 {
+                    track.rotation_values[axis].push(filtered_euler[axis] as f32);
+                    track.translation_values[axis].push(converted_translation[axis] as f32);
+                }
+            }
+        }
+
+        let tracks = tracks
+            .into_iter()
+            .filter(|track| track.changed_from_rest)
+            .map(|track| FbxAnimationTrack {
+                bone_index: track.bone_index,
+                frame_times: frame_times.clone(),
+                rotation_values: track.rotation_values,
+                translation_values: track.translation_values,
+            })
+            .collect();
+
+        Self { max_frame, tracks }
+    }
+
     fn from_vmd(
         model: &PmxParsedModel,
         vmd: &VmdParsedAnimation,
@@ -300,6 +449,18 @@ impl FbxAnimationData {
     fn last_time(&self) -> i64 {
         self.max_frame as i64 * FBX_FRAME_DURATION
     }
+}
+
+fn translation_changed(translation: glam::Vec3, rest: glam::Vec3A) -> bool {
+    (translation.x - rest.x).abs() > STATIC_BONE_EPSILON
+        || (translation.y - rest.y).abs() > STATIC_BONE_EPSILON
+        || (translation.z - rest.z).abs() > STATIC_BONE_EPSILON
+}
+
+fn rotation_changed(rotation: glam::Quat) -> bool {
+    let rotation = rotation.normalize();
+    let identity_dot = rotation.w.abs().clamp(0.0, 1.0);
+    1.0 - identity_dot > STATIC_BONE_EPSILON
 }
 
 fn collect_bone_tracks(model: &PmxParsedModel, vmd: &VmdParsedAnimation) -> Vec<BoneTrack> {

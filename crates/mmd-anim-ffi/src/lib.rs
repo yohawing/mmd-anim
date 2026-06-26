@@ -23,6 +23,7 @@ pub struct MmdRuntimeModel {
 }
 
 pub struct MmdRuntimeInstance {
+    model: Arc<ModelArena>,
     runtime: RuntimeInstance,
     cached_world_matrices: Vec<f32>,
     cached_skinning_matrices: Vec<f32>,
@@ -47,6 +48,13 @@ fn flatten_into(dst: &mut Vec<f32>, matrices: &[glam::Mat4]) {
     dst.reserve(expected);
     for m in matrices {
         dst.extend_from_slice(&m.to_cols_array());
+    }
+}
+
+fn flatten_matrices_into_slice(dst: &mut [f32], matrices: &[glam::Mat4]) {
+    debug_assert_eq!(dst.len(), matrices.len() * 16);
+    for (matrix_index, matrix) in matrices.iter().enumerate() {
+        dst[matrix_index * 16..matrix_index * 16 + 16].copy_from_slice(&matrix.to_cols_array());
     }
 }
 
@@ -2260,8 +2268,10 @@ pub unsafe extern "C" fn mmd_runtime_instance_create(
     let Some(model) = (unsafe { model.as_ref() }) else {
         return ptr::null_mut();
     };
+    let model_arena = Arc::clone(&model.model);
     let mut inst = MmdRuntimeInstance {
-        runtime: RuntimeInstance::new_with_morph_count(Arc::clone(&model.model), morph_count),
+        model: Arc::clone(&model_arena),
+        runtime: RuntimeInstance::new_with_morph_count(model_arena, morph_count),
         cached_world_matrices: Vec::new(),
         cached_skinning_matrices: Vec::new(),
     };
@@ -2286,8 +2296,10 @@ pub unsafe extern "C" fn mmd_runtime_instance_create_for_model(
     let Some(model) = (unsafe { model.as_ref() }) else {
         return ptr::null_mut();
     };
+    let model_arena = Arc::clone(&model.model);
     let mut inst = MmdRuntimeInstance {
-        runtime: RuntimeInstance::new(Arc::clone(&model.model)),
+        model: Arc::clone(&model_arena),
+        runtime: RuntimeInstance::new(model_arena),
         cached_world_matrices: Vec::new(),
         cached_skinning_matrices: Vec::new(),
     };
@@ -2310,8 +2322,10 @@ pub unsafe extern "C" fn mmd_runtime_instance_create_with_counts(
     let Some(model) = (unsafe { model.as_ref() }) else {
         return ptr::null_mut();
     };
+    let model_arena = Arc::clone(&model.model);
     let mut inst = MmdRuntimeInstance {
-        runtime: RuntimeInstance::new_with_counts(Arc::clone(&model.model), morph_count, ik_count),
+        model: Arc::clone(&model_arena),
+        runtime: RuntimeInstance::new_with_counts(model_arena, morph_count, ik_count),
         cached_world_matrices: Vec::new(),
         cached_skinning_matrices: Vec::new(),
     };
@@ -2444,6 +2458,251 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_without_ik(
         .evaluate_clip_frame_without_ik(&clip.clip, frame);
     instance.refresh_matrix_caches();
     true
+}
+
+/// Returns the required `f32` count for batch world matrix output.
+///
+/// The batch layout is `[frame][bone][16]`, with each matrix stored as
+/// column-major `f32[16]`.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by
+/// `mmd_runtime_instance_create`. A null pointer or size overflow returns `0`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_clip_frame_batch_world_matrix_f32_len(
+    instance: *const MmdRuntimeInstance,
+    frame_count: usize,
+) -> usize {
+    let Some(instance) = (unsafe { instance.as_ref() }) else {
+        return 0;
+    };
+    instance
+        .runtime
+        .world_matrices()
+        .len()
+        .checked_mul(16)
+        .and_then(|frame_len| frame_len.checked_mul(frame_count))
+        .unwrap_or(0)
+}
+
+/// Returns the required `f32` count for batch morph weight output.
+///
+/// The batch layout is `[frame][morph]`.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by
+/// `mmd_runtime_instance_create`. A null pointer or size overflow returns `0`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_clip_frame_batch_morph_weight_f32_len(
+    instance: *const MmdRuntimeInstance,
+    frame_count: usize,
+) -> usize {
+    let Some(instance) = (unsafe { instance.as_ref() }) else {
+        return 0;
+    };
+    instance
+        .runtime
+        .morph_weights()
+        .len()
+        .checked_mul(frame_count)
+        .unwrap_or(0)
+}
+
+/// Evaluates a contiguous clip frame range into caller-owned batch buffers.
+///
+/// `worker_count == 0` uses the host's available parallelism. The source
+/// `instance` is not evaluated or mutated; it only supplies the immutable model
+/// arena plus the morph and IK state sizes. Each worker owns an independent
+/// `RuntimeInstance`, so mutable pose and scratch buffers are never shared
+/// across threads.
+///
+/// Output layouts:
+/// - `out_world_matrices_f32`: `[frame][bone][16]`, column-major matrices
+/// - `out_morph_weights_f32`: `[frame][morph]`
+///
+/// # Safety
+///
+/// `instance` and `clip` must be null or valid pointers returned by their
+/// respective create functions. Non-empty output regions must point to writable
+/// buffers of at least the corresponding `*_len` count and must not alias each
+/// other.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_batch(
+    instance: *const MmdRuntimeInstance,
+    clip: *const MmdRuntimeClip,
+    start_frame: f32,
+    frame_step: f32,
+    frame_count: usize,
+    worker_count: u32,
+    out_world_matrices_f32: *mut f32,
+    out_world_matrices_f32_len: usize,
+    out_morph_weights_f32: *mut f32,
+    out_morph_weights_f32_len: usize,
+) -> bool {
+    let Some(instance) = (unsafe { instance.as_ref() }) else {
+        return false;
+    };
+    let Some(clip) = (unsafe { clip.as_ref() }) else {
+        return false;
+    };
+    if !start_frame.is_finite() || !frame_step.is_finite() {
+        return false;
+    }
+
+    let world_frame_len = match instance.runtime.world_matrices().len().checked_mul(16) {
+        Some(len) => len,
+        None => return false,
+    };
+    let morph_frame_len = instance.runtime.morph_weights().len();
+    let required_world_len = match world_frame_len.checked_mul(frame_count) {
+        Some(len) => len,
+        None => return false,
+    };
+    let required_morph_len = match morph_frame_len.checked_mul(frame_count) {
+        Some(len) => len,
+        None => return false,
+    };
+
+    if out_world_matrices_f32_len < required_world_len
+        || out_morph_weights_f32_len < required_morph_len
+    {
+        return false;
+    }
+    if required_world_len > 0 && out_world_matrices_f32.is_null() {
+        return false;
+    }
+    if required_morph_len > 0 && out_morph_weights_f32.is_null() {
+        return false;
+    }
+    if frame_count == 0 {
+        return true;
+    }
+
+    let model = Arc::clone(&instance.model);
+    let morph_count = morph_frame_len;
+    let ik_count = instance.runtime.ik_enabled().len();
+    let workers = resolve_batch_worker_count(worker_count, frame_count);
+
+    let out_world = if required_world_len == 0 {
+        &mut []
+    } else {
+        unsafe { slice::from_raw_parts_mut(out_world_matrices_f32, required_world_len) }
+    };
+    let out_morph = if required_morph_len == 0 {
+        &mut []
+    } else {
+        unsafe { slice::from_raw_parts_mut(out_morph_weights_f32, required_morph_len) }
+    };
+
+    if workers <= 1 {
+        let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, ik_count);
+        evaluate_clip_frame_batch_chunk(
+            &mut runtime,
+            &clip.clip,
+            start_frame,
+            frame_step,
+            0,
+            frame_count,
+            world_frame_len,
+            morph_frame_len,
+            out_world,
+            out_morph,
+        );
+        return true;
+    }
+
+    let frames_per_chunk = frame_count.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        let mut remaining_world = out_world;
+        let mut remaining_morph = out_morph;
+        for chunk_index in 0..workers {
+            let first_frame_index = chunk_index * frames_per_chunk;
+            if first_frame_index >= frame_count {
+                break;
+            }
+            let frames_in_chunk = (frame_count - first_frame_index).min(frames_per_chunk);
+            let world_chunk_len = frames_in_chunk * world_frame_len;
+            let morph_chunk_len = frames_in_chunk * morph_frame_len;
+            let (world_chunk, next_world) = remaining_world.split_at_mut(world_chunk_len);
+            let (morph_chunk, next_morph) = remaining_morph.split_at_mut(morph_chunk_len);
+            remaining_world = next_world;
+            remaining_morph = next_morph;
+            let worker_model = Arc::clone(&model);
+            let worker_clip = &clip.clip;
+            handles.push(scope.spawn(move || {
+                let mut runtime =
+                    RuntimeInstance::new_with_counts(worker_model, morph_count, ik_count);
+                evaluate_clip_frame_batch_chunk(
+                    &mut runtime,
+                    worker_clip,
+                    start_frame,
+                    frame_step,
+                    first_frame_index,
+                    frames_in_chunk,
+                    world_frame_len,
+                    morph_frame_len,
+                    world_chunk,
+                    morph_chunk,
+                );
+            }));
+        }
+
+        for handle in handles {
+            if handle.join().is_err() {
+                return false;
+            }
+        }
+        true
+    })
+}
+
+fn resolve_batch_worker_count(requested_worker_count: u32, frame_count: usize) -> usize {
+    let requested = requested_worker_count as usize;
+    let default_workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let workers = if requested == 0 {
+        default_workers
+    } else {
+        requested
+    };
+    workers.clamp(1, frame_count.max(1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_clip_frame_batch_chunk(
+    runtime: &mut RuntimeInstance,
+    clip: &AnimationClip,
+    start_frame: f32,
+    frame_step: f32,
+    first_frame_index: usize,
+    frame_count: usize,
+    world_frame_len: usize,
+    morph_frame_len: usize,
+    out_world: &mut [f32],
+    out_morph: &mut [f32],
+) {
+    for local_frame_index in 0..frame_count {
+        let global_frame_index = first_frame_index + local_frame_index;
+        let frame = start_frame + frame_step * global_frame_index as f32;
+        runtime.evaluate_clip_frame(clip, frame);
+
+        let world_start = local_frame_index * world_frame_len;
+        let world_end = world_start + world_frame_len;
+        flatten_matrices_into_slice(
+            &mut out_world[world_start..world_end],
+            runtime.world_matrices(),
+        );
+
+        if morph_frame_len > 0 {
+            let morph_start = local_frame_index * morph_frame_len;
+            let morph_end = morph_start + morph_frame_len;
+            out_morph[morph_start..morph_end].copy_from_slice(runtime.morph_weights());
+        }
+    }
 }
 
 /// Returns the required `f32` count for copying world matrices.
@@ -3865,6 +4124,267 @@ mod tests {
             )
         });
         assert_eq!(ik_enabled[0], 0);
+
+        unsafe {
+            mmd_runtime_clip_free(clip);
+            mmd_runtime_instance_free(instance);
+            mmd_runtime_model_free(model);
+        }
+    }
+
+    #[test]
+    fn evaluates_clip_frame_batch_through_c_abi_without_mutating_source_instance() {
+        let parents = [-1];
+        let rest_positions = [1.0, 0.0, 0.0];
+        let model =
+            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
+        assert!(!model.is_null());
+        let instance = unsafe { mmd_runtime_instance_create_with_counts(model, 1, 1) };
+        assert!(!instance.is_null());
+
+        let bone_tracks = [MmdRuntimeFfiBoneTrack {
+            bone_index: 0,
+            keyframe_offset: 0,
+            keyframe_count: 2,
+        }];
+        let bone_keyframes = [
+            MmdRuntimeFfiBoneKeyframe {
+                frame: 0,
+                position_xyz: [0.0, 0.0, 0.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
+            MmdRuntimeFfiBoneKeyframe {
+                frame: 60,
+                position_xyz: [2.0, 0.0, 0.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
+        ];
+        let morph_tracks = [MmdRuntimeFfiMorphTrack {
+            morph_index: 0,
+            keyframe_offset: 0,
+            keyframe_count: 2,
+        }];
+        let morph_keyframes = [
+            MmdRuntimeFfiMorphKeyframe {
+                frame: 0,
+                weight: 0.0,
+            },
+            MmdRuntimeFfiMorphKeyframe {
+                frame: 60,
+                weight: 1.0,
+            },
+        ];
+        let property_keyframes = [
+            MmdRuntimeFfiPropertyKeyframe {
+                frame: 0,
+                ik_enabled_offset: 0,
+                ik_enabled_count: 1,
+            },
+            MmdRuntimeFfiPropertyKeyframe {
+                frame: 30,
+                ik_enabled_offset: 1,
+                ik_enabled_count: 1,
+            },
+        ];
+        let property_ik_enabled = [1u8, 0u8];
+        let clip = unsafe {
+            mmd_runtime_clip_create(
+                bone_tracks.as_ptr(),
+                bone_tracks.len(),
+                bone_keyframes.as_ptr(),
+                bone_keyframes.len(),
+                morph_tracks.as_ptr(),
+                morph_tracks.len(),
+                morph_keyframes.as_ptr(),
+                morph_keyframes.len(),
+                property_keyframes.as_ptr(),
+                property_keyframes.len(),
+                property_ik_enabled.as_ptr(),
+                property_ik_enabled.len(),
+            )
+        };
+        assert!(!clip.is_null());
+
+        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(instance, clip, 30.0) });
+        let mut source_morph = [0.0f32; 1];
+        assert!(unsafe {
+            mmd_runtime_instance_copy_morph_weights(instance, source_morph.as_mut_ptr(), 1)
+        });
+        assert_eq!(source_morph[0], 0.5);
+
+        assert_eq!(
+            unsafe { mmd_runtime_instance_clip_frame_batch_world_matrix_f32_len(instance, 3) },
+            48
+        );
+        assert_eq!(
+            unsafe { mmd_runtime_instance_clip_frame_batch_morph_weight_f32_len(instance, 3) },
+            3
+        );
+
+        let mut batch_world = [0.0f32; 48];
+        let mut batch_morphs = [0.0f32; 3];
+        assert!(unsafe {
+            mmd_runtime_instance_evaluate_clip_frame_batch(
+                instance,
+                clip,
+                0.0,
+                30.0,
+                3,
+                2,
+                batch_world.as_mut_ptr(),
+                batch_world.len(),
+                batch_morphs.as_mut_ptr(),
+                batch_morphs.len(),
+            )
+        });
+
+        assert_eq!(batch_world[12], 1.0);
+        assert_eq!(batch_world[16 + 12], 2.0);
+        assert_eq!(batch_world[32 + 12], 3.0);
+        assert_slice_near(&batch_morphs, &[0.0, 0.5, 1.0], 0.0);
+
+        let mut auto_worker_world = [0.0f32; 48];
+        let mut auto_worker_morphs = [0.0f32; 3];
+        assert!(unsafe {
+            mmd_runtime_instance_evaluate_clip_frame_batch(
+                instance,
+                clip,
+                0.0,
+                30.0,
+                3,
+                0,
+                auto_worker_world.as_mut_ptr(),
+                auto_worker_world.len(),
+                auto_worker_morphs.as_mut_ptr(),
+                auto_worker_morphs.len(),
+            )
+        });
+        assert_slice_near(&auto_worker_world, &batch_world, 0.0);
+        assert_slice_near(&auto_worker_morphs, &batch_morphs, 0.0);
+
+        assert!(unsafe {
+            mmd_runtime_instance_evaluate_clip_frame_batch(
+                instance,
+                clip,
+                0.0,
+                30.0,
+                0,
+                0,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                0,
+            )
+        });
+
+        let mut source_morph_after = [0.0f32; 1];
+        assert!(unsafe {
+            mmd_runtime_instance_copy_morph_weights(instance, source_morph_after.as_mut_ptr(), 1)
+        });
+        assert_eq!(source_morph_after[0], 0.5);
+
+        assert!(!unsafe {
+            mmd_runtime_instance_evaluate_clip_frame_batch(
+                instance,
+                clip,
+                0.0,
+                30.0,
+                3,
+                2,
+                batch_world.as_mut_ptr(),
+                batch_world.len() - 1,
+                batch_morphs.as_mut_ptr(),
+                batch_morphs.len(),
+            )
+        });
+        assert!(!unsafe {
+            mmd_runtime_instance_evaluate_clip_frame_batch(
+                instance,
+                clip,
+                f32::NAN,
+                30.0,
+                3,
+                2,
+                batch_world.as_mut_ptr(),
+                batch_world.len(),
+                batch_morphs.as_mut_ptr(),
+                batch_morphs.len(),
+            )
+        });
+
+        unsafe {
+            mmd_runtime_clip_free(clip);
+            mmd_runtime_instance_free(instance);
+            mmd_runtime_model_free(model);
+        }
+    }
+
+    #[test]
+    fn evaluates_clip_frame_batch_allows_null_morph_buffer_when_model_has_no_morphs() {
+        let parents = [-1];
+        let rest_positions = [1.0, 0.0, 0.0];
+        let model =
+            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
+        assert!(!model.is_null());
+        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
+        assert!(!instance.is_null());
+
+        let bone_tracks = [MmdRuntimeFfiBoneTrack {
+            bone_index: 0,
+            keyframe_offset: 0,
+            keyframe_count: 2,
+        }];
+        let bone_keyframes = [
+            MmdRuntimeFfiBoneKeyframe {
+                frame: 0,
+                position_xyz: [0.0, 0.0, 0.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
+            MmdRuntimeFfiBoneKeyframe {
+                frame: 10,
+                position_xyz: [1.0, 0.0, 0.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
+        ];
+        let clip = unsafe {
+            mmd_runtime_clip_create(
+                bone_tracks.as_ptr(),
+                bone_tracks.len(),
+                bone_keyframes.as_ptr(),
+                bone_keyframes.len(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+        assert!(!clip.is_null());
+
+        assert_eq!(
+            unsafe { mmd_runtime_instance_clip_frame_batch_morph_weight_f32_len(instance, 2) },
+            0
+        );
+        let mut batch_world = [0.0f32; 32];
+        assert!(unsafe {
+            mmd_runtime_instance_evaluate_clip_frame_batch(
+                instance,
+                clip,
+                0.0,
+                10.0,
+                2,
+                2,
+                batch_world.as_mut_ptr(),
+                batch_world.len(),
+                ptr::null_mut(),
+                0,
+            )
+        });
+        assert_eq!(batch_world[12], 1.0);
+        assert_eq!(batch_world[16 + 12], 2.0);
 
         unsafe {
             mmd_runtime_clip_free(clip);

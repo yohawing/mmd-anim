@@ -12,6 +12,7 @@ description = "C ABI wrapper for Unity and native hosts"
 publish = false
 
 [lib]
+name = "mmd_runtime_ffi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

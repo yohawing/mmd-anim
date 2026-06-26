@@ -102,7 +102,7 @@ fn export_pmx_fbx_binary_with_animation(
 
     write_fbx_header_extension(&mut writer)?;
     write_top_level_fields(&mut writer)?;
-    write_global_settings(&mut writer)?;
+    write_global_settings(&mut writer, animation.as_ref())?;
     write_documents(&mut writer, animation.is_some())?;
     write_references(&mut writer)?;
     write_definitions(
@@ -373,7 +373,6 @@ impl FbxAnimationData {
 
         let tracks = tracks
             .into_iter()
-            .filter(|track| track.changed_from_rest)
             .map(|track| FbxAnimationTrack {
                 bone_index: track.bone_index,
                 frame_times: frame_times.clone(),
@@ -724,7 +723,10 @@ fn write_top_level_fields<W: Write + Seek>(writer: &mut Writer<W>) -> Result<(),
     Ok(())
 }
 
-fn write_global_settings<W: Write + Seek>(writer: &mut Writer<W>) -> Result<(), FbxExportError> {
+fn write_global_settings<W: Write + Seek>(
+    writer: &mut Writer<W>,
+    animation: Option<&FbxAnimationData>,
+) -> Result<(), FbxExportError> {
     begin_node(writer, "GlobalSettings", |_| Ok(()))?;
     write_i32_node(writer, "Version", 1000)?;
     begin_node(writer, "Properties70", |_| Ok(()))?;
@@ -744,6 +746,12 @@ fn write_global_settings<W: Write + Seek>(writer: &mut Writer<W>) -> Result<(), 
         "",
         1.0,
     )?;
+    if let Some(anim) = animation {
+        let last_time = anim.last_time();
+        write_property_i64(writer, "TimeSpanStart", "KTime", "Time", "", 0)?;
+        write_property_i64(writer, "TimeSpanStop", "KTime", "Time", "", last_time)?;
+        write_property_f64(writer, "CustomFrameRate", "double", "Number", "", 30.0)?;
+    }
     writer.close_node()?;
     writer.close_node()?;
     Ok(())
@@ -1075,10 +1083,11 @@ fn write_objects<W: Write + Seek>(
     mesh: &MeshData,
     animation: Option<&FbxAnimationData>,
 ) -> Result<(), FbxExportError> {
+    let bone_names = build_bone_names(&model.skeleton.bones);
     begin_node(writer, "Objects", |_| Ok(()))?;
     write_geometry(writer, mesh)?;
     write_model(writer, options)?;
-    write_skeleton(writer, &model.skeleton.bones, options)?;
+    write_skeleton(writer, &model.skeleton.bones, &bone_names, options)?;
     write_skin_deformers(writer, model, options)?;
     write_bind_pose(writer, &model.skeleton.bones, options)?;
     for (index, material) in model.materials.iter().enumerate() {
@@ -1199,11 +1208,12 @@ fn write_model<W: Write + Seek>(
 fn write_skeleton<W: Write + Seek>(
     writer: &mut Writer<W>,
     bones: &[PmxParsedBone],
+    bone_names: &[String],
     options: &FbxExportOptions,
 ) -> Result<(), FbxExportError> {
     for (index, bone) in bones.iter().enumerate() {
-        write_bone_node_attribute(writer, index, bone)?;
-        write_bone_model(writer, index, bone, bones, options)?;
+        write_bone_node_attribute(writer, index, &bone_names[index])?;
+        write_bone_model(writer, index, bone, &bone_names[index], bones, options)?;
     }
     Ok(())
 }
@@ -1211,9 +1221,9 @@ fn write_skeleton<W: Write + Seek>(
 fn write_bone_node_attribute<W: Write + Seek>(
     writer: &mut Writer<W>,
     index: usize,
-    bone: &PmxParsedBone,
+    bone_name: &str,
 ) -> Result<(), FbxExportError> {
-    let name = format!("{}\x00\x01NodeAttribute", bone_name(bone));
+    let name = format!("{}\x00\x01NodeAttribute", bone_name);
     begin_node(writer, "NodeAttribute", |attrs| {
         attrs.append_i64(bone_attr_id(index))?;
         attrs.append_string_direct(&name)?;
@@ -1232,10 +1242,11 @@ fn write_bone_model<W: Write + Seek>(
     writer: &mut Writer<W>,
     index: usize,
     bone: &PmxParsedBone,
+    bone_name: &str,
     bones: &[PmxParsedBone],
     options: &FbxExportOptions,
 ) -> Result<(), FbxExportError> {
-    let name = format!("{}\x00\x01Model", bone_name(bone));
+    let name = format!("{}\x00\x01Model", bone_name);
     begin_node(writer, "Model", |attrs| {
         attrs.append_i64(bone_model_id(index))?;
         attrs.append_string_direct(&name)?;
@@ -1300,31 +1311,37 @@ fn identity_matrix() -> [f64; 16] {
 fn bone_world_transform(bone: &PmxParsedBone, options: &FbxExportOptions) -> [f64; 16] {
     let position = converted_bone_position(bone, options);
     [
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        position[0],
-        position[1],
-        position[2],
-        1.0,
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, position[0], position[1],
+        position[2], 1.0,
     ]
 }
 
-fn bone_name(bone: &PmxParsedBone) -> &str {
-    if bone.english_name.is_empty() {
-        &bone.name
-    } else {
-        &bone.english_name
+fn bone_world_transform_inverse(bone: &PmxParsedBone, options: &FbxExportOptions) -> [f64; 16] {
+    let position = converted_bone_position(bone, options);
+    [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -position[0],
+        -position[1], -position[2], 1.0,
+    ]
+}
+
+fn build_bone_names(bones: &[PmxParsedBone]) -> Vec<String> {
+    bones.iter().map(|bone| japanese_to_ascii(&bone.name)).collect()
+}
+
+fn japanese_to_ascii(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() * 6);
+    for ch in s.chars() {
+        if ch.is_ascii() {
+            result.push(ch);
+        } else if ('\u{FF01}'..='\u{FF5E}').contains(&ch) {
+            result.push(char::from_u32(ch as u32 - 0xFEE0).unwrap_or('_'));
+        } else {
+            for byte in ch.to_string().as_bytes() {
+                result.push_str(&format!("{:02X}", byte));
+            }
+        }
     }
+    result
 }
 
 fn write_material<W: Write + Seek>(
@@ -1469,7 +1486,11 @@ fn write_cluster_deformer<W: Write + Seek>(
         write_arr_i32_node(writer, "Indexes", &indices)?;
         write_arr_f64_node(writer, "Weights", &weights)?;
     }
-    write_arr_f64_node(writer, "Transform", &identity_matrix())?;
+    write_arr_f64_node(
+        writer,
+        "Transform",
+        &bone_world_transform_inverse(bone, options),
+    )?;
     write_arr_f64_node(
         writer,
         "TransformLink",

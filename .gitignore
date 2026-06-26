@@ -37,3 +37,5 @@ crates/mmd-anim-wasm/harness/pkg-web/
 # local dev artifacts
 artifacts/
 viewer/
+.venv-fbx/
+*.fbx

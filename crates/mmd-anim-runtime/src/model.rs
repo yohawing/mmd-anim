@@ -63,7 +63,9 @@ pub struct BoneInit {
     pub rest_position: Vec3A,
     pub inverse_bind_matrix: Mat4,
     pub transform_order: i32,
+    pub transform_after_physics: bool,
     pub fixed_axis: Option<Vec3A>,
+    pub enforce_fixed_axis: bool,
 }
 
 impl BoneInit {
@@ -73,12 +75,15 @@ impl BoneInit {
             rest_position,
             inverse_bind_matrix: Mat4::IDENTITY,
             transform_order: 0,
+            transform_after_physics: false,
             fixed_axis: None,
+            enforce_fixed_axis: false,
         }
     }
 
     pub fn with_fixed_axis(mut self, axis: Vec3A) -> Self {
         self.fixed_axis = Some(axis);
+        self.enforce_fixed_axis = true;
         self
     }
 }
@@ -215,7 +220,10 @@ pub struct ModelArena {
     inverse_bind_matrices: Box<[Mat4]>,
     transform_orders: Box<[i32]>,
     fixed_axis_flags: Box<[u8]>,
+    fixed_axis_constraint_flags: Box<[u8]>,
     fixed_axes: Box<[Vec3A]>,
+    transform_after_physics_flags: Box<[u8]>,
+    ik_link_flags: Box<[u8]>,
     eval_order: Box<[BoneIndex]>,
     eval_order_positions: Box<[usize]>,
     ik_solvers: Box<[IkSolver]>,
@@ -265,7 +273,9 @@ impl ModelArena {
         let mut rest_positions = Vec::with_capacity(bone_count);
         let mut inverse_bind_matrices = Vec::with_capacity(bone_count);
         let mut transform_orders = Vec::with_capacity(bone_count);
+        let mut transform_after_physics_flags = Vec::with_capacity(bone_count);
         let mut fixed_axis_flags = Vec::with_capacity(bone_count);
+        let mut fixed_axis_constraint_flags = Vec::with_capacity(bone_count);
         let mut fixed_axes = Vec::with_capacity(bone_count);
 
         for (bone_index, bone) in bones.iter().enumerate() {
@@ -284,13 +294,16 @@ impl ModelArena {
             rest_positions.push(bone.rest_position);
             inverse_bind_matrices.push(bone.inverse_bind_matrix);
             transform_orders.push(bone.transform_order);
+            transform_after_physics_flags.push(u8::from(bone.transform_after_physics));
             match bone.fixed_axis {
                 Some(axis) if axis.length_squared() > f32::EPSILON => {
                     fixed_axis_flags.push(1);
+                    fixed_axis_constraint_flags.push(u8::from(bone.enforce_fixed_axis));
                     fixed_axes.push(axis.normalize());
                 }
                 _ => {
                     fixed_axis_flags.push(0);
+                    fixed_axis_constraint_flags.push(0);
                     fixed_axes.push(Vec3A::X);
                 }
             }
@@ -298,7 +311,7 @@ impl ModelArena {
 
         let eval_order = build_eval_order(&parent_indices, &transform_orders)?;
         let eval_order_positions = build_eval_order_positions(&eval_order, bone_count);
-        let ik_solvers = build_ik_solvers(ik_solvers, bone_count)?;
+        let (ik_solvers, ik_link_flags) = build_ik_solvers(ik_solvers, bone_count)?;
         let (append_transforms, append_transform_indices) =
             build_append_transforms(append_transforms, bone_count)?;
         validate_morph_init(&morph, bone_count)?;
@@ -309,7 +322,10 @@ impl ModelArena {
             inverse_bind_matrices: inverse_bind_matrices.into_boxed_slice(),
             transform_orders: transform_orders.into_boxed_slice(),
             fixed_axis_flags: fixed_axis_flags.into_boxed_slice(),
+            fixed_axis_constraint_flags: fixed_axis_constraint_flags.into_boxed_slice(),
             fixed_axes: fixed_axes.into_boxed_slice(),
+            transform_after_physics_flags: transform_after_physics_flags.into_boxed_slice(),
+            ik_link_flags,
             eval_order,
             eval_order_positions,
             ik_solvers,
@@ -365,11 +381,30 @@ impl ModelArena {
     }
 
     #[inline]
+    pub(crate) fn fixed_axis_constraint(&self, bone: BoneIndex) -> Option<Vec3A> {
+        if self.fixed_axis_constraint_flags[bone.as_usize()] != 0 {
+            Some(self.fixed_axes[bone.as_usize()])
+        } else {
+            None
+        }
+    }
+
+    #[inline]
     pub fn fixed_axis_count(&self) -> usize {
         self.fixed_axis_flags
             .iter()
             .filter(|&&flag| flag != 0)
             .count()
+    }
+
+    #[inline]
+    pub fn transform_after_physics(&self, bone: BoneIndex) -> bool {
+        self.transform_after_physics_flags[bone.as_usize()] != 0
+    }
+
+    #[inline]
+    pub(crate) fn is_ik_link_bone(&self, bone: BoneIndex) -> bool {
+        self.ik_link_flags[bone.as_usize()] != 0
     }
 
     #[inline]
@@ -474,12 +509,14 @@ pub struct AppendTransform {
 }
 
 type AppendTransformBuildOutput = (Box<[AppendTransform]>, Box<[i32]>);
+type IkSolverBuildOutput = (Box<[IkSolver]>, Box<[u8]>);
 
 fn build_ik_solvers(
     ik_solvers: Vec<IkSolverInit>,
     bone_count: usize,
-) -> Result<Box<[IkSolver]>, ModelBuildError> {
+) -> Result<IkSolverBuildOutput, ModelBuildError> {
     let mut solvers = Vec::with_capacity(ik_solvers.len());
+    let mut ik_link_flags = vec![0; bone_count];
 
     for (solver_index, solver) in ik_solvers.into_iter().enumerate() {
         validate_ik_bone(solver_index, "ik", solver.ik_bone, bone_count)?;
@@ -488,6 +525,7 @@ fn build_ik_solvers(
         let mut links = Vec::with_capacity(solver.links.len());
         for link in solver.links {
             validate_ik_bone(solver_index, "link", link.bone, bone_count)?;
+            ik_link_flags[link.bone.as_usize()] = 1;
             links.push(IkLink {
                 bone: link.bone,
                 angle_limit: link.angle_limit,
@@ -503,7 +541,7 @@ fn build_ik_solvers(
         });
     }
 
-    Ok(solvers.into_boxed_slice())
+    Ok((solvers.into_boxed_slice(), ik_link_flags.into_boxed_slice()))
 }
 
 fn validate_ik_bone(

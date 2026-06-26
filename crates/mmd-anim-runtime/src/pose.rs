@@ -9,6 +9,7 @@ pub struct PoseArena {
     local_scales: Box<[Vec3A]>,
     append_position_offsets: Box<[Vec3A]>,
     append_rotations: Box<[Quat]>,
+    ik_rotations: Box<[Quat]>,
     morph_weights: Box<[f32]>,
     ik_enabled: Box<[u8]>,
     world_matrices: Box<[Mat4]>,
@@ -31,6 +32,7 @@ impl PoseArena {
             local_scales: vec![Vec3A::ONE; bone_count].into_boxed_slice(),
             append_position_offsets: vec![Vec3A::ZERO; bone_count].into_boxed_slice(),
             append_rotations: vec![Quat::IDENTITY; bone_count].into_boxed_slice(),
+            ik_rotations: vec![Quat::IDENTITY; bone_count].into_boxed_slice(),
             morph_weights: vec![0.0; morph_count].into_boxed_slice(),
             ik_enabled: vec![1; ik_count].into_boxed_slice(),
             world_matrices: vec![Mat4::IDENTITY; bone_count].into_boxed_slice(),
@@ -43,6 +45,7 @@ impl PoseArena {
         self.local_rotations.fill(Quat::IDENTITY);
         self.local_scales.fill(Vec3A::ONE);
         self.reset_append_transforms();
+        self.ik_rotations.fill(Quat::IDENTITY);
         self.morph_weights.fill(0.0);
         self.ik_enabled.fill(1);
     }
@@ -55,6 +58,10 @@ impl PoseArena {
     pub(crate) fn reset_append_transform(&mut self, bone: BoneIndex) {
         self.append_position_offsets[bone.as_usize()] = Vec3A::ZERO;
         self.append_rotations[bone.as_usize()] = Quat::IDENTITY;
+    }
+
+    pub(crate) fn reset_ik_rotations(&mut self) {
+        self.ik_rotations.fill(Quat::IDENTITY);
     }
 
     #[inline]
@@ -98,6 +105,11 @@ impl PoseArena {
     }
 
     #[inline]
+    pub(crate) fn ik_rotation(&self, bone: BoneIndex) -> Quat {
+        self.ik_rotations[bone.as_usize()]
+    }
+
+    #[inline]
     pub(crate) fn set_append_position_offset(&mut self, bone: BoneIndex, value: Vec3A) {
         self.append_position_offsets[bone.as_usize()] = value;
     }
@@ -105,6 +117,11 @@ impl PoseArena {
     #[inline]
     pub(crate) fn set_append_rotation(&mut self, bone: BoneIndex, value: Quat) {
         self.append_rotations[bone.as_usize()] = value;
+    }
+
+    #[inline]
+    pub(crate) fn set_ik_rotation(&mut self, bone: BoneIndex, value: Quat) {
+        self.ik_rotations[bone.as_usize()] = value;
     }
 
     #[inline]

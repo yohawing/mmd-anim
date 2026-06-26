@@ -201,8 +201,9 @@ dependencies = [
  "glam",
  "mmd-anim-format",
  "mmd-anim-runtime",
- "mmd-anim-schema",
+ "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -232,16 +233,6 @@ name = "mmd-anim-runtime"
 version = "0.1.6"
 dependencies = [
  "glam",
- "thiserror",
-]
-
-[[package]]
-name = "mmd-anim-schema"
-version = "0.1.6"
-dependencies = [
- "glam",
- "serde",
- "serde_json",
  "thiserror",
 ]
 

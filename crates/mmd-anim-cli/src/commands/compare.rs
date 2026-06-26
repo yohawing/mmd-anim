@@ -8,7 +8,7 @@ use std::{
 
 use mmd_anim_format::vmd::VmdBoneKeyframeRaw;
 use mmd_anim_runtime::{BoneIndex, IkSolveOptions, ModelArena, MorphIndex, RuntimeInstance};
-use mmd_anim_schema::{
+use crate::schema::{
     DEFAULT_FOCUSED_IK_BONE_NAMES, MmdDumperOracleBone, MmdDumperOracleDump, MmdDumperOracleModel,
 };
 

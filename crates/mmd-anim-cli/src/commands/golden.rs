@@ -1,12 +1,12 @@
 use std::{collections::HashMap, fs, path::Path, process::ExitCode, sync::Arc};
 
-use glam::Vec3A;
-use mmd_anim_format::VmdClipBuildOptions;
-use mmd_anim_runtime::{BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance};
 use crate::schema::{
     DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
     MmdDumperOracleModel,
 };
+use glam::Vec3A;
+use mmd_anim_format::VmdClipBuildOptions;
+use mmd_anim_runtime::{BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance};
 use serde_json::json;
 
 pub(crate) const GOLDEN_IK_COMPARE_USAGE: &str =
@@ -1377,9 +1377,9 @@ pub(crate) fn golden_ik_diagnose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::{MmdDumperOracleBone, MmdDumperOracleModel};
     use glam::Mat4;
     use mmd_anim_runtime::{IkLink, IkSolver};
-    use crate::schema::{MmdDumperOracleBone, MmdDumperOracleModel};
 
     fn make_identity_matrix(tx: f32, ty: f32, tz: f32) -> [f32; 16] {
         let mut m = [0f32; 16];

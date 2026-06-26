@@ -339,7 +339,7 @@ mod tests {
                 "command": "oracle-batch"
             },
             "defaults": {
-                "outDir": "F:/Develop/MMDDev/GoldenOracle/runs/test-motion-numeric",
+                "outDir": "runs/test-motion-numeric",
                 "timeoutMs": 180000,
                 "dump": { "bones": true, "morphs": true, "rigidBodies": false },
                 "focus": { "bones": ["センター", "右ひざ"], "morphs": ["まばたき"] },

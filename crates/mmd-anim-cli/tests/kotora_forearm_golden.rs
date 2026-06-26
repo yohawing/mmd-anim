@@ -4,7 +4,6 @@ use std::{
 };
 
 const KOTORA_MANIFEST_ENV: &str = "MMD_ANIM_KOTORA_FOREARM_GOLDEN_MANIFEST";
-const DEFAULT_KOTORA_MANIFEST: &str = "F:\\Develop\\MMDDev\\GoldenOracle\\runs\\motion-numeric\\kotora-gym-weekender-forearm\\manifest.kotora-only.json";
 
 #[test]
 #[ignore = "requires local Kotora GoldenOracle data generated from MMD/MMDDumper"]
@@ -90,13 +89,13 @@ fn kotora_forearm_golden_diagnosis_stays_within_epsilon_after_fix() {
 fn local_manifest() -> PathBuf {
     std::env::var_os(KOTORA_MANIFEST_ENV)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_KOTORA_MANIFEST))
+        .unwrap_or_else(|| panic!("{KOTORA_MANIFEST_ENV} must point to the local Kotora manifest"))
 }
 
 fn require_local_manifest(path: &Path) {
     assert!(
         path.exists(),
-        "missing local Kotora GoldenOracle manifest: {}; set {KOTORA_MANIFEST_ENV} to override",
+        "missing local Kotora GoldenOracle manifest: {}; set {KOTORA_MANIFEST_ENV}",
         path.display()
     );
 }

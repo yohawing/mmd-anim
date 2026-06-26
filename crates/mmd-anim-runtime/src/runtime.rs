@@ -355,7 +355,7 @@ impl RuntimeInstance {
                 }
             }
         }
-        self.update_world_matrices();
+        self.update_world_matrices_using_current_append_from_eval_order_position(0);
     }
 
     fn solve_ik_solver(&mut self, ik_index: usize, options: IkSolveOptions, after_physics: bool) {
@@ -562,19 +562,17 @@ impl RuntimeInstance {
     ) {
         let start_position =
             self.min_ik_dependency_eval_order_position(links, ik_bone, target_bone);
-        let start_position =
-            self.expand_update_start_for_append_dependencies(start_position, phase);
-        for bone in &self.model.eval_order()[start_position..] {
-            if self.bone_matches_phase(*bone, phase)
-                || self.bone_is_in_ik_update_scope(*bone, links, ik_bone, target_bone)
-            {
-                self.pose.reset_append_transform(*bone);
-            }
-        }
+        let start_position = self.expand_update_start_for_append_dependencies(start_position, None);
         for position in start_position..self.model.eval_order().len() {
             let bone = self.model.eval_order()[position];
             if self.bone_matches_phase(bone, phase)
                 || self.bone_is_in_ik_update_scope(bone, links, ik_bone, target_bone)
+                || self.bone_depends_on_ik_update_scope_append_source(
+                    bone,
+                    links,
+                    ik_bone,
+                    target_bone,
+                )
             {
                 self.update_append_transform_for_bone(bone);
                 self.update_world_matrix_for_bone(bone);
@@ -622,6 +620,41 @@ impl RuntimeInstance {
         links.iter().any(|link| {
             self.bone_is_ancestor_of(bone, link.bone) || self.bone_is_ancestor_of(link.bone, bone)
         })
+    }
+
+    fn bone_depends_on_ik_update_scope_append_source(
+        &self,
+        bone: crate::BoneIndex,
+        links: &[crate::IkLink],
+        ik_bone: crate::BoneIndex,
+        target_bone: crate::BoneIndex,
+    ) -> bool {
+        let mut changed_append_roots = Vec::new();
+        loop {
+            let mut changed = false;
+            for append in self.model.append_transforms() {
+                let source_changed = self.bone_is_in_ik_update_scope(
+                    append.source_bone,
+                    links,
+                    ik_bone,
+                    target_bone,
+                ) || changed_append_roots.iter().any(|root| {
+                    append.source_bone == *root
+                        || self.bone_is_ancestor_of(*root, append.source_bone)
+                });
+                if source_changed && !changed_append_roots.contains(&append.target_bone) {
+                    changed_append_roots.push(append.target_bone);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        changed_append_roots
+            .iter()
+            .any(|root| bone == *root || self.bone_is_ancestor_of(*root, bone))
     }
 
     fn bone_is_ancestor_of(&self, ancestor: crate::BoneIndex, bone: crate::BoneIndex) -> bool {
@@ -2089,6 +2122,112 @@ mod tests {
 
         assert_vec3a_near(
             translation(runtime.world_matrices()[4]),
+            Vec3A::new(0.0, 1.0, 0.0),
+        );
+    }
+
+    #[test]
+    fn earlier_append_target_preserves_later_ik_link_source_append_rotation() {
+        let mut append_target = BoneInit::new(None, Vec3A::ZERO);
+        append_target.transform_order = 0;
+        let mut append_child = BoneInit::new(Some(BoneIndex(3)), Vec3A::X);
+        append_child.transform_order = 1;
+        let mut append_driver = BoneInit::new(None, Vec3A::ZERO);
+        append_driver.transform_order = 9;
+        let mut link = BoneInit::new(None, Vec3A::ZERO);
+        link.transform_order = 10;
+        let mut effector = BoneInit::new(Some(BoneIndex(0)), Vec3A::X);
+        effector.transform_order = 11;
+        let mut controller = BoneInit::new(None, Vec3A::Y);
+        controller.transform_order = 12;
+
+        let model = Arc::new(
+            ModelArena::new_full(
+                vec![
+                    link,
+                    effector,
+                    controller,
+                    append_target,
+                    append_child,
+                    append_driver,
+                ],
+                vec![IkSolverInit {
+                    ik_bone: BoneIndex(2),
+                    target_bone: BoneIndex(1),
+                    links: vec![IkLinkInit::new(BoneIndex(0))],
+                    iteration_count: 1,
+                    limit_angle: 0.0,
+                }],
+                vec![
+                    AppendTransformInit::new(BoneIndex(0), BoneIndex(5), 1.0).with_rotation(),
+                    AppendTransformInit::new(BoneIndex(3), BoneIndex(0), 1.0).with_rotation(),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(model);
+        runtime.pose_mut().set_local_rotation(
+            BoneIndex(5),
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
+        );
+
+        runtime.evaluate_current_pose();
+
+        assert_vec3a_near(
+            translation(runtime.world_matrices()[4]),
+            Vec3A::new(0.0, 1.0, 0.0),
+        );
+    }
+
+    #[test]
+    fn transitive_append_target_recomputes_after_opposite_phase_ik_source_rotation() {
+        let mut append_a = BoneInit::new(None, Vec3A::ZERO);
+        append_a.transform_order = 0;
+        let mut append_b = BoneInit::new(None, Vec3A::ZERO);
+        append_b.transform_order = 1;
+        let mut append_b_child = BoneInit::new(Some(BoneIndex(4)), Vec3A::X);
+        append_b_child.transform_order = 2;
+
+        let mut link = BoneInit::new(None, Vec3A::ZERO);
+        link.transform_order = 10;
+        link.transform_after_physics = true;
+        let mut effector = BoneInit::new(Some(BoneIndex(0)), Vec3A::X);
+        effector.transform_order = 11;
+        effector.transform_after_physics = true;
+        let mut controller = BoneInit::new(None, Vec3A::Y);
+        controller.transform_order = 12;
+        controller.transform_after_physics = true;
+
+        let model = Arc::new(
+            ModelArena::new_full(
+                vec![
+                    link,
+                    effector,
+                    controller,
+                    append_a,
+                    append_b,
+                    append_b_child,
+                ],
+                vec![IkSolverInit {
+                    ik_bone: BoneIndex(2),
+                    target_bone: BoneIndex(1),
+                    links: vec![IkLinkInit::new(BoneIndex(0))],
+                    iteration_count: 1,
+                    limit_angle: 0.0,
+                }],
+                vec![
+                    AppendTransformInit::new(BoneIndex(3), BoneIndex(0), 1.0).with_rotation(),
+                    AppendTransformInit::new(BoneIndex(4), BoneIndex(3), 1.0).with_rotation(),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(model);
+
+        runtime.evaluate_current_pose();
+
+        assert_vec3a_near(
+            translation(runtime.world_matrices()[5]),
             Vec3A::new(0.0, 1.0, 0.0),
         );
     }

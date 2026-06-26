@@ -4840,7 +4840,7 @@ mod tests {
         data.extend_from_slice(b"TestModel");
         data.push(4);
         data.extend_from_slice(b"Base");
-        data.extend_from_slice(b"F:\\Develop\\MMDDev\\data\\unittest\\test_1bone_cube.pmx");
+        data.extend_from_slice(b"C:\\MMDDev\\data\\unittest\\test_1bone_cube.pmx");
         data.push(0);
         data.extend_from_slice(b"UserFile\\Motion\\walk.vmd\0");
         data
@@ -4896,7 +4896,7 @@ mod tests {
         assert_eq!(slot.english_name, "Base");
         assert_eq!(
             slot.normalized_path,
-            "F:/Develop/MMDDev/data/unittest/test_1bone_cube.pmx"
+            "C:/MMDDev/data/unittest/test_1bone_cube.pmx"
         );
         assert_eq!(reparsed.motion_paths, vec!["UserFile/Motion/walk.vmd"]);
     }
@@ -5765,7 +5765,7 @@ mod tests {
             &mut data,
             b"TestModel",
             b"Base",
-            b"F:\\Develop\\MMDDev\\data\\unittest\\test_1bone_cube.pmx",
+            b"C:\\MMDDev\\data\\unittest\\test_1bone_cube.pmx",
         );
         append_pmm_model_slot(
             &mut data,
@@ -8467,11 +8467,11 @@ mod tests {
         assert_eq!(slot.english_name_bytes, b"Base");
         assert_eq!(
             slot.model_path,
-            "F:\\Develop\\MMDDev\\data\\unittest\\test_1bone_cube.pmx"
+            "C:\\MMDDev\\data\\unittest\\test_1bone_cube.pmx"
         );
         assert_eq!(
             slot.normalized_path,
-            "F:/Develop/MMDDev/data/unittest/test_1bone_cube.pmx"
+            "C:/MMDDev/data/unittest/test_1bone_cube.pmx"
         );
         assert_eq!(slot.asset_reference_index, Some(0));
         assert_eq!(slot.confidence, "high");
@@ -8845,18 +8845,18 @@ mod tests {
 
     #[test]
     fn pmm_asset_scan_keeps_complete_and_fragmented_duplicate_paths_separate() {
-        let data = b"Polygon Movie maker 0002\0F:\\Develop\\MMDDev\\data\\unittest\\test_1bone_cube.pmx\0:\\Develop\\MMDDev\\data\\unittest\\test_1bone_cube.pmx\0";
+        let data = b"Polygon Movie maker 0002\0C:\\MMDDev\\data\\unittest\\test_1bone_cube.pmx\0:\\MMDDev\\data\\unittest\\test_1bone_cube.pmx\0";
         let parsed = parse_pmm_manifest(data).unwrap();
 
         assert_eq!(parsed.model_assets.len(), 2);
         assert_eq!(
             parsed.model_assets[0].normalized_path,
-            "F:/Develop/MMDDev/data/unittest/test_1bone_cube.pmx"
+            "C:/MMDDev/data/unittest/test_1bone_cube.pmx"
         );
         assert_eq!(parsed.model_assets[0].confidence, "high");
         assert_eq!(
             parsed.model_assets[1].normalized_path,
-            ":/Develop/MMDDev/data/unittest/test_1bone_cube.pmx"
+            ":/MMDDev/data/unittest/test_1bone_cube.pmx"
         );
         assert_eq!(parsed.model_assets[1].confidence, "low");
         assert!(
@@ -9353,193 +9353,90 @@ mod tests {
     }
 
     #[test]
-    fn pmm_ik_multi_bone_fixture_matches_mmddumper_inspect_json() {
-        let json_str = include_str!("../fixtures/pmm/ik_multi_bone_from_pmx_vmd.inspect.json");
-        let oracle: serde_json::Value =
-            serde_json::from_str(json_str).expect("inspect json must parse as Value");
-
+    fn pmm_ik_multi_bone_fixture_has_expected_document_summary() {
         let data = include_bytes!("../fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
         let parsed = parse_pmm_manifest(data).unwrap();
 
-        // document byteLength
         assert_eq!(
-            parsed.byte_length,
-            oracle["document"]["byteLength"].as_u64().unwrap() as usize,
-            "byte_length must match document.byteLength from inspect"
+            parsed.byte_length, 2125,
+            "byte_length must match the checked-in PMM fixture"
         );
 
-        // selectedModelIndex from document summary (v2 block)
         let document = parsed
             .document_summary
             .as_ref()
             .expect("document summary must exist for this fixture");
-        assert_eq!(
-            document.selected_model_index,
-            oracle["selectedModelIndex"].as_u64().unwrap() as u8
-        );
+        assert_eq!(document.selected_model_index, 0);
 
-        // counts.models / bones / morphs / boneKeyframes / morphKeyframes (additional)
         let c = &document.counts;
-        assert_eq!(
-            c.models,
-            oracle["counts"]["models"].as_u64().unwrap() as usize
-        );
-        assert_eq!(
-            c.bones,
-            oracle["counts"]["bones"].as_u64().unwrap() as usize
-        );
-        assert_eq!(
-            c.morphs,
-            oracle["counts"]["morphs"].as_u64().unwrap() as usize
-        );
-        assert_eq!(
-            c.bone_keyframes,
-            oracle["counts"]["boneKeyframes"].as_u64().unwrap() as usize
-        );
-        assert_eq!(
-            c.morph_keyframes,
-            oracle["counts"]["morphKeyframes"].as_u64().unwrap() as usize
-        );
+        assert_eq!(c.models, 1);
+        assert_eq!(c.bones, 3);
+        assert_eq!(c.morphs, 0);
+        assert_eq!(c.bone_keyframes, 2);
+        assert_eq!(c.morph_keyframes, 0);
 
-        // model: documentModelIndex / nameJa / nameEn / path / pathOffset / boneCount / morphCount / lastFrameIndex
         assert_eq!(document.models.len(), 1);
         let model = &document.models[0];
-        let m0 = &oracle["models"][0];
-        assert_eq!(
-            model.document_model_index,
-            m0["documentModelIndex"].as_u64().unwrap() as u8
-        );
-        assert_eq!(model.name, m0["nameJa"].as_str().unwrap());
-        assert_eq!(model.english_name, m0["nameEn"].as_str().unwrap());
-        assert_eq!(model.path, m0["path"].as_str().unwrap());
-        assert_eq!(
-            model.path_offset,
-            m0["pathOffset"].as_u64().unwrap() as usize
-        );
-        assert_eq!(model.bone_count, m0["boneCount"].as_u64().unwrap() as usize);
-        assert_eq!(
-            model.morph_count,
-            m0["morphCount"].as_u64().unwrap() as usize
-        );
-        assert_eq!(
-            model.last_frame_index,
-            m0["lastFrameIndex"].as_i64().unwrap() as i32
-        );
+        assert_eq!(model.document_model_index, 0);
+        assert_eq!(model.name, "ik_multi_axis_limit_fixture");
+        assert_eq!(model.english_name, "ik_multi_axis_limit_fixture");
+        assert_eq!(model.path, "..\\pmx\\ik_multi_axis_limit.pmx");
+        assert_eq!(model.path_offset, 112);
+        assert_eq!(model.bone_count, 3);
+        assert_eq!(model.morph_count, 0);
+        assert_eq!(model.last_frame_index, 30);
 
-        // section offsets
         let s = &model.sections;
-        let secs = &m0["sections"];
-        assert_eq!(
-            s.initial_bone_keyframes_offset,
-            secs["initialBoneKeyframesOffset"].as_u64().unwrap() as usize
-        );
-        assert_eq!(
-            s.bone_keyframe_count_offset,
-            secs["boneKeyframeCountOffset"].as_u64().unwrap() as usize
-        );
-        assert_eq!(
-            s.bone_keyframes_offset,
-            secs["boneKeyframesOffset"].as_u64().unwrap() as usize
-        );
-        assert_eq!(
-            s.bone_keyframes_end_offset,
-            secs["boneKeyframesEndOffset"].as_u64().unwrap() as usize
-        );
+        assert_eq!(s.initial_bone_keyframes_offset, 449);
+        assert_eq!(s.bone_keyframe_count_offset, 623);
+        assert_eq!(s.bone_keyframes_offset, 627);
+        assert_eq!(s.bone_keyframes_end_offset, 751);
 
-        // initialBoneKeyframes (all) offset/byteLength vs oracle (repo-local, no MMDDumper)
-        let init_bkfs_o = m0["initialBoneKeyframes"].as_array().unwrap();
-        assert_eq!(
-            model.initial_bone_keyframe_summaries.len(),
-            init_bkfs_o.len()
-        );
-        for (ibk, o) in model
-            .initial_bone_keyframe_summaries
-            .iter()
-            .zip(init_bkfs_o.iter())
-        {
-            assert_eq!(ibk.offset, o["offset"].as_u64().unwrap() as usize);
-            assert_eq!(ibk.byte_length, o["byteLength"].as_u64().unwrap() as usize);
+        assert_eq!(model.initial_bone_keyframe_summaries.len(), 3);
+        for ibk in model.initial_bone_keyframe_summaries.iter() {
+            assert_eq!(ibk.byte_length, 58);
             assert_eq!(ibk.payload_offset, ibk.offset + 12);
             assert_eq!(ibk.payload_byte_length, 46);
             assert_eq!(ibk.payload_bytes.len(), ibk.payload_byte_length);
             assert_eq!(&ibk.payload_bytes[..16], &ibk.interpolation[..]);
         }
+        assert_eq!(model.initial_bone_keyframe_summaries[0].offset, 449);
+        assert_eq!(model.initial_bone_keyframe_summaries[1].offset, 507);
+        assert_eq!(model.initial_bone_keyframe_summaries[2].offset, 565);
 
-        // initialModelKeyframe offset/byteLength vs oracle (repo-local, no MMDDumper)
         let imkf = &model.initial_model_keyframe;
-        let imkf_o = &m0["initialModelKeyframe"];
-        assert_eq!(imkf.offset, imkf_o["offset"].as_u64().unwrap() as usize);
-        assert_eq!(
-            imkf.byte_length,
-            imkf_o["byteLength"].as_u64().unwrap() as usize
-        );
+        assert_eq!(imkf.offset, 755);
+        assert_eq!(imkf.byte_length, 14);
 
-        // additional bone frame 15 and 30: translations + previous/next links
         let link15 = model
             .bone_keyframe_summaries
             .iter()
             .find(|kf| kf.frame_index == 15)
             .expect("link_root frame 15 must be present");
-        let kf15 = &m0["boneKeyframes"][0];
-        assert_eq!(link15.offset, kf15["offset"].as_u64().unwrap() as usize);
-        assert_eq!(
-            link15.byte_length,
-            kf15["byteLength"].as_u64().unwrap() as usize
-        );
+        assert_eq!(link15.offset, 627);
+        assert_eq!(link15.byte_length, 62);
         assert_eq!(link15.payload_offset, link15.offset + 16);
         assert_eq!(link15.payload_byte_length, 46);
         assert_eq!(link15.payload_bytes.len(), link15.payload_byte_length);
         assert_eq!(&link15.payload_bytes[..16], &link15.interpolation[..]);
-        assert_eq!(
-            link15.previous_keyframe_index,
-            kf15["previousKeyframeIndex"].as_i64().unwrap() as i32
-        );
-        assert_eq!(
-            link15.next_keyframe_index,
-            kf15["nextKeyframeIndex"].as_i64().unwrap() as i32
-        );
-        let t15 = kf15["translation"].as_array().unwrap();
-        assert_eq!(
-            link15.translation,
-            [
-                t15[0].as_f64().unwrap() as f32,
-                t15[1].as_f64().unwrap() as f32,
-                t15[2].as_f64().unwrap() as f32
-            ]
-        );
+        assert_eq!(link15.previous_keyframe_index, 0);
+        assert_eq!(link15.next_keyframe_index, 0);
+        assert_eq!(link15.translation, [0.05, 0.0, 0.0]);
 
         let eff30 = model
             .bone_keyframe_summaries
             .iter()
             .find(|kf| kf.frame_index == 30)
             .expect("effector frame 30 must be present");
-        let kf30 = &m0["boneKeyframes"][1];
-        assert_eq!(eff30.offset, kf30["offset"].as_u64().unwrap() as usize);
-        assert_eq!(
-            eff30.byte_length,
-            kf30["byteLength"].as_u64().unwrap() as usize
-        );
+        assert_eq!(eff30.offset, 689);
+        assert_eq!(eff30.byte_length, 62);
         assert_eq!(eff30.payload_offset, eff30.offset + 16);
         assert_eq!(eff30.payload_byte_length, 46);
         assert_eq!(eff30.payload_bytes.len(), eff30.payload_byte_length);
         assert_eq!(&eff30.payload_bytes[..16], &eff30.interpolation[..]);
-        assert_eq!(
-            eff30.previous_keyframe_index,
-            kf30["previousKeyframeIndex"].as_i64().unwrap() as i32
-        );
-        assert_eq!(
-            eff30.next_keyframe_index,
-            kf30["nextKeyframeIndex"].as_i64().unwrap() as i32
-        );
-        let t30 = kf30["translation"].as_array().unwrap();
-        assert_eq!(
-            eff30.translation,
-            [
-                t30[0].as_f64().unwrap() as f32,
-                t30[1].as_f64().unwrap() as f32,
-                t30[2].as_f64().unwrap() as f32
-            ]
-        );
+        assert_eq!(eff30.previous_keyframe_index, 1);
+        assert_eq!(eff30.next_keyframe_index, 0);
+        assert_eq!(eff30.translation, [0.0, 0.1, 0.0]);
     }
 
     #[test]

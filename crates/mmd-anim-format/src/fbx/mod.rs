@@ -8,7 +8,7 @@ use fbxcel::{
 };
 
 use crate::{
-    pmx::{PmxParsedBone, PmxParsedLocalAxis, PmxParsedMaterial, PmxParsedModel},
+    pmx::{PmxParsedBone, PmxParsedMaterial, PmxParsedModel},
     vmd::{VmdParsedAnimation, VmdParsedBoneFrame},
 };
 
@@ -278,15 +278,11 @@ impl FbxAnimationData {
                 previous_euler = Some(filtered_euler);
 
                 let converted_translation = convert_position_to_fbx(translation, options);
-                let local_translation = [
-                    rest_translation[0] + converted_translation[0],
-                    rest_translation[1] + converted_translation[1],
-                    rest_translation[2] + converted_translation[2],
-                ];
 
                 for axis in 0..3 {
                     rotation_values[axis].push(filtered_euler[axis] as f32);
-                    translation_values[axis].push(local_translation[axis] as f32);
+                    translation_values[axis]
+                        .push((rest_translation[axis] + converted_translation[axis]) as f32);
                 }
             }
 
@@ -419,14 +415,14 @@ fn convert_position_to_fbx(p: [f64; 3], options: &FbxExportOptions) -> [f64; 3] 
 
 fn quat_to_euler_xyz(q: [f64; 4]) -> [f64; 3] {
     let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
-    let sin_beta = (2.0 * (x * z + w * y)).clamp(-1.0, 1.0);
+    let sin_beta = (2.0 * (w * y - x * z)).clamp(-1.0, 1.0);
     let beta = sin_beta.asin();
     let (alpha, gamma) = if beta.cos().abs() < 1e-6 {
-        let a = (2.0 * (x * y - w * z)).atan2(1.0 - 2.0 * (x * x + z * z));
+        let a = (2.0 * (x * y + w * z)).atan2(1.0 - 2.0 * (y * y + z * z));
         (a, 0.0)
     } else {
-        let a = (-(2.0 * (y * z - w * x))).atan2(1.0 - 2.0 * (x * x + y * y));
-        let g = (-(2.0 * (x * y - w * z))).atan2(1.0 - 2.0 * (y * y + z * z));
+        let a = (2.0 * (y * z + w * x)).atan2(1.0 - 2.0 * (x * x + y * y));
+        let g = (2.0 * (x * y + w * z)).atan2(1.0 - 2.0 * (y * y + z * z));
         (a, g)
     };
     [alpha.to_degrees(), beta.to_degrees(), gamma.to_degrees()]
@@ -1088,16 +1084,6 @@ fn write_bone_model<W: Write + Seek>(
     write_i32_node(writer, "Version", 232)?;
     begin_node(writer, "Properties70", |_| Ok(()))?;
     write_property_i32(writer, "RotationActive", "bool", "", "", 1)?;
-    if let Some(local_axis) = bone.local_axis.as_ref() {
-        write_property_vec3(
-            writer,
-            "PreRotation",
-            "Vector3D",
-            "Vector",
-            "",
-            prerotation_from_local_axis(local_axis, options),
-        )?;
-    }
     write_property_i32(writer, "InheritType", "enum", "", "", 1)?;
     write_property_vec3(writer, "ScalingMax", "Vector3D", "Vector", "", [0.0; 3])?;
     write_property_i32(writer, "DefaultAttributeIndex", "int", "Integer", "", 0)?;
@@ -1142,78 +1128,6 @@ fn converted_bone_position(bone: &PmxParsedBone, options: &FbxExportOptions) -> 
         bone.position[1] as f64,
         bone.position[2] as f64 * z_sign,
     ]
-}
-
-fn prerotation_from_local_axis(
-    local_axis: &PmxParsedLocalAxis,
-    options: &FbxExportOptions,
-) -> [f64; 3] {
-    let Some(lx) = normalize3([
-        local_axis.x[0] as f64,
-        local_axis.x[1] as f64,
-        local_axis.x[2] as f64,
-    ]) else {
-        return [0.0; 3];
-    };
-    let Some(lz_initial) = normalize3([
-        local_axis.z[0] as f64,
-        local_axis.z[1] as f64,
-        local_axis.z[2] as f64,
-    ]) else {
-        return [0.0; 3];
-    };
-    let Some(ly) = normalize3(cross3(lz_initial, lx)) else {
-        return [0.0; 3];
-    };
-    let lz = cross3(lx, ly);
-
-    let r_pmx = [
-        [lx[0], ly[0], lz[0]],
-        [lx[1], ly[1], lz[1]],
-        [lx[2], ly[2], lz[2]],
-    ];
-    let r_fbx = if options.flip_z {
-        [
-            [r_pmx[0][0], r_pmx[0][1], -r_pmx[0][2]],
-            [r_pmx[1][0], r_pmx[1][1], -r_pmx[1][2]],
-            [-r_pmx[2][0], -r_pmx[2][1], r_pmx[2][2]],
-        ]
-    } else {
-        r_pmx
-    };
-
-    let beta = r_fbx[0][2].clamp(-1.0, 1.0).asin();
-    let (alpha, gamma) = if beta.cos().abs() < 1e-6 {
-        (r_fbx[1][0].atan2(r_fbx[1][1]), 0.0)
-    } else {
-        (
-            (-r_fbx[1][2]).atan2(r_fbx[2][2]),
-            (-r_fbx[0][1]).atan2(r_fbx[0][0]),
-        )
-    };
-
-    [alpha.to_degrees(), beta.to_degrees(), gamma.to_degrees()]
-}
-
-fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn normalize3(v: [f64; 3]) -> Option<[f64; 3]> {
-    let length = vec3_length(v);
-    if length == 0.0 {
-        None
-    } else {
-        Some([v[0] / length, v[1] / length, v[2] / length])
-    }
-}
-
-fn vec3_length(v: [f64; 3]) -> f64 {
-    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
 fn identity_matrix() -> [f64; 16] {

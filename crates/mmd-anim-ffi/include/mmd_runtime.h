@@ -562,6 +562,31 @@ bool mmd_runtime_instance_evaluate_clip_frame_without_ik(
     const mmd_runtime_clip_t*     clip,
     float                         frame);
 
+size_t mmd_runtime_instance_clip_frame_batch_world_matrix_f32_len(
+    const mmd_runtime_instance_t* instance,
+    size_t                        frame_count);
+
+size_t mmd_runtime_instance_clip_frame_batch_morph_weight_f32_len(
+    const mmd_runtime_instance_t* instance,
+    size_t                        frame_count);
+
+/* Evaluates a frame range into caller-owned contiguous buffers.
+   worker_count == 0 uses available host parallelism.
+   The source instance is not mutated; worker-local runtime instances are used.
+   out_world_matrices_f32 layout: [frame][bone][16] column-major f32 matrices.
+   out_morph_weights_f32 layout: [frame][morph]. */
+bool mmd_runtime_instance_evaluate_clip_frame_batch(
+    const mmd_runtime_instance_t* instance,
+    const mmd_runtime_clip_t*     clip,
+    float                         start_frame,
+    float                         frame_step,
+    size_t                        frame_count,
+    uint32_t                      worker_count,
+    float*                        out_world_matrices_f32,
+    size_t                        out_world_matrices_f32_len,
+    float*                        out_morph_weights_f32,
+    size_t                        out_morph_weights_f32_len);
+
 /* ------------------------------------------------------------------ */
 /*  Output: world matrices                                             */
 /* ------------------------------------------------------------------ */

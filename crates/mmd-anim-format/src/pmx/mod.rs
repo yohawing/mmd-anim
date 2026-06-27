@@ -21,6 +21,7 @@ const BONE_FLAG_APPEND_ROTATE: u16 = 0x0100;
 const BONE_FLAG_APPEND_TRANSLATE: u16 = 0x0200;
 const BONE_FLAG_FIXED_AXIS: u16 = 0x0400;
 const BONE_FLAG_LOCAL_AXIS: u16 = 0x0800;
+const BONE_FLAG_TRANSFORM_AFTER_PHYSICS: u16 = 0x1000;
 const BONE_FLAG_EXTERNAL_PARENT: u16 = 0x2000;
 const PMX_SKINNING_MODE_BDEF1: &str = "bdef1";
 const PMX_SKINNING_MODE_BDEF2: &str = "bdef2";
@@ -781,7 +782,11 @@ pub fn read_bones(
             rest_position: position,
             inverse_bind_matrix: Mat4::from_translation((-position).into()),
             transform_order,
+            transform_after_physics: flags & BONE_FLAG_TRANSFORM_AFTER_PHYSICS != 0,
             fixed_axis,
+            // PMX fixed-axis is preserved as rig metadata. MMD-compatible pose evaluation
+            // does not project ordinary VMD/local rotations onto this axis.
+            enforce_fixed_axis: false,
         });
     }
 
@@ -4153,7 +4158,11 @@ fn bone_flag_bits(flags: &PmxParsedBoneFlags) -> u16 {
         } else {
             0
         }
-        | (u16::from(flags.transform_after_physics) << 12)
+        | if flags.transform_after_physics {
+            BONE_FLAG_TRANSFORM_AFTER_PHYSICS
+        } else {
+            0
+        }
         | if flags.external_parent_transform {
             BONE_FLAG_EXTERNAL_PARENT
         } else {
@@ -5484,6 +5493,7 @@ mod tests {
         assert_eq!(BONE_FLAG_APPEND_TRANSLATE, 0x0200);
         assert_eq!(BONE_FLAG_FIXED_AXIS, 0x0400);
         assert_eq!(BONE_FLAG_LOCAL_AXIS, 0x0800);
+        assert_eq!(BONE_FLAG_TRANSFORM_AFTER_PHYSICS, 0x1000);
         assert_eq!(BONE_FLAG_EXTERNAL_PARENT, 0x2000);
     }
 
@@ -6590,6 +6600,7 @@ mod tests {
 
         let result = import_pmx_model(&buf).unwrap();
         assert_eq!(result.bones[0].fixed_axis, Some(Vec3A::Y));
+        assert!(!result.bones[0].enforce_fixed_axis);
     }
 
     #[test]

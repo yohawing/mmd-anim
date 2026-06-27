@@ -1,6 +1,6 @@
 use std::{fs, process::ExitCode};
 
-use mmd_anim_schema::MmdDumperOracleDump;
+use crate::schema::MmdDumperOracleDump;
 
 pub(crate) fn oracle_summary(path: &str) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;

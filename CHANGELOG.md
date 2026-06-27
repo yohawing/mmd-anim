@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.1.7 - 2026-06-27
+
+Runtime IK/append correctness, batch evaluation APIs, schema crate
+consolidation, and repository cleanup.
+
+### Added
+
+- Added batch parallel clip evaluation APIs for C ABI (`mmd-anim-ffi`) and
+  WASM (`mmd-anim-wasm`), enabling multi-clip evaluation in a single call.
+  FFI uses Rayon thread-pool parallelism; WASM evaluates sequentially.
+- Added `--json` flag to `verify --mode numeric` for structured JSON report
+  output. JSON mode is report-only (exit 0 regardless of mismatches) to
+  support external gate tooling.
+- Added PMX runtime metadata accessors: `PmxBoneFlags`, bone flag queries,
+  and morph metadata for host-side inspection.
+- Added WASM smoke harness (`harness/smoke.mjs`) for batch evaluation
+  testing.
+
+### Changed
+
+- Absorbed `mmd-anim-schema` crate into `mmd-anim-cli`. Oracle and fixture
+  types moved to `cli/src/schema.rs` and `cli/src/mmd_dumper_oracle.rs`;
+  schema crate removed from workspace.
+- Removed public local-only smoke artifacts: root `scripts/`, C# FFI smoke
+  harness, PMM inspect/provenance fixtures, and hardcoded local `F:` paths.
+- Moved `RELEASE.md` and `TESTING.md` to gitignored `docs/` as local-only
+  development documents.
+
+### Fixed
+
+- Fixed PMX ordered append/IK evaluation: transitive append targets are now
+  recomputed after IK source rotation changes across evaluation phases,
+  fixing incorrect arm poses (e.g. Kotora forearm).
+- Consolidated PMM internal helper naming and removed dead inspect code.
+
 ## 0.1.6 - 2026-06-25
 
 Patch release for CLI overhaul, rig primitives, crates.io CLI publishing, and

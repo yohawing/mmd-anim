@@ -9,6 +9,8 @@ use std::{
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod commands;
+mod mmd_dumper_oracle;
+mod schema;
 
 // ---------------------------------------------------------------------------
 // Clap CLI definition
@@ -126,7 +128,7 @@ enum Commands {
     /// Verify oracle, golden, parser, or numeric comparison data.
     #[command(
         long_about = "Run comparison and oracle diagnostics from a manifest, oracle file, or golden root.\nWhen --mode is omitted, verify reads the target as an oracle JSONL summary file.\nMode inputs:\n  numeric: manifest JSON for numeric model/motion/oracle cases\n  camera: manifest JSON for camera comparison cases\n  ik: golden root directory containing IK fixture/oracle data\n  parser: golden root directory containing parser golden data\n  omitted: oracle JSONL summary file\nUse this for numeric, camera, IK, parser, and focused diagnosis workflows.",
-        after_help = "Examples:\n  mmd-anim verify oracle.jsonl\n  mmd-anim verify manifest.json --mode numeric\n  mmd-anim verify camera-manifest.json --mode camera\n  mmd-anim verify golden-root --mode ik\n  mmd-anim verify golden-root --mode ik --compare\n  mmd-anim verify golden-root --mode parser\n  mmd-anim verify manifest.json --mode numeric --diagnose case-a 120 左足ＩＫ"
+        after_help = "Examples:\n  mmd-anim verify oracle.jsonl\n  mmd-anim verify manifest.json --mode numeric\n  mmd-anim verify manifest.json --mode numeric --json\n  mmd-anim verify camera-manifest.json --mode camera\n  mmd-anim verify golden-root --mode ik\n  mmd-anim verify golden-root --mode ik --compare\n  mmd-anim verify golden-root --mode parser\n  mmd-anim verify manifest.json --mode numeric --diagnose case-a 120 左足ＩＫ"
     )]
     Verify {
         /// Path to a manifest, oracle JSONL file, or golden root directory
@@ -464,16 +466,35 @@ fn dispatch_verify(
     };
 
     match mode {
-        VerifyMode::Numeric | VerifyMode::Camera => {
-            if compare || use_json {
-                return usage_error(
-                    "verify --mode numeric|camera does not support --compare or --json",
-                );
+        VerifyMode::Numeric => {
+            if compare {
+                return usage_error("verify --mode numeric does not support --compare");
             }
             if sample_frame_offset.is_some() {
-                return usage_error(
-                    "verify --mode numeric|camera does not support --sample-frame-offset",
-                );
+                return usage_error("verify --mode numeric does not support --sample-frame-offset");
+            }
+            if use_json {
+                if diagnose.is_some() || eval_frame.is_some() {
+                    return usage_error(
+                        "verify --mode numeric --json cannot be combined with --diagnose or --eval-frame",
+                    );
+                }
+                return commands::compare::compare_numeric_manifest_json(target);
+            }
+            if let Some(parts) = diagnose {
+                return dispatch_numeric_diagnose(target, parts, eval_frame);
+            }
+            if eval_frame.is_some() {
+                return usage_error("verify --eval-frame requires --diagnose");
+            }
+            commands::compare::compare_numeric_manifest(target)
+        }
+        VerifyMode::Camera => {
+            if compare || use_json {
+                return usage_error("verify --mode camera does not support --compare or --json");
+            }
+            if sample_frame_offset.is_some() {
+                return usage_error("verify --mode camera does not support --sample-frame-offset");
             }
             if let Some(parts) = diagnose {
                 return dispatch_numeric_diagnose(target, parts, eval_frame);
@@ -841,7 +862,7 @@ pub(crate) fn copy_world_matrices_to_f32(matrices: &[glam::Mat4], out: &mut [f32
 // ---------------------------------------------------------------------------
 
 fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    use mmd_anim_schema::{
+    use crate::schema::{
         DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
     };
 
@@ -919,7 +940,7 @@ fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>
 }
 
 fn golden_parser_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    use mmd_anim_schema::{GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump};
+    use crate::schema::{GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump};
 
     let manifest_path = root.join("oracle-batch.json");
     let manifest = GoldenIkBatchManifest::from_json_str(&read_text_file(&manifest_path)?)?;
@@ -1274,6 +1295,143 @@ mod tests {
         assert!(!error.contains("unsupported kind"));
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn numeric_compare_json_report_is_report_only_for_missing_motion_case() {
+        let temp = unique_test_dir("compare-numeric-json-report-only");
+        fs::create_dir_all(&temp).unwrap();
+        let manifest_path = temp.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            r#"{
+                "cases": [
+                    {
+                        "name": "missing-motion",
+                        "kind": "motion-numeric",
+                        "assets": {
+                            "model": "missing.pmx",
+                            "motion": "missing.vmd"
+                        },
+                        "oracle": { "path": "missing.jsonl" },
+                        "frames": [0],
+                        "compare": {
+                            "targets": ["bones", "morphs", "rigidBodies"],
+                            "epsilon": 0.003
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let report = compare::build_numeric_compare_report(&manifest_path, false).unwrap();
+        let value = report.to_json();
+
+        assert_eq!(value["summary"]["cases"], 1);
+        assert_eq!(value["summary"]["comparedCases"], 0);
+        assert_eq!(value["summary"]["missing"], 1);
+        assert_eq!(value["summary"]["importErrors"], 0);
+        assert_eq!(value["summary"]["mismatchCount"], 0);
+        assert_eq!(
+            value["summary"]["skippedTargets"],
+            serde_json::json!(["morphs", "rigidBodies"])
+        );
+        assert_eq!(value["perCase"][0]["name"], "missing-motion");
+        assert_eq!(value["perCase"][0]["status"], "missing");
+        assert_eq!(
+            value["perCase"][0]["missingPaths"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let code = dispatch_verify(
+            &manifest_path,
+            Some(VerifyMode::Numeric),
+            None,
+            false,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn numeric_compare_report_summary_reuses_merged_stats() {
+        let camera = compare::CameraNumericCompareStats {
+            compared_cases: 1,
+            compared_frames: 2,
+            mismatch_count: 3,
+            max_delta: 0.25,
+        };
+        let mut motion = compare::MotionNumericCompareStats {
+            total_cases: 2,
+            compared_cases: 1,
+            compared_frames: 5,
+            compared_bones: 7,
+            mismatch_count: 11,
+            max_abs_error: 1.25,
+            worst: "case-a:30:左足".to_owned(),
+            worst_frame: Some(30),
+            worst_bone: "左足".to_owned(),
+            worst_component: Some(12),
+            ..compare::MotionNumericCompareStats::default()
+        };
+        motion.skipped_targets.insert("morphs".to_owned());
+        motion.skipped_targets.insert("rigidBodies".to_owned());
+        let report = compare::NumericCompareReport {
+            default_epsilon: 0.003,
+            camera_stats: camera,
+            motion_stats: motion,
+            per_case: Vec::new(),
+        };
+        let value = report.to_json();
+
+        assert_eq!(value["summary"]["cases"], 3);
+        assert_eq!(value["summary"]["comparedCases"], 2);
+        assert_eq!(value["summary"]["comparedFrames"], 7);
+        assert_eq!(value["summary"]["comparedBones"], 7);
+        assert_eq!(value["summary"]["mismatchCount"], 14);
+        assert_eq!(value["summary"]["maxAbsError"], 1.25);
+        assert_eq!(value["summary"]["cameraMaxDelta"], 0.25);
+        assert_eq!(
+            value["summary"]["skippedTargets"],
+            serde_json::json!(["morphs", "rigidBodies"])
+        );
+    }
+
+    #[test]
+    fn verify_numeric_json_rejects_diagnose_and_camera_json_stays_rejected() {
+        let target = Path::new("manifest.json");
+        let numeric = dispatch_verify(
+            target,
+            Some(VerifyMode::Numeric),
+            Some(vec!["case".to_owned(), "0".to_owned(), "bone".to_owned()]),
+            false,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(numeric, ExitCode::from(2));
+
+        let camera = dispatch_verify(
+            target,
+            Some(VerifyMode::Camera),
+            None,
+            false,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(camera, ExitCode::from(2));
     }
 
     #[test]

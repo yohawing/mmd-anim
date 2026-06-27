@@ -889,6 +889,7 @@ impl WasmMmdModel {
 
 #[wasm_bindgen]
 pub struct WasmMmdRuntimeInstance {
+    model: Arc<ModelArena>,
     runtime: RuntimeInstance,
     world_matrices_cache: Vec<f32>,
     skinning_matrices_cache: Vec<f32>,
@@ -925,11 +926,88 @@ impl WasmMmdRuntimeInstance {
 }
 
 #[wasm_bindgen]
+pub struct WasmMmdRuntimeBatchEvaluation {
+    frame_count: usize,
+    bone_count: usize,
+    morph_count: usize,
+    world_matrices: Vec<f32>,
+    morph_weights: Vec<f32>,
+}
+
+#[wasm_bindgen]
+impl WasmMmdRuntimeBatchEvaluation {
+    #[wasm_bindgen(js_name = frameCount)]
+    pub fn frame_count(&self) -> usize {
+        self.frame_count
+    }
+
+    #[wasm_bindgen(js_name = boneCount)]
+    pub fn bone_count(&self) -> usize {
+        self.bone_count
+    }
+
+    #[wasm_bindgen(js_name = morphCount)]
+    pub fn morph_count(&self) -> usize {
+        self.morph_count
+    }
+
+    #[wasm_bindgen(js_name = worldMatrixF32Len)]
+    pub fn world_matrix_f32_len(&self) -> usize {
+        self.world_matrices.len()
+    }
+
+    #[wasm_bindgen(js_name = morphWeightF32Len)]
+    pub fn morph_weight_f32_len(&self) -> usize {
+        self.morph_weights.len()
+    }
+
+    #[wasm_bindgen(js_name = worldMatrices)]
+    pub fn world_matrices(&self) -> Vec<f32> {
+        self.world_matrices.clone()
+    }
+
+    #[wasm_bindgen(js_name = morphWeights)]
+    pub fn morph_weights(&self) -> Vec<f32> {
+        self.morph_weights.clone()
+    }
+
+    #[wasm_bindgen(js_name = worldMatricesView)]
+    pub fn world_matrices_view(&self) -> js_sys::Float32Array {
+        unsafe { js_sys::Float32Array::view(&self.world_matrices) }
+    }
+
+    #[wasm_bindgen(js_name = morphWeightsView)]
+    pub fn morph_weights_view(&self) -> js_sys::Float32Array {
+        unsafe { js_sys::Float32Array::view(&self.morph_weights) }
+    }
+
+    #[wasm_bindgen(js_name = copyWorldMatrices)]
+    pub fn copy_world_matrices(&self, out: &mut [f32]) -> bool {
+        if out.len() < self.world_matrices.len() {
+            return false;
+        }
+        out[..self.world_matrices.len()].copy_from_slice(&self.world_matrices);
+        true
+    }
+
+    #[wasm_bindgen(js_name = copyMorphWeights)]
+    pub fn copy_morph_weights(&self, out: &mut [f32]) -> bool {
+        if out.len() < self.morph_weights.len() {
+            return false;
+        }
+        out[..self.morph_weights.len()].copy_from_slice(&self.morph_weights);
+        true
+    }
+}
+
+#[wasm_bindgen]
 impl WasmMmdRuntimeInstance {
     #[wasm_bindgen(constructor)]
     pub fn new(model: &WasmMmdModel, morph_count: usize) -> WasmMmdRuntimeInstance {
+        let model_arena = Arc::clone(&model.model);
         let mut instance = Self {
-            runtime: RuntimeInstance::new_with_morph_count(Arc::clone(&model.model), morph_count),
+            model: Arc::clone(&model_arena),
+            runtime: RuntimeInstance::new_with_morph_count(model_arena, morph_count),
             world_matrices_cache: Vec::new(),
             skinning_matrices_cache: Vec::new(),
             morph_weights_cache: Vec::new(),
@@ -945,12 +1023,10 @@ impl WasmMmdRuntimeInstance {
         morph_count: usize,
         ik_count: usize,
     ) -> WasmMmdRuntimeInstance {
+        let model_arena = Arc::clone(&model.model);
         let mut instance = Self {
-            runtime: RuntimeInstance::new_with_counts(
-                Arc::clone(&model.model),
-                morph_count,
-                ik_count,
-            ),
+            model: Arc::clone(&model_arena),
+            runtime: RuntimeInstance::new_with_counts(model_arena, morph_count, ik_count),
             world_matrices_cache: Vec::new(),
             skinning_matrices_cache: Vec::new(),
             morph_weights_cache: Vec::new(),
@@ -962,8 +1038,10 @@ impl WasmMmdRuntimeInstance {
 
     #[wasm_bindgen(js_name = forModel)]
     pub fn for_model(model: &WasmMmdModel) -> WasmMmdRuntimeInstance {
+        let model_arena = Arc::clone(&model.model);
         let mut instance = Self {
-            runtime: RuntimeInstance::new(Arc::clone(&model.model)),
+            model: Arc::clone(&model_arena),
+            runtime: RuntimeInstance::new(model_arena),
             world_matrices_cache: Vec::new(),
             skinning_matrices_cache: Vec::new(),
             morph_weights_cache: Vec::new(),
@@ -1012,6 +1090,78 @@ impl WasmMmdRuntimeInstance {
         );
         self.refresh_caches();
         Ok(())
+    }
+
+    #[wasm_bindgen(js_name = clipFrameBatchWorldMatrixF32Len)]
+    pub fn clip_frame_batch_world_matrix_f32_len(&self, frame_count: usize) -> usize {
+        self.runtime
+            .world_matrices()
+            .len()
+            .checked_mul(16)
+            .and_then(|frame_len| frame_len.checked_mul(frame_count))
+            .unwrap_or(0)
+    }
+
+    #[wasm_bindgen(js_name = clipFrameBatchMorphWeightF32Len)]
+    pub fn clip_frame_batch_morph_weight_f32_len(&self, frame_count: usize) -> usize {
+        self.runtime
+            .morph_weights()
+            .len()
+            .checked_mul(frame_count)
+            .unwrap_or(0)
+    }
+
+    #[wasm_bindgen(js_name = evaluateClipFrameBatch)]
+    pub fn evaluate_clip_frame_batch(
+        &self,
+        clip: &WasmMmdClip,
+        start_frame: f32,
+        frame_step: f32,
+        frame_count: usize,
+        worker_count: u32,
+    ) -> Result<WasmMmdRuntimeBatchEvaluation, JsValue> {
+        if !start_frame.is_finite() || !frame_step.is_finite() {
+            return Err(JsValue::from_str("startFrame and frameStep must be finite"));
+        }
+
+        let bone_count = self.runtime.world_matrices().len();
+        let morph_count = self.runtime.morph_weights().len();
+        let world_len = bone_count
+            .checked_mul(16)
+            .and_then(|frame_len| frame_len.checked_mul(frame_count))
+            .ok_or_else(|| JsValue::from_str("batch world matrix output length overflow"))?;
+        let morph_len = morph_count
+            .checked_mul(frame_count)
+            .ok_or_else(|| JsValue::from_str("batch morph weight output length overflow"))?;
+
+        let mut world_matrices = Vec::with_capacity(world_len);
+        let mut morph_weights = Vec::with_capacity(morph_len);
+        let morph_state_count = morph_count;
+        let ik_state_count = self.runtime.ik_enabled().len();
+        let mut runtime = RuntimeInstance::new_with_counts(
+            Arc::clone(&self.model),
+            morph_state_count,
+            ik_state_count,
+        );
+
+        // worker_count is accepted for C ABI parity. Wasm threads require a
+        // separate build/runtime contract, so this surface currently runs the
+        // batch in one worker and keeps the output layout stable.
+        let _ = worker_count;
+        for frame_index in 0..frame_count {
+            let frame = start_frame + frame_step * frame_index as f32;
+            runtime.evaluate_clip_frame(&clip.clip, frame);
+            extend_matrices(&mut world_matrices, runtime.world_matrices());
+            morph_weights.extend_from_slice(runtime.morph_weights());
+        }
+
+        Ok(WasmMmdRuntimeBatchEvaluation {
+            frame_count,
+            bone_count,
+            morph_count,
+            world_matrices,
+            morph_weights,
+        })
     }
 
     #[wasm_bindgen(js_name = worldMatrixF32Len)]
@@ -1475,10 +1625,14 @@ fn build_morph_init_from_wasm(input: &ModelInput<'_>) -> Result<MorphInit, Strin
 
 fn copy_matrices(matrices: &[glam::Mat4]) -> Vec<f32> {
     let mut out = Vec::with_capacity(matrices.len() * 16);
+    extend_matrices(&mut out, matrices);
+    out
+}
+
+fn extend_matrices(out: &mut Vec<f32>, matrices: &[glam::Mat4]) {
     for matrix in matrices {
         out.extend_from_slice(&matrix.to_cols_array());
     }
-    out
 }
 
 fn try_copy_matrices(matrices: &[glam::Mat4], out: &mut [f32]) -> bool {
@@ -2051,6 +2205,55 @@ TextureFilename { "tex/main.png"; }
         assert_eq!(runtime.ik_enabled(), vec![0]);
         assert_eq!(runtime.morph_weights_cache, vec![0.5]);
         assert_eq!(runtime.ik_enabled_cache, vec![0]);
+    }
+
+    #[test]
+    fn evaluates_clip_frame_batch_through_wasm_wrapper_without_mutating_source() {
+        let model = WasmMmdModel::new(&[-1], &[0.0, 0.0, 0.0]).unwrap();
+        let clip = WasmMmdClip::new(
+            &[0, 0, 2],
+            &[0, 60],
+            &[
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            &[0, 0, 2],
+            &[0, 60],
+            &[0.0, 1.0],
+            &[0, 30],
+            &[1, 0],
+            1,
+        )
+        .unwrap();
+        let mut runtime = WasmMmdRuntimeInstance::with_counts(&model, 1, 1);
+        runtime.evaluate_clip_frame(&clip, 30.0);
+        let source_world_before = runtime.world_matrices();
+        let source_morph_before = runtime.morph_weights();
+
+        assert_eq!(runtime.clip_frame_batch_world_matrix_f32_len(3), 48);
+        assert_eq!(runtime.clip_frame_batch_morph_weight_f32_len(3), 3);
+        let batch = runtime
+            .evaluate_clip_frame_batch(&clip, 0.0, 30.0, 3, 0)
+            .unwrap();
+
+        assert_eq!(batch.frame_count(), 3);
+        assert_eq!(batch.bone_count(), 1);
+        assert_eq!(batch.morph_count(), 1);
+        assert_eq!(batch.world_matrix_f32_len(), 48);
+        assert_eq!(batch.morph_weight_f32_len(), 3);
+        let batch_world = batch.world_matrices();
+        assert_eq!(batch_world[12], 0.0);
+        assert_eq!(batch_world[16 + 12], 1.0);
+        assert_eq!(batch_world[32 + 12], 2.0);
+        assert_eq!(batch.morph_weights(), vec![0.0, 0.5, 1.0]);
+
+        let mut world_copy = vec![0.0; batch.world_matrix_f32_len()];
+        assert!(batch.copy_world_matrices(&mut world_copy));
+        assert_eq!(world_copy, batch_world);
+        let mut short_world_copy = vec![0.0; batch.world_matrix_f32_len() - 1];
+        assert!(!batch.copy_world_matrices(&mut short_world_copy));
+
+        assert_eq!(runtime.world_matrices(), source_world_before);
+        assert_eq!(runtime.morph_weights(), source_morph_before);
     }
 
     #[test]

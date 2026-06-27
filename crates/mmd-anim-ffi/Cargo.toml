@@ -12,10 +12,11 @@ description = "C ABI wrapper for Unity and native hosts"
 publish = false
 
 [lib]
+name = "mmd_runtime_ffi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 glam.workspace = true
 mmd-anim-runtime.workspace = true
-mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.5" }
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.7" }
 serde_json.workspace = true

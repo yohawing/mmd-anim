@@ -133,26 +133,6 @@ mmd_runtime_model_free(model);
 ホスト側の形状データから PMX を生成したい場合は `mmd_runtime_export_pmx_from_parts` を使います。
 入力配列の所有権は呼び出し元に残り、返却されたバイト列は `mmd_runtime_byte_buffer_free` で解放します。
 
-VMD の camera / light / self-shadow track は、モデル runtime を作らずに直接 sampling できます。
-出力先は呼び出し元が用意した float buffer です。
-
-```c
-float camera[9];      // distance, position.xyz, rotation.xyz, fov, perspective
-float light[6];       // color.rgb, direction.xyz
-float self_shadow[2]; // mode, distance
-
-bool has_camera = mmd_runtime_vmd_sample_camera(
-    vmd_bytes, vmd_len, 120.0f, camera, 9);
-bool has_light = mmd_runtime_vmd_sample_light(
-    vmd_bytes, vmd_len, 120.0f, light, 6);
-bool has_self_shadow = mmd_runtime_vmd_sample_self_shadow(
-    vmd_bytes, vmd_len, 120.0f, self_shadow, 2);
-```
-
-繰り返し sampling する場合は、`mmd_runtime_vmd_camera_track_t`、
-`mmd_runtime_vmd_light_track_t`、`mmd_runtime_vmd_self_shadow_track_t` を一度作成し、
-対応する `*_track_sample` 関数を呼びます。
-
 ## WASM / ブラウザから使う
 
 ビルドはブラウザ向けの `wasm-pack build --target web` に固定しています。Node.js 単体用ビルドは使いません。
@@ -170,15 +150,9 @@ import init, {
   exportPmxFromParts,
   exportVmdAnimationJsonBytes,
   parseMmdFormatJson,
-  sampleVmdCamera,
-  sampleVmdLight,
-  sampleVmdSelfShadow,
-  WasmVmdCameraTrack,
-  WasmVmdLightTrack,
   WasmMmdClip,
   WasmMmdModel,
   WasmMmdRuntimeInstance,
-  WasmVmdSelfShadowTrack,
 } from "./pkg/mmd_anim_wasm.js";
 
 await init();
@@ -201,27 +175,6 @@ model.free();
 const json = parseMmdFormatJson(vmdBytes, "motion.vmd");
 const exportedBytes = exportVmdAnimationJsonBytes(json);
 const normalizedBytes = exportMmdFormatBytes(vmdBytes, "motion.vmd");
-
-// モデル runtime を使わない camera / light / self-shadow sampling
-const camera = new Float32Array(9);      // distance, position.xyz, rotation.xyz, fov, perspective
-const light = new Float32Array(6);       // color.rgb, direction.xyz
-const selfShadow = new Float32Array(2);  // mode, distance
-
-const hasCamera = sampleVmdCamera(vmdBytes, 120, camera);
-const hasLight = sampleVmdLight(vmdBytes, 120, light);
-const hasSelfShadow = sampleVmdSelfShadow(vmdBytes, 120, selfShadow);
-
-const cameraTrack = WasmVmdCameraTrack.fromVmdBytes(vmdBytes);
-cameraTrack.sample(180, camera);
-cameraTrack.free();
-
-const lightTrack = WasmVmdLightTrack.fromVmdBytes(vmdBytes);
-lightTrack.sample(180, light);
-lightTrack.free();
-
-const selfShadowTrack = WasmVmdSelfShadowTrack.fromVmdBytes(vmdBytes);
-selfShadowTrack.sample(180, selfShadow);
-selfShadowTrack.free();
 
 // 型付き配列から PMX を生成
 const generatedPmxBytes = exportPmxFromParts(

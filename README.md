@@ -142,27 +142,6 @@ host-side geometry data, use `mmd_runtime_export_pmx_from_parts`.
 Input arrays remain owned by the caller, and returned bytes must be freed with
 `mmd_runtime_byte_buffer_free`.
 
-VMD camera, light, and self-shadow tracks can also be sampled directly through
-caller-owned output buffers. This is useful for hosts that need MMD camera or
-lighting state without constructing a full model runtime.
-
-```c
-float camera[9];      // distance, position.xyz, rotation.xyz, fov, perspective
-float light[6];       // color.rgb, direction.xyz
-float self_shadow[2]; // mode, distance
-
-bool has_camera = mmd_runtime_vmd_sample_camera(
-    vmd_bytes, vmd_len, 120.0f, camera, 9);
-bool has_light = mmd_runtime_vmd_sample_light(
-    vmd_bytes, vmd_len, 120.0f, light, 6);
-bool has_self_shadow = mmd_runtime_vmd_sample_self_shadow(
-    vmd_bytes, vmd_len, 120.0f, self_shadow, 2);
-```
-
-For repeated sampling, create `mmd_runtime_vmd_camera_track_t`,
-`mmd_runtime_vmd_light_track_t`, or `mmd_runtime_vmd_self_shadow_track_t` once
-and call the matching `*_track_sample` function.
-
 This native integration crate is not published to crates.io for the 0.1.x line. It is
 kept in the Rust workspace for builds and checks.
 
@@ -184,15 +163,9 @@ import init, {
   exportPmxFromParts,
   exportVmdAnimationJsonBytes,
   parseMmdFormatJson,
-  sampleVmdCamera,
-  sampleVmdLight,
-  sampleVmdSelfShadow,
-  WasmVmdCameraTrack,
-  WasmVmdLightTrack,
   WasmMmdClip,
   WasmMmdModel,
   WasmMmdRuntimeInstance,
-  WasmVmdSelfShadowTrack,
 } from "./pkg/mmd_anim_wasm.js";
 
 await init();
@@ -214,27 +187,6 @@ model.free();
 const json = parseMmdFormatJson(vmdBytes, "motion.vmd");
 const exportedBytes = exportVmdAnimationJsonBytes(json);
 const normalizedBytes = exportMmdFormatBytes(vmdBytes, "motion.vmd");
-
-// Camera / light / self-shadow sampling without a model runtime
-const camera = new Float32Array(9);      // distance, position.xyz, rotation.xyz, fov, perspective
-const light = new Float32Array(6);       // color.rgb, direction.xyz
-const selfShadow = new Float32Array(2);  // mode, distance
-
-const hasCamera = sampleVmdCamera(vmdBytes, 120, camera);
-const hasLight = sampleVmdLight(vmdBytes, 120, light);
-const hasSelfShadow = sampleVmdSelfShadow(vmdBytes, 120, selfShadow);
-
-const cameraTrack = WasmVmdCameraTrack.fromVmdBytes(vmdBytes);
-cameraTrack.sample(180, camera);
-cameraTrack.free();
-
-const lightTrack = WasmVmdLightTrack.fromVmdBytes(vmdBytes);
-lightTrack.sample(180, light);
-lightTrack.free();
-
-const selfShadowTrack = WasmVmdSelfShadowTrack.fromVmdBytes(vmdBytes);
-selfShadowTrack.sample(180, selfShadow);
-selfShadowTrack.free();
 
 // Generate PMX from typed arrays
 const generatedPmxBytes = exportPmxFromParts(

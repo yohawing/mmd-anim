@@ -17,7 +17,7 @@ use mmd_anim_runtime::{
 };
 use wasm_bindgen::prelude::*;
 
-pub const WASM_WRAPPER_VERSION: u32 = 1;
+pub const WASM_WRAPPER_VERSION: u32 = 2;
 
 const APPEND_FLAG_ROTATION: u32 = 1;
 const APPEND_FLAG_TRANSLATION: u32 = 1 << 1;
@@ -93,48 +93,14 @@ pub fn parse_vmd_animation_json(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&parsed).map_err(js_error)
 }
 
-#[wasm_bindgen(js_name = sampleVmdCameraJson)]
-pub fn sample_vmd_camera_json(data: &[u8], frame: f32) -> Result<String, JsValue> {
-    if data.is_empty() {
-        return Err(JsValue::from_str("VMD data is empty"));
-    }
-    if !frame.is_finite() {
-        return Err(JsValue::from_str("frame must be finite"));
-    }
-    let parsed = mmd_anim_format::parse_vmd_animation(data)
-        .map_err(|error| js_parser_error("VMD", "sampleVmdCameraJson", None, error))?;
-    let camera = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
-        .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
-    serde_json::to_string(&camera).map_err(js_error)
-}
-
-/// Sample VMD camera bytes and return:
-/// `[distance, position.x, position.y, position.z, rotation.x, rotation.y,
-/// rotation.z, fov, perspective]`.
-///
-/// `perspective` is encoded as `1.0` when perspective is enabled, otherwise
-/// `0.0`.
-#[wasm_bindgen(js_name = sampleVmdCameraArray)]
-pub fn sample_vmd_camera_array(data: &[u8], frame: f32) -> Result<js_sys::Float32Array, JsValue> {
-    if data.is_empty() {
-        return Err(JsValue::from_str("VMD data is empty"));
-    }
-    if !frame.is_finite() {
-        return Err(JsValue::from_str("frame must be finite"));
-    }
-    let parsed = mmd_anim_format::parse_vmd_animation(data)
-        .map_err(|error| js_parser_error("VMD", "sampleVmdCameraArray", None, error))?;
-    let camera = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
-        .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
-    Ok(js_sys::Float32Array::from(&camera_state_array(camera)[..]))
-}
-
 /// Sample VMD camera bytes into a caller-owned `Float32Array`.
 ///
-/// The output layout matches `sampleVmdCameraArray`. Returns `false` when
-/// `out.length < 9`.
-#[wasm_bindgen(js_name = sampleVmdCameraInto)]
-pub fn sample_vmd_camera_into(
+/// Writes `[distance, position.x, position.y, position.z, rotation.x,
+/// rotation.y, rotation.z, fov, perspective]` to `out`.
+/// `perspective` is encoded as `1.0` when enabled, otherwise `0.0`.
+/// Returns `false` when `out.length < 9`.
+#[wasm_bindgen(js_name = sampleVmdCamera)]
+pub fn sample_vmd_camera(
     data: &[u8],
     frame: f32,
     out: &js_sys::Float32Array,
@@ -146,10 +112,57 @@ pub fn sample_vmd_camera_into(
         return Err(JsValue::from_str("frame must be finite"));
     }
     let parsed = mmd_anim_format::parse_vmd_animation(data)
-        .map_err(|error| js_parser_error("VMD", "sampleVmdCameraInto", None, error))?;
+        .map_err(|error| js_parser_error("VMD", "sampleVmdCamera", None, error))?;
     let camera = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
         .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
     copy_camera_state_array(camera, out)
+}
+
+/// Sample VMD light bytes into a caller-owned `Float32Array`.
+///
+/// Writes `[color.r, color.g, color.b, direction.x, direction.y,
+/// direction.z]` to `out`. Returns `false` when `out.length < 6`.
+#[wasm_bindgen(js_name = sampleVmdLight)]
+pub fn sample_vmd_light(
+    data: &[u8],
+    frame: f32,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if data.is_empty() {
+        return Err(JsValue::from_str("VMD data is empty"));
+    }
+    if !frame.is_finite() {
+        return Err(JsValue::from_str("frame must be finite"));
+    }
+    let parsed = mmd_anim_format::parse_vmd_animation(data)
+        .map_err(|error| js_parser_error("VMD", "sampleVmdLight", None, error))?;
+    let light = mmd_anim_format::sample_vmd_light_frames(&parsed.light_frames, frame)
+        .ok_or_else(|| JsValue::from_str("VMD has no light keyframes"))?;
+    copy_light_state_array(light, out)
+}
+
+/// Sample VMD self-shadow bytes into a caller-owned `Float32Array`.
+///
+/// Writes `[mode, distance]` to `out`. `mode` is encoded as a float.
+/// Returns `false` when `out.length < 2`.
+#[wasm_bindgen(js_name = sampleVmdSelfShadow)]
+pub fn sample_vmd_self_shadow(
+    data: &[u8],
+    frame: f32,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if data.is_empty() {
+        return Err(JsValue::from_str("VMD data is empty"));
+    }
+    if !frame.is_finite() {
+        return Err(JsValue::from_str("frame must be finite"));
+    }
+    let parsed = mmd_anim_format::parse_vmd_animation(data)
+        .map_err(|error| js_parser_error("VMD", "sampleVmdSelfShadow", None, error))?;
+    let self_shadow =
+        mmd_anim_format::sample_vmd_self_shadow_frames(&parsed.self_shadow_frames, frame)
+            .ok_or_else(|| JsValue::from_str("VMD has no self-shadow keyframes"))?;
+    copy_self_shadow_state_array(self_shadow, out)
 }
 
 #[wasm_bindgen(js_name = parseMmdFormatJson)]
@@ -1359,44 +1372,106 @@ impl WasmVmdCameraTrack {
         self.frames.len()
     }
 
-    #[wasm_bindgen(js_name = sampleJson)]
-    pub fn sample_json(&self, frame: f32) -> Result<String, JsValue> {
-        if !frame.is_finite() {
-            return Err(JsValue::from_str("frame must be finite"));
-        }
-        let camera = mmd_anim_format::sample_vmd_camera_frames(&self.frames, frame)
-            .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
-        serde_json::to_string(&camera).map_err(js_error)
-    }
-
-    /// Sample the camera track and return:
-    /// `[distance, position.x, position.y, position.z, rotation.x, rotation.y,
-    /// rotation.z, fov, perspective]`.
-    ///
-    /// `perspective` is encoded as `1.0` when perspective is enabled, otherwise
-    /// `0.0`.
-    #[wasm_bindgen(js_name = sampleArray)]
-    pub fn sample_array(&self, frame: f32) -> Result<js_sys::Float32Array, JsValue> {
-        if !frame.is_finite() {
-            return Err(JsValue::from_str("frame must be finite"));
-        }
-        let camera = mmd_anim_format::sample_vmd_camera_frames(&self.frames, frame)
-            .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
-        Ok(js_sys::Float32Array::from(&camera_state_array(camera)[..]))
-    }
-
     /// Sample the camera track into a caller-owned `Float32Array`.
     ///
-    /// The output layout matches `sampleArray`. Returns `false` when
-    /// `out.length < 9`.
-    #[wasm_bindgen(js_name = sampleInto)]
-    pub fn sample_into(&self, frame: f32, out: &js_sys::Float32Array) -> Result<bool, JsValue> {
+    /// Writes `[distance, position.x, position.y, position.z, rotation.x,
+    /// rotation.y, rotation.z, fov, perspective]` to `out`.
+    /// `perspective` is encoded as `1.0` when enabled, otherwise `0.0`.
+    /// Returns `false` when `out.length < 9`.
+    #[wasm_bindgen(js_name = sample)]
+    pub fn sample(&self, frame: f32, out: &js_sys::Float32Array) -> Result<bool, JsValue> {
         if !frame.is_finite() {
             return Err(JsValue::from_str("frame must be finite"));
         }
         let camera = mmd_anim_format::sample_vmd_camera_frames(&self.frames, frame)
             .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
         copy_camera_state_array(camera, out)
+    }
+}
+
+#[wasm_bindgen]
+pub struct WasmVmdLightTrack {
+    frames: Vec<mmd_anim_format::vmd::VmdParsedLightFrame>,
+}
+
+#[wasm_bindgen]
+impl WasmVmdLightTrack {
+    #[wasm_bindgen(js_name = fromVmdBytes)]
+    pub fn from_vmd_bytes(data: &[u8]) -> Result<WasmVmdLightTrack, JsValue> {
+        if data.is_empty() {
+            return Err(JsValue::from_str("VMD data is empty"));
+        }
+        let parsed = mmd_anim_format::parse_vmd_animation(data).map_err(|error| {
+            js_parser_error("VMD", "WasmVmdLightTrack.fromVmdBytes", None, error)
+        })?;
+        if parsed.light_frames.is_empty() {
+            return Err(JsValue::from_str("VMD has no light keyframes"));
+        }
+        Ok(Self {
+            frames: parsed.light_frames,
+        })
+    }
+
+    #[wasm_bindgen(js_name = frameCount)]
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Sample the light track into a caller-owned `Float32Array`.
+    ///
+    /// Writes `[color.r, color.g, color.b, direction.x, direction.y,
+    /// direction.z]` to `out`. Returns `false` when `out.length < 6`.
+    #[wasm_bindgen(js_name = sample)]
+    pub fn sample(&self, frame: f32, out: &js_sys::Float32Array) -> Result<bool, JsValue> {
+        if !frame.is_finite() {
+            return Err(JsValue::from_str("frame must be finite"));
+        }
+        let light = mmd_anim_format::sample_vmd_light_frames(&self.frames, frame)
+            .ok_or_else(|| JsValue::from_str("VMD has no light keyframes"))?;
+        copy_light_state_array(light, out)
+    }
+}
+
+#[wasm_bindgen]
+pub struct WasmVmdSelfShadowTrack {
+    frames: Vec<mmd_anim_format::vmd::VmdParsedSelfShadowFrame>,
+}
+
+#[wasm_bindgen]
+impl WasmVmdSelfShadowTrack {
+    #[wasm_bindgen(js_name = fromVmdBytes)]
+    pub fn from_vmd_bytes(data: &[u8]) -> Result<WasmVmdSelfShadowTrack, JsValue> {
+        if data.is_empty() {
+            return Err(JsValue::from_str("VMD data is empty"));
+        }
+        let parsed = mmd_anim_format::parse_vmd_animation(data).map_err(|error| {
+            js_parser_error("VMD", "WasmVmdSelfShadowTrack.fromVmdBytes", None, error)
+        })?;
+        if parsed.self_shadow_frames.is_empty() {
+            return Err(JsValue::from_str("VMD has no self-shadow keyframes"));
+        }
+        Ok(Self {
+            frames: parsed.self_shadow_frames,
+        })
+    }
+
+    #[wasm_bindgen(js_name = frameCount)]
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Sample the self-shadow track into a caller-owned `Float32Array`.
+    ///
+    /// Writes `[mode, distance]` to `out`. `mode` is encoded as a float.
+    /// Returns `false` when `out.length < 2`.
+    #[wasm_bindgen(js_name = sample)]
+    pub fn sample(&self, frame: f32, out: &js_sys::Float32Array) -> Result<bool, JsValue> {
+        if !frame.is_finite() {
+            return Err(JsValue::from_str("frame must be finite"));
+        }
+        let self_shadow = mmd_anim_format::sample_vmd_self_shadow_frames(&self.frames, frame)
+            .ok_or_else(|| JsValue::from_str("VMD has no self-shadow keyframes"))?;
+        copy_self_shadow_state_array(self_shadow, out)
     }
 }
 
@@ -1422,6 +1497,49 @@ fn copy_camera_state_array(
         return Ok(false);
     }
     let values = camera_state_array(camera);
+    for (index, value) in values.into_iter().enumerate() {
+        out.set_index(index as u32, value);
+    }
+    Ok(true)
+}
+
+fn light_state_array(light: mmd_anim_format::VmdLightState) -> [f32; 6] {
+    [
+        light.color[0],
+        light.color[1],
+        light.color[2],
+        light.direction[0],
+        light.direction[1],
+        light.direction[2],
+    ]
+}
+
+fn copy_light_state_array(
+    light: mmd_anim_format::VmdLightState,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if out.length() < 6 {
+        return Ok(false);
+    }
+    let values = light_state_array(light);
+    for (index, value) in values.into_iter().enumerate() {
+        out.set_index(index as u32, value);
+    }
+    Ok(true)
+}
+
+fn self_shadow_state_array(self_shadow: mmd_anim_format::VmdSelfShadowState) -> [f32; 2] {
+    [self_shadow.mode as f32, self_shadow.distance]
+}
+
+fn copy_self_shadow_state_array(
+    self_shadow: mmd_anim_format::VmdSelfShadowState,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if out.length() < 2 {
+        return Ok(false);
+    }
+    let values = self_shadow_state_array(self_shadow);
     for (index, value) in values.into_iter().enumerate() {
         out.set_index(index as u32, value);
     }
@@ -1934,6 +2052,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wrapper_version_matches_current_breaking_surface() {
+        assert_eq!(WASM_WRAPPER_VERSION, 2);
+        assert_eq!(wasm_wrapper_version(), WASM_WRAPPER_VERSION);
+    }
+
+    #[test]
     fn evaluates_rest_pose_through_wasm_wrapper() {
         let model = WasmMmdModel::new(&[-1, 0], &[1.0, 0.0, 0.0, 0.0, 2.0, 0.0]).unwrap();
         assert_eq!(model.bone_count(), 2);
@@ -1989,19 +2113,6 @@ mod tests {
     }
 
     #[test]
-    fn samples_vmd_camera_json_through_wasm_wrapper() {
-        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
-        let json = sample_vmd_camera_json(bytes, 22.5).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-        assert_json_near(&value["distance"], -40.25);
-        assert_json_vec3_near(&value["position"], [-0.25, 6.0, 1.625]);
-        assert_json_vec3_near(&value["rotation"], [-0.1, -0.1, 0.75]);
-        assert_json_near(&value["fov"], 47.5);
-        assert_eq!(value["perspective"], true);
-    }
-
-    #[test]
     fn samples_vmd_camera_array_layout() {
         let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
         let parsed = mmd_anim_format::parse_vmd_animation(bytes).unwrap();
@@ -2022,11 +2133,87 @@ mod tests {
         let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
         let track = WasmVmdCameraTrack::from_vmd_bytes(bytes).unwrap();
         assert_eq!(track.frame_count(), 2);
+    }
 
-        let json = track.sample_json(22.5).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_json_near(&value["distance"], -40.25);
-        assert_json_near(&value["fov"], 47.5);
+    #[test]
+    fn samples_vmd_light_array_layout_and_track_json() {
+        let bytes = light_and_self_shadow_vmd_bytes();
+        let parsed = mmd_anim_format::parse_vmd_animation(&bytes).unwrap();
+        let light = mmd_anim_format::sample_vmd_light_frames(&parsed.light_frames, 20.0)
+            .expect("fixture has light keyframes");
+        let values = light_state_array(light);
+
+        assert_eq!(values.len(), 6);
+        assert_vec3_near([values[0], values[1], values[2]], [0.5, 0.25, 0.5]);
+        assert_vec3_near([values[3], values[4], values[5]], [0.5, -0.5, 0.0]);
+
+        let track = WasmVmdLightTrack::from_vmd_bytes(&bytes).unwrap();
+        assert_eq!(track.frame_count(), 2);
+    }
+
+    #[test]
+    fn samples_vmd_self_shadow_array_layout_and_track_json() {
+        let bytes = light_and_self_shadow_vmd_bytes();
+        let parsed = mmd_anim_format::parse_vmd_animation(&bytes).unwrap();
+        let self_shadow =
+            mmd_anim_format::sample_vmd_self_shadow_frames(&parsed.self_shadow_frames, 20.0)
+                .expect("fixture has self-shadow keyframes");
+        let values = self_shadow_state_array(self_shadow);
+
+        assert_eq!(values.len(), 2);
+        assert_near(values[0], 1.0);
+        assert_near(values[1], 40.0);
+
+        let track = WasmVmdSelfShadowTrack::from_vmd_bytes(&bytes).unwrap();
+        assert_eq!(track.frame_count(), 2);
+    }
+
+    fn light_and_self_shadow_vmd_bytes() -> Vec<u8> {
+        mmd_anim_format::export_vmd_animation(&mmd_anim_format::vmd::VmdParsedAnimation {
+            kind: "vmd",
+            metadata: mmd_anim_format::vmd::VmdParsedMetadata {
+                format: "vmd",
+                model_name: "light_shadow".to_owned(),
+                model_name_bytes: Vec::new(),
+                counts: mmd_anim_format::vmd::VmdParsedCounts {
+                    bones: 0,
+                    morphs: 0,
+                    cameras: 0,
+                    lights: 2,
+                    self_shadows: 2,
+                    properties: 0,
+                },
+                max_frame: 30,
+            },
+            bone_frames: Vec::new(),
+            morph_frames: Vec::new(),
+            camera_frames: Vec::new(),
+            light_frames: vec![
+                mmd_anim_format::vmd::VmdParsedLightFrame {
+                    frame: 10,
+                    color: [0.0, 0.0, 1.0],
+                    direction: [1.0, 0.0, 0.0],
+                },
+                mmd_anim_format::vmd::VmdParsedLightFrame {
+                    frame: 30,
+                    color: [1.0, 0.5, 0.0],
+                    direction: [0.0, -1.0, 0.0],
+                },
+            ],
+            self_shadow_frames: vec![
+                mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+                    frame: 10,
+                    mode: 1,
+                    distance: 20.0,
+                },
+                mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+                    frame: 30,
+                    mode: 2,
+                    distance: 60.0,
+                },
+            ],
+            property_frames: Vec::new(),
+        })
     }
 
     fn assert_near(actual: f32, expected: f32) {
@@ -2039,22 +2226,6 @@ mod tests {
     fn assert_vec3_near(actual: [f32; 3], expected: [f32; 3]) {
         for (actual, expected) in actual.iter().zip(expected) {
             assert_near(*actual, expected);
-        }
-    }
-
-    fn assert_json_near(value: &serde_json::Value, expected: f64) {
-        let actual = value.as_f64().unwrap();
-        assert!(
-            (actual - expected).abs() <= 1.0e-4,
-            "actual={actual} expected={expected}"
-        );
-    }
-
-    fn assert_json_vec3_near(value: &serde_json::Value, expected: [f64; 3]) {
-        let actual = value.as_array().unwrap();
-        assert_eq!(actual.len(), 3);
-        for (index, expected) in expected.iter().enumerate() {
-            assert_json_near(&actual[index], *expected);
         }
     }
 

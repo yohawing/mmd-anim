@@ -13,7 +13,7 @@ use mmd_anim_runtime::{
     RuntimeInstance, solve_append_transform,
 };
 
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -64,6 +64,14 @@ pub struct MmdRuntimeClip {
 
 pub struct MmdRuntimeVmdCameraTrack {
     frames: Vec<mmd_anim_format::vmd::VmdParsedCameraFrame>,
+}
+
+pub struct MmdRuntimeVmdLightTrack {
+    frames: Vec<mmd_anim_format::vmd::VmdParsedLightFrame>,
+}
+
+pub struct MmdRuntimeVmdSelfShadowTrack {
+    frames: Vec<mmd_anim_format::vmd::VmdParsedSelfShadowFrame>,
 }
 
 pub struct MmdRuntimePmxMaterialSplit {
@@ -198,15 +206,6 @@ pub struct MmdRuntimeFfiGroupMorphOffset {
 pub struct MmdRuntimeFfiByteBuffer {
     pub data: *mut u8,
     pub len: usize,
-}
-
-#[repr(C)]
-pub struct MmdRuntimeFfiCameraState {
-    pub distance: f32,
-    pub position_xyz: [f32; 3],
-    pub rotation_xyz: [f32; 3],
-    pub fov: f32,
-    pub perspective: u8,
 }
 
 const APPEND_FLAG_ROTATION: u32 = 1;
@@ -597,37 +596,6 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_frame_count(
     track.frames.len()
 }
 
-/// Samples an owned VMD camera track at an arbitrary frame.
-///
-/// Returns false when `track` or `out_camera` is null, when `frame` is not
-/// finite, or when the track has no camera keyframes.
-///
-/// # Safety
-///
-/// `track` must be null or a valid pointer returned by
-/// `mmd_runtime_vmd_camera_track_create_from_vmd_bytes`. `out_camera` must be
-/// valid for writes when non-null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_sample(
-    track: *const MmdRuntimeVmdCameraTrack,
-    frame: f32,
-    out_camera: *mut MmdRuntimeFfiCameraState,
-) -> bool {
-    if !frame.is_finite() || out_camera.is_null() {
-        return false;
-    }
-    let Some(track) = (unsafe { track.as_ref() }) else {
-        return false;
-    };
-    let Some(camera) = mmd_anim_format::sample_vmd_camera_frames(&track.frames, frame) else {
-        return false;
-    };
-    unsafe {
-        *out_camera = ffi_camera_state(camera);
-    }
-    true
-}
-
 /// Samples an owned VMD camera track into a flat array.
 ///
 /// Writes `[distance, position.x, position.y, position.z, rotation.x,
@@ -644,7 +612,7 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_sample(
 /// `mmd_runtime_vmd_camera_track_create_from_vmd_bytes`. `out_values` must be
 /// valid for writes of at least `out_len` floats when non-null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_sample_array(
+pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_sample(
     track: *const MmdRuntimeVmdCameraTrack,
     frame: f32,
     out_values: *mut f32,
@@ -673,48 +641,10 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_sample_array(
 /// # Safety
 ///
 /// `data` must point to `len` readable bytes when `len` is non-zero.
-/// `out_camera` must be valid for writes when non-null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mmd_runtime_vmd_sample_camera(
-    data: *const u8,
-    len: usize,
-    frame: f32,
-    out_camera: *mut MmdRuntimeFfiCameraState,
-) -> bool {
-    if data.is_null() || len == 0 || !frame.is_finite() || out_camera.is_null() {
-        return false;
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return false,
-    };
-    let Some(camera) = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
-    else {
-        return false;
-    };
-    unsafe {
-        *out_camera = ffi_camera_state(camera);
-    }
-    true
-}
-
-/// Samples camera motion directly from VMD bytes into a flat array.
-///
-/// Writes `[distance, position.x, position.y, position.z, rotation.x,
-/// rotation.y, rotation.z, fov, perspective]` to `out_values`.
-/// `perspective` is encoded as `1.0` when enabled, otherwise `0.0`.
-///
-/// This one-shot helper reparses the VMD on each call. Hosts that evaluate
-/// multiple frames should use the camera-track handle API instead.
-///
-/// # Safety
-///
-/// `data` must point to `len` readable bytes when `len` is non-zero.
 /// `out_values` must be valid for writes of at least `out_len` floats when
 /// non-null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mmd_runtime_vmd_sample_camera_array(
+pub unsafe extern "C" fn mmd_runtime_vmd_sample_camera(
     data: *const u8,
     len: usize,
     frame: f32,
@@ -755,13 +685,265 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_free(track: *mut MmdRuntim
     }
 }
 
-fn ffi_camera_state(camera: mmd_anim_format::VmdCameraState) -> MmdRuntimeFfiCameraState {
-    MmdRuntimeFfiCameraState {
-        distance: camera.distance,
-        position_xyz: camera.position,
-        rotation_xyz: camera.rotation,
-        fov: camera.fov,
-        perspective: u8::from(camera.perspective),
+/// Parses VMD bytes and returns an owned light-track handle.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+/// The returned track is owned by the caller and must be freed with
+/// `mmd_runtime_vmd_light_track_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_light_track_create_from_vmd_bytes(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimeVmdLightTrack {
+    if data.is_null() || len == 0 {
+        return ptr::null_mut();
+    }
+
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return ptr::null_mut(),
+    };
+    if parsed.light_frames.is_empty() {
+        return ptr::null_mut();
+    }
+
+    Box::into_raw(Box::new(MmdRuntimeVmdLightTrack {
+        frames: parsed.light_frames,
+    }))
+}
+
+/// Returns the number of light keyframes in a VMD light track.
+///
+/// # Safety
+///
+/// `track` must be null or a valid pointer returned by
+/// `mmd_runtime_vmd_light_track_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_light_track_frame_count(
+    track: *const MmdRuntimeVmdLightTrack,
+) -> usize {
+    let Some(track) = (unsafe { track.as_ref() }) else {
+        return 0;
+    };
+    track.frames.len()
+}
+
+/// Samples an owned VMD light track into a flat array.
+///
+/// Writes `[color.r, color.g, color.b, direction.x, direction.y,
+/// direction.z]` to `out_values`.
+///
+/// # Safety
+///
+/// `track` must be null or a valid pointer returned by
+/// `mmd_runtime_vmd_light_track_create_from_vmd_bytes`. `out_values` must be
+/// valid for writes of at least `out_len` floats when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_light_track_sample(
+    track: *const MmdRuntimeVmdLightTrack,
+    frame: f32,
+    out_values: *mut f32,
+    out_len: usize,
+) -> bool {
+    if !frame.is_finite() || out_values.is_null() || out_len < 6 {
+        return false;
+    }
+    let Some(track) = (unsafe { track.as_ref() }) else {
+        return false;
+    };
+    let Some(light) = mmd_anim_format::sample_vmd_light_frames(&track.frames, frame) else {
+        return false;
+    };
+    unsafe {
+        write_light_state_array(light, out_values);
+    }
+    true
+}
+
+/// Samples light motion directly from VMD bytes.
+///
+/// This one-shot helper reparses the VMD on each call. Hosts that evaluate
+/// multiple frames should use the light-track handle API instead.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+/// `out_values` must be valid for writes of at least `out_len` floats when
+/// non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_sample_light(
+    data: *const u8,
+    len: usize,
+    frame: f32,
+    out_values: *mut f32,
+    out_len: usize,
+) -> bool {
+    if data.is_null() || len == 0 || !frame.is_finite() || out_values.is_null() || out_len < 6 {
+        return false;
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    let Some(light) = mmd_anim_format::sample_vmd_light_frames(&parsed.light_frames, frame) else {
+        return false;
+    };
+    unsafe {
+        write_light_state_array(light, out_values);
+    }
+    true
+}
+
+/// Frees a VMD light track created by
+/// `mmd_runtime_vmd_light_track_create_from_vmd_bytes`.
+///
+/// # Safety
+///
+/// `track` must be null or a valid pointer returned by this library that has
+/// not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_light_track_free(track: *mut MmdRuntimeVmdLightTrack) {
+    if !track.is_null() {
+        unsafe {
+            drop(Box::from_raw(track));
+        }
+    }
+}
+
+/// Parses VMD bytes and returns an owned self-shadow-track handle.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero`.
+/// The returned track is owned by the caller and must be freed with
+/// `mmd_runtime_vmd_self_shadow_track_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_create_from_vmd_bytes(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimeVmdSelfShadowTrack {
+    if data.is_null() || len == 0 {
+        return ptr::null_mut();
+    }
+
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return ptr::null_mut(),
+    };
+    if parsed.self_shadow_frames.is_empty() {
+        return ptr::null_mut();
+    }
+
+    Box::into_raw(Box::new(MmdRuntimeVmdSelfShadowTrack {
+        frames: parsed.self_shadow_frames,
+    }))
+}
+
+/// Returns the number of self-shadow keyframes in a VMD self-shadow track.
+///
+/// # Safety
+///
+/// `track` must be null or a valid pointer returned by
+/// `mmd_runtime_vmd_self_shadow_track_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_frame_count(
+    track: *const MmdRuntimeVmdSelfShadowTrack,
+) -> usize {
+    let Some(track) = (unsafe { track.as_ref() }) else {
+        return 0;
+    };
+    track.frames.len()
+}
+
+/// Samples an owned VMD self-shadow track into a flat array.
+///
+/// Writes `[mode, distance]` to `out_values`. `mode` is encoded as a float.
+///
+/// # Safety
+///
+/// `track` must be null or a valid pointer returned by
+/// `mmd_runtime_vmd_self_shadow_track_create_from_vmd_bytes`. `out_values`
+/// must be valid for writes of at least `out_len` floats when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_sample(
+    track: *const MmdRuntimeVmdSelfShadowTrack,
+    frame: f32,
+    out_values: *mut f32,
+    out_len: usize,
+) -> bool {
+    if !frame.is_finite() || out_values.is_null() || out_len < 2 {
+        return false;
+    }
+    let Some(track) = (unsafe { track.as_ref() }) else {
+        return false;
+    };
+    let Some(self_shadow) = mmd_anim_format::sample_vmd_self_shadow_frames(&track.frames, frame)
+    else {
+        return false;
+    };
+    unsafe {
+        write_self_shadow_state_array(self_shadow, out_values);
+    }
+    true
+}
+
+/// Samples self-shadow motion directly from VMD bytes.
+///
+/// This one-shot helper reparses the VMD on each call. Hosts that evaluate
+/// multiple frames should use the self-shadow-track handle API instead.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+/// `out_values` must be valid for writes of at least `out_len` floats when
+/// non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_sample_self_shadow(
+    data: *const u8,
+    len: usize,
+    frame: f32,
+    out_values: *mut f32,
+    out_len: usize,
+) -> bool {
+    if data.is_null() || len == 0 || !frame.is_finite() || out_values.is_null() || out_len < 2 {
+        return false;
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    let Some(self_shadow) =
+        mmd_anim_format::sample_vmd_self_shadow_frames(&parsed.self_shadow_frames, frame)
+    else {
+        return false;
+    };
+    unsafe {
+        write_self_shadow_state_array(self_shadow, out_values);
+    }
+    true
+}
+
+/// Frees a VMD self-shadow track created by
+/// `mmd_runtime_vmd_self_shadow_track_create_from_vmd_bytes`.
+///
+/// # Safety
+///
+/// `track` must be null or a valid pointer returned by this library that has
+/// not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_free(
+    track: *mut MmdRuntimeVmdSelfShadowTrack,
+) {
+    if !track.is_null() {
+        unsafe {
+            drop(Box::from_raw(track));
+        }
     }
 }
 
@@ -781,6 +963,38 @@ fn camera_state_array(camera: mmd_anim_format::VmdCameraState) -> [f32; 9] {
 
 unsafe fn write_camera_state_array(camera: mmd_anim_format::VmdCameraState, out_values: *mut f32) {
     let values = camera_state_array(camera);
+    unsafe {
+        ptr::copy_nonoverlapping(values.as_ptr(), out_values, values.len());
+    }
+}
+
+fn light_state_array(light: mmd_anim_format::VmdLightState) -> [f32; 6] {
+    [
+        light.color[0],
+        light.color[1],
+        light.color[2],
+        light.direction[0],
+        light.direction[1],
+        light.direction[2],
+    ]
+}
+
+unsafe fn write_light_state_array(light: mmd_anim_format::VmdLightState, out_values: *mut f32) {
+    let values = light_state_array(light);
+    unsafe {
+        ptr::copy_nonoverlapping(values.as_ptr(), out_values, values.len());
+    }
+}
+
+fn self_shadow_state_array(self_shadow: mmd_anim_format::VmdSelfShadowState) -> [f32; 2] {
+    [self_shadow.mode as f32, self_shadow.distance]
+}
+
+unsafe fn write_self_shadow_state_array(
+    self_shadow: mmd_anim_format::VmdSelfShadowState,
+    out_values: *mut f32,
+) {
+    let values = self_shadow_state_array(self_shadow);
     unsafe {
         ptr::copy_nonoverlapping(values.as_ptr(), out_values, values.len());
     }
@@ -3762,6 +3976,12 @@ fn build_morph_init_from_ffi(
 mod tests {
     use super::*;
 
+    #[test]
+    fn abi_version_matches_current_breaking_surface() {
+        assert_eq!(ABI_VERSION, 2);
+        assert_eq!(mmd_runtime_abi_version(), ABI_VERSION);
+    }
+
     fn assert_near(actual: f32, expected: f32, tolerance: f32) {
         assert!(
             (actual - expected).abs() <= tolerance,
@@ -5667,28 +5887,9 @@ mod tests {
             2
         );
 
-        let mut camera = MmdRuntimeFfiCameraState {
-            distance: 0.0,
-            position_xyz: [0.0; 3],
-            rotation_xyz: [0.0; 3],
-            fov: 0.0,
-            perspective: 0,
-        };
-        assert!(unsafe { mmd_runtime_vmd_camera_track_sample(track, 22.5, &mut camera) });
-        assert_near(camera.distance, -40.25, 1.0e-4);
-        assert_slice_near(&camera.position_xyz, &[-0.25, 6.0, 1.625], 1.0e-4);
-        assert_slice_near(&camera.rotation_xyz, &[-0.1, -0.1, 0.75], 1.0e-4);
-        assert_near(camera.fov, 47.5, 1.0e-4);
-        assert_eq!(camera.perspective, 1);
-
         let mut values = [0.0f32; 9];
         assert!(unsafe {
-            mmd_runtime_vmd_camera_track_sample_array(
-                track,
-                22.5,
-                values.as_mut_ptr(),
-                values.len(),
-            )
+            mmd_runtime_vmd_camera_track_sample(track, 22.5, values.as_mut_ptr(), values.len())
         });
         assert_slice_near(
             &values,
@@ -5702,25 +5903,9 @@ mod tests {
     #[test]
     fn vmd_camera_one_shot_samples_camera_fixture() {
         let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
-        let mut camera = MmdRuntimeFfiCameraState {
-            distance: 0.0,
-            position_xyz: [0.0; 3],
-            rotation_xyz: [0.0; 3],
-            fov: 0.0,
-            perspective: 0,
-        };
-        assert!(unsafe {
-            mmd_runtime_vmd_sample_camera(bytes.as_ptr(), bytes.len(), 22.5, &mut camera)
-        });
-        assert_near(camera.distance, -40.25, 1.0e-4);
-        assert_slice_near(&camera.position_xyz, &[-0.25, 6.0, 1.625], 1.0e-4);
-        assert_slice_near(&camera.rotation_xyz, &[-0.1, -0.1, 0.75], 1.0e-4);
-        assert_near(camera.fov, 47.5, 1.0e-4);
-        assert_eq!(camera.perspective, 1);
-
         let mut values = [0.0f32; 9];
         assert!(unsafe {
-            mmd_runtime_vmd_sample_camera_array(
+            mmd_runtime_vmd_sample_camera(
                 bytes.as_ptr(),
                 bytes.len(),
                 22.5,
@@ -5736,33 +5921,92 @@ mod tests {
     }
 
     #[test]
-    fn vmd_camera_sample_rejects_invalid_inputs() {
-        let mut camera = MmdRuntimeFfiCameraState {
-            distance: 0.0,
-            position_xyz: [0.0; 3],
-            rotation_xyz: [0.0; 3],
-            fov: 0.0,
-            perspective: 0,
+    fn vmd_light_track_and_one_shot_sample_buffers() {
+        let bytes = light_and_self_shadow_vmd_bytes();
+        let track = unsafe {
+            mmd_runtime_vmd_light_track_create_from_vmd_bytes(bytes.as_ptr(), bytes.len())
         };
+        assert!(!track.is_null());
+        assert_eq!(unsafe { mmd_runtime_vmd_light_track_frame_count(track) }, 2);
+
+        let mut track_values = [0.0f32; 6];
+        assert!(unsafe {
+            mmd_runtime_vmd_light_track_sample(
+                track,
+                20.0,
+                track_values.as_mut_ptr(),
+                track_values.len(),
+            )
+        });
+        assert_slice_near(&track_values, &[0.5, 0.25, 0.5, 0.5, -0.5, 0.0], 1.0e-4);
+
+        let mut one_shot_values = [0.0f32; 6];
+        assert!(unsafe {
+            mmd_runtime_vmd_sample_light(
+                bytes.as_ptr(),
+                bytes.len(),
+                20.0,
+                one_shot_values.as_mut_ptr(),
+                one_shot_values.len(),
+            )
+        });
+        assert_slice_near(&one_shot_values, &track_values, 1.0e-4);
+
+        unsafe { mmd_runtime_vmd_light_track_free(track) };
+    }
+
+    #[test]
+    fn vmd_self_shadow_track_and_one_shot_sample_buffers() {
+        let bytes = light_and_self_shadow_vmd_bytes();
+        let track = unsafe {
+            mmd_runtime_vmd_self_shadow_track_create_from_vmd_bytes(bytes.as_ptr(), bytes.len())
+        };
+        assert!(!track.is_null());
+        assert_eq!(
+            unsafe { mmd_runtime_vmd_self_shadow_track_frame_count(track) },
+            2
+        );
+
+        let mut track_values = [0.0f32; 2];
+        assert!(unsafe {
+            mmd_runtime_vmd_self_shadow_track_sample(
+                track,
+                20.0,
+                track_values.as_mut_ptr(),
+                track_values.len(),
+            )
+        });
+        assert_slice_near(&track_values, &[1.0, 40.0], 1.0e-4);
+
+        let mut one_shot_values = [0.0f32; 2];
+        assert!(unsafe {
+            mmd_runtime_vmd_sample_self_shadow(
+                bytes.as_ptr(),
+                bytes.len(),
+                20.0,
+                one_shot_values.as_mut_ptr(),
+                one_shot_values.len(),
+            )
+        });
+        assert_slice_near(&one_shot_values, &track_values, 1.0e-4);
+
+        unsafe { mmd_runtime_vmd_self_shadow_track_free(track) };
+    }
+
+    #[test]
+    fn vmd_camera_sample_rejects_invalid_inputs() {
         assert!(
             unsafe { mmd_runtime_vmd_camera_track_create_from_vmd_bytes(ptr::null(), 0) }.is_null()
         );
-        assert!(!unsafe { mmd_runtime_vmd_camera_track_sample(ptr::null(), 0.0, &mut camera) });
-        assert!(!unsafe { mmd_runtime_vmd_sample_camera(ptr::null(), 0, 0.0, &mut camera) });
         let mut values = [0.0f32; 8];
         assert!(!unsafe {
-            mmd_runtime_vmd_camera_track_sample_array(
-                ptr::null(),
-                0.0,
-                values.as_mut_ptr(),
-                values.len(),
-            )
+            mmd_runtime_vmd_camera_track_sample(ptr::null(), 0.0, values.as_mut_ptr(), values.len())
         });
         assert!(!unsafe {
-            mmd_runtime_vmd_sample_camera_array(ptr::null(), 0, 0.0, values.as_mut_ptr(), 9)
+            mmd_runtime_vmd_sample_camera(ptr::null(), 0, 0.0, values.as_mut_ptr(), 9)
         });
         assert!(!unsafe {
-            mmd_runtime_vmd_sample_camera_array(
+            mmd_runtime_vmd_sample_camera(
                 [0u8; 1].as_ptr(),
                 1,
                 0.0,
@@ -5770,6 +6014,54 @@ mod tests {
                 values.len(),
             )
         });
+    }
+
+    fn light_and_self_shadow_vmd_bytes() -> Vec<u8> {
+        mmd_anim_format::export_vmd_animation(&mmd_anim_format::vmd::VmdParsedAnimation {
+            kind: "vmd",
+            metadata: mmd_anim_format::vmd::VmdParsedMetadata {
+                format: "vmd",
+                model_name: "light_shadow".to_owned(),
+                model_name_bytes: Vec::new(),
+                counts: mmd_anim_format::vmd::VmdParsedCounts {
+                    bones: 0,
+                    morphs: 0,
+                    cameras: 0,
+                    lights: 2,
+                    self_shadows: 2,
+                    properties: 0,
+                },
+                max_frame: 30,
+            },
+            bone_frames: Vec::new(),
+            morph_frames: Vec::new(),
+            camera_frames: Vec::new(),
+            light_frames: vec![
+                mmd_anim_format::vmd::VmdParsedLightFrame {
+                    frame: 10,
+                    color: [0.0, 0.0, 1.0],
+                    direction: [1.0, 0.0, 0.0],
+                },
+                mmd_anim_format::vmd::VmdParsedLightFrame {
+                    frame: 30,
+                    color: [1.0, 0.5, 0.0],
+                    direction: [0.0, -1.0, 0.0],
+                },
+            ],
+            self_shadow_frames: vec![
+                mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+                    frame: 10,
+                    mode: 1,
+                    distance: 20.0,
+                },
+                mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+                    frame: 30,
+                    mode: 2,
+                    distance: 60.0,
+                },
+            ],
+            property_frames: Vec::new(),
+        })
     }
 
     #[test]

@@ -409,10 +409,24 @@ pub struct VmdParsedLightFrame {
     pub direction: [f32; 3],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmdLightState {
+    pub color: [f32; 3],
+    pub direction: [f32; 3],
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VmdParsedSelfShadowFrame {
     pub frame: u32,
+    pub mode: u8,
+    pub distance: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmdSelfShadowState {
     pub mode: u8,
     pub distance: f32,
 }
@@ -790,6 +804,66 @@ pub fn sample_vmd_camera_frames(
         } else {
             next.perspective
         },
+    })
+}
+
+pub fn sample_vmd_light_frames(
+    frames: &[VmdParsedLightFrame],
+    frame: f32,
+) -> Option<VmdLightState> {
+    if frames.is_empty() {
+        return None;
+    }
+
+    let mut sorted: Vec<&VmdParsedLightFrame> = frames.iter().collect();
+    sorted.sort_by_key(|keyframe| keyframe.frame);
+
+    let mut index = 0usize;
+    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
+        index += 1;
+    }
+
+    let previous = sorted[index];
+    let next = sorted.get(index + 1).copied().unwrap_or(previous);
+    let t = interpolation_ratio(previous.frame, next.frame, frame);
+
+    Some(VmdLightState {
+        color: [
+            lerp(previous.color[0], next.color[0], t),
+            lerp(previous.color[1], next.color[1], t),
+            lerp(previous.color[2], next.color[2], t),
+        ],
+        direction: [
+            lerp(previous.direction[0], next.direction[0], t),
+            lerp(previous.direction[1], next.direction[1], t),
+            lerp(previous.direction[2], next.direction[2], t),
+        ],
+    })
+}
+
+pub fn sample_vmd_self_shadow_frames(
+    frames: &[VmdParsedSelfShadowFrame],
+    frame: f32,
+) -> Option<VmdSelfShadowState> {
+    if frames.is_empty() {
+        return None;
+    }
+
+    let mut sorted: Vec<&VmdParsedSelfShadowFrame> = frames.iter().collect();
+    sorted.sort_by_key(|keyframe| keyframe.frame);
+
+    let mut index = 0usize;
+    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
+        index += 1;
+    }
+
+    let previous = sorted[index];
+    let next = sorted.get(index + 1).copied().unwrap_or(previous);
+    let t = interpolation_ratio(previous.frame, next.frame, frame);
+
+    Some(VmdSelfShadowState {
+        mode: if t < 1.0 { previous.mode } else { next.mode },
+        distance: lerp(previous.distance, next.distance, t),
     })
 }
 
@@ -2387,6 +2461,51 @@ mod tests {
 
         let last = sample_vmd_camera_frames(&parsed.camera_frames, 45.0).unwrap();
         assert!(!last.perspective);
+    }
+
+    #[test]
+    fn samples_vmd_light_frames_linearly() {
+        let frames = vec![
+            VmdParsedLightFrame {
+                frame: 30,
+                color: [1.0, 0.5, 0.0],
+                direction: [0.0, -1.0, 0.0],
+            },
+            VmdParsedLightFrame {
+                frame: 10,
+                color: [0.0, 0.0, 1.0],
+                direction: [1.0, 0.0, 0.0],
+            },
+        ];
+
+        let light = sample_vmd_light_frames(&frames, 20.0).unwrap();
+
+        assert_vec3_near(light.color, [0.5, 0.25, 0.5]);
+        assert_vec3_near(light.direction, [0.5, -0.5, 0.0]);
+    }
+
+    #[test]
+    fn samples_vmd_self_shadow_frames_linearly_with_stepped_mode() {
+        let frames = vec![
+            VmdParsedSelfShadowFrame {
+                frame: 10,
+                mode: 1,
+                distance: 20.0,
+            },
+            VmdParsedSelfShadowFrame {
+                frame: 30,
+                mode: 2,
+                distance: 60.0,
+            },
+        ];
+
+        let middle = sample_vmd_self_shadow_frames(&frames, 20.0).unwrap();
+        assert_eq!(middle.mode, 1);
+        assert_near(middle.distance, 40.0);
+
+        let last = sample_vmd_self_shadow_frames(&frames, 30.0).unwrap();
+        assert_eq!(last.mode, 2);
+        assert_near(last.distance, 60.0);
     }
 
     #[test]

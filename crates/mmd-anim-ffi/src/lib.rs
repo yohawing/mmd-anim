@@ -62,6 +62,10 @@ pub struct MmdRuntimeClip {
     clip: AnimationClip,
 }
 
+pub struct MmdRuntimeVmdCameraTrack {
+    frames: Vec<mmd_anim_format::vmd::VmdParsedCameraFrame>,
+}
+
 pub struct MmdRuntimePmxMaterialSplit {
     split: mmd_anim_format::PmxMaterialSplitResult,
     manifest_json: Vec<u8>,
@@ -194,6 +198,15 @@ pub struct MmdRuntimeFfiGroupMorphOffset {
 pub struct MmdRuntimeFfiByteBuffer {
     pub data: *mut u8,
     pub len: usize,
+}
+
+#[repr(C)]
+pub struct MmdRuntimeFfiCameraState {
+    pub distance: f32,
+    pub position_xyz: [f32; 3],
+    pub rotation_xyz: [f32; 3],
+    pub fov: f32,
+    pub perspective: u8,
 }
 
 const APPEND_FLAG_ROTATION: u32 = 1;
@@ -535,6 +548,143 @@ pub unsafe extern "C" fn mmd_runtime_parse_vmd_json(
     match serde_json::to_vec(&parsed) {
         Ok(json) => byte_buffer_from_vec(json),
         Err(_) => empty_byte_buffer(),
+    }
+}
+
+/// Parses VMD bytes and returns an owned camera-track handle.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+/// The returned track is owned by the caller and must be freed with
+/// `mmd_runtime_vmd_camera_track_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_create_from_vmd_bytes(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimeVmdCameraTrack {
+    if data.is_null() || len == 0 {
+        return ptr::null_mut();
+    }
+
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return ptr::null_mut(),
+    };
+    if parsed.camera_frames.is_empty() {
+        return ptr::null_mut();
+    }
+
+    Box::into_raw(Box::new(MmdRuntimeVmdCameraTrack {
+        frames: parsed.camera_frames,
+    }))
+}
+
+/// Returns the number of camera keyframes in a VMD camera track.
+///
+/// # Safety
+///
+/// `track` must be null or a valid pointer returned by
+/// `mmd_runtime_vmd_camera_track_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_frame_count(
+    track: *const MmdRuntimeVmdCameraTrack,
+) -> usize {
+    let Some(track) = (unsafe { track.as_ref() }) else {
+        return 0;
+    };
+    track.frames.len()
+}
+
+/// Samples an owned VMD camera track at an arbitrary frame.
+///
+/// Returns false when `track` or `out_camera` is null, when `frame` is not
+/// finite, or when the track has no camera keyframes.
+///
+/// # Safety
+///
+/// `track` must be null or a valid pointer returned by
+/// `mmd_runtime_vmd_camera_track_create_from_vmd_bytes`. `out_camera` must be
+/// valid for writes when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_sample(
+    track: *const MmdRuntimeVmdCameraTrack,
+    frame: f32,
+    out_camera: *mut MmdRuntimeFfiCameraState,
+) -> bool {
+    if !frame.is_finite() || out_camera.is_null() {
+        return false;
+    }
+    let Some(track) = (unsafe { track.as_ref() }) else {
+        return false;
+    };
+    let Some(camera) = mmd_anim_format::sample_vmd_camera_frames(&track.frames, frame) else {
+        return false;
+    };
+    unsafe {
+        *out_camera = ffi_camera_state(camera);
+    }
+    true
+}
+
+/// Samples camera motion directly from VMD bytes.
+///
+/// This one-shot helper reparses the VMD on each call. Hosts that evaluate
+/// multiple frames should use the camera-track handle API instead.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+/// `out_camera` must be valid for writes when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_sample_camera(
+    data: *const u8,
+    len: usize,
+    frame: f32,
+    out_camera: *mut MmdRuntimeFfiCameraState,
+) -> bool {
+    if data.is_null() || len == 0 || !frame.is_finite() || out_camera.is_null() {
+        return false;
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    let Some(camera) = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
+    else {
+        return false;
+    };
+    unsafe {
+        *out_camera = ffi_camera_state(camera);
+    }
+    true
+}
+
+/// Frees a VMD camera track created by
+/// `mmd_runtime_vmd_camera_track_create_from_vmd_bytes`.
+///
+/// # Safety
+///
+/// `track` must be null or a valid pointer returned by this library that has
+/// not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_free(track: *mut MmdRuntimeVmdCameraTrack) {
+    if !track.is_null() {
+        unsafe {
+            drop(Box::from_raw(track));
+        }
+    }
+}
+
+fn ffi_camera_state(camera: mmd_anim_format::VmdCameraState) -> MmdRuntimeFfiCameraState {
+    MmdRuntimeFfiCameraState {
+        distance: camera.distance,
+        position_xyz: camera.position,
+        rotation_xyz: camera.rotation,
+        fov: camera.fov,
+        perspective: u8::from(camera.perspective),
     }
 }
 
@@ -5405,6 +5555,71 @@ mod tests {
         assert!(v.is_object(), "vmd json must be an object");
 
         unsafe { mmd_runtime_byte_buffer_free(json_buf) };
+    }
+
+    #[test]
+    fn vmd_camera_track_samples_camera_fixture() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+        let track = unsafe {
+            mmd_runtime_vmd_camera_track_create_from_vmd_bytes(bytes.as_ptr(), bytes.len())
+        };
+        assert!(!track.is_null());
+        assert_eq!(
+            unsafe { mmd_runtime_vmd_camera_track_frame_count(track) },
+            2
+        );
+
+        let mut camera = MmdRuntimeFfiCameraState {
+            distance: 0.0,
+            position_xyz: [0.0; 3],
+            rotation_xyz: [0.0; 3],
+            fov: 0.0,
+            perspective: 0,
+        };
+        assert!(unsafe { mmd_runtime_vmd_camera_track_sample(track, 22.5, &mut camera) });
+        assert_near(camera.distance, -40.25, 1.0e-4);
+        assert_slice_near(&camera.position_xyz, &[-0.25, 6.0, 1.625], 1.0e-4);
+        assert_slice_near(&camera.rotation_xyz, &[-0.1, -0.1, 0.75], 1.0e-4);
+        assert_near(camera.fov, 47.5, 1.0e-4);
+        assert_eq!(camera.perspective, 1);
+
+        unsafe { mmd_runtime_vmd_camera_track_free(track) };
+    }
+
+    #[test]
+    fn vmd_camera_one_shot_samples_camera_fixture() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+        let mut camera = MmdRuntimeFfiCameraState {
+            distance: 0.0,
+            position_xyz: [0.0; 3],
+            rotation_xyz: [0.0; 3],
+            fov: 0.0,
+            perspective: 0,
+        };
+        assert!(unsafe {
+            mmd_runtime_vmd_sample_camera(bytes.as_ptr(), bytes.len(), 22.5, &mut camera)
+        });
+        assert_near(camera.distance, -40.25, 1.0e-4);
+        assert_slice_near(&camera.position_xyz, &[-0.25, 6.0, 1.625], 1.0e-4);
+        assert_slice_near(&camera.rotation_xyz, &[-0.1, -0.1, 0.75], 1.0e-4);
+        assert_near(camera.fov, 47.5, 1.0e-4);
+        assert_eq!(camera.perspective, 1);
+    }
+
+    #[test]
+    fn vmd_camera_sample_rejects_invalid_inputs() {
+        let mut camera = MmdRuntimeFfiCameraState {
+            distance: 0.0,
+            position_xyz: [0.0; 3],
+            rotation_xyz: [0.0; 3],
+            fov: 0.0,
+            perspective: 0,
+        };
+        assert!(
+            unsafe { mmd_runtime_vmd_camera_track_create_from_vmd_bytes(ptr::null(), 0) }.is_null()
+        );
+        assert!(!unsafe { mmd_runtime_vmd_camera_track_sample(ptr::null(), 0.0, &mut camera) });
+        assert!(!unsafe { mmd_runtime_vmd_sample_camera(ptr::null(), 0, 0.0, &mut camera) });
     }
 
     #[test]

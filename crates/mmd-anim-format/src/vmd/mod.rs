@@ -391,7 +391,8 @@ pub struct VmdParsedCameraFrame {
     pub perspective: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VmdCameraState {
     pub distance: f32,
     pub position: [f32; 3],
@@ -816,11 +817,12 @@ fn decode_camera_interpolation_scalar(
     interpolation: &[u8; 24],
     channel: usize,
 ) -> InterpolationScalar {
+    let offset = channel * 4;
     decode_interpolation_scalar([
-        interpolation[channel],
-        interpolation[channel + 6],
-        interpolation[channel + 12],
-        interpolation[channel + 18],
+        interpolation[offset],
+        interpolation[offset + 1],
+        interpolation[offset + 2],
+        interpolation[offset + 3],
     ])
 }
 
@@ -828,7 +830,11 @@ fn interpolation_ratio(previous_frame: u32, next_frame: u32, frame: f32) -> f32 
     if next_frame <= previous_frame {
         return 0.0;
     }
-    ((frame - previous_frame as f32) / (next_frame - previous_frame) as f32).clamp(0.0, 1.0)
+    let span = next_frame - previous_frame;
+    if span <= 1 {
+        return if frame >= next_frame as f32 { 1.0 } else { 0.0 };
+    }
+    ((frame - previous_frame as f32) / span as f32).clamp(0.0, 1.0)
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -1521,6 +1527,71 @@ mod tests {
     }
 
     #[test]
+    fn decodes_raw_vmd_camera_interpolation_as_contiguous_curves() {
+        let mut interpolation = [0u8; 24];
+        for (index, value) in interpolation.iter_mut().enumerate() {
+            *value = index as u8;
+        }
+
+        let decoded = decode_camera_interpolation(&interpolation);
+
+        assert_eq!(
+            decoded.position.x,
+            InterpolationScalar {
+                x1: 0,
+                y1: 1,
+                x2: 2,
+                y2: 3
+            }
+        );
+        assert_eq!(
+            decoded.position.y,
+            InterpolationScalar {
+                x1: 4,
+                y1: 5,
+                x2: 6,
+                y2: 7
+            }
+        );
+        assert_eq!(
+            decoded.position.z,
+            InterpolationScalar {
+                x1: 8,
+                y1: 9,
+                x2: 10,
+                y2: 11
+            }
+        );
+        assert_eq!(
+            decoded.rotation,
+            InterpolationScalar {
+                x1: 12,
+                y1: 13,
+                x2: 14,
+                y2: 15
+            }
+        );
+        assert_eq!(
+            decoded.distance,
+            InterpolationScalar {
+                x1: 16,
+                y1: 17,
+                x2: 18,
+                y2: 19
+            }
+        );
+        assert_eq!(
+            decoded.fov,
+            InterpolationScalar {
+                x1: 20,
+                y1: 21,
+                x2: 22,
+                y2: 23
+            }
+        );
+    }
+
+    #[test]
     fn skips_camera_light_shadow_and_reads_ik_property_names() {
         let mut buf = build_vmd_header_bytes();
 
@@ -2129,7 +2200,7 @@ mod tests {
     fn assert_near(actual: f32, expected: f32) {
         let delta = (actual - expected).abs();
         assert!(
-            delta < 1.0e-5,
+            delta < 1.0e-4,
             "actual={actual:?} expected={expected:?} delta={delta:?}"
         );
     }

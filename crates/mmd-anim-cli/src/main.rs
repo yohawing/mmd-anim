@@ -1368,6 +1368,7 @@ mod tests {
             compared_cases: 1,
             compared_frames: 2,
             mismatch_count: 3,
+            skipped_targets: Default::default(),
             max_delta: 0.25,
         };
         let mut motion = compare::MotionNumericCompareStats {
@@ -1404,6 +1405,64 @@ mod tests {
             value["summary"]["skippedTargets"],
             serde_json::json!(["morphs", "rigidBodies"])
         );
+    }
+
+    #[test]
+    fn compare_numeric_camera_current_dump_reads_jsonl_current_state() {
+        let temp = unique_test_dir("compare-numeric-camera-current");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("camera.vmd"),
+            include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd"),
+        )
+        .unwrap();
+        fs::write(
+            temp.join("oracle.actual.jsonl"),
+            r#"{"frame":0,"camera":{"available":true,"current":{"distance":3.0,"position":[7.029143,5.044919,32.742695],"rotation":[0.1,-0.2,0.3]}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.join("manifest.json"),
+            r#"{
+                "cases": [
+                    {
+                        "name": "camera-current",
+                        "kind": "camera-numeric-dump",
+                        "assets": { "cameraMotion": "camera.vmd" },
+                        "oracle": { "path": "oracle.actual.jsonl", "format": "jsonl" },
+                        "compare": {
+                            "targets": ["camera.current", "d3d.projection.derived"],
+                            "epsilon": 0.003
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let report = compare::build_numeric_compare_report(&temp.join("manifest.json"), false)
+            .unwrap()
+            .to_json();
+
+        assert_eq!(report["summary"]["cameraCases"], 1);
+        assert_eq!(report["summary"]["cameraFrames"], 1);
+        assert_eq!(report["summary"]["cameraMismatches"], 0);
+        assert!(
+            report["summary"]["cameraMaxDelta"].as_f64().unwrap() < 1.0e-6,
+            "cameraMaxDelta={}",
+            report["summary"]["cameraMaxDelta"]
+        );
+        assert_eq!(
+            report["summary"]["skippedTargets"],
+            serde_json::json!(["d3d.projection.derived"])
+        );
+        assert_eq!(report["perCase"][0]["kind"], "camera-numeric-dump");
+        assert_eq!(
+            report["perCase"][0]["skippedTargets"],
+            serde_json::json!(["d3d.projection.derived"])
+        );
+
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

@@ -93,6 +93,21 @@ pub fn parse_vmd_animation_json(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&parsed).map_err(js_error)
 }
 
+#[wasm_bindgen(js_name = sampleVmdCameraJson)]
+pub fn sample_vmd_camera_json(data: &[u8], frame: f32) -> Result<String, JsValue> {
+    if data.is_empty() {
+        return Err(JsValue::from_str("VMD data is empty"));
+    }
+    if !frame.is_finite() {
+        return Err(JsValue::from_str("frame must be finite"));
+    }
+    let parsed = mmd_anim_format::parse_vmd_animation(data)
+        .map_err(|error| js_parser_error("VMD", "sampleVmdCameraJson", None, error))?;
+    let camera = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
+        .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
+    serde_json::to_string(&camera).map_err(js_error)
+}
+
 #[wasm_bindgen(js_name = parseMmdFormatJson)]
 pub fn parse_mmd_format_json(data: &[u8], file_name: Option<String>) -> Result<String, JsValue> {
     if data.is_empty() {
@@ -1273,6 +1288,45 @@ pub struct WasmMmdClip {
 }
 
 #[wasm_bindgen]
+pub struct WasmVmdCameraTrack {
+    frames: Vec<mmd_anim_format::vmd::VmdParsedCameraFrame>,
+}
+
+#[wasm_bindgen]
+impl WasmVmdCameraTrack {
+    #[wasm_bindgen(js_name = fromVmdBytes)]
+    pub fn from_vmd_bytes(data: &[u8]) -> Result<WasmVmdCameraTrack, JsValue> {
+        if data.is_empty() {
+            return Err(JsValue::from_str("VMD data is empty"));
+        }
+        let parsed = mmd_anim_format::parse_vmd_animation(data).map_err(|error| {
+            js_parser_error("VMD", "WasmVmdCameraTrack.fromVmdBytes", None, error)
+        })?;
+        if parsed.camera_frames.is_empty() {
+            return Err(JsValue::from_str("VMD has no camera keyframes"));
+        }
+        Ok(Self {
+            frames: parsed.camera_frames,
+        })
+    }
+
+    #[wasm_bindgen(js_name = frameCount)]
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    #[wasm_bindgen(js_name = sampleJson)]
+    pub fn sample_json(&self, frame: f32) -> Result<String, JsValue> {
+        if !frame.is_finite() {
+            return Err(JsValue::from_str("frame must be finite"));
+        }
+        let camera = mmd_anim_format::sample_vmd_camera_frames(&self.frames, frame)
+            .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
+        serde_json::to_string(&camera).map_err(js_error)
+    }
+}
+
+#[wasm_bindgen]
 impl WasmMmdClip {
     #[wasm_bindgen(constructor)]
     #[allow(clippy::too_many_arguments)]
@@ -1830,6 +1884,47 @@ mod tests {
         assert_eq!(value["kind"], "vmd");
         assert_eq!(value["metadata"]["format"], "vmd");
         assert!(value["cameraFrames"].as_array().unwrap().len() >= 2);
+    }
+
+    #[test]
+    fn samples_vmd_camera_json_through_wasm_wrapper() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+        let json = sample_vmd_camera_json(bytes, 22.5).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_json_near(&value["distance"], -40.25);
+        assert_json_vec3_near(&value["position"], [-0.25, 6.0, 1.625]);
+        assert_json_vec3_near(&value["rotation"], [-0.1, -0.1, 0.75]);
+        assert_json_near(&value["fov"], 47.5);
+        assert_eq!(value["perspective"], true);
+    }
+
+    #[test]
+    fn samples_vmd_camera_track_through_wasm_wrapper() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+        let track = WasmVmdCameraTrack::from_vmd_bytes(bytes).unwrap();
+        assert_eq!(track.frame_count(), 2);
+
+        let json = track.sample_json(22.5).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_json_near(&value["distance"], -40.25);
+        assert_json_near(&value["fov"], 47.5);
+    }
+
+    fn assert_json_near(value: &serde_json::Value, expected: f64) {
+        let actual = value.as_f64().unwrap();
+        assert!(
+            (actual - expected).abs() <= 1.0e-4,
+            "actual={actual} expected={expected}"
+        );
+    }
+
+    fn assert_json_vec3_near(value: &serde_json::Value, expected: [f64; 3]) {
+        let actual = value.as_array().unwrap();
+        assert_eq!(actual.len(), 3);
+        for (index, expected) in expected.iter().enumerate() {
+            assert_json_near(&actual[index], *expected);
+        }
     }
 
     #[test]

@@ -26,6 +26,7 @@ typedef struct mmd_runtime_pmx_material_split_t mmd_runtime_pmx_material_split_t
 typedef struct mmd_runtime_pmx_rig_spec_t mmd_runtime_pmx_rig_spec_t;
 typedef struct mmd_runtime_ik_chain_t mmd_runtime_ik_chain_t;
 typedef struct mmd_runtime_append_solver_t mmd_runtime_append_solver_t;
+typedef struct mmd_runtime_vmd_camera_track_t mmd_runtime_vmd_camera_track_t;
 
 /* ------------------------------------------------------------------ */
 /*  Flag constants                                                    */
@@ -143,6 +144,14 @@ typedef struct mmd_runtime_ffi_byte_buffer {
     size_t   len;
 } mmd_runtime_ffi_byte_buffer_t;
 
+typedef struct mmd_runtime_ffi_camera_state {
+    float   distance;
+    float   position_xyz[3];
+    float   rotation_xyz[3];
+    float   fov;
+    uint8_t perspective;
+} mmd_runtime_ffi_camera_state_t;
+
 /* ------------------------------------------------------------------ */
 /*  Model lifecycle                                                   */
 /* ------------------------------------------------------------------ */
@@ -155,6 +164,27 @@ void mmd_runtime_byte_buffer_free(
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_vmd_json(
     const uint8_t* data,
     size_t         len);
+
+mmd_runtime_vmd_camera_track_t* mmd_runtime_vmd_camera_track_create_from_vmd_bytes(
+    const uint8_t* data,
+    size_t         len);
+
+size_t mmd_runtime_vmd_camera_track_frame_count(
+    const mmd_runtime_vmd_camera_track_t* track);
+
+bool mmd_runtime_vmd_camera_track_sample(
+    const mmd_runtime_vmd_camera_track_t* track,
+    float                                 frame,
+    mmd_runtime_ffi_camera_state_t*       out_camera);
+
+bool mmd_runtime_vmd_sample_camera(
+    const uint8_t*                  data,
+    size_t                          len,
+    float                           frame,
+    mmd_runtime_ffi_camera_state_t*  out_camera);
+
+void mmd_runtime_vmd_camera_track_free(
+    mmd_runtime_vmd_camera_track_t* track);
 
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_non_geometry_json(
     const uint8_t* data,

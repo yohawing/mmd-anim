@@ -2,21 +2,32 @@
 
 ## 0.1.8 - 2026-06-29
 
-Camera sampling APIs and GoldenOracle regression gate tooling.
+Camera, light, and self-shadow sampling APIs and GoldenOracle regression gate
+tooling.
 
 ### Added
 
 - Added VMD camera sampling helpers to `mmd-anim-format`, with interpolated
   distance, position, rotation, FOV, and perspective state.
-- Added C ABI camera track APIs for parsing VMD camera frames once and sampling
-  them by frame, plus a one-shot `mmd_runtime_vmd_sample_camera` helper.
-- Added WASM camera sampling APIs: `sampleVmdCameraJson` and
-  `WasmVmdCameraTrack`.
+- Added caller-owned output-buffer C ABI sampling APIs for VMD camera, light,
+  and self-shadow tracks, plus one-shot helpers:
+  `mmd_runtime_vmd_sample_camera`, `mmd_runtime_vmd_sample_light`, and
+  `mmd_runtime_vmd_sample_self_shadow`.
+- Added caller-owned `Float32Array` WASM sampling APIs for VMD camera, light,
+  and self-shadow tracks: `sampleVmdCamera`, `sampleVmdLight`,
+  `sampleVmdSelfShadow`, `WasmVmdCameraTrack`, `WasmVmdLightTrack`, and
+  `WasmVmdSelfShadowTrack`.
 - Added `camera-numeric-dump` handling to numeric compare reports so
   `camera.current` GoldenOracle output can be gated through the same report
   shape as motion numeric checks.
 - Added the `tools/golden-gate` Python gate for baseline-not-worse local
   release checks.
+
+### Changed
+
+- Replaced the pre-release JSON-returning and array-returning camera sampling
+  APIs with caller-owned output-buffer APIs before the `0.1.8` release tag.
+  This keeps hot-path C ABI and WASM sampling allocation-free.
 
 ## 0.1.7 - 2026-06-27
 

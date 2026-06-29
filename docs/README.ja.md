@@ -84,8 +84,7 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 | `mmd-anim-format` | PMX/VMD のランタイム取り込み、形式判定、読み込み（構造化）、PMX/PMD/VMD/VPD/X/VAC の書き出しを提供する。 |
 | `mmd-anim-ffi` | ネイティブホスト向けの C ABI。ランタイム操作と PMX パーツ書き出しを公開する。0.1.x 系ではリポジトリ内専用。 |
 | `mmd-anim-wasm` | ブラウザ向けの `wasm-bindgen` ラッパー。ランタイム操作、読み込み/書き出し、PMX パーツ書き出しを公開する。0.1.x 系ではワークスペース内専用。 |
-| `mmd-anim-cli` | MMD 形式ファイルの検査・変換・診断コマンド。`cargo install mmd-anim-cli` でインストール可能。 |
-| `mmd-anim-schema` | CLI や診断ツールが使用する共有 IR・トレーススキーマ。 |
+| `mmd-anim-cli` | MMD 形式ファイルの検査・変換・診断コマンド。メンテナ向け oracle / numeric compare schema もこの crate 側に含む。`cargo install mmd-anim-cli` でインストール可能。 |
 
 通常のライブラリ利用では `mmd-anim` を依存に追加してください。低レイヤだけを直接使いたい場合は
 `mmd-anim-format` や `mmd-anim-runtime` に直接依存できます。
@@ -134,6 +133,26 @@ mmd_runtime_model_free(model);
 ホスト側の形状データから PMX を生成したい場合は `mmd_runtime_export_pmx_from_parts` を使います。
 入力配列の所有権は呼び出し元に残り、返却されたバイト列は `mmd_runtime_byte_buffer_free` で解放します。
 
+VMD の camera / light / self-shadow track は、モデル runtime を作らずに直接 sampling できます。
+出力先は呼び出し元が用意した float buffer です。
+
+```c
+float camera[9];      // distance, position.xyz, rotation.xyz, fov, perspective
+float light[6];       // color.rgb, direction.xyz
+float self_shadow[2]; // mode, distance
+
+bool has_camera = mmd_runtime_vmd_sample_camera(
+    vmd_bytes, vmd_len, 120.0f, camera, 9);
+bool has_light = mmd_runtime_vmd_sample_light(
+    vmd_bytes, vmd_len, 120.0f, light, 6);
+bool has_self_shadow = mmd_runtime_vmd_sample_self_shadow(
+    vmd_bytes, vmd_len, 120.0f, self_shadow, 2);
+```
+
+繰り返し sampling する場合は、`mmd_runtime_vmd_camera_track_t`、
+`mmd_runtime_vmd_light_track_t`、`mmd_runtime_vmd_self_shadow_track_t` を一度作成し、
+対応する `*_track_sample` 関数を呼びます。
+
 ## WASM / ブラウザから使う
 
 ビルドはブラウザ向けの `wasm-pack build --target web` に固定しています。Node.js 単体用ビルドは使いません。
@@ -151,9 +170,15 @@ import init, {
   exportPmxFromParts,
   exportVmdAnimationJsonBytes,
   parseMmdFormatJson,
+  sampleVmdCamera,
+  sampleVmdLight,
+  sampleVmdSelfShadow,
+  WasmVmdCameraTrack,
+  WasmVmdLightTrack,
   WasmMmdClip,
   WasmMmdModel,
   WasmMmdRuntimeInstance,
+  WasmVmdSelfShadowTrack,
 } from "./pkg/mmd_anim_wasm.js";
 
 await init();
@@ -176,6 +201,27 @@ model.free();
 const json = parseMmdFormatJson(vmdBytes, "motion.vmd");
 const exportedBytes = exportVmdAnimationJsonBytes(json);
 const normalizedBytes = exportMmdFormatBytes(vmdBytes, "motion.vmd");
+
+// モデル runtime を使わない camera / light / self-shadow sampling
+const camera = new Float32Array(9);      // distance, position.xyz, rotation.xyz, fov, perspective
+const light = new Float32Array(6);       // color.rgb, direction.xyz
+const selfShadow = new Float32Array(2);  // mode, distance
+
+const hasCamera = sampleVmdCamera(vmdBytes, 120, camera);
+const hasLight = sampleVmdLight(vmdBytes, 120, light);
+const hasSelfShadow = sampleVmdSelfShadow(vmdBytes, 120, selfShadow);
+
+const cameraTrack = WasmVmdCameraTrack.fromVmdBytes(vmdBytes);
+cameraTrack.sample(180, camera);
+cameraTrack.free();
+
+const lightTrack = WasmVmdLightTrack.fromVmdBytes(vmdBytes);
+lightTrack.sample(180, light);
+lightTrack.free();
+
+const selfShadowTrack = WasmVmdSelfShadowTrack.fromVmdBytes(vmdBytes);
+selfShadowTrack.sample(180, selfShadow);
+selfShadowTrack.free();
 
 // 型付き配列から PMX を生成
 const generatedPmxBytes = exportPmxFromParts(

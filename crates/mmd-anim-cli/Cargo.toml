@@ -19,7 +19,7 @@ doc = false
 clap = { version = "4", features = ["derive"] }
 glam.workspace = true
 mmd-anim-runtime.workspace = true
-mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.7" }
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.8" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

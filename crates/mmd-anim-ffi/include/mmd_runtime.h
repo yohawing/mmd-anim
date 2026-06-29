@@ -177,11 +177,24 @@ bool mmd_runtime_vmd_camera_track_sample(
     float                                 frame,
     mmd_runtime_ffi_camera_state_t*       out_camera);
 
+bool mmd_runtime_vmd_camera_track_sample_array(
+    const mmd_runtime_vmd_camera_track_t* track,
+    float                                 frame,
+    float*                                out_values,
+    size_t                                out_len);
+
 bool mmd_runtime_vmd_sample_camera(
     const uint8_t*                  data,
     size_t                          len,
     float                           frame,
     mmd_runtime_ffi_camera_state_t*  out_camera);
+
+bool mmd_runtime_vmd_sample_camera_array(
+    const uint8_t* data,
+    size_t         len,
+    float          frame,
+    float*         out_values,
+    size_t         out_len);
 
 void mmd_runtime_vmd_camera_track_free(
     mmd_runtime_vmd_camera_track_t* track);

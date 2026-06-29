@@ -108,6 +108,50 @@ pub fn sample_vmd_camera_json(data: &[u8], frame: f32) -> Result<String, JsValue
     serde_json::to_string(&camera).map_err(js_error)
 }
 
+/// Sample VMD camera bytes and return:
+/// `[distance, position.x, position.y, position.z, rotation.x, rotation.y,
+/// rotation.z, fov, perspective]`.
+///
+/// `perspective` is encoded as `1.0` when perspective is enabled, otherwise
+/// `0.0`.
+#[wasm_bindgen(js_name = sampleVmdCameraArray)]
+pub fn sample_vmd_camera_array(data: &[u8], frame: f32) -> Result<js_sys::Float32Array, JsValue> {
+    if data.is_empty() {
+        return Err(JsValue::from_str("VMD data is empty"));
+    }
+    if !frame.is_finite() {
+        return Err(JsValue::from_str("frame must be finite"));
+    }
+    let parsed = mmd_anim_format::parse_vmd_animation(data)
+        .map_err(|error| js_parser_error("VMD", "sampleVmdCameraArray", None, error))?;
+    let camera = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
+        .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
+    Ok(js_sys::Float32Array::from(&camera_state_array(camera)[..]))
+}
+
+/// Sample VMD camera bytes into a caller-owned `Float32Array`.
+///
+/// The output layout matches `sampleVmdCameraArray`. Returns `false` when
+/// `out.length < 9`.
+#[wasm_bindgen(js_name = sampleVmdCameraInto)]
+pub fn sample_vmd_camera_into(
+    data: &[u8],
+    frame: f32,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if data.is_empty() {
+        return Err(JsValue::from_str("VMD data is empty"));
+    }
+    if !frame.is_finite() {
+        return Err(JsValue::from_str("frame must be finite"));
+    }
+    let parsed = mmd_anim_format::parse_vmd_animation(data)
+        .map_err(|error| js_parser_error("VMD", "sampleVmdCameraInto", None, error))?;
+    let camera = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
+        .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
+    copy_camera_state_array(camera, out)
+}
+
 #[wasm_bindgen(js_name = parseMmdFormatJson)]
 pub fn parse_mmd_format_json(data: &[u8], file_name: Option<String>) -> Result<String, JsValue> {
     if data.is_empty() {
@@ -1324,6 +1368,64 @@ impl WasmVmdCameraTrack {
             .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
         serde_json::to_string(&camera).map_err(js_error)
     }
+
+    /// Sample the camera track and return:
+    /// `[distance, position.x, position.y, position.z, rotation.x, rotation.y,
+    /// rotation.z, fov, perspective]`.
+    ///
+    /// `perspective` is encoded as `1.0` when perspective is enabled, otherwise
+    /// `0.0`.
+    #[wasm_bindgen(js_name = sampleArray)]
+    pub fn sample_array(&self, frame: f32) -> Result<js_sys::Float32Array, JsValue> {
+        if !frame.is_finite() {
+            return Err(JsValue::from_str("frame must be finite"));
+        }
+        let camera = mmd_anim_format::sample_vmd_camera_frames(&self.frames, frame)
+            .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
+        Ok(js_sys::Float32Array::from(&camera_state_array(camera)[..]))
+    }
+
+    /// Sample the camera track into a caller-owned `Float32Array`.
+    ///
+    /// The output layout matches `sampleArray`. Returns `false` when
+    /// `out.length < 9`.
+    #[wasm_bindgen(js_name = sampleInto)]
+    pub fn sample_into(&self, frame: f32, out: &js_sys::Float32Array) -> Result<bool, JsValue> {
+        if !frame.is_finite() {
+            return Err(JsValue::from_str("frame must be finite"));
+        }
+        let camera = mmd_anim_format::sample_vmd_camera_frames(&self.frames, frame)
+            .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
+        copy_camera_state_array(camera, out)
+    }
+}
+
+fn camera_state_array(camera: mmd_anim_format::VmdCameraState) -> [f32; 9] {
+    [
+        camera.distance,
+        camera.position[0],
+        camera.position[1],
+        camera.position[2],
+        camera.rotation[0],
+        camera.rotation[1],
+        camera.rotation[2],
+        camera.fov,
+        if camera.perspective { 1.0 } else { 0.0 },
+    ]
+}
+
+fn copy_camera_state_array(
+    camera: mmd_anim_format::VmdCameraState,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if out.length() < 9 {
+        return Ok(false);
+    }
+    let values = camera_state_array(camera);
+    for (index, value) in values.into_iter().enumerate() {
+        out.set_index(index as u32, value);
+    }
+    Ok(true)
 }
 
 #[wasm_bindgen]
@@ -1900,6 +2002,22 @@ mod tests {
     }
 
     #[test]
+    fn samples_vmd_camera_array_layout() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+        let parsed = mmd_anim_format::parse_vmd_animation(bytes).unwrap();
+        let camera = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, 22.5)
+            .expect("fixture has camera keyframes");
+        let values = camera_state_array(camera);
+
+        assert_eq!(values.len(), 9);
+        assert_near(values[0], -40.25);
+        assert_vec3_near([values[1], values[2], values[3]], [-0.25, 6.0, 1.625]);
+        assert_vec3_near([values[4], values[5], values[6]], [-0.1, -0.1, 0.75]);
+        assert_near(values[7], 47.5);
+        assert_near(values[8], 1.0);
+    }
+
+    #[test]
     fn samples_vmd_camera_track_through_wasm_wrapper() {
         let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
         let track = WasmVmdCameraTrack::from_vmd_bytes(bytes).unwrap();
@@ -1909,6 +2027,19 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_json_near(&value["distance"], -40.25);
         assert_json_near(&value["fov"], 47.5);
+    }
+
+    fn assert_near(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-4,
+            "actual={actual} expected={expected}"
+        );
+    }
+
+    fn assert_vec3_near(actual: [f32; 3], expected: [f32; 3]) {
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_near(*actual, expected);
+        }
     }
 
     fn assert_json_near(value: &serde_json::Value, expected: f64) {

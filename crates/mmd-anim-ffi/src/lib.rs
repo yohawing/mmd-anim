@@ -628,6 +628,43 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_sample(
     true
 }
 
+/// Samples an owned VMD camera track into a flat array.
+///
+/// Writes `[distance, position.x, position.y, position.z, rotation.x,
+/// rotation.y, rotation.z, fov, perspective]` to `out_values`.
+/// `perspective` is encoded as `1.0` when enabled, otherwise `0.0`.
+///
+/// Returns false when `track` or `out_values` is null, when `out_len` is less
+/// than 9, when `frame` is not finite, or when the track has no camera
+/// keyframes.
+///
+/// # Safety
+///
+/// `track` must be null or a valid pointer returned by
+/// `mmd_runtime_vmd_camera_track_create_from_vmd_bytes`. `out_values` must be
+/// valid for writes of at least `out_len` floats when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_sample_array(
+    track: *const MmdRuntimeVmdCameraTrack,
+    frame: f32,
+    out_values: *mut f32,
+    out_len: usize,
+) -> bool {
+    if !frame.is_finite() || out_values.is_null() || out_len < 9 {
+        return false;
+    }
+    let Some(track) = (unsafe { track.as_ref() }) else {
+        return false;
+    };
+    let Some(camera) = mmd_anim_format::sample_vmd_camera_frames(&track.frames, frame) else {
+        return false;
+    };
+    unsafe {
+        write_camera_state_array(camera, out_values);
+    }
+    true
+}
+
 /// Samples camera motion directly from VMD bytes.
 ///
 /// This one-shot helper reparses the VMD on each call. Hosts that evaluate
@@ -662,6 +699,46 @@ pub unsafe extern "C" fn mmd_runtime_vmd_sample_camera(
     true
 }
 
+/// Samples camera motion directly from VMD bytes into a flat array.
+///
+/// Writes `[distance, position.x, position.y, position.z, rotation.x,
+/// rotation.y, rotation.z, fov, perspective]` to `out_values`.
+/// `perspective` is encoded as `1.0` when enabled, otherwise `0.0`.
+///
+/// This one-shot helper reparses the VMD on each call. Hosts that evaluate
+/// multiple frames should use the camera-track handle API instead.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+/// `out_values` must be valid for writes of at least `out_len` floats when
+/// non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_sample_camera_array(
+    data: *const u8,
+    len: usize,
+    frame: f32,
+    out_values: *mut f32,
+    out_len: usize,
+) -> bool {
+    if data.is_null() || len == 0 || !frame.is_finite() || out_values.is_null() || out_len < 9 {
+        return false;
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    let Some(camera) = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
+    else {
+        return false;
+    };
+    unsafe {
+        write_camera_state_array(camera, out_values);
+    }
+    true
+}
+
 /// Frees a VMD camera track created by
 /// `mmd_runtime_vmd_camera_track_create_from_vmd_bytes`.
 ///
@@ -685,6 +762,27 @@ fn ffi_camera_state(camera: mmd_anim_format::VmdCameraState) -> MmdRuntimeFfiCam
         rotation_xyz: camera.rotation,
         fov: camera.fov,
         perspective: u8::from(camera.perspective),
+    }
+}
+
+fn camera_state_array(camera: mmd_anim_format::VmdCameraState) -> [f32; 9] {
+    [
+        camera.distance,
+        camera.position[0],
+        camera.position[1],
+        camera.position[2],
+        camera.rotation[0],
+        camera.rotation[1],
+        camera.rotation[2],
+        camera.fov,
+        if camera.perspective { 1.0 } else { 0.0 },
+    ]
+}
+
+unsafe fn write_camera_state_array(camera: mmd_anim_format::VmdCameraState, out_values: *mut f32) {
+    let values = camera_state_array(camera);
+    unsafe {
+        ptr::copy_nonoverlapping(values.as_ptr(), out_values, values.len());
     }
 }
 
@@ -5583,6 +5681,21 @@ mod tests {
         assert_near(camera.fov, 47.5, 1.0e-4);
         assert_eq!(camera.perspective, 1);
 
+        let mut values = [0.0f32; 9];
+        assert!(unsafe {
+            mmd_runtime_vmd_camera_track_sample_array(
+                track,
+                22.5,
+                values.as_mut_ptr(),
+                values.len(),
+            )
+        });
+        assert_slice_near(
+            &values,
+            &[-40.25, -0.25, 6.0, 1.625, -0.1, -0.1, 0.75, 47.5, 1.0],
+            1.0e-4,
+        );
+
         unsafe { mmd_runtime_vmd_camera_track_free(track) };
     }
 
@@ -5604,6 +5717,22 @@ mod tests {
         assert_slice_near(&camera.rotation_xyz, &[-0.1, -0.1, 0.75], 1.0e-4);
         assert_near(camera.fov, 47.5, 1.0e-4);
         assert_eq!(camera.perspective, 1);
+
+        let mut values = [0.0f32; 9];
+        assert!(unsafe {
+            mmd_runtime_vmd_sample_camera_array(
+                bytes.as_ptr(),
+                bytes.len(),
+                22.5,
+                values.as_mut_ptr(),
+                values.len(),
+            )
+        });
+        assert_slice_near(
+            &values,
+            &[-40.25, -0.25, 6.0, 1.625, -0.1, -0.1, 0.75, 47.5, 1.0],
+            1.0e-4,
+        );
     }
 
     #[test]
@@ -5620,6 +5749,27 @@ mod tests {
         );
         assert!(!unsafe { mmd_runtime_vmd_camera_track_sample(ptr::null(), 0.0, &mut camera) });
         assert!(!unsafe { mmd_runtime_vmd_sample_camera(ptr::null(), 0, 0.0, &mut camera) });
+        let mut values = [0.0f32; 8];
+        assert!(!unsafe {
+            mmd_runtime_vmd_camera_track_sample_array(
+                ptr::null(),
+                0.0,
+                values.as_mut_ptr(),
+                values.len(),
+            )
+        });
+        assert!(!unsafe {
+            mmd_runtime_vmd_sample_camera_array(ptr::null(), 0, 0.0, values.as_mut_ptr(), 9)
+        });
+        assert!(!unsafe {
+            mmd_runtime_vmd_sample_camera_array(
+                [0u8; 1].as_ptr(),
+                1,
+                0.0,
+                values.as_mut_ptr(),
+                values.len(),
+            )
+        });
     }
 
     #[test]

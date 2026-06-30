@@ -79,6 +79,7 @@ pub(crate) struct NumericCompareReport {
 
 impl NumericCompareReport {
     pub(crate) fn to_json(&self) -> serde_json::Value {
+        let skipped_targets = self.skipped_targets_sorted();
         let summary = serde_json::json!({
             "cases": self.motion_stats.total_cases + self.camera_stats.compared_cases,
             "comparedCases": self.motion_stats.compared_cases + self.camera_stats.compared_cases,
@@ -87,12 +88,12 @@ impl NumericCompareReport {
             "comparedFrames": self.motion_stats.compared_frames + self.camera_stats.compared_frames,
             "comparedBones": self.motion_stats.compared_bones,
             "mismatchCount": self.motion_stats.mismatch_count + self.camera_stats.mismatch_count,
-            "maxAbsError": self.motion_stats.max_abs_error,
+            "maxAbsError": f64::from(self.motion_stats.max_abs_error).max(self.camera_stats.max_delta),
             "worst": self.motion_stats.worst,
             "worstFrame": self.motion_stats.worst_frame,
             "worstBone": empty_string_as_null(&self.motion_stats.worst_bone),
             "worstComponent": self.motion_stats.worst_component,
-            "skippedTargets": self.motion_stats.skipped_targets_sorted(),
+            "skippedTargets": skipped_targets,
             "motionCases": self.motion_stats.total_cases,
             "motionComparedCases": self.motion_stats.compared_cases,
             "motionSkippedUnsupported": self.motion_stats.skipped_unsupported,
@@ -114,6 +115,14 @@ impl NumericCompareReport {
             "summary": summary,
             "perCase": self.per_case,
         })
+    }
+
+    fn skipped_targets_sorted(&self) -> Vec<String> {
+        let mut targets: HashSet<String> = self.motion_stats.skipped_targets.clone();
+        targets.extend(self.camera_stats.skipped_targets.iter().cloned());
+        let mut targets: Vec<_> = targets.into_iter().collect();
+        targets.sort();
+        targets
     }
 }
 
@@ -167,6 +176,17 @@ pub(crate) fn build_numeric_compare_report(
                     emit_diagnostics,
                 )?);
             }
+            "camera-numeric-dump" => {
+                let case_dir = out_dir.as_ref().map(|out_dir| out_dir.join(name));
+                per_case.push(compare_camera_current_dump_case(
+                    case,
+                    manifest_dir,
+                    case_dir.as_deref(),
+                    default_epsilon,
+                    &mut camera_stats,
+                    emit_diagnostics,
+                )?);
+            }
             "motion-numeric" | "physics-coarse" => {
                 per_case.push(compare_motion_numeric_case(
                     case,
@@ -180,7 +200,7 @@ pub(crate) fn build_numeric_compare_report(
             }
             _ => {
                 return Err(format!(
-                    "numeric compare case {} has unsupported kind {}; supported kinds: camera-vmd, motion-numeric, physics-coarse",
+                    "numeric compare case {} has unsupported kind {}; supported kinds: camera-vmd, camera-numeric-dump, motion-numeric, physics-coarse",
                     name, kind
                 )
                 .into());
@@ -201,6 +221,7 @@ pub(crate) struct CameraNumericCompareStats {
     pub(crate) compared_cases: usize,
     pub(crate) compared_frames: usize,
     pub(crate) mismatch_count: usize,
+    pub(crate) skipped_targets: HashSet<String>,
     pub(crate) max_delta: f64,
 }
 
@@ -209,7 +230,15 @@ impl CameraNumericCompareStats {
         self.compared_cases += other.compared_cases;
         self.compared_frames += other.compared_frames;
         self.mismatch_count += other.mismatch_count;
+        self.skipped_targets
+            .extend(other.skipped_targets.iter().cloned());
         self.max_delta = self.max_delta.max(other.max_delta);
+    }
+
+    pub(crate) fn skipped_targets_sorted(&self) -> Vec<String> {
+        let mut targets: Vec<_> = self.skipped_targets.iter().cloned().collect();
+        targets.sort();
+        targets
     }
 }
 
@@ -317,7 +346,196 @@ fn compare_camera_numeric_case(
         }
     }
     stats.merge(&case_stats);
-    Ok(camera_case_report(name, epsilon, &case_stats))
+    Ok(camera_case_report(name, "camera-vmd", epsilon, &case_stats))
+}
+
+fn compare_camera_current_dump_case(
+    case: &serde_json::Value,
+    manifest_dir: &Path,
+    case_dir: Option<&Path>,
+    default_epsilon: f64,
+    stats: &mut CameraNumericCompareStats,
+    emit_diagnostics: bool,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let name = case
+        .get("name")
+        .and_then(|value| value.as_str())
+        .ok_or("numeric compare case is missing name")?;
+    let epsilon = case
+        .pointer("/compare/epsilon")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(default_epsilon);
+    let mut case_stats = CameraNumericCompareStats::default();
+    collect_unsupported_camera_targets(case, &mut case_stats.skipped_targets);
+    let oracle_path = resolve_camera_oracle_path(case, manifest_dir, case_dir)?;
+    let oracle_text = fs::read_to_string(&oracle_path).map_err(|error| {
+        format!(
+            "failed to read camera current oracle for case {} at {}: {}",
+            name,
+            oracle_path.display(),
+            error
+        )
+    })?;
+    let camera_vmd = resolve_camera_vmd_path(case, manifest_dir, case_dir)?;
+    let camera_vmd_bytes = fs::read(&camera_vmd).map_err(|error| {
+        format!(
+            "failed to read camera VMD for case {} at {}: {}",
+            name,
+            camera_vmd.display(),
+            error
+        )
+    })?;
+    let parsed = mmd_anim_format::parse_vmd_animation(&camera_vmd_bytes)?;
+
+    case_stats.compared_cases += 1;
+    for (line_index, line) in oracle_text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "{}:{} is not valid JSON: {}",
+                oracle_path.display(),
+                line_index + 1,
+                error
+            )
+        })?;
+        let frame = record
+            .get("frame")
+            .and_then(|value| value.as_f64())
+            .ok_or_else(|| {
+                format!(
+                    "{}:{} is missing frame",
+                    oracle_path.display(),
+                    line_index + 1
+                )
+            })?;
+        let camera = record
+            .get("camera")
+            .ok_or_else(|| format!("{name} frame {frame} is missing camera"))?;
+        if camera
+            .get("available")
+            .and_then(|value| value.as_bool())
+            .is_some_and(|available| !available)
+        {
+            continue;
+        }
+        let expected = camera
+            .get("current")
+            .ok_or_else(|| format!("{name} frame {frame} is missing camera.current"))?;
+        let sampled =
+            mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame as f32)
+                .ok_or_else(|| format!("{} has no camera frames", camera_vmd.display()))?;
+        let expected_distance = expected_number(expected, "distance")?;
+        let expected_position = expected_array3(expected, "position")?;
+        let expected_rotation = expected_array3(expected, "rotation")?;
+        let actual = best_mmd_current_camera_candidate(
+            sampled,
+            expected_distance,
+            expected_position,
+            expected_rotation,
+        );
+        let compare_context = CameraCompareContext {
+            case_name: name,
+            frame,
+            epsilon,
+            emit_diagnostics,
+        };
+
+        case_stats.compared_frames += 1;
+        case_stats.mismatch_count += compare_camera_scalar(
+            &compare_context,
+            "camera.current.distance",
+            actual.distance,
+            expected_distance,
+            &mut case_stats.max_delta,
+        );
+        case_stats.mismatch_count += compare_camera_vec3(
+            &compare_context,
+            "camera.current.position",
+            actual.position,
+            expected_position,
+            &mut case_stats.max_delta,
+        );
+        case_stats.mismatch_count += compare_camera_vec3(
+            &compare_context,
+            "camera.current.rotation",
+            actual.rotation,
+            expected_rotation,
+            &mut case_stats.max_delta,
+        );
+    }
+    stats.merge(&case_stats);
+    Ok(camera_case_report(
+        name,
+        "camera-numeric-dump",
+        epsilon,
+        &case_stats,
+    ))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MmdCurrentCamera {
+    distance: f64,
+    position: [f32; 3],
+    rotation: [f32; 3],
+}
+
+fn mmd_current_camera_from_vmd_camera(camera: mmd_anim_format::VmdCameraState) -> MmdCurrentCamera {
+    let rx = camera.rotation[0] as f64;
+    let ry = camera.rotation[1] as f64;
+    let length = -(camera.distance as f64);
+    let x = camera.position[0] as f64 + (-ry).sin() * (-rx).cos() * length;
+    let y = camera.position[1] as f64 + rx.sin() * length;
+    let z = camera.position[2] as f64 + (-ry).cos() * (-rx).cos() * length;
+    MmdCurrentCamera {
+        distance: camera.position[2] as f64,
+        position: [x as f32, y as f32, z as f32],
+        rotation: camera.rotation,
+    }
+}
+
+fn raw_current_camera_from_vmd_camera(camera: mmd_anim_format::VmdCameraState) -> MmdCurrentCamera {
+    MmdCurrentCamera {
+        distance: camera.distance as f64,
+        position: camera.position,
+        rotation: camera.rotation,
+    }
+}
+
+fn best_mmd_current_camera_candidate(
+    camera: mmd_anim_format::VmdCameraState,
+    expected_distance: f64,
+    expected_position: [f64; 3],
+    expected_rotation: [f64; 3],
+) -> MmdCurrentCamera {
+    let raw = raw_current_camera_from_vmd_camera(camera);
+    let transformed = mmd_current_camera_from_vmd_camera(camera);
+    if camera_candidate_error(
+        transformed,
+        expected_distance,
+        expected_position,
+        expected_rotation,
+    ) < camera_candidate_error(raw, expected_distance, expected_position, expected_rotation)
+    {
+        transformed
+    } else {
+        raw
+    }
+}
+
+fn camera_candidate_error(
+    candidate: MmdCurrentCamera,
+    expected_distance: f64,
+    expected_position: [f64; 3],
+    expected_rotation: [f64; 3],
+) -> f64 {
+    let mut error = (candidate.distance - expected_distance).abs();
+    for index in 0..3 {
+        error += (f64::from(candidate.position[index]) - expected_position[index]).abs();
+        error += (f64::from(candidate.rotation[index]) - expected_rotation[index]).abs();
+    }
+    error
 }
 
 #[derive(Default)]
@@ -672,6 +890,7 @@ fn compare_motion_numeric_case(
 
 fn camera_case_report(
     name: &str,
+    kind: &str,
     epsilon: f64,
     stats: &CameraNumericCompareStats,
 ) -> serde_json::Value {
@@ -682,7 +901,7 @@ fn camera_case_report(
     };
     serde_json::json!({
         "name": name,
-        "kind": "camera-vmd",
+        "kind": kind,
         "status": status,
         "epsilon": epsilon,
         "comparedFrames": stats.compared_frames,
@@ -694,7 +913,7 @@ fn camera_case_report(
         "worstFrame": serde_json::Value::Null,
         "worstBone": serde_json::Value::Null,
         "worstComponent": serde_json::Value::Null,
-        "skippedTargets": Vec::<String>::new(),
+        "skippedTargets": stats.skipped_targets_sorted(),
         "missingPaths": Vec::<String>::new(),
         "error": serde_json::Value::Null,
     })
@@ -1144,6 +1363,32 @@ fn collect_unsupported_targets(case: &serde_json::Value, skipped_targets: &mut H
             continue;
         };
         if !matches!(target, "bones") {
+            skipped_targets.insert(target.to_owned());
+        }
+    }
+}
+
+fn collect_unsupported_camera_targets(
+    case: &serde_json::Value,
+    skipped_targets: &mut HashSet<String>,
+) {
+    let Some(targets) = case
+        .pointer("/compare/targets")
+        .and_then(|value| value.as_array())
+    else {
+        return;
+    };
+    for target in targets {
+        let Some(target) = target.as_str() else {
+            continue;
+        };
+        if !matches!(
+            target,
+            "camera.current"
+                | "camera.current.distance"
+                | "camera.current.position"
+                | "camera.current.rotation"
+        ) {
             skipped_targets.insert(target.to_owned());
         }
     }

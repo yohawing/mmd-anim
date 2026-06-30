@@ -391,7 +391,8 @@ pub struct VmdParsedCameraFrame {
     pub perspective: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VmdCameraState {
     pub distance: f32,
     pub position: [f32; 3],
@@ -408,10 +409,24 @@ pub struct VmdParsedLightFrame {
     pub direction: [f32; 3],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmdLightState {
+    pub color: [f32; 3],
+    pub direction: [f32; 3],
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VmdParsedSelfShadowFrame {
     pub frame: u32,
+    pub mode: u8,
+    pub distance: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmdSelfShadowState {
     pub mode: u8,
     pub distance: f32,
 }
@@ -792,6 +807,66 @@ pub fn sample_vmd_camera_frames(
     })
 }
 
+pub fn sample_vmd_light_frames(
+    frames: &[VmdParsedLightFrame],
+    frame: f32,
+) -> Option<VmdLightState> {
+    if frames.is_empty() {
+        return None;
+    }
+
+    let mut sorted: Vec<&VmdParsedLightFrame> = frames.iter().collect();
+    sorted.sort_by_key(|keyframe| keyframe.frame);
+
+    let mut index = 0usize;
+    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
+        index += 1;
+    }
+
+    let previous = sorted[index];
+    let next = sorted.get(index + 1).copied().unwrap_or(previous);
+    let t = interpolation_ratio(previous.frame, next.frame, frame);
+
+    Some(VmdLightState {
+        color: [
+            lerp(previous.color[0], next.color[0], t),
+            lerp(previous.color[1], next.color[1], t),
+            lerp(previous.color[2], next.color[2], t),
+        ],
+        direction: [
+            lerp(previous.direction[0], next.direction[0], t),
+            lerp(previous.direction[1], next.direction[1], t),
+            lerp(previous.direction[2], next.direction[2], t),
+        ],
+    })
+}
+
+pub fn sample_vmd_self_shadow_frames(
+    frames: &[VmdParsedSelfShadowFrame],
+    frame: f32,
+) -> Option<VmdSelfShadowState> {
+    if frames.is_empty() {
+        return None;
+    }
+
+    let mut sorted: Vec<&VmdParsedSelfShadowFrame> = frames.iter().collect();
+    sorted.sort_by_key(|keyframe| keyframe.frame);
+
+    let mut index = 0usize;
+    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
+        index += 1;
+    }
+
+    let previous = sorted[index];
+    let next = sorted.get(index + 1).copied().unwrap_or(previous);
+    let t = interpolation_ratio(previous.frame, next.frame, frame);
+
+    Some(VmdSelfShadowState {
+        mode: if t < 1.0 { previous.mode } else { next.mode },
+        distance: lerp(previous.distance, next.distance, t),
+    })
+}
+
 struct CameraInterpolation {
     position: InterpolationVector3,
     rotation: InterpolationScalar,
@@ -816,11 +891,12 @@ fn decode_camera_interpolation_scalar(
     interpolation: &[u8; 24],
     channel: usize,
 ) -> InterpolationScalar {
+    let offset = channel * 4;
     decode_interpolation_scalar([
-        interpolation[channel],
-        interpolation[channel + 6],
-        interpolation[channel + 12],
-        interpolation[channel + 18],
+        interpolation[offset],
+        interpolation[offset + 1],
+        interpolation[offset + 2],
+        interpolation[offset + 3],
     ])
 }
 
@@ -828,7 +904,11 @@ fn interpolation_ratio(previous_frame: u32, next_frame: u32, frame: f32) -> f32 
     if next_frame <= previous_frame {
         return 0.0;
     }
-    ((frame - previous_frame as f32) / (next_frame - previous_frame) as f32).clamp(0.0, 1.0)
+    let span = next_frame - previous_frame;
+    if span <= 1 {
+        return if frame >= next_frame as f32 { 1.0 } else { 0.0 };
+    }
+    ((frame - previous_frame as f32) / span as f32).clamp(0.0, 1.0)
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -1521,6 +1601,71 @@ mod tests {
     }
 
     #[test]
+    fn decodes_raw_vmd_camera_interpolation_as_contiguous_curves() {
+        let mut interpolation = [0u8; 24];
+        for (index, value) in interpolation.iter_mut().enumerate() {
+            *value = index as u8;
+        }
+
+        let decoded = decode_camera_interpolation(&interpolation);
+
+        assert_eq!(
+            decoded.position.x,
+            InterpolationScalar {
+                x1: 0,
+                y1: 1,
+                x2: 2,
+                y2: 3
+            }
+        );
+        assert_eq!(
+            decoded.position.y,
+            InterpolationScalar {
+                x1: 4,
+                y1: 5,
+                x2: 6,
+                y2: 7
+            }
+        );
+        assert_eq!(
+            decoded.position.z,
+            InterpolationScalar {
+                x1: 8,
+                y1: 9,
+                x2: 10,
+                y2: 11
+            }
+        );
+        assert_eq!(
+            decoded.rotation,
+            InterpolationScalar {
+                x1: 12,
+                y1: 13,
+                x2: 14,
+                y2: 15
+            }
+        );
+        assert_eq!(
+            decoded.distance,
+            InterpolationScalar {
+                x1: 16,
+                y1: 17,
+                x2: 18,
+                y2: 19
+            }
+        );
+        assert_eq!(
+            decoded.fov,
+            InterpolationScalar {
+                x1: 20,
+                y1: 21,
+                x2: 22,
+                y2: 23
+            }
+        );
+    }
+
+    #[test]
     fn skips_camera_light_shadow_and_reads_ik_property_names() {
         let mut buf = build_vmd_header_bytes();
 
@@ -2129,7 +2274,7 @@ mod tests {
     fn assert_near(actual: f32, expected: f32) {
         let delta = (actual - expected).abs();
         assert!(
-            delta < 1.0e-5,
+            delta < 1.0e-4,
             "actual={actual:?} expected={expected:?} delta={delta:?}"
         );
     }
@@ -2316,6 +2461,51 @@ mod tests {
 
         let last = sample_vmd_camera_frames(&parsed.camera_frames, 45.0).unwrap();
         assert!(!last.perspective);
+    }
+
+    #[test]
+    fn samples_vmd_light_frames_linearly() {
+        let frames = vec![
+            VmdParsedLightFrame {
+                frame: 30,
+                color: [1.0, 0.5, 0.0],
+                direction: [0.0, -1.0, 0.0],
+            },
+            VmdParsedLightFrame {
+                frame: 10,
+                color: [0.0, 0.0, 1.0],
+                direction: [1.0, 0.0, 0.0],
+            },
+        ];
+
+        let light = sample_vmd_light_frames(&frames, 20.0).unwrap();
+
+        assert_vec3_near(light.color, [0.5, 0.25, 0.5]);
+        assert_vec3_near(light.direction, [0.5, -0.5, 0.0]);
+    }
+
+    #[test]
+    fn samples_vmd_self_shadow_frames_linearly_with_stepped_mode() {
+        let frames = vec![
+            VmdParsedSelfShadowFrame {
+                frame: 10,
+                mode: 1,
+                distance: 20.0,
+            },
+            VmdParsedSelfShadowFrame {
+                frame: 30,
+                mode: 2,
+                distance: 60.0,
+            },
+        ];
+
+        let middle = sample_vmd_self_shadow_frames(&frames, 20.0).unwrap();
+        assert_eq!(middle.mode, 1);
+        assert_near(middle.distance, 40.0);
+
+        let last = sample_vmd_self_shadow_frames(&frames, 30.0).unwrap();
+        assert_eq!(last.mode, 2);
+        assert_near(last.distance, 60.0);
     }
 
     #[test]

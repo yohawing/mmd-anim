@@ -2,8 +2,7 @@ use glam::{Quat, Vec3A};
 
 use crate::{BoneIndex, MorphIndex, PoseArena};
 
-const BEZIER_ITERATIONS: usize = 15;
-const BEZIER_EPSILON: f32 = 1.0e-5;
+const BEZIER_ITERATIONS: usize = 12;
 const MMD_INTERPOLATION_SCALE: f32 = 1.0 / 127.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +30,9 @@ impl InterpolationScalar {
         }
         if x >= 1.0 {
             return 1.0;
+        }
+        if self.x1 == self.y1 && self.x2 == self.y2 {
+            return x;
         }
         bezier_interpolation(
             self.x1 as f32 * MMD_INTERPOLATION_SCALE,
@@ -452,7 +454,7 @@ fn bezier_interpolation(x1: f32, x2: f32, y1: f32, y2: f32, x: f32) -> f32 {
         ttt = t * t * t;
 
         let ft = sst3 * x1 + stt3 * x2 + ttt - x;
-        if ft.abs() < BEZIER_EPSILON {
+        if ft == 0.0 {
             return sst3 * y1 + stt3 * y2 + ttt;
         }
 
@@ -492,6 +494,22 @@ mod tests {
     #[test]
     fn linear_interpolation_maps_half_to_half() {
         assert_near(InterpolationScalar::linear().evaluate(0.5), 0.5);
+    }
+
+    #[test]
+    fn mmd_camera_ease_out_matches_native_subdivision_points() {
+        let interpolation = InterpolationScalar {
+            x1: 0,
+            y1: 127,
+            x2: 127,
+            y2: 127,
+        };
+
+        assert_near(interpolation.evaluate(1.0 / 6.0), 0.5933867);
+        assert_near(interpolation.evaluate(1.0 / 3.0), 0.76974934);
+        assert_near(interpolation.evaluate(0.5), 0.875);
+        assert_near(interpolation.evaluate(2.0 / 3.0), 0.9420012);
+        assert_near(interpolation.evaluate(5.0 / 6.0), 0.9825947);
     }
 
     #[test]

@@ -1,0 +1,9 @@
+golden-gate.local.json
+golden-gate.local.toml
+*.local.json
+*.local.toml
+reports/
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc

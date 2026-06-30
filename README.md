@@ -16,17 +16,10 @@ It is tested against data exported from the original MMD and against several
 PMX/VMD assets, but real-world usage is still limited. APIs and features are not
 frozen yet, and breaking changes may happen before 1.0. Feedback is welcome.
 
-PMM support is partial. The current release can inspect PMMv1/PMMv2 metadata,
-preserve parsed PMM bytes for lossless round trips, and generate a limited
-single-model PMMv2 scene from PMX/VMD inputs through the maintainer CLI. It is
-not a complete semantic PMM exporter yet, and generated PMM files should be
-validated in MikuMikuDance before production use.
-
 ## Runtime Evaluation
 
 - Load a PMX model and convert it into runtime-ready model data.
-- Load a VMD motion, resolve names against the PMX model, and convert it into a playable clip.
-- Evaluate a frame and read the bone matrices, morph weights, and IK on/off state for that moment.
+- Load a VMD motion and convert bone, camera, light, and other motion tracks into a playable form.
 - Interpolate between keyframes with MMD-style Bezier interpolation for translation and rotation.
 
 > **Physics simulation is not included.** Rigid-body and joint data can be read
@@ -91,8 +84,7 @@ Format support overview. "Loading" means parsing a file into structured data.
 | `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
 | `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for the 0.1.x line. |
 | `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for the 0.1.x line. |
-| `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files. Installable via `cargo install mmd-anim-cli`. |
-| `mmd-anim-schema` | Shared IR and trace schema used by the CLI and diagnostic tools. |
+| `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files, including maintainer-local oracle and numeric comparison schemas. Installable via `cargo install mmd-anim-cli`. |
 
 For normal library use, depend on `mmd-anim`. Advanced users who only need a
 lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.

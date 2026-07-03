@@ -152,6 +152,9 @@ typedef struct mmd_runtime_ffi_byte_buffer {
 
 uint32_t mmd_runtime_abi_version(void);
 
+/* Returns the most recent FFI error message for the calling thread, or NULL. */
+const char* mmd_runtime_last_error_message(void);
+
 void mmd_runtime_byte_buffer_free(
     mmd_runtime_ffi_byte_buffer_t buffer);
 

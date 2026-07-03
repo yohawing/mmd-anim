@@ -8,8 +8,11 @@ use mmd_anim_runtime::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::binary::ByteReader;
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
+
+type Reader<'a> = ByteReader<'a>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,55 +214,25 @@ pub struct PmdRuntimeImport {
     pub diagnostics: Vec<PmdParserDiagnostic>,
 }
 
-struct Reader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.pos)
-    }
-
-    fn peek_u32_at(&self, pos: usize) -> Option<u32> {
-        let bytes = self.data.get(pos..pos + 4)?;
-        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-    }
-
+impl<'a> ByteReader<'a> {
     fn read(&mut self, n: usize) -> Result<&'a [u8], ImportError> {
-        if self.remaining() < n {
-            return Err(ImportError::UnexpectedEof(n - self.remaining()));
-        }
-        let out = &self.data[self.pos..self.pos + n];
-        self.pos += n;
-        Ok(out)
-    }
-
-    fn skip(&mut self, n: usize) -> Result<(), ImportError> {
-        self.read(n).map(|_| ())
+        self.read_bytes(n)
     }
 
     fn u8(&mut self) -> Result<u8, ImportError> {
-        Ok(self.read(1)?[0])
+        self.read_u8()
     }
 
     fn u16(&mut self) -> Result<u16, ImportError> {
-        let b = self.read(2)?;
-        Ok(u16::from_le_bytes([b[0], b[1]]))
+        self.read_u16_le()
     }
 
     fn u32(&mut self) -> Result<u32, ImportError> {
-        let b = self.read(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        self.read_u32_le()
     }
 
     fn f32(&mut self) -> Result<f32, ImportError> {
-        let b = self.read(4)?;
-        Ok(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        self.read_f32_le()
     }
 
     fn vec3(&mut self) -> Result<[f32; 3], ImportError> {

@@ -8,7 +8,10 @@ use mmd_anim_runtime::{
     IkLinkInit, IkSolverInit, ModelArena, MorphIndex, MorphInit, MorphOffsetSpan,
 };
 
+use crate::binary::ByteReader;
 use crate::error::ImportError;
+
+type Reader<'a> = ByteReader<'a>;
 
 mod json_f32;
 
@@ -59,71 +62,7 @@ pub struct PmxHeader {
     pub rigidbody_index_size: u8,
 }
 
-struct Reader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.pos)
-    }
-
-    fn require(&self, n: usize) -> Result<(), ImportError> {
-        if self.remaining() >= n {
-            Ok(())
-        } else {
-            Err(ImportError::UnexpectedEof(
-                n.saturating_sub(self.remaining()),
-            ))
-        }
-    }
-
-    fn require_record_bytes(&self, count: usize, record_size: usize) -> Result<(), ImportError> {
-        let bytes = count
-            .checked_mul(record_size)
-            .ok_or(ImportError::SectionOverflow)?;
-        self.require(bytes)
-    }
-
-    fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], ImportError> {
-        self.require(n)?;
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
-        Ok(slice)
-    }
-
-    fn read_u8(&mut self) -> Result<u8, ImportError> {
-        Ok(self.read_bytes(1)?[0])
-    }
-
-    fn read_u16_le(&mut self) -> Result<u16, ImportError> {
-        let b = self.read_bytes(2)?;
-        Ok(u16::from_le_bytes([b[0], b[1]]))
-    }
-
-    fn read_i32_le(&mut self) -> Result<i32, ImportError> {
-        let b = self.read_bytes(4)?;
-        Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    fn read_f32_le(&mut self) -> Result<f32, ImportError> {
-        let b = self.read_bytes(4)?;
-        Ok(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    fn read_vec3(&mut self) -> Result<Vec3A, ImportError> {
-        Ok(Vec3A::new(
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-        ))
-    }
-
+impl<'a> ByteReader<'a> {
     fn read_vec2_array(&mut self) -> Result<[f32; 2], ImportError> {
         Ok([self.read_f32_le()?, self.read_f32_le()?])
     }
@@ -175,12 +114,6 @@ impl<'a> Reader<'a> {
             }
             _ => Err(ImportError::InvalidIndexSize(size)),
         }
-    }
-
-    fn skip(&mut self, n: usize) -> Result<(), ImportError> {
-        self.require(n)?;
-        self.pos += n;
-        Ok(())
     }
 
     fn read_string(&mut self, encoding: TextEncoding) -> Result<String, ImportError> {

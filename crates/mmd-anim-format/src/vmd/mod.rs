@@ -7,65 +7,22 @@ use mmd_anim_runtime::{
     MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
 };
 
+use crate::binary::ByteReader;
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
+
+type Reader<'a> = ByteReader<'a>;
 
 const VMD_MAGIC: [u8; 30] = *b"Vocaloid Motion Data 0002\0\0\0\0\0";
 const VMD_MAGIC_PREFIX: &[u8] = b"Vocaloid Motion Data 0002\0";
 
-struct Reader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.pos)
-    }
-
-    fn require(&self, n: usize) -> Result<(), ImportError> {
-        if self.remaining() >= n {
-            Ok(())
-        } else {
-            Err(ImportError::UnexpectedEof(
-                n.saturating_sub(self.remaining()),
-            ))
-        }
-    }
-
-    fn read_slice(&mut self, n: usize) -> Result<&'a [u8], ImportError> {
-        self.require(n)?;
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
-        Ok(slice)
-    }
-
-    fn read_u8(&mut self) -> Result<u8, ImportError> {
-        Ok(self.read_slice(1)?[0])
-    }
-
-    fn read_u32_le(&mut self) -> Result<u32, ImportError> {
-        let b = self.read_slice(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
+impl<'a> ByteReader<'a> {
     fn read_optional_u32_le(&mut self) -> Result<Option<u32>, ImportError> {
         if self.remaining() == 0 {
             Ok(None)
         } else {
             self.read_u32_le().map(Some)
         }
-    }
-
-    fn require_record_bytes(&self, count: usize, record_size: usize) -> Result<(), ImportError> {
-        let bytes = count
-            .checked_mul(record_size)
-            .ok_or(ImportError::SectionOverflow)?;
-        self.require(bytes)
     }
 
     fn read_record_count(&mut self, record_size: usize) -> Result<usize, ImportError> {
@@ -107,19 +64,6 @@ impl<'a> Reader<'a> {
             return Ok(None);
         }
         Ok(Some(count))
-    }
-
-    fn read_f32_le(&mut self) -> Result<f32, ImportError> {
-        let b = self.read_slice(4)?;
-        Ok(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    fn read_vec3(&mut self) -> Result<Vec3A, ImportError> {
-        Ok(Vec3A::new(
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-        ))
     }
 
     fn read_quat(&mut self) -> Result<Quat, ImportError> {

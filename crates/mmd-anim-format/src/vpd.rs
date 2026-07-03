@@ -1,7 +1,7 @@
-use encoding_rs::SHIFT_JIS;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ImportError;
+use crate::sjis::{decode_sjis, encode_sjis};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,8 +35,7 @@ fn default_vpd_format() -> &'static str {
 }
 
 pub fn parse_vpd_pose(data: &[u8]) -> Result<VpdParsedPose, ImportError> {
-    let (decoded, _, _) = SHIFT_JIS.decode(data);
-    let text = decoded.into_owned();
+    let text = decode_sjis(data);
     if !text.starts_with("Vocaloid Pose Data file") {
         return Err(ImportError::InvalidMagic { format: "VPD" });
     }
@@ -112,8 +111,7 @@ pub fn export_vpd_pose(pose: &VpdParsedPose) -> Vec<u8> {
         ));
         text.push_str("}\r\n\r\n");
     }
-    let (encoded, _, _) = SHIFT_JIS.encode(&text);
-    encoded.into_owned()
+    encode_sjis(&text)
 }
 
 fn parse_f32_tuple3(line: &str) -> [f32; 3] {
@@ -168,8 +166,8 @@ mod tests {
     #[test]
     fn exports_parsed_vpd_pose_for_roundtrip() {
         let source = "Vocaloid Pose Data file\r\n\r\nmiku.osm;\r\n1;\r\n\r\nBone0{左親指１\r\n  1.000000,2.000000,3.000000;\r\n  0.100000,0.200000,0.300000,0.400000;\r\n}\r\n";
-        let (encoded, _, _) = SHIFT_JIS.encode(source);
-        let parsed = parse_vpd_pose(encoded.as_ref()).unwrap();
+        let encoded = encode_sjis(source);
+        let parsed = parse_vpd_pose(&encoded).unwrap();
         let exported = export_vpd_pose(&parsed);
         let reparsed = parse_vpd_pose(&exported).unwrap();
 
@@ -183,8 +181,8 @@ mod tests {
     #[test]
     fn vpd_pose_json_top_level_schema_is_stable() {
         let source = "Vocaloid Pose Data file\r\n\r\nmiku.osm;\r\n0;\r\n";
-        let (encoded, _, _) = SHIFT_JIS.encode(source);
-        let parsed = parse_vpd_pose(encoded.as_ref()).unwrap();
+        let encoded = encode_sjis(source);
+        let parsed = parse_vpd_pose(&encoded).unwrap();
         let keys = json_keys(&serde_json::to_value(&parsed).unwrap());
 
         assert_eq!(

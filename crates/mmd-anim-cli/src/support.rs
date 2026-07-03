@@ -3,39 +3,35 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+use anyhow::{Result, anyhow};
+
+pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).map_err(|error| {
-        format!(
+        anyhow!(
             "failed to read {}: {}",
             path.display(),
             io_error_label(error.kind())
         )
-        .into()
     })
 }
 
-pub(crate) fn read_text_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+pub(crate) fn read_text_file(path: &Path) -> Result<String> {
     fs::read_to_string(path).map_err(|error| {
-        format!(
+        anyhow!(
             "failed to read {}: {}",
             path.display(),
             io_error_label(error.kind())
         )
-        .into()
     })
 }
 
-pub(crate) fn write_file(
-    path: &Path,
-    data: impl AsRef<[u8]>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn write_file(path: &Path, data: impl AsRef<[u8]>) -> Result<()> {
     fs::write(path, data).map_err(|error| {
-        format!(
+        anyhow!(
             "failed to write {}: {}",
             path.display(),
             io_error_label(error.kind())
         )
-        .into()
     })
 }
 
@@ -48,7 +44,7 @@ pub(crate) fn diagnostics_suffix(count: usize) -> String {
 }
 
 pub(crate) fn unsupported_format_error(path: &Path) -> Box<dyn std::error::Error> {
-    format!(
+    anyhow!(
         "unsupported or unrecognized file format: {}",
         path.display()
     )

@@ -20,6 +20,7 @@ keywords = ["mmd", "animation", "pmx", "vmd"]
 categories = ["multimedia"]
 
 [workspace.dependencies]
+anyhow = "1.0.100"
 glam = { version = "0.32.1", features = ["debug-glam-assert", "fast-math"] }
 thiserror = "2.0.17"
 serde = { version = "1.0.228", features = ["derive"] }

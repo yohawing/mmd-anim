@@ -222,6 +222,19 @@ enum Commands {
         /// Path to the output PMM file
         output: PathBuf,
     },
+
+    /// Build a PMX model from a parts manifest.
+    #[command(
+        name = "build-pmx",
+        long_about = "Create a PMX model from a parts manifest JSON.\nThe input is not the parsed PmxParsedModel DTO used by export --from-json; it is a PmxPartsDescriptor plus flat positionsXyz, normalsXyz, uvsXy, indices, and optional skin/edge arrays.\n\nSupported formats: .json → .pmx",
+        after_help = "Examples:\n  mmd-anim build-pmx parts.json model.pmx\n  mmd-anim build-pmx ./fixtures/parts.json ./out/model.pmx"
+    )]
+    BuildPmx {
+        /// Path to the PMX parts manifest JSON file
+        input: PathBuf,
+        /// Path to the output PMX file
+        output: PathBuf,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -322,6 +335,9 @@ fn main() -> ExitCode {
             motion,
             output,
         }) => commands::export::export_pmm_scene(&model, &motion, &output),
+        Some(Commands::BuildPmx { input, output }) => {
+            commands::export::export_pmx_from_parts_manifest(&input, &output)
+        }
     };
 
     match result {

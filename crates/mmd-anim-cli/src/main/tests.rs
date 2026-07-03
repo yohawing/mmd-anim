@@ -893,6 +893,100 @@ fn pmx_roundtrip_json_reports_machine_readable_counts() {
     assert_eq!(value["counts"]["softBodies"], 9);
 }
 
+fn minimal_pmx_parts_manifest() -> serde_json::Value {
+    serde_json::json!({
+        "name": "cli-parts",
+        "englishName": "cli-parts-en",
+        "comment": "built from CLI parts manifest",
+        "encoding": "utf-8",
+        "indexSizes": {
+            "vertex": 1,
+            "texture": 1,
+            "material": 1,
+            "bone": 1,
+            "morph": 1,
+            "rigidBody": 1
+        },
+        "materialName": "default-mat",
+        "positionsXyz": [
+            0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0
+        ],
+        "normalsXyz": [
+            0.0, 0.0, 1.0,
+            0.0, 0.0, 1.0,
+            0.0, 0.0, 1.0
+        ],
+        "uvsXy": [
+            0.0, 0.0,
+            1.0, 0.0,
+            0.0, 1.0
+        ],
+        "indices": [0, 1, 2]
+    })
+}
+
+#[test]
+fn export_pmx_from_parts_manifest_writes_parseable_pmx() {
+    let temp = unique_test_dir("pmx-parts-export");
+    fs::create_dir_all(&temp).unwrap();
+    let input = temp.join("parts.json");
+    let output = temp.join("model.pmx");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&minimal_pmx_parts_manifest()).unwrap(),
+    )
+    .unwrap();
+
+    export::export_pmx_from_parts_manifest(&input, &output).unwrap();
+
+    let data = fs::read(&output).unwrap();
+    let parsed = mmd_anim_format::parse_pmx_model(&data).unwrap();
+    assert_eq!(parsed.metadata.name, "cli-parts");
+    assert_eq!(parsed.metadata.english_name, "cli-parts-en");
+    assert_eq!(parsed.metadata.counts.vertices, 3);
+    assert_eq!(parsed.metadata.counts.faces, 1);
+    assert_eq!(parsed.metadata.counts.materials, 1);
+    assert_eq!(parsed.metadata.counts.bones, 1);
+
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn export_pmx_from_parts_manifest_rejects_normals_stride_mismatch() {
+    let temp = unique_test_dir("pmx-parts-bad-normals");
+    fs::create_dir_all(&temp).unwrap();
+    let input = temp.join("parts.json");
+    let output = temp.join("model.pmx");
+    let mut manifest = minimal_pmx_parts_manifest();
+    manifest["normalsXyz"] = serde_json::json!([0.0, 0.0, 1.0]);
+    fs::write(&input, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+    let error = export::export_pmx_from_parts_manifest(&input, &output).unwrap_err();
+    assert!(error.to_string().contains("normals_xyz"));
+    assert!(!output.exists());
+
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn export_pmx_from_parts_manifest_rejects_partial_skinning() {
+    let temp = unique_test_dir("pmx-parts-partial-skin");
+    fs::create_dir_all(&temp).unwrap();
+    let input = temp.join("parts.json");
+    let output = temp.join("model.pmx");
+    let mut manifest = minimal_pmx_parts_manifest();
+    manifest["skinIndices"] = serde_json::json!([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    fs::write(&input, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+    let error = export::export_pmx_from_parts_manifest(&input, &output).unwrap_err();
+    assert!(error.to_string().contains("skin_indices and skin_weights"));
+    assert!(!output.exists());
+
+    fs::remove_dir_all(temp).unwrap();
+}
+
 #[test]
 fn resolve_pmx_path_for_pmm_makes_relative_existing_path_absolute() {
     let relative = Path::new("Cargo.toml");

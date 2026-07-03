@@ -75,7 +75,7 @@ pub(crate) struct NumericCompareReport {
     pub(crate) default_epsilon: f64,
     pub(crate) camera_stats: CameraNumericCompareStats,
     pub(crate) motion_stats: MotionNumericCompareStats,
-    pub(crate) per_case: Vec<serde_json::Value>,
+    pub(crate) per_case: Vec<NumericCompareCaseReport>,
 }
 
 impl NumericCompareReport {
@@ -134,7 +134,7 @@ impl NumericCompareReport {
 struct NumericCompareJsonReport<'a> {
     summary: NumericCompareJsonSummary<'a>,
     #[serde(rename = "perCase")]
-    per_case: &'a [serde_json::Value],
+    per_case: &'a [NumericCompareCaseReport],
 }
 
 #[derive(Serialize)]
@@ -169,6 +169,56 @@ struct NumericCompareJsonSummary<'a> {
     camera_max_delta: f64,
     default_epsilon: f64,
     skipped_unsupported: usize,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum NumericCompareCaseReport {
+    Camera(CameraNumericCompareCaseReport),
+    Motion(MotionNumericCompareCaseReport),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CameraNumericCompareCaseReport {
+    name: String,
+    kind: String,
+    status: String,
+    epsilon: f64,
+    compared_frames: usize,
+    compared_bones: usize,
+    mismatch_count: usize,
+    max_abs_error: f64,
+    camera_max_delta: f64,
+    worst: Option<String>,
+    worst_frame: Option<i32>,
+    worst_bone: Option<String>,
+    worst_component: Option<usize>,
+    skipped_targets: Vec<String>,
+    missing_paths: Vec<String>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MotionNumericCompareCaseReport {
+    name: String,
+    kind: String,
+    status: String,
+    epsilon: f32,
+    compared_frames: usize,
+    compared_bones: usize,
+    mismatch_count: usize,
+    max_abs_error: f32,
+    worst: String,
+    worst_frame: Option<i32>,
+    worst_bone: Option<String>,
+    worst_component: Option<usize>,
+    skipped_targets: Vec<String>,
+    missing_paths: Vec<String>,
+    missing: usize,
+    import_errors: usize,
+    error: Option<String>,
 }
 
 fn non_empty_str(value: &str) -> Option<&str> {
@@ -298,7 +348,7 @@ fn compare_camera_numeric_case(
     default_epsilon: f64,
     stats: &mut CameraNumericCompareStats,
     emit_diagnostics: bool,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+) -> Result<NumericCompareCaseReport, Box<dyn std::error::Error>> {
     let name = case
         .get("name")
         .and_then(|value| value.as_str())
@@ -405,7 +455,7 @@ fn compare_camera_current_dump_case(
     default_epsilon: f64,
     stats: &mut CameraNumericCompareStats,
     emit_diagnostics: bool,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+) -> Result<NumericCompareCaseReport, Box<dyn std::error::Error>> {
     let name = case
         .get("name")
         .and_then(|value| value.as_str())
@@ -658,7 +708,7 @@ fn compare_motion_numeric_case(
     default_eval_frame_offset: f32,
     stats: &mut MotionNumericCompareStats,
     emit_diagnostics: bool,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+) -> Result<NumericCompareCaseReport, Box<dyn std::error::Error>> {
     let mut case_stats = MotionNumericCompareStats {
         total_cases: 1,
         worst: String::from("none"),
@@ -942,29 +992,29 @@ fn camera_case_report(
     kind: &str,
     epsilon: f64,
     stats: &CameraNumericCompareStats,
-) -> serde_json::Value {
+) -> NumericCompareCaseReport {
     let status = if stats.mismatch_count == 0 {
         "ok"
     } else {
         "mismatch"
     };
-    serde_json::json!({
-        "name": name,
-        "kind": kind,
-        "status": status,
-        "epsilon": epsilon,
-        "comparedFrames": stats.compared_frames,
-        "comparedBones": 0,
-        "mismatchCount": stats.mismatch_count,
-        "maxAbsError": stats.max_delta,
-        "cameraMaxDelta": stats.max_delta,
-        "worst": serde_json::Value::Null,
-        "worstFrame": serde_json::Value::Null,
-        "worstBone": serde_json::Value::Null,
-        "worstComponent": serde_json::Value::Null,
-        "skippedTargets": stats.skipped_targets_sorted(),
-        "missingPaths": Vec::<String>::new(),
-        "error": serde_json::Value::Null,
+    NumericCompareCaseReport::Camera(CameraNumericCompareCaseReport {
+        name: name.to_owned(),
+        kind: kind.to_owned(),
+        status: status.to_owned(),
+        epsilon,
+        compared_frames: stats.compared_frames,
+        compared_bones: 0,
+        mismatch_count: stats.mismatch_count,
+        max_abs_error: stats.max_delta,
+        camera_max_delta: stats.max_delta,
+        worst: None,
+        worst_frame: None,
+        worst_bone: None,
+        worst_component: None,
+        skipped_targets: stats.skipped_targets_sorted(),
+        missing_paths: Vec::new(),
+        error: None,
     })
 }
 
@@ -976,39 +1026,31 @@ fn motion_case_report(
     stats: &MotionNumericCompareStats,
     mut missing_paths: Vec<String>,
     error: Option<String>,
-) -> serde_json::Value {
+) -> NumericCompareCaseReport {
     missing_paths.sort();
     let kind = case
         .get("kind")
         .and_then(|value| value.as_str())
         .unwrap_or("motion-numeric");
-    serde_json::json!({
-        "name": name,
-        "kind": kind,
-        "status": status,
-        "epsilon": epsilon,
-        "comparedFrames": stats.compared_frames,
-        "comparedBones": stats.compared_bones,
-        "mismatchCount": stats.mismatch_count,
-        "maxAbsError": stats.max_abs_error,
-        "worst": stats.worst,
-        "worstFrame": stats.worst_frame,
-        "worstBone": empty_string_as_null(&stats.worst_bone),
-        "worstComponent": stats.worst_component,
-        "skippedTargets": stats.skipped_targets_sorted(),
-        "missingPaths": missing_paths,
-        "missing": stats.missing,
-        "importErrors": stats.import_errors,
-        "error": error,
+    NumericCompareCaseReport::Motion(MotionNumericCompareCaseReport {
+        name: name.to_owned(),
+        kind: kind.to_owned(),
+        status: status.to_owned(),
+        epsilon,
+        compared_frames: stats.compared_frames,
+        compared_bones: stats.compared_bones,
+        mismatch_count: stats.mismatch_count,
+        max_abs_error: stats.max_abs_error,
+        worst: stats.worst.clone(),
+        worst_frame: stats.worst_frame,
+        worst_bone: non_empty_str(&stats.worst_bone).map(str::to_owned),
+        worst_component: stats.worst_component,
+        skipped_targets: stats.skipped_targets_sorted(),
+        missing_paths,
+        missing: stats.missing,
+        import_errors: stats.import_errors,
+        error,
     })
-}
-
-fn empty_string_as_null(value: &str) -> serde_json::Value {
-    if value.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::String(value.to_owned())
-    }
 }
 
 pub(crate) fn diagnose_numeric_bones(

@@ -130,6 +130,10 @@ impl MovableBoneTrack {
         }
     }
 
+    pub fn keyframe_count(&self) -> usize {
+        self.frame_numbers.len()
+    }
+
     pub fn sample(&self, frame: f32) -> Option<(Vec3A, Quat)> {
         match self.frame_numbers.len() {
             0 => None,
@@ -186,7 +190,7 @@ impl MovableBoneTrack {
             .partition_point(|keyframe| (*keyframe as f32) <= frame)
     }
 
-    fn frame_range(&self) -> Option<(u32, u32)> {
+    pub fn frame_range(&self) -> Option<(u32, u32)> {
         Some((*self.frame_numbers.first()?, *self.frame_numbers.last()?))
     }
 }
@@ -230,6 +234,10 @@ impl MorphTrack {
         }
     }
 
+    pub fn keyframe_count(&self) -> usize {
+        self.frame_numbers.len()
+    }
+
     pub fn sample(&self, frame: f32) -> Option<f32> {
         match self.frame_numbers.len() {
             0 => None,
@@ -262,7 +270,7 @@ impl MorphTrack {
         }
     }
 
-    fn frame_range(&self) -> Option<(u32, u32)> {
+    pub fn frame_range(&self) -> Option<(u32, u32)> {
         Some((*self.frame_numbers.first()?, *self.frame_numbers.last()?))
     }
 }
@@ -315,6 +323,10 @@ impl PropertyAnimationBinding {
         }
     }
 
+    pub fn keyframe_count(&self) -> usize {
+        self.frame_numbers.len()
+    }
+
     pub fn sample(&self, frame: f32) -> Option<&[u8]> {
         match self.frame_numbers.len() {
             0 => None,
@@ -331,9 +343,85 @@ impl PropertyAnimationBinding {
         }
     }
 
-    fn frame_range(&self) -> Option<(u32, u32)> {
+    pub fn frame_range(&self) -> Option<(u32, u32)> {
         Some((*self.frame_numbers.first()?, *self.frame_numbers.last()?))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoneSample {
+    pub bone: BoneIndex,
+    pub position: Vec3A,
+    pub rotation: Quat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MorphSample {
+    pub morph: MorphIndex,
+    pub weight: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClipSample {
+    bone_samples: Vec<BoneSample>,
+    morph_samples: Vec<MorphSample>,
+    ik_enabled: Option<Vec<u8>>,
+}
+
+impl ClipSample {
+    pub fn with_capacity(bone_capacity: usize, morph_capacity: usize) -> Self {
+        Self {
+            bone_samples: Vec::with_capacity(bone_capacity),
+            morph_samples: Vec::with_capacity(morph_capacity),
+            ik_enabled: None,
+        }
+    }
+
+    pub fn bone_samples(&self) -> &[BoneSample] {
+        &self.bone_samples
+    }
+
+    pub fn morph_samples(&self) -> &[MorphSample] {
+        &self.morph_samples
+    }
+
+    pub fn ik_enabled(&self) -> Option<&[u8]> {
+        self.ik_enabled.as_deref()
+    }
+
+    pub fn apply_to_pose(&self, pose: &mut PoseArena) {
+        pose.reset_local_pose();
+        for sample in self.bone_samples.iter() {
+            pose.set_local_position_offset(sample.bone, sample.position);
+            pose.set_local_rotation(sample.bone, sample.rotation);
+        }
+        for sample in self.morph_samples.iter() {
+            pose.set_morph_weight(sample.morph, sample.weight);
+        }
+        if let Some(ik_enabled) = self.ik_enabled.as_ref() {
+            for (ik_index, enabled) in ik_enabled.iter().enumerate() {
+                pose.set_ik_enabled(ik_index, *enabled != 0);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipFrameBounds {
+    pub start: f32,
+    pub end: f32,
+}
+
+impl ClipFrameBounds {
+    pub const fn new(start: f32, end: f32) -> Self {
+        Self { start, end }
+    }
+}
+
+enum ClipSampleEvent<'a> {
+    Bone(BoneIndex, Vec3A, Quat),
+    Morph(MorphIndex, f32),
+    IkEnabled(&'a [u8]),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -367,17 +455,69 @@ impl AnimationClip {
         }
     }
 
+    pub fn builder() -> AnimationClipBuilder {
+        AnimationClipBuilder::new()
+    }
+
+    pub fn sample_at(&self, frame: f32) -> ClipSample {
+        let mut sample = ClipSample::with_capacity(self.bone_tracks.len(), self.morph_tracks.len());
+        self.sample_into(frame, &mut sample);
+        sample
+    }
+
+    pub fn sample_into(&self, frame: f32, sample: &mut ClipSample) {
+        sample.bone_samples.clear();
+        sample.morph_samples.clear();
+        let mut ik_enabled = sample.ik_enabled.take();
+        let mut has_ik_state = false;
+        self.visit_samples(frame, |event| match event {
+            ClipSampleEvent::Bone(bone, position, rotation) => {
+                sample.bone_samples.push(BoneSample {
+                    bone,
+                    position,
+                    rotation,
+                });
+            }
+            ClipSampleEvent::Morph(morph, weight) => {
+                sample.morph_samples.push(MorphSample { morph, weight });
+            }
+            ClipSampleEvent::IkEnabled(state) => {
+                let buffer = ik_enabled.get_or_insert_with(Vec::new);
+                buffer.clear();
+                buffer.extend_from_slice(state);
+                has_ik_state = true;
+            }
+        });
+        sample.ik_enabled = if has_ik_state { ik_enabled } else { None };
+    }
+
     pub fn apply_to_pose(&self, frame: f32, pose: &mut PoseArena) {
         pose.reset_local_pose();
+        self.visit_samples(frame, |event| match event {
+            ClipSampleEvent::Bone(bone, position, rotation) => {
+                pose.set_local_position_offset(bone, position);
+                pose.set_local_rotation(bone, rotation);
+            }
+            ClipSampleEvent::Morph(morph, weight) => {
+                pose.set_morph_weight(morph, weight);
+            }
+            ClipSampleEvent::IkEnabled(ik_enabled) => {
+                for (ik_index, enabled) in ik_enabled.iter().enumerate() {
+                    pose.set_ik_enabled(ik_index, *enabled != 0);
+                }
+            }
+        });
+    }
+
+    fn visit_samples(&self, frame: f32, mut on_event: impl FnMut(ClipSampleEvent<'_>)) {
         for binding in self.bone_tracks.iter() {
             if let Some((position, rotation)) = binding.track.sample(frame) {
-                pose.set_local_position_offset(binding.bone, position);
-                pose.set_local_rotation(binding.bone, rotation);
+                on_event(ClipSampleEvent::Bone(binding.bone, position, rotation));
             }
         }
         for binding in self.morph_tracks.iter() {
             if let Some(weight) = binding.track.sample(frame) {
-                pose.set_morph_weight(binding.morph, weight);
+                on_event(ClipSampleEvent::Morph(binding.morph, weight));
             }
         }
         if let Some(ik_enabled) = self
@@ -385,10 +525,20 @@ impl AnimationClip {
             .as_ref()
             .and_then(|track| track.sample(frame))
         {
-            for (ik_index, enabled) in ik_enabled.iter().enumerate() {
-                pose.set_ik_enabled(ik_index, *enabled != 0);
-            }
+            on_event(ClipSampleEvent::IkEnabled(ik_enabled));
         }
+    }
+
+    pub fn bone_tracks(&self) -> &[BoneAnimationBinding] {
+        &self.bone_tracks
+    }
+
+    pub fn morph_tracks(&self) -> &[MorphAnimationBinding] {
+        &self.morph_tracks
+    }
+
+    pub fn property_track(&self) -> Option<&PropertyAnimationBinding> {
+        self.property_track.as_ref()
     }
 
     pub fn bone_track_count(&self) -> usize {
@@ -417,11 +567,70 @@ impl AnimationClip {
         range
     }
 
+    pub fn frame_bounds(&self) -> Option<ClipFrameBounds> {
+        self.frame_range()
+            .map(|(first, last)| ClipFrameBounds::new(first as f32, last as f32))
+    }
+
     pub fn find_bone_track(&self, bone: BoneIndex) -> Option<&MovableBoneTrack> {
         self.bone_tracks
             .iter()
             .find(|binding| binding.bone == bone)
             .map(|binding| &binding.track)
+    }
+
+    pub fn find_morph_track(&self, morph: MorphIndex) -> Option<&MorphTrack> {
+        self.morph_tracks
+            .iter()
+            .find(|binding| binding.morph == morph)
+            .map(|binding| &binding.track)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AnimationClipBuilder {
+    bone_tracks: Vec<BoneAnimationBinding>,
+    morph_tracks: Vec<MorphAnimationBinding>,
+    property_track: Option<PropertyAnimationBinding>,
+}
+
+impl AnimationClipBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_bone_track(mut self, binding: BoneAnimationBinding) -> Self {
+        self.bone_tracks.push(binding);
+        self
+    }
+
+    pub fn with_morph_track(mut self, binding: MorphAnimationBinding) -> Self {
+        self.morph_tracks.push(binding);
+        self
+    }
+
+    pub fn with_property_track(mut self, track: PropertyAnimationBinding) -> Self {
+        self.property_track = Some(track);
+        self
+    }
+
+    pub fn push_bone_track(&mut self, binding: BoneAnimationBinding) -> &mut Self {
+        self.bone_tracks.push(binding);
+        self
+    }
+
+    pub fn push_morph_track(&mut self, binding: MorphAnimationBinding) -> &mut Self {
+        self.morph_tracks.push(binding);
+        self
+    }
+
+    pub fn set_property_track(&mut self, track: PropertyAnimationBinding) -> &mut Self {
+        self.property_track = Some(track);
+        self
+    }
+
+    pub fn build(self) -> AnimationClip {
+        AnimationClip::new_full(self.bone_tracks, self.morph_tracks, self.property_track)
     }
 }
 
@@ -584,7 +793,212 @@ mod tests {
     }
 
     #[test]
+    fn clip_frame_bounds_match_integer_frame_range() {
+        let clip = AnimationClip::new_full(
+            vec![BoneAnimationBinding {
+                bone: BoneIndex(0),
+                track: MovableBoneTrack::from_keyframes(vec![
+                    MovableBoneKeyframe::new(10, Vec3A::ZERO, Quat::IDENTITY),
+                    MovableBoneKeyframe::new(20, Vec3A::ZERO, Quat::IDENTITY),
+                ]),
+            }],
+            vec![MorphAnimationBinding {
+                morph: MorphIndex(0),
+                track: MorphTrack::from_keyframes(vec![
+                    MorphKeyframe::new(5, 0.0),
+                    MorphKeyframe::new(30, 1.0),
+                ]),
+            }],
+            None,
+        );
+
+        assert_eq!(clip.frame_range(), Some((5, 30)));
+        assert_eq!(clip.frame_bounds(), Some(ClipFrameBounds::new(5.0, 30.0)));
+    }
+
+    #[test]
+    fn clip_builder_matches_full_constructor() {
+        let bone_track = BoneAnimationBinding {
+            bone: BoneIndex(0),
+            track: MovableBoneTrack::from_keyframes(vec![
+                MovableBoneKeyframe::new(0, Vec3A::ZERO, Quat::IDENTITY),
+                MovableBoneKeyframe::new(10, Vec3A::new(10.0, 0.0, 0.0), Quat::IDENTITY),
+            ]),
+        };
+        let morph_track = MorphAnimationBinding {
+            morph: MorphIndex(0),
+            track: MorphTrack::from_keyframes(vec![
+                MorphKeyframe::new(0, 0.0),
+                MorphKeyframe::new(10, 1.0),
+            ]),
+        };
+        let property_track = PropertyAnimationBinding::from_keyframes(vec![
+            PropertyKeyframe::new(0, vec![true, true]),
+            PropertyKeyframe::new(10, vec![false, true]),
+        ]);
+
+        let direct = AnimationClip::new_full(
+            vec![bone_track.clone()],
+            vec![morph_track.clone()],
+            Some(property_track.clone()),
+        );
+        let built = AnimationClip::builder()
+            .with_bone_track(bone_track)
+            .with_morph_track(morph_track)
+            .with_property_track(property_track)
+            .build();
+
+        assert_eq!(built.bone_track_count(), direct.bone_track_count());
+        assert_eq!(built.morph_track_count(), direct.morph_track_count());
+        assert_eq!(built.has_property_track(), direct.has_property_track());
+        assert_eq!(built.frame_range(), direct.frame_range());
+        assert_eq!(built.sample_at(5.0), direct.sample_at(5.0));
+    }
+
+    #[test]
+    fn clip_sample_applies_same_pose_as_clip() {
+        let clip = AnimationClip::new_full(
+            vec![BoneAnimationBinding {
+                bone: BoneIndex(0),
+                track: MovableBoneTrack::from_keyframes(vec![
+                    MovableBoneKeyframe::new(0, Vec3A::ZERO, Quat::IDENTITY),
+                    MovableBoneKeyframe::new(10, Vec3A::new(2.0, 4.0, 6.0), Quat::IDENTITY),
+                ]),
+            }],
+            vec![MorphAnimationBinding {
+                morph: MorphIndex(0),
+                track: MorphTrack::from_keyframes(vec![
+                    MorphKeyframe::new(0, 0.0),
+                    MorphKeyframe::new(10, 1.0),
+                ]),
+            }],
+            Some(PropertyAnimationBinding::from_keyframes(vec![
+                PropertyKeyframe::new(0, vec![true, true]),
+                PropertyKeyframe::new(10, vec![false, true]),
+            ])),
+        );
+
+        let mut from_clip = PoseArena::new_with_counts(1, 1, 2);
+        clip.apply_to_pose(5.0, &mut from_clip);
+
+        let mut from_sample = PoseArena::new_with_counts(1, 1, 2);
+        let sample = clip.sample_at(5.0);
+        sample.apply_to_pose(&mut from_sample);
+
+        assert_vec3a_near(
+            from_sample.local_position_offset(BoneIndex(0)),
+            from_clip.local_position_offset(BoneIndex(0)),
+        );
+        assert_near(
+            from_sample
+                .local_rotation(BoneIndex(0))
+                .dot(from_clip.local_rotation(BoneIndex(0))),
+            1.0,
+        );
+        assert_near(
+            from_sample.morph_weight(MorphIndex(0)),
+            from_clip.morph_weight(MorphIndex(0)),
+        );
+        assert_eq!(from_sample.ik_enabled(), from_clip.ik_enabled());
+    }
+
+    #[test]
+    fn clip_sample_into_reuses_output_and_matches_sample_at() {
+        let clip = AnimationClip::builder()
+            .with_bone_track(BoneAnimationBinding {
+                bone: BoneIndex(0),
+                track: MovableBoneTrack::from_keyframes(vec![
+                    MovableBoneKeyframe::new(0, Vec3A::ZERO, Quat::IDENTITY),
+                    MovableBoneKeyframe::new(10, Vec3A::new(10.0, 0.0, 0.0), Quat::IDENTITY),
+                ]),
+            })
+            .with_morph_track(MorphAnimationBinding {
+                morph: MorphIndex(0),
+                track: MorphTrack::from_keyframes(vec![
+                    MorphKeyframe::new(0, 0.0),
+                    MorphKeyframe::new(10, 1.0),
+                ]),
+            })
+            .with_property_track(PropertyAnimationBinding::from_keyframes(vec![
+                PropertyKeyframe::new(0, vec![true, false]),
+                PropertyKeyframe::new(10, vec![false, true]),
+            ]))
+            .build();
+
+        let expected = clip.sample_at(5.0);
+        let mut sample = ClipSample::with_capacity(1, 1);
+        clip.sample_into(5.0, &mut sample);
+        assert_eq!(sample, expected);
+
+        let bone_capacity = sample.bone_samples.capacity();
+        let morph_capacity = sample.morph_samples.capacity();
+        let ik_capacity = sample
+            .ik_enabled
+            .as_ref()
+            .expect("property sample should include IK state")
+            .capacity();
+        clip.sample_into(0.0, &mut sample);
+        assert!(sample.bone_samples.capacity() >= bone_capacity);
+        assert!(sample.morph_samples.capacity() >= morph_capacity);
+        assert!(
+            sample
+                .ik_enabled
+                .as_ref()
+                .expect("property sample should include IK state")
+                .capacity()
+                >= ik_capacity
+        );
+    }
+
+    #[test]
+    fn clip_exposes_track_collections_and_lookup() {
+        let clip = AnimationClip::builder()
+            .with_bone_track(BoneAnimationBinding {
+                bone: BoneIndex(3),
+                track: MovableBoneTrack::from_keyframes(vec![MovableBoneKeyframe::new(
+                    12,
+                    Vec3A::ZERO,
+                    Quat::IDENTITY,
+                )]),
+            })
+            .with_morph_track(MorphAnimationBinding {
+                morph: MorphIndex(4),
+                track: MorphTrack::from_keyframes(vec![MorphKeyframe::new(8, 0.25)]),
+            })
+            .with_property_track(PropertyAnimationBinding::from_keyframes(vec![
+                PropertyKeyframe::new(6, vec![false]),
+            ]))
+            .build();
+
+        assert_eq!(clip.bone_tracks().len(), 1);
+        assert_eq!(clip.bone_tracks()[0].bone, BoneIndex(3));
+        assert_eq!(clip.bone_tracks()[0].track.keyframe_count(), 1);
+        assert_eq!(clip.bone_tracks()[0].track.frame_range(), Some((12, 12)));
+        assert_eq!(
+            clip.find_bone_track(BoneIndex(3)).unwrap().keyframe_count(),
+            1
+        );
+
+        assert_eq!(clip.morph_tracks().len(), 1);
+        assert_eq!(clip.morph_tracks()[0].morph, MorphIndex(4));
+        assert_eq!(clip.morph_tracks()[0].track.keyframe_count(), 1);
+        assert_eq!(clip.morph_tracks()[0].track.frame_range(), Some((8, 8)));
+        assert_eq!(
+            clip.find_morph_track(MorphIndex(4))
+                .unwrap()
+                .keyframe_count(),
+            1
+        );
+
+        let property_track = clip.property_track().unwrap();
+        assert_eq!(property_track.keyframe_count(), 1);
+        assert_eq!(property_track.frame_range(), Some((6, 6)));
+        assert_eq!(property_track.sample(5.0), None);
+    }
+
+    #[test]
     fn empty_clip_frame_range_is_none() {
         assert_eq!(AnimationClip::default().frame_range(), None);
+        assert_eq!(AnimationClip::default().frame_bounds(), None);
     }
 }

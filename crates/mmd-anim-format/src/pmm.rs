@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
 
-use encoding_rs::SHIFT_JIS;
 use serde::Serialize;
 
+use crate::binary::{
+    ByteReader, write_f32_le as push_f32, write_i32_le as push_i32, write_u32_le as push_u32,
+};
 use crate::error::ImportError;
 use crate::pmx::PmxParsedModel;
+use crate::sjis::{decode_sjis, decode_sjis_trim_nul, encode_sjis};
 use crate::vmd::{VmdParsedAnimation, VmdParsedBoneFrame, VmdParsedMorphFrame};
 
 #[derive(Debug, Clone, Serialize)]
@@ -699,7 +702,9 @@ pub struct PmmDocumentModelSummary {
     pub path: String,
     pub asset_reference_index: Option<usize>,
     pub bone_count: usize,
+    pub bone_names: Vec<String>,
     pub morph_count: usize,
+    pub morph_names: Vec<String>,
     pub constraint_bone_count: usize,
     pub outside_parent_subject_bone_count: usize,
     pub draw_order_index: u8,
@@ -822,12 +827,876 @@ fn make_keyframe_reference(
     }
 }
 
-pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError> {
-    const PREFIX: &[u8] = b"Polygon Movie maker ";
-    if !data.starts_with(PREFIX) {
+fn make_global_track_ref(
+    track: &PmmDocumentTrackSummary,
+    kind: &'static str,
+) -> PmmProjectTrackReference {
+    let initial_kf_offset = track.initial_keyframe.as_ref().map(|kf| match kf {
+        PmmDocumentKeyframeSummary::Camera { offset, .. } => *offset,
+        PmmDocumentKeyframeSummary::Light { offset, .. } => *offset,
+        PmmDocumentKeyframeSummary::Gravity { offset, .. } => *offset,
+        PmmDocumentKeyframeSummary::SelfShadow { offset, .. } => *offset,
+    });
+    PmmProjectTrackReference {
+        scope: "global",
+        track_kind: kind,
+        owner_index: None,
+        document_index: None,
+        owner_name: None,
+        initial_keyframes: track.initial_keyframes,
+        keyframes: track.keyframes,
+        initial_keyframes_offset: initial_kf_offset,
+        keyframe_count_offset: Some(track.keyframe_count_offset),
+        keyframes_offset: track.keyframes_offset,
+        keyframes_end_offset: track.keyframes_end_offset,
+        state_offset: track.state_offset,
+        state_end_offset: track.state_end_offset,
+    }
+}
+
+fn append_global_keyframe_refs(
+    refs: &mut Vec<PmmProjectKeyframeReference>,
+    track: &PmmDocumentTrackSummary,
+    kind: &'static str,
+) {
+    if let Some(kf) = &track.initial_keyframe {
+        let (index, frame, prev, next, off, blen, poff, plen) = match kf {
+            PmmDocumentKeyframeSummary::Camera {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::Light {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::Gravity {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::SelfShadow {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+        };
+        refs.push(make_keyframe_reference(
+            "global", kind, None, None, None, true, index, frame, prev, next, off, blen, poff, plen,
+        ));
+    }
+    for kf in &track.keyframe_summaries {
+        let (index, frame, prev, next, off, blen, poff, plen) = match kf {
+            PmmDocumentKeyframeSummary::Camera {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::Light {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::Gravity {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::SelfShadow {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+        };
+        refs.push(make_keyframe_reference(
+            "global", kind, None, None, None, false, index, frame, prev, next, off, blen, poff,
+            plen,
+        ));
+    }
+}
+
+fn make_global_track_byte_range(
+    track: &PmmDocumentTrackSummary,
+    kind: &'static str,
+) -> PmmProjectByteRange {
+    let byte_length = track.offset_end - track.offset;
+    PmmProjectByteRange {
+        scope: "global",
+        kind,
+        owner_index: None,
+        document_index: None,
+        name: None,
+        offset: track.offset,
+        offset_end: track.offset_end,
+        byte_length,
+    }
+}
+
+fn build_project_track_references(
+    doc: &PmmDocumentSummary,
+    glob: &PmmDocumentGlobalSummary,
+) -> Vec<PmmProjectTrackReference> {
+    let mut track_references: Vec<PmmProjectTrackReference> = Vec::new();
+    for model in &doc.models {
+        let s = &model.sections;
+        track_references.push(PmmProjectTrackReference {
+            scope: "model",
+            track_kind: "bone",
+            owner_index: Some(model.slot_index),
+            document_index: Some(model.document_model_index),
+            owner_name: Some(model.name.clone()),
+            initial_keyframes: model.initial_bone_keyframes,
+            keyframes: model.bone_keyframes,
+            initial_keyframes_offset: Some(s.initial_bone_keyframes_offset),
+            keyframe_count_offset: Some(s.bone_keyframe_count_offset),
+            keyframes_offset: s.bone_keyframes_offset,
+            keyframes_end_offset: s.bone_keyframes_end_offset,
+            state_offset: None,
+            state_end_offset: None,
+        });
+        track_references.push(PmmProjectTrackReference {
+            scope: "model",
+            track_kind: "morph",
+            owner_index: Some(model.slot_index),
+            document_index: Some(model.document_model_index),
+            owner_name: Some(model.name.clone()),
+            initial_keyframes: model.initial_morph_keyframes,
+            keyframes: model.morph_keyframes,
+            initial_keyframes_offset: Some(s.initial_morph_keyframes_offset),
+            keyframe_count_offset: Some(s.morph_keyframe_count_offset),
+            keyframes_offset: s.morph_keyframes_offset,
+            keyframes_end_offset: s.morph_keyframes_end_offset,
+            state_offset: None,
+            state_end_offset: None,
+        });
+        track_references.push(PmmProjectTrackReference {
+            scope: "model",
+            track_kind: "model",
+            owner_index: Some(model.slot_index),
+            document_index: Some(model.document_model_index),
+            owner_name: Some(model.name.clone()),
+            initial_keyframes: model.initial_model_keyframes,
+            keyframes: model.model_keyframes,
+            initial_keyframes_offset: Some(s.initial_model_keyframe_offset),
+            keyframe_count_offset: Some(s.model_keyframe_count_offset),
+            keyframes_offset: s.model_keyframes_offset,
+            keyframes_end_offset: s.model_keyframes_end_offset,
+            state_offset: None,
+            state_end_offset: None,
+        });
+    }
+    track_references.push(make_global_track_ref(&glob.camera, "camera"));
+    track_references.push(make_global_track_ref(&glob.light, "light"));
+    track_references.push(make_global_track_ref(&glob.gravity, "gravity"));
+    track_references.push(make_global_track_ref(&glob.self_shadow, "selfShadow"));
+    for acc in &glob.accessories.accessories {
+        track_references.push(PmmProjectTrackReference {
+            scope: "accessory",
+            track_kind: "accessory",
+            owner_index: Some(acc.slot_index),
+            document_index: Some(acc.document_accessory_index),
+            owner_name: Some(acc.name.clone()),
+            initial_keyframes: 1,
+            keyframes: acc.keyframes,
+            initial_keyframes_offset: Some(acc.initial_keyframe.offset),
+            keyframe_count_offset: Some(acc.keyframe_count_offset),
+            keyframes_offset: acc.keyframes_offset,
+            keyframes_end_offset: acc.keyframes_end_offset,
+            state_offset: Some(acc.state_offset),
+            state_end_offset: Some(acc.state_end_offset),
+        });
+    }
+    track_references
+}
+
+fn build_project_keyframe_references(
+    doc: &PmmDocumentSummary,
+    glob: &PmmDocumentGlobalSummary,
+) -> Vec<PmmProjectKeyframeReference> {
+    // Build keyframeReferences inventory derived only from already-decoded summaries.
+    // This is a graph index slice; no new parsing, no payload bytes duplication.
+    let mut keyframe_references: Vec<PmmProjectKeyframeReference> = Vec::new();
+
+    // per document model: initial + additional for bone, morph, model
+    for model in &doc.models {
+        // bone keyframes (initial + additional)
+        for kf in &model.initial_bone_keyframe_summaries {
+            keyframe_references.push(make_keyframe_reference(
+                "model",
+                "bone",
+                Some(model.slot_index),
+                Some(model.document_model_index),
+                Some(model.name.clone()),
+                true,
+                kf.index,
+                kf.frame_index,
+                kf.previous_keyframe_index,
+                kf.next_keyframe_index,
+                kf.offset,
+                kf.byte_length,
+                kf.payload_offset,
+                kf.payload_byte_length,
+            ));
+        }
+        for kf in &model.bone_keyframe_summaries {
+            keyframe_references.push(make_keyframe_reference(
+                "model",
+                "bone",
+                Some(model.slot_index),
+                Some(model.document_model_index),
+                Some(model.name.clone()),
+                false,
+                kf.index,
+                kf.frame_index,
+                kf.previous_keyframe_index,
+                kf.next_keyframe_index,
+                kf.offset,
+                kf.byte_length,
+                kf.payload_offset,
+                kf.payload_byte_length,
+            ));
+        }
+        // morph keyframes (initial + additional)
+        for kf in &model.initial_morph_keyframe_summaries {
+            keyframe_references.push(make_keyframe_reference(
+                "model",
+                "morph",
+                Some(model.slot_index),
+                Some(model.document_model_index),
+                Some(model.name.clone()),
+                true,
+                kf.index,
+                kf.frame_index,
+                kf.previous_keyframe_index,
+                kf.next_keyframe_index,
+                kf.offset,
+                kf.byte_length,
+                kf.payload_offset,
+                kf.payload_byte_length,
+            ));
+        }
+        for kf in &model.morph_keyframe_summaries {
+            keyframe_references.push(make_keyframe_reference(
+                "model",
+                "morph",
+                Some(model.slot_index),
+                Some(model.document_model_index),
+                Some(model.name.clone()),
+                false,
+                kf.index,
+                kf.frame_index,
+                kf.previous_keyframe_index,
+                kf.next_keyframe_index,
+                kf.offset,
+                kf.byte_length,
+                kf.payload_offset,
+                kf.payload_byte_length,
+            ));
+        }
+        // model keyframes: initial is singular, additional in vec
+        keyframe_references.push(make_keyframe_reference(
+            "model",
+            "model",
+            Some(model.slot_index),
+            Some(model.document_model_index),
+            Some(model.name.clone()),
+            true,
+            model.initial_model_keyframe.index,
+            model.initial_model_keyframe.frame_index,
+            model.initial_model_keyframe.previous_keyframe_index,
+            model.initial_model_keyframe.next_keyframe_index,
+            model.initial_model_keyframe.offset,
+            model.initial_model_keyframe.byte_length,
+            model.initial_model_keyframe.payload_offset,
+            model.initial_model_keyframe.payload_byte_length,
+        ));
+        for kf in &model.model_keyframe_summaries {
+            keyframe_references.push(make_keyframe_reference(
+                "model",
+                "model",
+                Some(model.slot_index),
+                Some(model.document_model_index),
+                Some(model.name.clone()),
+                false,
+                kf.index,
+                kf.frame_index,
+                kf.previous_keyframe_index,
+                kf.next_keyframe_index,
+                kf.offset,
+                kf.byte_length,
+                kf.payload_offset,
+                kf.payload_byte_length,
+            ));
+        }
+    }
+
+    // global: initial + additional for camera, light, gravity, selfShadow
+    // helper to append from PmmDocumentTrackSummary + variant kind (uses existing summaries only)
+    append_global_keyframe_refs(&mut keyframe_references, &glob.camera, "camera");
+    append_global_keyframe_refs(&mut keyframe_references, &glob.light, "light");
+    append_global_keyframe_refs(&mut keyframe_references, &glob.gravity, "gravity");
+    append_global_keyframe_refs(&mut keyframe_references, &glob.self_shadow, "selfShadow");
+
+    // per decoded accessory: initial + additional accessory keyframes
+    for acc in &glob.accessories.accessories {
+        keyframe_references.push(make_keyframe_reference(
+            "accessory",
+            "accessory",
+            Some(acc.slot_index),
+            Some(acc.document_accessory_index),
+            Some(acc.name.clone()),
+            true,
+            acc.initial_keyframe.index,
+            acc.initial_keyframe.frame_index,
+            acc.initial_keyframe.previous_keyframe_index,
+            acc.initial_keyframe.next_keyframe_index,
+            acc.initial_keyframe.offset,
+            acc.initial_keyframe.byte_length,
+            acc.initial_keyframe.payload_offset,
+            acc.initial_keyframe.payload_byte_length,
+        ));
+        for kf in &acc.keyframe_summaries {
+            keyframe_references.push(make_keyframe_reference(
+                "accessory",
+                "accessory",
+                Some(acc.slot_index),
+                Some(acc.document_accessory_index),
+                Some(acc.name.clone()),
+                false,
+                kf.index,
+                kf.frame_index,
+                kf.previous_keyframe_index,
+                kf.next_keyframe_index,
+                kf.offset,
+                kf.byte_length,
+                kf.payload_offset,
+                kf.payload_byte_length,
+            ));
+        }
+    }
+
+    keyframe_references
+}
+
+fn build_project_byte_coverage(
+    doc: &PmmDocumentSummary,
+    glob: &PmmDocumentGlobalSummary,
+) -> PmmProjectByteCoverage {
+    // Build byteCoverage summary derived only from already-decoded range summaries.
+    // Diagnostic/exporter-prep slice: which top-level decoded sections cover bytes in the PMM.
+    // Includes: per decoded model, global root, global camera/light/gravity/selfShadow tracks,
+    // accessory block, and each decoded accessory. No raw bytes, no keyframe-level ranges
+    // (those are in keyframeReferences).
+    let mut bc_ranges: Vec<PmmProjectByteRange> = Vec::new();
+
+    // each decoded document model
+    for model in &doc.models {
+        let bl = model.offset_end - model.offset;
+        bc_ranges.push(PmmProjectByteRange {
+            scope: "model",
+            kind: "model",
+            owner_index: Some(model.slot_index),
+            document_index: Some(model.document_model_index),
+            name: Some(model.name.clone()),
+            offset: model.offset,
+            offset_end: model.offset_end,
+            byte_length: bl,
+        });
+    }
+
+    // global root (the document global summary span)
+    {
+        let off = glob.offset;
+        let end = glob.offset_end;
+        bc_ranges.push(PmmProjectByteRange {
+            scope: "global",
+            kind: "root",
+            owner_index: None,
+            document_index: None,
+            name: None,
+            offset: off,
+            offset_end: end,
+            byte_length: end - off,
+        });
+    }
+
+    // global tracks (camera/light/gravity/selfShadow) - use their track.offset..offset_end
+    bc_ranges.push(make_global_track_byte_range(&glob.camera, "camera"));
+    bc_ranges.push(make_global_track_byte_range(&glob.light, "light"));
+    bc_ranges.push(make_global_track_byte_range(&glob.gravity, "gravity"));
+    bc_ranges.push(make_global_track_byte_range(
+        &glob.self_shadow,
+        "selfShadow",
+    ));
+
+    // accessory block
+    {
+        let blk = &glob.accessories;
+        let bl = blk.offset_end - blk.offset;
+        bc_ranges.push(PmmProjectByteRange {
+            scope: "global",
+            kind: "accessoryBlock",
+            owner_index: None,
+            document_index: None,
+            name: None,
+            offset: blk.offset,
+            offset_end: blk.offset_end,
+            byte_length: bl,
+        });
+    }
+
+    // each decoded accessory
+    for acc in &glob.accessories.accessories {
+        let bl = acc.offset_end - acc.offset;
+        bc_ranges.push(PmmProjectByteRange {
+            scope: "accessory",
+            kind: "accessory",
+            owner_index: Some(acc.slot_index),
+            document_index: Some(acc.document_accessory_index),
+            name: Some(acc.name.clone()),
+            offset: acc.offset,
+            offset_end: acc.offset_end,
+            byte_length: bl,
+        });
+    }
+
+    // Merge overlapping decoded ranges (e.g. global root overlaps global tracks; models/tracks may abut or overlap)
+    // before summing for covered_byte_length. Compute unknown gaps within the overall span [bc_offset, bc_offset_end].
+    let mut merged: Vec<(usize, usize)> =
+        bc_ranges.iter().map(|r| (r.offset, r.offset_end)).collect();
+    merged.sort_by_key(|&(s, _)| s);
+    let mut merged_intervals: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in merged {
+        if let Some(last) = merged_intervals.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+            } else {
+                merged_intervals.push((start, end));
+            }
+        } else {
+            merged_intervals.push((start, end));
+        }
+    }
+    let covered_byte_length: usize = merged_intervals.iter().map(|&(s, e)| e - s).sum();
+
+    let bc_offset = bc_ranges.iter().map(|r| r.offset).min().unwrap_or(0);
+    let bc_offset_end = bc_ranges.iter().map(|r| r.offset_end).max().unwrap_or(0);
+    let bc_byte_length = bc_offset_end - bc_offset;
+
+    let mut gaps: Vec<PmmProjectByteRange> = Vec::new();
+    let mut cursor = bc_offset;
+    for (gstart, gend) in &merged_intervals {
+        if cursor < *gstart {
+            let goff = cursor;
+            let gend_ = *gstart;
+            let glen = gend_ - goff;
+            gaps.push(PmmProjectByteRange {
+                scope: "unknown",
+                kind: "gap",
+                owner_index: None,
+                document_index: None,
+                name: None,
+                offset: goff,
+                offset_end: gend_,
+                byte_length: glen,
+            });
+        }
+        cursor = cursor.max(*gend);
+    }
+    if cursor < bc_offset_end {
+        let goff = cursor;
+        let gend_ = bc_offset_end;
+        let glen = gend_ - goff;
+        gaps.push(PmmProjectByteRange {
+            scope: "unknown",
+            kind: "gap",
+            owner_index: None,
+            document_index: None,
+            name: None,
+            offset: goff,
+            offset_end: gend_,
+            byte_length: glen,
+        });
+    }
+
+    let coverage_ratio = if bc_byte_length == 0 {
+        1.0
+    } else {
+        covered_byte_length as f32 / bc_byte_length as f32
+    };
+
+    PmmProjectByteCoverage {
+        offset: bc_offset,
+        offset_end: bc_offset_end,
+        byte_length: bc_byte_length,
+        covered_byte_length,
+        coverage_ratio,
+        gap_count: gaps.len(),
+        gaps,
+        range_count: bc_ranges.len(),
+        ranges: bc_ranges,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_asset_binding(
+    scope: &'static str,
+    asset_kind: &'static str,
+    owner_index: Option<usize>,
+    document_index: Option<u8>,
+    owner_name: Option<String>,
+    path: String,
+    path_offset: Option<usize>,
+    asset_reference_index: Option<usize>,
+    asset_references: &[PmmAssetReference],
+) -> PmmProjectAssetBinding {
+    let (ar_offset, ar_end, ar_conf) = match asset_reference_index {
+        Some(idx) => asset_references.get(idx).map_or((None, None, None), |ar| {
+            (Some(ar.offset), Some(ar.offset_end), Some(ar.confidence))
+        }),
+        None => (None, None, None),
+    };
+    PmmProjectAssetBinding {
+        scope,
+        asset_kind,
+        owner_index,
+        document_index,
+        owner_name,
+        path,
+        path_offset,
+        asset_reference_index,
+        asset_reference_offset: ar_offset,
+        asset_reference_end_offset: ar_end,
+        asset_reference_confidence: ar_conf,
+    }
+}
+
+fn build_project_asset_bindings(
+    doc: &PmmDocumentSummary,
+    glob: &PmmDocumentGlobalSummary,
+    asset_references: &[PmmAssetReference],
+) -> Vec<PmmProjectAssetBinding> {
+    let mut asset_bindings: Vec<PmmProjectAssetBinding> = Vec::new();
+
+    for model in &doc.models {
+        asset_bindings.push(make_asset_binding(
+            "model",
+            "model",
+            Some(model.slot_index),
+            Some(model.document_model_index),
+            Some(model.name.clone()),
+            model.path.clone(),
+            Some(model.path_offset),
+            model.asset_reference_index,
+            asset_references,
+        ));
+    }
+    for acc in &glob.accessories.accessories {
+        asset_bindings.push(make_asset_binding(
+            "accessory",
+            "accessory",
+            Some(acc.slot_index),
+            Some(acc.document_accessory_index),
+            Some(acc.name.clone()),
+            acc.path.clone(),
+            Some(acc.path_offset),
+            acc.asset_reference_index,
+            asset_references,
+        ));
+    }
+
+    let settings = &glob.settings;
+    let audio_asset_reference_index = if settings.audio_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "audio", &settings.audio_path)
+    };
+    let background_video_asset_reference_index = if settings.background_video_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "video", &settings.background_video_path)
+    };
+    let background_image_asset_reference_index = if settings.background_image_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "image", &settings.background_image_path)
+    };
+
+    if !settings.audio_path.is_empty() {
+        asset_bindings.push(make_asset_binding(
+            "sceneSettings",
+            "audio",
+            None,
+            None,
+            None,
+            settings.audio_path.clone(),
+            Some(settings.audio_path_offset),
+            audio_asset_reference_index,
+            asset_references,
+        ));
+    }
+    if !settings.background_video_path.is_empty() {
+        asset_bindings.push(make_asset_binding(
+            "sceneSettings",
+            "video",
+            None,
+            None,
+            None,
+            settings.background_video_path.clone(),
+            Some(settings.background_video_path_offset),
+            background_video_asset_reference_index,
+            asset_references,
+        ));
+    }
+    if !settings.background_image_path.is_empty() {
+        asset_bindings.push(make_asset_binding(
+            "sceneSettings",
+            "image",
+            None,
+            None,
+            None,
+            settings.background_image_path.clone(),
+            Some(settings.background_image_path_offset),
+            background_image_asset_reference_index,
+            asset_references,
+        ));
+    }
+
+    asset_bindings
+}
+
+fn build_project_scene_settings(
+    glob: &PmmDocumentGlobalSummary,
+    asset_references: &[PmmAssetReference],
+) -> PmmProjectSceneSettings {
+    let settings = &glob.settings;
+    let audio_asset_reference_index = if settings.audio_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "audio", &settings.audio_path)
+    };
+    let background_video_asset_reference_index = if settings.background_video_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "video", &settings.background_video_path)
+    };
+    let background_image_asset_reference_index = if settings.background_image_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "image", &settings.background_image_path)
+    };
+
+    PmmProjectSceneSettings {
+        offset: settings.offset,
+        offset_end: settings.offset_end,
+        current_frame_index: settings.current_frame_index,
+        current_frame_index_in_text_field: settings.current_frame_index_in_text_field,
+        begin_frame_index_enabled: settings.begin_frame_index_enabled,
+        end_frame_index_enabled: settings.end_frame_index_enabled,
+        begin_frame_index: settings.begin_frame_index,
+        end_frame_index: settings.end_frame_index,
+        preferred_fps: settings.preferred_fps,
+        loop_enabled: settings.loop_enabled,
+        audio_enabled: settings.audio_enabled,
+        audio_path: settings.audio_path.clone(),
+        audio_asset_reference_index,
+        background_video_enabled: settings.background_video_enabled,
+        background_video_path: settings.background_video_path.clone(),
+        background_video_asset_reference_index,
+        background_video_offset: settings.background_video_offset,
+        background_video_scale_factor: settings.background_video_scale_factor,
+        background_image_enabled: settings.background_image_enabled,
+        background_image_path: settings.background_image_path.clone(),
+        background_image_asset_reference_index,
+        background_image_offset: settings.background_image_offset,
+        background_image_scale_factor: settings.background_image_scale_factor,
+    }
+}
+
+fn build_project_export_readiness(
+    byte_coverage: &PmmProjectByteCoverage,
+    asset_bindings: &[PmmProjectAssetBinding],
+) -> PmmProjectExportReadiness {
+    let mut blockers: Vec<PmmProjectExportBlocker> = Vec::new();
+    blockers.push(PmmProjectExportBlocker {
+        code: "PMM_SEMANTIC_EXPORTER_UNFINISHED",
+        severity: "blocker",
+        message: "full semantic graph export/editing is not yet supported".to_string(),
+        scope: None,
+        kind: None,
+        count: None,
+        coverage_ratio: None,
+    });
+    if byte_coverage.gap_count > 0 {
+        blockers.push(PmmProjectExportBlocker {
+            code: "PMM_DECODED_BYTE_GAPS_REMAIN",
+            severity: "warning",
+            message: format!(
+                "{} decoded byte gaps remain (coverage ratio {:.4})",
+                byte_coverage.gap_count, byte_coverage.coverage_ratio
+            ),
+            scope: Some("projectGraph"),
+            kind: Some("byteCoverage"),
+            count: Some(byte_coverage.gap_count),
+            coverage_ratio: Some(byte_coverage.coverage_ratio),
+        });
+    }
+    let unresolved_count = asset_bindings
+        .iter()
+        .filter(|binding| binding.asset_reference_index.is_none())
+        .count();
+    if unresolved_count > 0 {
+        blockers.push(PmmProjectExportBlocker {
+            code: "PMM_UNRESOLVED_ASSET_BINDINGS",
+            severity: "warning",
+            message: format!(
+                "{} asset bindings have unresolved asset references",
+                unresolved_count
+            ),
+            scope: Some("projectGraph"),
+            kind: Some("assetBindings"),
+            count: Some(unresolved_count),
+            coverage_ratio: None,
+        });
+    }
+    let blocker_count = blockers.len();
+    PmmProjectExportReadiness {
+        lossless_parsed_byte_export_supported: true,
+        semantic_graph_export_supported: false,
+        source_byte_preservation_required: true,
+        blocker_count,
+        blockers,
+    }
+}
+
+const PMM_MANIFEST_PREFIX: &[u8] = b"Polygon Movie maker ";
+
+fn parse_pmm_manifest_version(data: &[u8]) -> Result<(String, Option<u32>), ImportError> {
+    if !data.starts_with(PMM_MANIFEST_PREFIX) {
         return Err(ImportError::InvalidMagic { format: "PMM" });
     }
-    let version_bytes = &data[PREFIX.len()..data.len().min(32)];
+    let version_bytes = &data[PMM_MANIFEST_PREFIX.len()..data.len().min(32)];
     let version_end = version_bytes
         .iter()
         .position(|&byte| byte == 0)
@@ -836,6 +1705,11 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
         .trim()
         .to_owned();
     let parsed_version = version.parse::<u32>().ok();
+    Ok((version, parsed_version))
+}
+
+pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError> {
+    let (version, parsed_version) = parse_pmm_manifest_version(data)?;
     let project_settings = parse_project_settings(data);
     let display_state = parse_display_state(data, parsed_version);
     let asset_references = extract_asset_references(data);
@@ -864,810 +1738,19 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
     );
     let project_graph = match (&document_summary, &document_global_summary) {
         (Some(doc), Some(glob)) => {
-            let mut track_references: Vec<PmmProjectTrackReference> = Vec::new();
-            for model in &doc.models {
-                let s = &model.sections;
-                // per-model bone track group
-                track_references.push(PmmProjectTrackReference {
-                    scope: "model",
-                    track_kind: "bone",
-                    owner_index: Some(model.slot_index),
-                    document_index: Some(model.document_model_index),
-                    owner_name: Some(model.name.clone()),
-                    initial_keyframes: model.initial_bone_keyframes,
-                    keyframes: model.bone_keyframes,
-                    initial_keyframes_offset: Some(s.initial_bone_keyframes_offset),
-                    keyframe_count_offset: Some(s.bone_keyframe_count_offset),
-                    keyframes_offset: s.bone_keyframes_offset,
-                    keyframes_end_offset: s.bone_keyframes_end_offset,
-                    state_offset: None,
-                    state_end_offset: None,
-                });
-                // per-model morph track group
-                track_references.push(PmmProjectTrackReference {
-                    scope: "model",
-                    track_kind: "morph",
-                    owner_index: Some(model.slot_index),
-                    document_index: Some(model.document_model_index),
-                    owner_name: Some(model.name.clone()),
-                    initial_keyframes: model.initial_morph_keyframes,
-                    keyframes: model.morph_keyframes,
-                    initial_keyframes_offset: Some(s.initial_morph_keyframes_offset),
-                    keyframe_count_offset: Some(s.morph_keyframe_count_offset),
-                    keyframes_offset: s.morph_keyframes_offset,
-                    keyframes_end_offset: s.morph_keyframes_end_offset,
-                    state_offset: None,
-                    state_end_offset: None,
-                });
-                // per-model model track group
-                track_references.push(PmmProjectTrackReference {
-                    scope: "model",
-                    track_kind: "model",
-                    owner_index: Some(model.slot_index),
-                    document_index: Some(model.document_model_index),
-                    owner_name: Some(model.name.clone()),
-                    initial_keyframes: model.initial_model_keyframes,
-                    keyframes: model.model_keyframes,
-                    initial_keyframes_offset: Some(s.initial_model_keyframe_offset),
-                    keyframe_count_offset: Some(s.model_keyframe_count_offset),
-                    keyframes_offset: s.model_keyframes_offset,
-                    keyframes_end_offset: s.model_keyframes_end_offset,
-                    state_offset: None,
-                    state_end_offset: None,
-                });
-            }
-            // global track groups (camera/light/gravity/selfShadow)
-            fn make_global_track_ref(
-                track: &PmmDocumentTrackSummary,
-                kind: &'static str,
-            ) -> PmmProjectTrackReference {
-                let initial_kf_offset = track.initial_keyframe.as_ref().map(|kf| match kf {
-                    PmmDocumentKeyframeSummary::Camera { offset, .. } => *offset,
-                    PmmDocumentKeyframeSummary::Light { offset, .. } => *offset,
-                    PmmDocumentKeyframeSummary::Gravity { offset, .. } => *offset,
-                    PmmDocumentKeyframeSummary::SelfShadow { offset, .. } => *offset,
-                });
-                PmmProjectTrackReference {
-                    scope: "global",
-                    track_kind: kind,
-                    owner_index: None,
-                    document_index: None,
-                    owner_name: None,
-                    initial_keyframes: track.initial_keyframes,
-                    keyframes: track.keyframes,
-                    initial_keyframes_offset: initial_kf_offset,
-                    keyframe_count_offset: Some(track.keyframe_count_offset),
-                    keyframes_offset: track.keyframes_offset,
-                    keyframes_end_offset: track.keyframes_end_offset,
-                    state_offset: track.state_offset,
-                    state_end_offset: track.state_end_offset,
-                }
-            }
-            track_references.push(make_global_track_ref(&glob.camera, "camera"));
-            track_references.push(make_global_track_ref(&glob.light, "light"));
-            track_references.push(make_global_track_ref(&glob.gravity, "gravity"));
-            track_references.push(make_global_track_ref(&glob.self_shadow, "selfShadow"));
-            // per-accessory track groups
-            for acc in &glob.accessories.accessories {
-                track_references.push(PmmProjectTrackReference {
-                    scope: "accessory",
-                    track_kind: "accessory",
-                    owner_index: Some(acc.slot_index),
-                    document_index: Some(acc.document_accessory_index),
-                    owner_name: Some(acc.name.clone()),
-                    initial_keyframes: 1,
-                    keyframes: acc.keyframes,
-                    initial_keyframes_offset: Some(acc.initial_keyframe.offset),
-                    keyframe_count_offset: Some(acc.keyframe_count_offset),
-                    keyframes_offset: acc.keyframes_offset,
-                    keyframes_end_offset: acc.keyframes_end_offset,
-                    state_offset: Some(acc.state_offset),
-                    state_end_offset: Some(acc.state_end_offset),
-                });
-            }
-
-            // Build keyframeReferences inventory derived only from already-decoded summaries.
-            // This is a graph index slice; no new parsing, no payload bytes duplication.
-            let mut keyframe_references: Vec<PmmProjectKeyframeReference> = Vec::new();
-
-            // per document model: initial + additional for bone, morph, model
-            for model in &doc.models {
-                // bone keyframes (initial + additional)
-                for kf in &model.initial_bone_keyframe_summaries {
-                    keyframe_references.push(make_keyframe_reference(
-                        "model",
-                        "bone",
-                        Some(model.slot_index),
-                        Some(model.document_model_index),
-                        Some(model.name.clone()),
-                        true,
-                        kf.index,
-                        kf.frame_index,
-                        kf.previous_keyframe_index,
-                        kf.next_keyframe_index,
-                        kf.offset,
-                        kf.byte_length,
-                        kf.payload_offset,
-                        kf.payload_byte_length,
-                    ));
-                }
-                for kf in &model.bone_keyframe_summaries {
-                    keyframe_references.push(make_keyframe_reference(
-                        "model",
-                        "bone",
-                        Some(model.slot_index),
-                        Some(model.document_model_index),
-                        Some(model.name.clone()),
-                        false,
-                        kf.index,
-                        kf.frame_index,
-                        kf.previous_keyframe_index,
-                        kf.next_keyframe_index,
-                        kf.offset,
-                        kf.byte_length,
-                        kf.payload_offset,
-                        kf.payload_byte_length,
-                    ));
-                }
-                // morph keyframes (initial + additional)
-                for kf in &model.initial_morph_keyframe_summaries {
-                    keyframe_references.push(make_keyframe_reference(
-                        "model",
-                        "morph",
-                        Some(model.slot_index),
-                        Some(model.document_model_index),
-                        Some(model.name.clone()),
-                        true,
-                        kf.index,
-                        kf.frame_index,
-                        kf.previous_keyframe_index,
-                        kf.next_keyframe_index,
-                        kf.offset,
-                        kf.byte_length,
-                        kf.payload_offset,
-                        kf.payload_byte_length,
-                    ));
-                }
-                for kf in &model.morph_keyframe_summaries {
-                    keyframe_references.push(make_keyframe_reference(
-                        "model",
-                        "morph",
-                        Some(model.slot_index),
-                        Some(model.document_model_index),
-                        Some(model.name.clone()),
-                        false,
-                        kf.index,
-                        kf.frame_index,
-                        kf.previous_keyframe_index,
-                        kf.next_keyframe_index,
-                        kf.offset,
-                        kf.byte_length,
-                        kf.payload_offset,
-                        kf.payload_byte_length,
-                    ));
-                }
-                // model keyframes: initial is singular, additional in vec
-                keyframe_references.push(make_keyframe_reference(
-                    "model",
-                    "model",
-                    Some(model.slot_index),
-                    Some(model.document_model_index),
-                    Some(model.name.clone()),
-                    true,
-                    model.initial_model_keyframe.index,
-                    model.initial_model_keyframe.frame_index,
-                    model.initial_model_keyframe.previous_keyframe_index,
-                    model.initial_model_keyframe.next_keyframe_index,
-                    model.initial_model_keyframe.offset,
-                    model.initial_model_keyframe.byte_length,
-                    model.initial_model_keyframe.payload_offset,
-                    model.initial_model_keyframe.payload_byte_length,
-                ));
-                for kf in &model.model_keyframe_summaries {
-                    keyframe_references.push(make_keyframe_reference(
-                        "model",
-                        "model",
-                        Some(model.slot_index),
-                        Some(model.document_model_index),
-                        Some(model.name.clone()),
-                        false,
-                        kf.index,
-                        kf.frame_index,
-                        kf.previous_keyframe_index,
-                        kf.next_keyframe_index,
-                        kf.offset,
-                        kf.byte_length,
-                        kf.payload_offset,
-                        kf.payload_byte_length,
-                    ));
-                }
-            }
-
-            // global: initial + additional for camera, light, gravity, selfShadow
-            // helper to append from PmmDocumentTrackSummary + variant kind (uses existing summaries only)
-            fn append_global_keyframe_refs(
-                refs: &mut Vec<PmmProjectKeyframeReference>,
-                track: &PmmDocumentTrackSummary,
-                kind: &'static str,
-            ) {
-                if let Some(kf) = &track.initial_keyframe {
-                    let (index, frame, prev, next, off, blen, poff, plen) = match kf {
-                        PmmDocumentKeyframeSummary::Camera {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::Light {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::Gravity {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::SelfShadow {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                    };
-                    refs.push(make_keyframe_reference(
-                        "global", kind, None, None, None, true, index, frame, prev, next, off,
-                        blen, poff, plen,
-                    ));
-                }
-                for kf in &track.keyframe_summaries {
-                    let (index, frame, prev, next, off, blen, poff, plen) = match kf {
-                        PmmDocumentKeyframeSummary::Camera {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::Light {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::Gravity {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::SelfShadow {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                    };
-                    refs.push(make_keyframe_reference(
-                        "global", kind, None, None, None, false, index, frame, prev, next, off,
-                        blen, poff, plen,
-                    ));
-                }
-            }
-            append_global_keyframe_refs(&mut keyframe_references, &glob.camera, "camera");
-            append_global_keyframe_refs(&mut keyframe_references, &glob.light, "light");
-            append_global_keyframe_refs(&mut keyframe_references, &glob.gravity, "gravity");
-            append_global_keyframe_refs(&mut keyframe_references, &glob.self_shadow, "selfShadow");
-
-            // per decoded accessory: initial + additional accessory keyframes
-            for acc in &glob.accessories.accessories {
-                keyframe_references.push(make_keyframe_reference(
-                    "accessory",
-                    "accessory",
-                    Some(acc.slot_index),
-                    Some(acc.document_accessory_index),
-                    Some(acc.name.clone()),
-                    true,
-                    acc.initial_keyframe.index,
-                    acc.initial_keyframe.frame_index,
-                    acc.initial_keyframe.previous_keyframe_index,
-                    acc.initial_keyframe.next_keyframe_index,
-                    acc.initial_keyframe.offset,
-                    acc.initial_keyframe.byte_length,
-                    acc.initial_keyframe.payload_offset,
-                    acc.initial_keyframe.payload_byte_length,
-                ));
-                for kf in &acc.keyframe_summaries {
-                    keyframe_references.push(make_keyframe_reference(
-                        "accessory",
-                        "accessory",
-                        Some(acc.slot_index),
-                        Some(acc.document_accessory_index),
-                        Some(acc.name.clone()),
-                        false,
-                        kf.index,
-                        kf.frame_index,
-                        kf.previous_keyframe_index,
-                        kf.next_keyframe_index,
-                        kf.offset,
-                        kf.byte_length,
-                        kf.payload_offset,
-                        kf.payload_byte_length,
-                    ));
-                }
-            }
-
-            // Build byteCoverage summary derived only from already-decoded range summaries.
-            // Diagnostic/exporter-prep slice: which top-level decoded sections cover bytes in the PMM.
-            // Includes: per decoded model, global root, global camera/light/gravity/selfShadow tracks,
-            // accessory block, and each decoded accessory. No raw bytes, no keyframe-level ranges
-            // (those are in keyframeReferences).
-            let mut bc_ranges: Vec<PmmProjectByteRange> = Vec::new();
-
-            // each decoded document model
-            for model in &doc.models {
-                let bl = model.offset_end - model.offset;
-                bc_ranges.push(PmmProjectByteRange {
-                    scope: "model",
-                    kind: "model",
-                    owner_index: Some(model.slot_index),
-                    document_index: Some(model.document_model_index),
-                    name: Some(model.name.clone()),
-                    offset: model.offset,
-                    offset_end: model.offset_end,
-                    byte_length: bl,
-                });
-            }
-
-            // global root (the document global summary span)
-            {
-                let off = glob.offset;
-                let end = glob.offset_end;
-                bc_ranges.push(PmmProjectByteRange {
-                    scope: "global",
-                    kind: "root",
-                    owner_index: None,
-                    document_index: None,
-                    name: None,
-                    offset: off,
-                    offset_end: end,
-                    byte_length: end - off,
-                });
-            }
-
-            // global tracks (camera/light/gravity/selfShadow) - use their track.offset..offset_end
-            fn make_global_track_byte_range(
-                track: &PmmDocumentTrackSummary,
-                kind: &'static str,
-            ) -> PmmProjectByteRange {
-                let bl = track.offset_end - track.offset;
-                PmmProjectByteRange {
-                    scope: "global",
-                    kind,
-                    owner_index: None,
-                    document_index: None,
-                    name: None,
-                    offset: track.offset,
-                    offset_end: track.offset_end,
-                    byte_length: bl,
-                }
-            }
-            bc_ranges.push(make_global_track_byte_range(&glob.camera, "camera"));
-            bc_ranges.push(make_global_track_byte_range(&glob.light, "light"));
-            bc_ranges.push(make_global_track_byte_range(&glob.gravity, "gravity"));
-            bc_ranges.push(make_global_track_byte_range(
-                &glob.self_shadow,
-                "selfShadow",
-            ));
-
-            // accessory block
-            {
-                let blk = &glob.accessories;
-                let bl = blk.offset_end - blk.offset;
-                bc_ranges.push(PmmProjectByteRange {
-                    scope: "global",
-                    kind: "accessoryBlock",
-                    owner_index: None,
-                    document_index: None,
-                    name: None,
-                    offset: blk.offset,
-                    offset_end: blk.offset_end,
-                    byte_length: bl,
-                });
-            }
-
-            // each decoded accessory
-            for acc in &glob.accessories.accessories {
-                let bl = acc.offset_end - acc.offset;
-                bc_ranges.push(PmmProjectByteRange {
-                    scope: "accessory",
-                    kind: "accessory",
-                    owner_index: Some(acc.slot_index),
-                    document_index: Some(acc.document_accessory_index),
-                    name: Some(acc.name.clone()),
-                    offset: acc.offset,
-                    offset_end: acc.offset_end,
-                    byte_length: bl,
-                });
-            }
-
-            // Merge overlapping decoded ranges (e.g. global root overlaps global tracks; models/tracks may abut or overlap)
-            // before summing for covered_byte_length. Compute unknown gaps within the overall span [bc_offset, bc_offset_end].
-            let mut merged: Vec<(usize, usize)> =
-                bc_ranges.iter().map(|r| (r.offset, r.offset_end)).collect();
-            merged.sort_by_key(|&(s, _)| s);
-            let mut merged_intervals: Vec<(usize, usize)> = Vec::new();
-            for (start, end) in merged {
-                if let Some(last) = merged_intervals.last_mut() {
-                    if start <= last.1 {
-                        last.1 = last.1.max(end);
-                    } else {
-                        merged_intervals.push((start, end));
-                    }
-                } else {
-                    merged_intervals.push((start, end));
-                }
-            }
-            let covered_byte_length: usize = merged_intervals.iter().map(|&(s, e)| e - s).sum();
-
-            let bc_offset = bc_ranges.iter().map(|r| r.offset).min().unwrap_or(0);
-            let bc_offset_end = bc_ranges.iter().map(|r| r.offset_end).max().unwrap_or(0);
-            let bc_byte_length = bc_offset_end - bc_offset;
-
-            let mut gaps: Vec<PmmProjectByteRange> = Vec::new();
-            let mut cursor = bc_offset;
-            for (gstart, gend) in &merged_intervals {
-                if cursor < *gstart {
-                    let goff = cursor;
-                    let gend_ = *gstart;
-                    let glen = gend_ - goff;
-                    gaps.push(PmmProjectByteRange {
-                        scope: "unknown",
-                        kind: "gap",
-                        owner_index: None,
-                        document_index: None,
-                        name: None,
-                        offset: goff,
-                        offset_end: gend_,
-                        byte_length: glen,
-                    });
-                }
-                cursor = cursor.max(*gend);
-            }
-            if cursor < bc_offset_end {
-                let goff = cursor;
-                let gend_ = bc_offset_end;
-                let glen = gend_ - goff;
-                gaps.push(PmmProjectByteRange {
-                    scope: "unknown",
-                    kind: "gap",
-                    owner_index: None,
-                    document_index: None,
-                    name: None,
-                    offset: goff,
-                    offset_end: gend_,
-                    byte_length: glen,
-                });
-            }
-
-            let coverage_ratio = if bc_byte_length == 0 {
-                1.0
-            } else {
-                covered_byte_length as f32 / bc_byte_length as f32
-            };
-
-            let byte_coverage = PmmProjectByteCoverage {
-                offset: bc_offset,
-                offset_end: bc_offset_end,
-                byte_length: bc_byte_length,
-                covered_byte_length,
-                coverage_ratio,
-                gap_count: gaps.len(),
-                gaps,
-                range_count: bc_ranges.len(),
-                ranges: bc_ranges,
-            };
+            let track_references = build_project_track_references(doc, glob);
+            let keyframe_references = build_project_keyframe_references(doc, glob);
+            let byte_coverage = build_project_byte_coverage(doc, glob);
 
             // Build assetBindings derived only from already-decoded summaries + asset_references.
             // Exporter-prep read-only slice: connects owners (model/accessory/sceneSettings) to their asset paths + resolved asset reference metadata.
-            // No new parsing. Small local helper for DRY (kept inside graph construction block).
-            let mut asset_bindings: Vec<PmmProjectAssetBinding> = Vec::new();
-
-            #[allow(clippy::too_many_arguments)]
-            fn make_asset_binding(
-                scope: &'static str,
-                asset_kind: &'static str,
-                owner_index: Option<usize>,
-                document_index: Option<u8>,
-                owner_name: Option<String>,
-                path: String,
-                path_offset: Option<usize>,
-                asset_reference_index: Option<usize>,
-                asset_references: &[PmmAssetReference],
-            ) -> PmmProjectAssetBinding {
-                let (ar_offset, ar_end, ar_conf) = match asset_reference_index {
-                    Some(idx) => asset_references.get(idx).map_or((None, None, None), |ar| {
-                        (Some(ar.offset), Some(ar.offset_end), Some(ar.confidence))
-                    }),
-                    None => (None, None, None),
-                };
-                PmmProjectAssetBinding {
-                    scope,
-                    asset_kind,
-                    owner_index,
-                    document_index,
-                    owner_name,
-                    path,
-                    path_offset,
-                    asset_reference_index,
-                    asset_reference_offset: ar_offset,
-                    asset_reference_end_offset: ar_end,
-                    asset_reference_confidence: ar_conf,
-                }
-            }
-
-            for model in &doc.models {
-                asset_bindings.push(make_asset_binding(
-                    "model",
-                    "model",
-                    Some(model.slot_index),
-                    Some(model.document_model_index),
-                    Some(model.name.clone()),
-                    model.path.clone(),
-                    Some(model.path_offset),
-                    model.asset_reference_index,
-                    &asset_references,
-                ));
-            }
-            for acc in &glob.accessories.accessories {
-                asset_bindings.push(make_asset_binding(
-                    "accessory",
-                    "accessory",
-                    Some(acc.slot_index),
-                    Some(acc.document_accessory_index),
-                    Some(acc.name.clone()),
-                    acc.path.clone(),
-                    Some(acc.path_offset),
-                    acc.asset_reference_index,
-                    &asset_references,
-                ));
-            }
-
-            let settings = &glob.settings;
-            let audio_asset_reference_index = if settings.audio_path.is_empty() {
-                None
-            } else {
-                asset_reference_index_for_path(&asset_references, "audio", &settings.audio_path)
-            };
-            let background_video_asset_reference_index =
-                if settings.background_video_path.is_empty() {
-                    None
-                } else {
-                    asset_reference_index_for_path(
-                        &asset_references,
-                        "video",
-                        &settings.background_video_path,
-                    )
-                };
-            let background_image_asset_reference_index =
-                if settings.background_image_path.is_empty() {
-                    None
-                } else {
-                    asset_reference_index_for_path(
-                        &asset_references,
-                        "image",
-                        &settings.background_image_path,
-                    )
-                };
-
-            // non-empty scene settings paths only (empty in synthetic fixture -> no binding)
-            if !settings.audio_path.is_empty() {
-                asset_bindings.push(make_asset_binding(
-                    "sceneSettings",
-                    "audio",
-                    None,
-                    None,
-                    None,
-                    settings.audio_path.clone(),
-                    Some(settings.audio_path_offset),
-                    audio_asset_reference_index,
-                    &asset_references,
-                ));
-            }
-            if !settings.background_video_path.is_empty() {
-                asset_bindings.push(make_asset_binding(
-                    "sceneSettings",
-                    "video",
-                    None,
-                    None,
-                    None,
-                    settings.background_video_path.clone(),
-                    Some(settings.background_video_path_offset),
-                    background_video_asset_reference_index,
-                    &asset_references,
-                ));
-            }
-            if !settings.background_image_path.is_empty() {
-                asset_bindings.push(make_asset_binding(
-                    "sceneSettings",
-                    "image",
-                    None,
-                    None,
-                    None,
-                    settings.background_image_path.clone(),
-                    Some(settings.background_image_path_offset),
-                    background_image_asset_reference_index,
-                    &asset_references,
-                ));
-            }
+            // No new parsing.
+            let asset_bindings = build_project_asset_bindings(doc, glob, &asset_references);
+            let scene_settings = build_project_scene_settings(glob, &asset_references);
 
             // Build exportReadiness immediately before PmmProjectGraph construction (exporter-prep diagnostics only).
             // lossless parsed byte supported; semantic graph export remains false (full exporter unfinished).
-            let export_readiness = {
-                let mut blockers: Vec<PmmProjectExportBlocker> = Vec::new();
-                blockers.push(PmmProjectExportBlocker {
-                    code: "PMM_SEMANTIC_EXPORTER_UNFINISHED",
-                    severity: "blocker",
-                    message: "full semantic graph export/editing is not yet supported".to_string(),
-                    scope: None,
-                    kind: None,
-                    count: None,
-                    coverage_ratio: None,
-                });
-                if byte_coverage.gap_count > 0 {
-                    blockers.push(PmmProjectExportBlocker {
-                        code: "PMM_DECODED_BYTE_GAPS_REMAIN",
-                        severity: "warning",
-                        message: format!(
-                            "{} decoded byte gaps remain (coverage ratio {:.4})",
-                            byte_coverage.gap_count, byte_coverage.coverage_ratio
-                        ),
-                        scope: Some("projectGraph"),
-                        kind: Some("byteCoverage"),
-                        count: Some(byte_coverage.gap_count),
-                        coverage_ratio: Some(byte_coverage.coverage_ratio),
-                    });
-                }
-                let unresolved_count = asset_bindings
-                    .iter()
-                    .filter(|b| b.asset_reference_index.is_none())
-                    .count();
-                if unresolved_count > 0 {
-                    blockers.push(PmmProjectExportBlocker {
-                        code: "PMM_UNRESOLVED_ASSET_BINDINGS",
-                        severity: "warning",
-                        message: format!(
-                            "{} asset bindings have unresolved asset references",
-                            unresolved_count
-                        ),
-                        scope: Some("projectGraph"),
-                        kind: Some("assetBindings"),
-                        count: Some(unresolved_count),
-                        coverage_ratio: None,
-                    });
-                }
-                let blocker_count = blockers.len();
-                PmmProjectExportReadiness {
-                    lossless_parsed_byte_export_supported: true,
-                    semantic_graph_export_supported: false,
-                    source_byte_preservation_required: true,
-                    blocker_count,
-                    blockers,
-                }
-            };
+            let export_readiness = build_project_export_readiness(&byte_coverage, &asset_bindings);
 
             Some(PmmProjectGraph {
                 source: "mmd-anim-format first PMMv2 document graph DTO slice",
@@ -1685,31 +1768,7 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
                 track_references,
                 keyframe_references,
                 byte_coverage,
-                scene_settings: PmmProjectSceneSettings {
-                    offset: settings.offset,
-                    offset_end: settings.offset_end,
-                    current_frame_index: settings.current_frame_index,
-                    current_frame_index_in_text_field: settings.current_frame_index_in_text_field,
-                    begin_frame_index_enabled: settings.begin_frame_index_enabled,
-                    end_frame_index_enabled: settings.end_frame_index_enabled,
-                    begin_frame_index: settings.begin_frame_index,
-                    end_frame_index: settings.end_frame_index,
-                    preferred_fps: settings.preferred_fps,
-                    loop_enabled: settings.loop_enabled,
-                    audio_enabled: settings.audio_enabled,
-                    audio_path: settings.audio_path.clone(),
-                    audio_asset_reference_index,
-                    background_video_enabled: settings.background_video_enabled,
-                    background_video_path: settings.background_video_path.clone(),
-                    background_video_asset_reference_index,
-                    background_video_offset: settings.background_video_offset,
-                    background_video_scale_factor: settings.background_video_scale_factor,
-                    background_image_enabled: settings.background_image_enabled,
-                    background_image_path: settings.background_image_path.clone(),
-                    background_image_asset_reference_index,
-                    background_image_offset: settings.background_image_offset,
-                    background_image_scale_factor: settings.background_image_scale_factor,
-                },
+                scene_settings,
                 asset_bindings,
                 export_readiness,
             })
@@ -2422,13 +2481,8 @@ fn next_keyframe_index<T>(
     }
 }
 
-fn push_i32(out: &mut Vec<u8>, value: i32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
 fn push_pmm_fixed_sjis(out: &mut Vec<u8>, text: &str, length: usize) {
-    let (encoded, _, _) = SHIFT_JIS.encode(text);
-    let encoded = encoded.into_owned();
+    let encoded = encode_sjis(text);
     let mut bytes = vec![0u8; length];
     let copy_len = encoded.len().min(length);
     bytes[..copy_len].copy_from_slice(&encoded[..copy_len]);
@@ -2439,8 +2493,7 @@ fn push_pmm_fixed_sjis(out: &mut Vec<u8>, text: &str, length: usize) {
 /// Leaves room for a trailing NUL if encoded length < slice length.
 /// Intended for patching document model path fields in source bytes.
 fn write_pmm_fixed_sjis_to_slice(dest: &mut [u8], text: &str) -> Result<(), String> {
-    let (encoded, _, _) = SHIFT_JIS.encode(text);
-    let encoded = encoded.into_owned();
+    let encoded = encode_sjis(text);
     if encoded.len() >= dest.len() {
         return Err("encoded Shift-JIS path must leave room for NUL terminator".to_owned());
     }
@@ -2655,20 +2708,11 @@ fn write_pmm_global_tail(out: &mut Vec<u8>, max_frame: u32, camera_fov: f32) {
     push_i32(out, 0);
 }
 
-fn push_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_f32(out: &mut Vec<u8>, value: f32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
 fn push_pmm_len_prefixed_sjis(out: &mut Vec<u8>, text: &str, original_bytes: &[u8]) {
     let bytes = if !original_bytes.is_empty() {
         original_bytes.to_vec()
     } else {
-        let (encoded, _, _) = SHIFT_JIS.encode(text);
-        encoded.into_owned()
+        encode_sjis(text)
     };
     let length = bytes.len().min(u8::MAX as usize);
     out.push(length as u8);
@@ -2682,8 +2726,7 @@ fn push_pmm_sjis_string(out: &mut Vec<u8>, text: &str, original_bytes: Option<&[
         out.extend_from_slice(bytes);
         return;
     }
-    let (encoded, _, _) = SHIFT_JIS.encode(text);
-    out.extend_from_slice(&encoded);
+    out.extend_from_slice(&encode_sjis(text));
 }
 
 fn timeline_from_project_settings(settings: &PmmProjectSettings) -> PmmTimeline {
@@ -2887,8 +2930,7 @@ fn parse_header_text_entries(
         }
         if index > chunk_start {
             let bytes = &data[chunk_start..index];
-            let (decoded, _, _) = SHIFT_JIS.decode(bytes);
-            let text = decoded.trim().to_owned();
+            let text = decode_sjis(bytes).trim().to_owned();
             if !text.is_empty() {
                 entries.push(PmmHeaderTextEntry {
                     index: entries.len(),
@@ -2917,19 +2959,26 @@ fn read_f32_at(data: &[u8], offset: usize) -> Option<f32> {
 }
 
 struct PmmDocumentCursor<'a> {
-    data: &'a [u8],
-    offset: usize,
+    inner: ByteReader<'a>,
 }
 
 impl<'a> PmmDocumentCursor<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, offset: 0 }
+        Self {
+            inner: ByteReader::new(data),
+        }
+    }
+
+    fn offset(&self) -> usize {
+        self.inner.pos
+    }
+
+    fn data(&self) -> &'a [u8] {
+        self.inner.data
     }
 
     fn read_u8(&mut self) -> Option<u8> {
-        let value = *self.data.get(self.offset)?;
-        self.offset += 1;
-        Some(value)
+        self.inner.read_u8().ok()
     }
 
     fn read_bool(&mut self) -> Option<bool> {
@@ -2937,23 +2986,11 @@ impl<'a> PmmDocumentCursor<'a> {
     }
 
     fn read_i32(&mut self) -> Option<i32> {
-        let bytes: [u8; 4] = self
-            .data
-            .get(self.offset..self.offset + 4)?
-            .try_into()
-            .ok()?;
-        self.offset += 4;
-        Some(i32::from_le_bytes(bytes))
+        self.inner.read_i32_le().ok()
     }
 
     fn read_f32(&mut self) -> Option<f32> {
-        let bytes: [u8; 4] = self
-            .data
-            .get(self.offset..self.offset + 4)?
-            .try_into()
-            .ok()?;
-        self.offset += 4;
-        Some(f32::from_le_bytes(bytes))
+        self.inner.read_f32_le().ok()
     }
 
     fn read_f32x3(&mut self) -> Option<[f32; 3]> {
@@ -2970,35 +3007,21 @@ impl<'a> PmmDocumentCursor<'a> {
     }
 
     fn read_bytes16(&mut self) -> Option<[u8; 16]> {
-        let bytes: [u8; 16] = self
-            .data
-            .get(self.offset..self.offset + 16)?
-            .try_into()
-            .ok()?;
-        self.offset += 16;
-        Some(bytes)
+        self.inner.read_bytes(16).ok()?.try_into().ok()
     }
 
     fn read_bytes24(&mut self) -> Option<[u8; 24]> {
-        let bytes: [u8; 24] = self
-            .data
-            .get(self.offset..self.offset + 24)?
-            .try_into()
-            .ok()?;
-        self.offset += 24;
-        Some(bytes)
+        self.inner.read_bytes(24).ok()?.try_into().ok()
     }
 
     fn read_variable_string(&mut self) -> Option<String> {
         let length = self.read_u8()? as usize;
-        let bytes = self.data.get(self.offset..self.offset + length)?;
-        self.offset += length;
+        let bytes = self.inner.read_bytes(length).ok()?;
         Some(decode_shift_jis(bytes))
     }
 
     fn read_fixed_string(&mut self, length: usize) -> Option<String> {
-        let bytes = self.data.get(self.offset..self.offset + length)?;
-        self.offset += length;
+        let bytes = self.inner.read_bytes(length).ok()?;
         let end = bytes
             .iter()
             .position(|byte| *byte == 0)
@@ -3007,9 +3030,7 @@ impl<'a> PmmDocumentCursor<'a> {
     }
 
     fn skip(&mut self, length: usize) -> Option<()> {
-        self.data.get(self.offset..self.offset + length)?;
-        self.offset += length;
-        Some(())
+        self.inner.skip(length).ok()
     }
 }
 
@@ -3077,7 +3098,7 @@ fn parse_document_global_summary(
         read_document_model_summary(&mut cursor, slot_index, references)?;
     }
 
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let camera = read_document_camera_summary(&mut cursor)?;
     let light = read_document_light_summary(&mut cursor)?;
     let accessories = read_document_accessory_block_summary(&mut cursor, references)?;
@@ -3086,7 +3107,7 @@ fn parse_document_global_summary(
     let self_shadow = read_document_self_shadow_summary(&mut cursor)?;
     let settings =
         finish_document_settings_summary(settings_before_gravity, &mut cursor, model_count)?;
-    let offset_end = cursor.offset;
+    let offset_end = cursor.offset();
 
     Some(PmmDocumentGlobalSummary {
         source: "nanoem/ext/document.c PMMv2 global layout",
@@ -3107,21 +3128,23 @@ fn read_document_model_summary(
     references: &[PmmAssetReference],
 ) -> Option<PmmDocumentModelSummary> {
     const PMM_PATH_BYTE_LENGTH: usize = 256;
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let document_model_index = cursor.read_u8()?;
     let name = cursor.read_variable_string()?;
     let english_name = cursor.read_variable_string()?;
-    let path_offset = cursor.offset;
+    let path_offset = cursor.offset();
     let path = cursor.read_fixed_string(PMM_PATH_BYTE_LENGTH)?;
     let asset_reference_index = asset_reference_index_for_path(references, "model", &path);
     cursor.read_u8()?;
     let bone_count = usize_from_i32(cursor.read_i32()?)?;
+    let mut bone_names = Vec::new();
     for _ in 0..bone_count {
-        cursor.read_variable_string()?;
+        bone_names.push(cursor.read_variable_string()?);
     }
     let morph_count = usize_from_i32(cursor.read_i32()?)?;
+    let mut morph_names = Vec::new();
     for _ in 0..morph_count {
-        cursor.read_variable_string()?;
+        morph_names.push(cursor.read_variable_string()?);
     }
     let constraint_bone_count = usize_from_i32(cursor.read_i32()?)?;
     cursor.skip(constraint_bone_count.checked_mul(4)?)?;
@@ -3141,47 +3164,47 @@ fn read_document_model_summary(
     let vertical_scroll = cursor.read_i32()?;
     let last_frame_index = cursor.read_i32()?;
 
-    let initial_bone_keyframes_offset = cursor.offset;
+    let initial_bone_keyframes_offset = cursor.offset();
     let initial_bone_keyframes = bone_count;
     let mut initial_bone_keyframe_summaries = Vec::with_capacity(initial_bone_keyframes);
     for _ in 0..initial_bone_keyframes {
         initial_bone_keyframe_summaries.push(read_document_bone_keyframe(cursor, false)?);
     }
-    let bone_keyframe_count_offset = cursor.offset;
+    let bone_keyframe_count_offset = cursor.offset();
     let bone_keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let bone_keyframes_offset = cursor.offset;
+    let bone_keyframes_offset = cursor.offset();
     let mut bone_keyframe_summaries = Vec::with_capacity(bone_keyframes);
     for _ in 0..bone_keyframes {
         bone_keyframe_summaries.push(read_document_bone_keyframe(cursor, true)?);
     }
-    let bone_keyframes_end_offset = cursor.offset;
+    let bone_keyframes_end_offset = cursor.offset();
 
-    let initial_morph_keyframes_offset = cursor.offset;
+    let initial_morph_keyframes_offset = cursor.offset();
     let initial_morph_keyframes = morph_count;
     let mut initial_morph_keyframe_summaries = Vec::with_capacity(initial_morph_keyframes);
     for _ in 0..initial_morph_keyframes {
         initial_morph_keyframe_summaries.push(read_document_morph_keyframe(cursor, false)?);
     }
-    let morph_keyframe_count_offset = cursor.offset;
+    let morph_keyframe_count_offset = cursor.offset();
     let morph_keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let morph_keyframes_offset = cursor.offset;
+    let morph_keyframes_offset = cursor.offset();
     let mut morph_keyframe_summaries = Vec::with_capacity(morph_keyframes);
     for _ in 0..morph_keyframes {
         morph_keyframe_summaries.push(read_document_morph_keyframe(cursor, true)?);
     }
-    let morph_keyframes_end_offset = cursor.offset;
+    let morph_keyframes_end_offset = cursor.offset();
 
     let initial_model_keyframes = 1;
-    let initial_model_keyframe_offset = cursor.offset;
+    let initial_model_keyframe_offset = cursor.offset();
     let initial_model_keyframe = read_document_model_keyframe(
         cursor,
         false,
         constraint_bone_count,
         outside_parent_subject_bone_count,
     )?;
-    let model_keyframe_count_offset = cursor.offset;
+    let model_keyframe_count_offset = cursor.offset();
     let model_keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let model_keyframes_offset = cursor.offset;
+    let model_keyframes_offset = cursor.offset();
     let mut model_keyframe_summaries = Vec::with_capacity(model_keyframes);
     for _ in 0..model_keyframes {
         model_keyframe_summaries.push(read_document_model_keyframe(
@@ -3191,24 +3214,24 @@ fn read_document_model_summary(
             outside_parent_subject_bone_count,
         )?);
     }
-    let model_keyframes_end_offset = cursor.offset;
+    let model_keyframes_end_offset = cursor.offset();
 
-    let bone_states_offset = cursor.offset;
+    let bone_states_offset = cursor.offset();
     let mut bone_state_summaries = Vec::with_capacity(bone_count);
     for _ in 0..bone_count {
         bone_state_summaries.push(read_document_bone_state(cursor)?);
     }
-    let morph_states_offset = cursor.offset;
+    let morph_states_offset = cursor.offset();
     let mut morph_state_summaries = Vec::with_capacity(morph_count);
     for _ in 0..morph_count {
         morph_state_summaries.push(read_document_morph_state(cursor)?);
     }
-    let constraint_states_offset = cursor.offset;
+    let constraint_states_offset = cursor.offset();
     let mut constraint_state_summaries = Vec::with_capacity(constraint_bone_count);
     for _ in 0..constraint_bone_count {
         constraint_state_summaries.push(read_document_constraint_state(cursor)?);
     }
-    let outside_parent_states_offset = cursor.offset;
+    let outside_parent_states_offset = cursor.offset();
     let mut outside_parent_state_summaries = Vec::with_capacity(outside_parent_subject_bone_count);
     for _ in 0..outside_parent_subject_bone_count {
         outside_parent_state_summaries.push(read_document_outside_parent_state(cursor)?);
@@ -3218,7 +3241,7 @@ fn read_document_model_summary(
     let edge_width = cursor.read_f32()?;
     let self_shadow_enabled = cursor.read_bool()?;
     let transform_order_index = cursor.read_u8()?;
-    let offset_end = cursor.offset;
+    let offset_end = cursor.offset();
 
     Some(PmmDocumentModelSummary {
         slot_index,
@@ -3231,7 +3254,9 @@ fn read_document_model_summary(
         path,
         asset_reference_index,
         bone_count,
+        bone_names,
         morph_count,
+        morph_names,
         constraint_bone_count,
         outside_parent_subject_bone_count,
         draw_order_index,
@@ -3285,17 +3310,17 @@ fn read_document_bone_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentBoneKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
+    let payload_offset = cursor.offset();
     let interpolation = cursor.read_bytes16()?;
     let translation = cursor.read_f32x3()?;
     let orientation = cursor.read_f32x4()?;
     let physics_disabled = cursor.read_bool()?;
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentBoneKeyframeSummary {
         index: base.index,
         frame_index: base.frame_index,
@@ -3318,14 +3343,14 @@ fn read_document_morph_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentMorphKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
+    let payload_offset = cursor.offset();
     let weight = cursor.read_f32()?;
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentMorphKeyframeSummary {
         index: base.index,
         frame_index: base.frame_index,
@@ -3347,18 +3372,18 @@ fn read_document_model_keyframe(
     constraint_bone_count: usize,
     outside_parent_subject_bone_count: usize,
 ) -> Option<PmmDocumentModelKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let visible_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let visible_offset = cursor.offset();
     let visible = cursor.read_bool()?;
-    let constraint_states_offset = cursor.offset;
+    let constraint_states_offset = cursor.offset();
     let mut constraint_states = Vec::with_capacity(constraint_bone_count);
     for _ in 0..constraint_bone_count {
         constraint_states.push(cursor.read_bool()?);
     }
-    let constraint_states_byte_length = cursor.offset - constraint_states_offset;
-    let outside_parent_indices_offset = cursor.offset;
+    let constraint_states_byte_length = cursor.offset() - constraint_states_offset;
+    let outside_parent_indices_offset = cursor.offset();
     let mut outside_parent_indices = Vec::with_capacity(outside_parent_subject_bone_count);
     for _ in 0..outside_parent_subject_bone_count {
         outside_parent_indices.push(PmmDocumentOutsideParentIndexSummary {
@@ -3366,12 +3391,12 @@ fn read_document_model_keyframe(
             parent_model_bone_index: cursor.read_i32()?,
         });
     }
-    let outside_parent_indices_byte_length = cursor.offset - outside_parent_indices_offset;
-    let self_shadow_enabled_offset = cursor.offset;
+    let outside_parent_indices_byte_length = cursor.offset() - outside_parent_indices_offset;
+    let self_shadow_enabled_offset = cursor.offset();
     let self_shadow_enabled = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     let constraint_state_count = constraint_bone_count;
     let outside_parent_index_count = outside_parent_subject_bone_count;
     Some(PmmDocumentModelKeyframeSummary {
@@ -3402,20 +3427,20 @@ fn read_document_model_keyframe(
 fn read_document_camera_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let initial_keyframe = read_document_camera_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset;
+    let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset;
+    let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
         keyframe_summaries.push(read_document_camera_keyframe(cursor, true)?);
     }
-    let keyframes_end_offset = cursor.offset;
-    let state_offset = cursor.offset;
+    let keyframes_end_offset = cursor.offset();
+    let state_offset = cursor.offset();
     cursor.skip(12 * 3)?;
     cursor.read_bool()?;
-    let state_end_offset = cursor.offset;
+    let state_end_offset = cursor.offset();
     Some(PmmDocumentTrackSummary {
         offset,
         offset_end: state_end_offset,
@@ -3435,33 +3460,33 @@ fn read_document_camera_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let distance_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let distance_offset = cursor.offset();
     let distance = cursor.read_f32()?;
-    let look_at_offset = cursor.offset;
+    let look_at_offset = cursor.offset();
     let look_at = cursor.read_f32x3()?;
-    let look_at_byte_length = cursor.offset - look_at_offset;
-    let angle_offset = cursor.offset;
+    let look_at_byte_length = cursor.offset() - look_at_offset;
+    let angle_offset = cursor.offset();
     let angle = cursor.read_f32x3()?;
-    let angle_byte_length = cursor.offset - angle_offset;
-    let parent_model_index_offset = cursor.offset;
+    let angle_byte_length = cursor.offset() - angle_offset;
+    let parent_model_index_offset = cursor.offset();
     let parent_model_index = cursor.read_i32()?;
-    let parent_model_bone_index_offset = cursor.offset;
+    let parent_model_bone_index_offset = cursor.offset();
     let parent_model_bone_index = cursor.read_i32()?;
-    let interpolation_offset = cursor.offset;
+    let interpolation_offset = cursor.offset();
     let interpolation = cursor.read_bytes24()?;
-    let interpolation_byte_length = cursor.offset - interpolation_offset;
-    let perspective_view_offset = cursor.offset;
+    let interpolation_byte_length = cursor.offset() - interpolation_offset;
+    let perspective_view_offset = cursor.offset();
     let perspective_view = !cursor.read_bool()?;
-    let fov_offset = cursor.offset;
+    let fov_offset = cursor.offset();
     let fov = cursor.read_i32()?;
-    let selected_offset = cursor.offset;
+    let selected_offset = cursor.offset();
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentKeyframeSummary::Camera {
         index: base.index,
         frame_index: base.frame_index,
@@ -3499,20 +3524,20 @@ fn read_document_camera_keyframe(
 fn read_document_light_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let initial_keyframe = read_document_light_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset;
+    let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset;
+    let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
         keyframe_summaries.push(read_document_light_keyframe(cursor, true)?);
     }
-    let keyframes_end_offset = cursor.offset;
-    let state_offset = cursor.offset;
+    let keyframes_end_offset = cursor.offset();
+    let state_offset = cursor.offset();
     cursor.skip(12)?;
     cursor.skip(12)?;
-    let state_end_offset = cursor.offset;
+    let state_end_offset = cursor.offset();
     Some(PmmDocumentTrackSummary {
         offset,
         offset_end: state_end_offset,
@@ -3532,20 +3557,20 @@ fn read_document_light_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let color_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let color_offset = cursor.offset();
     let color = cursor.read_f32x3()?;
-    let color_byte_length = cursor.offset - color_offset;
-    let direction_offset = cursor.offset;
+    let color_byte_length = cursor.offset() - color_offset;
+    let direction_offset = cursor.offset();
     let direction = cursor.read_f32x3()?;
-    let direction_byte_length = cursor.offset - direction_offset;
-    let selected_offset = cursor.offset;
+    let direction_byte_length = cursor.offset() - direction_offset;
+    let selected_offset = cursor.offset();
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentKeyframeSummary::Light {
         index: base.index,
         frame_index: base.frame_index,
@@ -3571,7 +3596,7 @@ fn read_document_accessory_block_summary(
     cursor: &mut PmmDocumentCursor<'_>,
     references: &[PmmAssetReference],
 ) -> Option<PmmDocumentAccessoryBlockSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let selected_accessory_index = cursor.read_u8()?;
     let horizontal_scroll = cursor.read_i32()?;
     let accessory_count = cursor.read_u8()? as usize;
@@ -3581,7 +3606,7 @@ fn read_document_accessory_block_summary(
             cursor, slot_index, references,
         )?);
     }
-    let offset_end = cursor.offset;
+    let offset_end = cursor.offset();
     let keyframes = accessories
         .iter()
         .map(|accessory| accessory.keyframes)
@@ -3604,24 +3629,24 @@ fn read_document_accessory_summary(
 ) -> Option<PmmDocumentAccessorySummary> {
     const PMM_ACCESSORY_NAME_BYTE_LENGTH: usize = 100;
     const PMM_PATH_BYTE_LENGTH: usize = 256;
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let document_accessory_index = cursor.read_u8()?;
     let name = cursor.read_fixed_string(PMM_ACCESSORY_NAME_BYTE_LENGTH)?;
-    let path_offset = cursor.offset;
+    let path_offset = cursor.offset();
     let path = cursor.read_fixed_string(PMM_PATH_BYTE_LENGTH)?;
     let asset_reference_index = asset_reference_index_for_path(references, "accessory", &path);
     let draw_order_index = cursor.read_u8()?;
     let initial_keyframe = read_document_accessory_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset;
+    let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset;
+    let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
         keyframe_summaries.push(read_document_accessory_keyframe(cursor, true)?);
     }
-    let keyframes_end_offset = cursor.offset;
+    let keyframes_end_offset = cursor.offset();
 
-    let state_offset = cursor.offset;
+    let state_offset = cursor.offset();
     let (opacity, visible) = unpack_document_accessory_opacity_and_visible(cursor.read_u8()?);
     let parent_model_index = cursor.read_i32()?;
     let parent_model_bone_index = cursor.read_i32()?;
@@ -3630,8 +3655,8 @@ fn read_document_accessory_summary(
     cursor.skip(12)?;
     let shadow_enabled = cursor.read_bool()?;
     let add_blend_enabled = cursor.read_bool()?;
-    let state_end_offset = cursor.offset;
-    let offset_end = cursor.offset;
+    let state_end_offset = cursor.offset();
+    let offset_end = cursor.offset();
 
     Some(PmmDocumentAccessorySummary {
         slot_index,
@@ -3665,30 +3690,30 @@ fn read_document_accessory_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentAccessoryKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let packed_opacity_visible_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let packed_opacity_visible_offset = cursor.offset();
     let (opacity, visible) = unpack_document_accessory_opacity_and_visible(cursor.read_u8()?);
-    let parent_model_index_offset = cursor.offset;
+    let parent_model_index_offset = cursor.offset();
     let parent_model_index = cursor.read_i32()?;
-    let parent_model_bone_index_offset = cursor.offset;
+    let parent_model_bone_index_offset = cursor.offset();
     let parent_model_bone_index = cursor.read_i32()?;
-    let translation_offset = cursor.offset;
+    let translation_offset = cursor.offset();
     let translation = cursor.read_f32x3()?;
-    let translation_byte_length = cursor.offset - translation_offset;
-    let orientation_offset = cursor.offset;
+    let translation_byte_length = cursor.offset() - translation_offset;
+    let orientation_offset = cursor.offset();
     let orientation = cursor.read_f32x3()?;
-    let orientation_byte_length = cursor.offset - orientation_offset;
-    let scale_factor_offset = cursor.offset;
+    let orientation_byte_length = cursor.offset() - orientation_offset;
+    let scale_factor_offset = cursor.offset();
     let scale_factor = cursor.read_f32()?;
-    let shadow_enabled_offset = cursor.offset;
+    let shadow_enabled_offset = cursor.offset();
     let shadow_enabled = cursor.read_bool()?;
-    let selected_offset = cursor.offset;
+    let selected_offset = cursor.offset();
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentAccessoryKeyframeSummary {
         index: base.index,
         frame_index: base.frame_index,
@@ -3766,33 +3791,33 @@ fn read_document_settings_before_gravity(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentSettingsBeforeGravity> {
     const PMM_PATH_BYTE_LENGTH: usize = 256;
-    let offset = cursor.offset;
-    let current_frame_index_offset = cursor.offset;
+    let offset = cursor.offset();
+    let current_frame_index_offset = cursor.offset();
     let current_frame_index = cursor.read_i32()?;
     let horizontal_scroll = cursor.read_i32()?;
     let horizontal_scroll_thumb = cursor.read_i32()?;
     let editing_mode = cursor.read_i32()?;
     let camera_look_mode = cursor.read_u8()?;
     let loop_enabled = cursor.read_bool()?;
-    let begin_frame_index_enabled_offset = cursor.offset;
+    let begin_frame_index_enabled_offset = cursor.offset();
     let begin_frame_index_enabled = cursor.read_bool()?;
-    let end_frame_index_enabled_offset = cursor.offset;
+    let end_frame_index_enabled_offset = cursor.offset();
     let end_frame_index_enabled = cursor.read_bool()?;
-    let begin_frame_index_offset = cursor.offset;
+    let begin_frame_index_offset = cursor.offset();
     let begin_frame_index = cursor.read_i32()?;
-    let end_frame_index_offset = cursor.offset;
+    let end_frame_index_offset = cursor.offset();
     let end_frame_index = cursor.read_i32()?;
     let audio_enabled = cursor.read_bool()?;
-    let audio_path_offset = cursor.offset;
+    let audio_path_offset = cursor.offset();
     let audio_path = cursor.read_fixed_string(PMM_PATH_BYTE_LENGTH)?;
     let background_video_offset = [cursor.read_i32()?, cursor.read_i32()?];
     let background_video_scale_factor = cursor.read_f32()?;
-    let background_video_path_offset = cursor.offset;
+    let background_video_path_offset = cursor.offset();
     let background_video_path = cursor.read_fixed_string(PMM_PATH_BYTE_LENGTH)?;
     let background_video_enabled = cursor.read_i32()? != 0;
     let background_image_offset = [cursor.read_i32()?, cursor.read_i32()?];
     let background_image_scale_factor = cursor.read_f32()?;
-    let background_image_path_offset = cursor.offset;
+    let background_image_path_offset = cursor.offset();
     let background_image_path = cursor.read_fixed_string(PMM_PATH_BYTE_LENGTH)?;
     let background_image_enabled = cursor.read_bool()?;
     let information_shown = cursor.read_bool()?;
@@ -3850,22 +3875,22 @@ fn read_document_settings_before_gravity(
 fn read_document_gravity_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset;
-    let state_offset = cursor.offset;
+    let offset = cursor.offset();
+    let state_offset = cursor.offset();
     cursor.read_f32()?;
     cursor.read_i32()?;
     cursor.skip(12)?;
     cursor.read_bool()?;
-    let state_end_offset = cursor.offset;
+    let state_end_offset = cursor.offset();
     let initial_keyframe = read_document_gravity_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset;
+    let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset;
+    let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
         keyframe_summaries.push(read_document_gravity_keyframe(cursor, true)?);
     }
-    let keyframes_end_offset = cursor.offset;
+    let keyframes_end_offset = cursor.offset();
     Some(PmmDocumentTrackSummary {
         offset,
         offset_end: keyframes_end_offset,
@@ -3885,23 +3910,23 @@ fn read_document_gravity_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let noise_enabled_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let noise_enabled_offset = cursor.offset();
     let noise_enabled = cursor.read_bool()?;
-    let noise_offset = cursor.offset;
+    let noise_offset = cursor.offset();
     let noise = cursor.read_i32()?;
-    let acceleration_offset = cursor.offset;
+    let acceleration_offset = cursor.offset();
     let acceleration = cursor.read_f32()?;
-    let direction_offset = cursor.offset;
+    let direction_offset = cursor.offset();
     let direction = cursor.read_f32x3()?;
-    let direction_byte_length = cursor.offset - direction_offset;
-    let selected_offset = cursor.offset;
+    let direction_byte_length = cursor.offset() - direction_offset;
+    let selected_offset = cursor.offset();
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentKeyframeSummary::Gravity {
         index: base.index,
         frame_index: base.frame_index,
@@ -3929,20 +3954,20 @@ fn read_document_gravity_keyframe(
 fn read_document_self_shadow_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset;
-    let state_offset = cursor.offset;
+    let offset = cursor.offset();
+    let state_offset = cursor.offset();
     cursor.read_bool()?;
     cursor.read_f32()?;
-    let state_end_offset = cursor.offset;
+    let state_end_offset = cursor.offset();
     let initial_keyframe = read_document_self_shadow_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset;
+    let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset;
+    let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
         keyframe_summaries.push(read_document_self_shadow_keyframe(cursor, true)?);
     }
-    let keyframes_end_offset = cursor.offset;
+    let keyframes_end_offset = cursor.offset();
     Some(PmmDocumentTrackSummary {
         offset,
         offset_end: keyframes_end_offset,
@@ -3962,18 +3987,18 @@ fn read_document_self_shadow_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let mode_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let mode_offset = cursor.offset();
     let mode = cursor.read_u8()?;
-    let distance_offset = cursor.offset;
+    let distance_offset = cursor.offset();
     let distance = cursor.read_f32()?;
-    let selected_offset = cursor.offset;
+    let selected_offset = cursor.offset();
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentKeyframeSummary::SelfShadow {
         index: base.index,
         frame_index: base.frame_index,
@@ -4006,20 +4031,20 @@ fn finish_document_settings_summary(
     let black_background_enabled = cursor.read_bool()?;
     let camera_look_at_model_index = cursor.read_i32()?;
     let camera_look_at_model_bone_index = cursor.read_i32()?;
-    let unknown_matrix_offset = cursor.offset;
+    let unknown_matrix_offset = cursor.offset();
     cursor.skip(16 * 4)?;
-    let unknown_matrix_end_offset = cursor.offset;
+    let unknown_matrix_end_offset = cursor.offset();
     let following_look_at_enabled = cursor.read_bool()?;
     cursor.read_bool()?;
     let physics_ground_enabled = cursor.read_bool()?;
-    let current_frame_index_in_text_field_offset = cursor.offset;
+    let current_frame_index_in_text_field_offset = cursor.offset();
     let current_frame_index_in_text_field = cursor.read_i32()?;
 
     let mut model_selection_footer_present = false;
     let mut model_selection_footer_offset = None;
     let mut model_selection_footer_end_offset = None;
-    if cursor.offset < cursor.data.len() {
-        let footer_offset = cursor.offset;
+    if cursor.offset() < cursor.data().len() {
+        let footer_offset = cursor.offset();
         if cursor.read_u8()? != 0 {
             model_selection_footer_present = true;
             model_selection_footer_offset = Some(footer_offset);
@@ -4027,10 +4052,10 @@ fn finish_document_settings_summary(
                 cursor.read_u8()?;
                 cursor.read_i32()?;
             }
-            model_selection_footer_end_offset = Some(cursor.offset);
+            model_selection_footer_end_offset = Some(cursor.offset());
         }
     }
-    let offset_end = cursor.offset;
+    let offset_end = cursor.offset();
 
     Some(PmmDocumentSettingsSummary {
         offset: before_gravity.offset,
@@ -4188,8 +4213,7 @@ fn usize_from_i32(value: i32) -> Option<usize> {
 }
 
 fn decode_shift_jis(bytes: &[u8]) -> String {
-    let (decoded, _, _) = SHIFT_JIS.decode(bytes);
-    decoded.trim_end_matches('\0').to_owned()
+    decode_sjis_trim_nul(bytes)
 }
 
 #[derive(Debug, Clone)]
@@ -4272,7 +4296,7 @@ fn parse_model_slot_at(
     if path_end == path_offset {
         return Err("empty_path");
     }
-    let (decoded_path, _, _) = SHIFT_JIS.decode(&data[path_offset..path_end]);
+    let decoded_path = decode_sjis(&data[path_offset..path_end]);
     let model_path = find_asset_candidates(&decoded_path)
         .into_iter()
         .find(|candidate| {
@@ -4339,12 +4363,7 @@ fn read_pmm_len_prefixed_sjis(data: &[u8], offset: usize) -> Option<(String, Vec
     if bytes.contains(&0) {
         return None;
     }
-    let (decoded, _, _) = SHIFT_JIS.decode(bytes);
-    Some((
-        decoded.trim_end_matches('\0').to_owned(),
-        bytes.to_vec(),
-        end,
-    ))
+    Some((decode_sjis_trim_nul(bytes), bytes.to_vec(), end))
 }
 
 fn extract_asset_references(data: &[u8]) -> Vec<PmmAssetReference> {
@@ -4355,7 +4374,7 @@ fn extract_asset_references(data: &[u8]) -> Vec<PmmAssetReference> {
             continue;
         }
         if index > chunk_start {
-            let (decoded, _, _) = SHIFT_JIS.decode(&data[chunk_start..index]);
+            let decoded = decode_sjis(&data[chunk_start..index]);
             for candidate in find_asset_candidates(&decoded) {
                 let normalized = normalize_path(&candidate);
                 if refs.iter().any(|existing: &PmmAssetReference| {
@@ -7951,6 +7970,7 @@ mod tests {
                 "boneCount",
                 "boneKeyframeSummaries",
                 "boneKeyframes",
+                "boneNames",
                 "boneStateSummaries",
                 "constraintBoneCount",
                 "constraintStateSummaries",
@@ -7970,6 +7990,7 @@ mod tests {
                 "morphCount",
                 "morphKeyframeSummaries",
                 "morphKeyframes",
+                "morphNames",
                 "morphStateSummaries",
                 "name",
                 "offset",
@@ -8170,7 +8191,9 @@ mod tests {
             "UserFile/Model/miku.pmx"
         );
         assert_eq!(model.bone_count, 1);
+        assert_eq!(model.bone_names, vec!["center".to_owned()]);
         assert_eq!(model.morph_count, 1);
+        assert_eq!(model.morph_names, vec!["smile".to_owned()]);
         assert_eq!(model.constraint_bone_count, 1);
         assert_eq!(model.outside_parent_subject_bone_count, 1);
         assert_eq!(model.bone_keyframes, 1);
@@ -8616,6 +8639,13 @@ mod tests {
 
         assert_eq!(parsed.version, "0002");
         assert_eq!(parsed.parsed_version, Some(2));
+    }
+
+    #[test]
+    fn rejects_invalid_pmm_magic() {
+        let err = parse_pmm_manifest(b"not a PMM project").unwrap_err();
+
+        assert_eq!(err, ImportError::InvalidMagic { format: "PMM" });
     }
 
     #[test]

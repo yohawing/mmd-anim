@@ -7,65 +7,25 @@ use mmd_anim_runtime::{
     MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
 };
 
+use crate::binary::{
+    ByteReader, write_f32_le as write_f32, write_fixed_bytes, write_u32_le as write_u32,
+};
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
+use crate::sjis::{decode_sjis_fixed_trimmed, encode_sjis};
+
+type Reader<'a> = ByteReader<'a>;
 
 const VMD_MAGIC: [u8; 30] = *b"Vocaloid Motion Data 0002\0\0\0\0\0";
 const VMD_MAGIC_PREFIX: &[u8] = b"Vocaloid Motion Data 0002\0";
 
-struct Reader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.pos)
-    }
-
-    fn require(&self, n: usize) -> Result<(), ImportError> {
-        if self.remaining() >= n {
-            Ok(())
-        } else {
-            Err(ImportError::UnexpectedEof(
-                n.saturating_sub(self.remaining()),
-            ))
-        }
-    }
-
-    fn read_slice(&mut self, n: usize) -> Result<&'a [u8], ImportError> {
-        self.require(n)?;
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
-        Ok(slice)
-    }
-
-    fn read_u8(&mut self) -> Result<u8, ImportError> {
-        Ok(self.read_slice(1)?[0])
-    }
-
-    fn read_u32_le(&mut self) -> Result<u32, ImportError> {
-        let b = self.read_slice(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
+impl<'a> ByteReader<'a> {
     fn read_optional_u32_le(&mut self) -> Result<Option<u32>, ImportError> {
         if self.remaining() == 0 {
             Ok(None)
         } else {
             self.read_u32_le().map(Some)
         }
-    }
-
-    fn require_record_bytes(&self, count: usize, record_size: usize) -> Result<(), ImportError> {
-        let bytes = count
-            .checked_mul(record_size)
-            .ok_or(ImportError::SectionOverflow)?;
-        self.require(bytes)
     }
 
     fn read_record_count(&mut self, record_size: usize) -> Result<usize, ImportError> {
@@ -107,19 +67,6 @@ impl<'a> Reader<'a> {
             return Ok(None);
         }
         Ok(Some(count))
-    }
-
-    fn read_f32_le(&mut self) -> Result<f32, ImportError> {
-        let b = self.read_slice(4)?;
-        Ok(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    fn read_vec3(&mut self) -> Result<Vec3A, ImportError> {
-        Ok(Vec3A::new(
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-        ))
     }
 
     fn read_quat(&mut self) -> Result<Quat, ImportError> {
@@ -916,9 +863,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 fn decode_sjis_fixed(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let (decoded, _, _) = encoding_rs::SHIFT_JIS.decode(&bytes[..end]);
-    decoded.trim().to_owned()
+    decode_sjis_fixed_trimmed(bytes)
 }
 
 fn trim_fixed_bytes(bytes: &[u8]) -> &[u8] {
@@ -926,27 +871,13 @@ fn trim_fixed_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
-fn write_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_f32(out: &mut Vec<u8>, value: f32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
 fn write_fixed_name_bytes(out: &mut Vec<u8>, value: &str, raw_bytes: &[u8], len: usize) {
     if raw_bytes.is_empty() {
-        let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(value);
-        write_fixed_bytes(out, encoded.as_ref(), len);
+        let encoded = encode_sjis(value);
+        write_fixed_bytes(out, &encoded, len);
     } else {
         write_fixed_bytes(out, raw_bytes, len);
     }
-}
-
-fn write_fixed_bytes(out: &mut Vec<u8>, value: &[u8], len: usize) {
-    let copied = value.len().min(len);
-    out.extend_from_slice(&value[..copied]);
-    out.resize(out.len() + len - copied, 0);
 }
 
 fn decode_interpolation_scalar(data: [u8; 4]) -> InterpolationScalar {

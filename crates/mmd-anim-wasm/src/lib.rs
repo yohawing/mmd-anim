@@ -7,13 +7,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneInit, BoneMorphOffset,
-    GroupMorphOffset, IkAngleLimit, IkLinkInit, IkSolveOptions, IkSolverInit,
-    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan, MorphTrack,
-    MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
-    RuntimeInstance,
+    AnimationClip, BoneAnimationBinding, BoneIndex, FlatModelInputError, IkSolveOptions,
+    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack, MovableBoneKeyframe,
+    MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
+};
+use mmd_anim_runtime::{
+    FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
+    FlatIkLinkInput, FlatIkSolverInput, ModelArena, build_append_transforms_from_flat_iter,
+    build_bones_from_flat, build_ik_solvers_from_flat_iter, build_morph_init_from_flat_iter,
 };
 use wasm_bindgen::prelude::*;
 
@@ -388,7 +390,7 @@ impl WasmPmxGeometry {
             sdef_rw0: g.sdef.rw0.clone(),
             sdef_rw1: g.sdef.rw1.clone(),
             qdef_enabled: g.qdef.enabled.iter().map(|&v| u8::from(v != 0.0)).collect(),
-            skinning_modes: pmx_skinning_modes(g),
+            skinning_modes: g.sdef.skinning_modes.clone(),
         }
     }
 
@@ -534,31 +536,6 @@ impl WasmPmxGeometry {
     pub fn skinning_modes(&self) -> Vec<String> {
         self.skinning_modes.clone()
     }
-}
-
-fn pmx_skinning_modes(g: &mmd_anim_format::pmx::PmxParsedGeometry) -> Vec<String> {
-    let vertex_count = g.positions.len() / 3;
-    (0..vertex_count)
-        .map(|i| {
-            if g.sdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
-                "sdef"
-            } else if g.qdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
-                "qdef"
-            } else {
-                let w2 = g.skin_weights.get(i * 4 + 2).copied().unwrap_or(0.0);
-                let w3 = g.skin_weights.get(i * 4 + 3).copied().unwrap_or(0.0);
-                let w1 = g.skin_weights.get(i * 4 + 1).copied().unwrap_or(0.0);
-                if w2 != 0.0 || w3 != 0.0 {
-                    "bdef4"
-                } else if w1 != 0.0 {
-                    "bdef2"
-                } else {
-                    "bdef1"
-                }
-            }
-            .to_owned()
-        })
-        .collect()
 }
 
 /// Parsed PMX handle for the split loader ABI.
@@ -1643,22 +1620,13 @@ struct ModelInput<'a> {
 }
 
 fn build_model(input: ModelInput<'_>) -> Result<ModelArena, String> {
-    if input.parent_indices.is_empty() {
-        return Err("model must contain at least one bone".to_owned());
-    }
-    if input.rest_positions_xyz.len() != input.parent_indices.len() * 3 {
-        return Err("rest_positions_xyz must contain bone_count * 3 values".to_owned());
-    }
-    if !input.inverse_bind_matrices.is_empty()
-        && input.inverse_bind_matrices.len() != input.parent_indices.len() * 16
-    {
-        return Err("inverse_bind_matrices must contain bone_count * 16 values".to_owned());
-    }
-    if !input.transform_orders.is_empty()
-        && input.transform_orders.len() != input.parent_indices.len()
-    {
-        return Err("transform_orders must contain bone_count values".to_owned());
-    }
+    let bones = build_bones_from_flat(FlatBoneInput {
+        parent_indices: input.parent_indices,
+        rest_positions_xyz: input.rest_positions_xyz,
+        inverse_bind_matrices: input.inverse_bind_matrices,
+        transform_orders: input.transform_orders,
+    })
+    .map_err(|error| error.to_string())?;
     if !input.ik_solvers_u32.len().is_multiple_of(5) {
         return Err(
             "ik_solvers_u32 must contain ik/target/linkOffset/linkCount/iteration quintets"
@@ -1683,99 +1651,60 @@ fn build_model(input: ModelInput<'_>) -> Result<ModelArena, String> {
         return Err("append_ratios length must match append transform count".to_owned());
     }
 
-    let mut bones = Vec::with_capacity(input.parent_indices.len());
-    for (bone_index, parent_index) in input.parent_indices.iter().enumerate() {
-        let parent = match *parent_index {
-            -1 => None,
-            parent if parent >= 0 => Some(BoneIndex(parent as u32)),
-            _ => return Err("parent index must be -1 or non-negative".to_owned()),
-        };
-        let position_offset = bone_index * 3;
-        let mut bone = BoneInit::new(
-            parent,
-            glam::Vec3A::new(
-                input.rest_positions_xyz[position_offset],
-                input.rest_positions_xyz[position_offset + 1],
-                input.rest_positions_xyz[position_offset + 2],
-            ),
-        );
-        if !input.inverse_bind_matrices.is_empty() {
-            let inverse_bind_offset = bone_index * 16;
-            let inverse_bind_matrix = input.inverse_bind_matrices
-                [inverse_bind_offset..inverse_bind_offset + 16]
-                .try_into()
-                .map_err(|_| "inverse bind matrix slice conversion failed".to_owned())?;
-            bone.inverse_bind_matrix = glam::Mat4::from_cols_array(inverse_bind_matrix);
-        }
-        if !input.transform_orders.is_empty() {
-            bone.transform_order = input.transform_orders[bone_index];
-        }
-        bones.push(bone);
-    }
-
     let ik_links = input
         .ik_links_u32
         .chunks_exact(2)
         .enumerate()
         .map(|(link_index, link)| {
-            let mut init = IkLinkInit::new(BoneIndex(link[0]));
-            if link[1] & IK_LINK_FLAG_ANGLE_LIMIT != 0 {
-                let limit_offset = link_index * 6;
-                init = init.with_angle_limit(IkAngleLimit::new(
-                    glam::Vec3A::new(
-                        input.ik_link_limits[limit_offset],
-                        input.ik_link_limits[limit_offset + 1],
-                        input.ik_link_limits[limit_offset + 2],
-                    ),
-                    glam::Vec3A::new(
-                        input.ik_link_limits[limit_offset + 3],
-                        input.ik_link_limits[limit_offset + 4],
-                        input.ik_link_limits[limit_offset + 5],
-                    ),
-                ));
+            let limit_offset = link_index * 6;
+            FlatIkLinkInput {
+                bone_index: link[0],
+                has_angle_limit: link[1] & IK_LINK_FLAG_ANGLE_LIMIT != 0,
+                angle_limit_min_xyz: [
+                    input.ik_link_limits[limit_offset],
+                    input.ik_link_limits[limit_offset + 1],
+                    input.ik_link_limits[limit_offset + 2],
+                ],
+                angle_limit_max_xyz: [
+                    input.ik_link_limits[limit_offset + 3],
+                    input.ik_link_limits[limit_offset + 4],
+                    input.ik_link_limits[limit_offset + 5],
+                ],
             }
-            init
         })
         .collect::<Vec<_>>();
 
-    let ik_solvers = input
-        .ik_solvers_u32
-        .chunks_exact(5)
-        .zip(input.ik_solver_limit_angles.iter())
-        .map(|(solver, limit_angle)| {
-            let link_offset = solver[2] as usize;
-            let link_count = solver[3] as usize;
-            let links = checked_range(&ik_links, link_offset, link_count)?.to_vec();
-            Ok(IkSolverInit {
-                ik_bone: BoneIndex(solver[0]),
-                target_bone: BoneIndex(solver[1]),
-                links,
+    let ik_solvers = build_ik_solvers_from_flat_iter(
+        input
+            .ik_solvers_u32
+            .chunks_exact(5)
+            .zip(input.ik_solver_limit_angles.iter())
+            .map(|(solver, limit_angle)| FlatIkSolverInput {
+                ik_bone_index: solver[0],
+                target_bone_index: solver[1],
+                link_offset: solver[2] as usize,
+                link_count: solver[3] as usize,
                 iteration_count: solver[4],
                 limit_angle: *limit_angle,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+            }),
+        &ik_links,
+    )
+    .map_err(|error| error.to_string())?;
 
-    let append_transforms = input
-        .append_u32
-        .chunks_exact(3)
-        .zip(input.append_ratios.iter())
-        .map(|(append, ratio)| {
-            let mut init =
-                AppendTransformInit::new(BoneIndex(append[0]), BoneIndex(append[1]), *ratio);
-            let flags = append[2];
-            if flags & APPEND_FLAG_ROTATION != 0 {
-                init = init.with_rotation();
-            }
-            if flags & APPEND_FLAG_TRANSLATION != 0 {
-                init = init.with_translation();
-            }
-            if flags & APPEND_FLAG_LOCAL != 0 {
-                init = init.with_local();
-            }
-            init
-        })
-        .collect::<Vec<_>>();
+    let append_transforms = build_append_transforms_from_flat_iter(
+        input
+            .append_u32
+            .chunks_exact(3)
+            .zip(input.append_ratios.iter())
+            .map(|(append, ratio)| FlatAppendTransformInput {
+                target_bone_index: append[0],
+                source_bone_index: append[1],
+                ratio: *ratio,
+                affect_rotation: append[2] & APPEND_FLAG_ROTATION != 0,
+                affect_translation: append[2] & APPEND_FLAG_TRANSLATION != 0,
+                local: append[2] & APPEND_FLAG_LOCAL != 0,
+            }),
+    );
 
     let morph = build_morph_init_from_wasm(&input)?;
     ModelArena::new_with_morphs(bones, ik_solvers, append_transforms, morph)
@@ -1793,7 +1722,6 @@ fn build_morph_init_from_wasm(input: &ModelInput<'_>) -> Result<MorphInit, Strin
         }
         return Ok(MorphInit::default());
     }
-    let mc = input.morph_count as usize;
 
     if !input.bone_morph_u32.len().is_multiple_of(2) {
         return Err("bone_morph_u32 must contain morphIndex/targetBone pairs".to_owned());
@@ -1808,93 +1736,56 @@ fn build_morph_init_from_wasm(input: &ModelInput<'_>) -> Result<MorphInit, Strin
         return Err("group_morph_ratios length must match group morph count".to_owned());
     }
 
-    let (bone_offsets, bone_spans) = if input.bone_morph_u32.is_empty() {
-        (Vec::new(), vec![MorphOffsetSpan::default(); mc])
-    } else {
-        let mut entries: Vec<(u32, u32, usize)> = input
+    build_morph_init_from_flat_iter(
+        input.morph_count,
+        input
             .bone_morph_u32
             .chunks_exact(2)
             .enumerate()
-            .map(|(i, pair)| (pair[0], pair[1], i))
-            .collect();
-        entries.sort_by_key(|a| a.0);
-        if entries.last().unwrap().0 as usize >= mc {
-            return Err("bone_morph_u32 contains morph_index >= morph_count".to_owned());
-        }
-        let mut offsets = Vec::with_capacity(entries.len());
-        let mut spans = vec![MorphOffsetSpan::default(); mc];
-        let mut i = 0;
-        while i < entries.len() {
-            let morph = entries[i].0 as usize;
-            let start = offsets.len() as u32;
-            let mut count = 0u32;
-            while i < entries.len() && entries[i].0 as usize == morph {
-                let (_, target_bone, entry_idx) = entries[i];
-                let f32_offset = entry_idx * 7;
-                offsets.push(BoneMorphOffset {
-                    target_bone: BoneIndex(target_bone),
-                    position_offset: glam::Vec3A::new(
+            .map(|(entry_index, pair)| {
+                let f32_offset = entry_index * 7;
+                FlatBoneMorphInput {
+                    morph_index: pair[0],
+                    target_bone_index: pair[1],
+                    position_offset_xyz: [
                         input.bone_morph_f32[f32_offset],
                         input.bone_morph_f32[f32_offset + 1],
                         input.bone_morph_f32[f32_offset + 2],
-                    ),
-                    rotation_offset: glam::Quat::from_xyzw(
+                    ],
+                    rotation_offset_xyzw: [
                         input.bone_morph_f32[f32_offset + 3],
                         input.bone_morph_f32[f32_offset + 4],
                         input.bone_morph_f32[f32_offset + 5],
                         input.bone_morph_f32[f32_offset + 6],
-                    ),
-                });
-                count += 1;
-                i += 1;
-            }
-            spans[morph] = MorphOffsetSpan { start, count };
-        }
-        (offsets, spans)
-    };
-
-    let (group_offsets, group_spans) = if input.group_morph_u32.is_empty() {
-        (Vec::new(), vec![MorphOffsetSpan::default(); mc])
-    } else {
-        let mut entries: Vec<(u32, u32, usize)> = input
+                    ],
+                }
+            }),
+        input
             .group_morph_u32
             .chunks_exact(2)
             .enumerate()
-            .map(|(i, pair)| (pair[0], pair[1], i))
-            .collect();
-        entries.sort_by_key(|a| a.0);
-        if entries.last().unwrap().0 as usize >= mc {
-            return Err("group_morph_u32 contains morph_index >= morph_count".to_owned());
-        }
-        let mut offsets = Vec::with_capacity(entries.len());
-        let mut spans = vec![MorphOffsetSpan::default(); mc];
-        let mut i = 0;
-        while i < entries.len() {
-            let morph = entries[i].0 as usize;
-            let start = offsets.len() as u32;
-            let mut count = 0u32;
-            while i < entries.len() && entries[i].0 as usize == morph {
-                let (_, child_morph, orig_idx) = entries[i];
-                offsets.push(GroupMorphOffset {
-                    child_morph: MorphIndex(child_morph),
-                    ratio: input.group_morph_ratios[orig_idx],
-                });
-                count += 1;
-                i += 1;
-            }
-            spans[morph] = MorphOffsetSpan { start, count };
-        }
-        (offsets, spans)
-    };
+            .map(|(entry_index, pair)| FlatGroupMorphInput {
+                morph_index: pair[0],
+                child_morph_index: pair[1],
+                ratio: input.group_morph_ratios[entry_index],
+            }),
+    )
+    .map_err(flat_morph_input_error_to_wasm_string)
+}
 
-    Ok(MorphInit {
-        morph_count: input.morph_count,
-        bone_offsets,
-        bone_spans,
-        group_offsets,
-        group_spans,
-        ..MorphInit::default()
-    })
+fn flat_morph_input_error_to_wasm_string(error: FlatModelInputError) -> String {
+    match error {
+        FlatModelInputError::MorphCountZeroWithData => {
+            "morph_count must be non-zero when morph data is provided".to_owned()
+        }
+        FlatModelInputError::BoneMorphIndexOutOfRange => {
+            "bone_morph_u32 contains morph_index >= morph_count".to_owned()
+        }
+        FlatModelInputError::GroupMorphIndexOutOfRange => {
+            "group_morph_u32 contains morph_index >= morph_count".to_owned()
+        }
+        other => other.to_string(),
+    }
 }
 
 fn copy_matrices(matrices: &[glam::Mat4]) -> Vec<f32> {
@@ -3123,7 +3014,7 @@ TextureFilename { "tex/main.png"; }
         assert_eq!(geo.sdef_rw0().len(), 9);
         assert_eq!(geo.sdef_rw1().len(), 9);
         assert_eq!(geo.qdef_enabled(), vec![0u8, 0, 0]);
-        assert_eq!(geo.skinning_modes(), vec!["bdef1", "bdef1", "bdef1"]);
+        assert_eq!(geo.skinning_modes(), vec!["bdef4", "bdef4", "bdef4"]);
     }
 
     #[test]

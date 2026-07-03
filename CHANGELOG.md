@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.1.9 - 2026-07-03
+
+CLI/API brush-up, FFI hardening, typed diagnostics, and CI-built CLI release
+assets.
+
+### Added
+
+- Added PMX parts export, VMD sample export, VMD DTO export round-trip coverage,
+  and runtime batch import JSON support to `mmd-anim-cli`.
+- Added PMX geometry handle accessors, skinning-mode reporting, and parser
+  model-name retention for host diagnostics.
+- Added typed numeric and GoldenOracle comparison reports for summary,
+  per-case, unsupported-case, root-motion, lag, IK residual, and import
+  diagnostics.
+- Added tagged-release CLI binary assets for Linux and Windows, with
+  `SHA256SUMS`, to support other projects consuming `mmd-anim` from CI.
+
+### Changed
+
+- Split large CLI, runtime, PMM, PMX, FFI, and format helper implementations
+  into smaller modules while preserving the external command/API surface.
+- Shared byte-reader, Shift-JIS, format-writer, flat-model, runtime IK, morph,
+  and world-matrix helpers across parser/runtime/FFI code paths.
+- Moved CLI support helpers out of `main.rs` and adopted `anyhow` for
+  incremental CLI error handling cleanup.
+
+### Fixed
+
+- Hardened FFI exported functions with panic/error guards and added
+  `mmd_runtime_last_error_message` for native-host diagnostics.
+- Added a CI header-symbol check so Rust FFI exports stay synchronized with the
+  public C header.
+- Fixed review-gate numeric/parser API issues and tightened compare report
+  sampling behavior.
+
 ## 0.1.8 - 2026-06-29
 
 Camera, light, and self-shadow sampling APIs and GoldenOracle regression gate
@@ -28,6 +63,9 @@ tooling.
 - Replaced the pre-release JSON-returning and array-returning camera sampling
   APIs with caller-owned output-buffer APIs before the `0.1.8` release tag.
   This keeps hot-path C ABI and WASM sampling allocation-free.
+- Documented intentional pre-release error-surface changes: WASM flat model
+  validation reports bone input errors before IK errors, and truncated NMD
+  payloads now surface as `UnexpectedEof` instead of `SectionOverflow`.
 
 ## 0.1.7 - 2026-06-27
 

@@ -5,6 +5,7 @@
 //! PMX/VMD object graph — mesh, material, texture, toon, display-frame UI,
 //! rigid body, joint, and soft-body metadata are dropped during import.
 
+mod binary;
 pub mod error;
 pub mod format;
 pub mod nmd;
@@ -12,6 +13,7 @@ pub mod normalize;
 pub mod pmd;
 pub mod pmm;
 pub mod pmx;
+mod sjis;
 pub mod vmd;
 pub mod vpd;
 pub mod xfile;

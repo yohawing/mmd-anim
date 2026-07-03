@@ -16,10 +16,11 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
+anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 glam.workspace = true
 mmd-anim-runtime.workspace = true
-mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.8" }
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.9" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

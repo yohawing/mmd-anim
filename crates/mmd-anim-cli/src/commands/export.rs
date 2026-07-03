@@ -1,8 +1,26 @@
 use std::{path::Path, process::ExitCode};
 
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::{diagnostics_suffix, read_file, read_text_file, unsupported_format_error, write_file};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PmxPartsCliManifest {
+    #[serde(flatten)]
+    descriptor: mmd_anim_format::PmxPartsDescriptor,
+    positions_xyz: Vec<f32>,
+    normals_xyz: Vec<f32>,
+    uvs_xy: Vec<f32>,
+    indices: Vec<u32>,
+    #[serde(default)]
+    skin_indices: Vec<u32>,
+    #[serde(default)]
+    skin_weights: Vec<f32>,
+    #[serde(default)]
+    edge_scale: Vec<f32>,
+}
 
 pub(crate) fn export_roundtrip_summary(
     path: &Path,
@@ -545,6 +563,46 @@ pub(crate) fn export_pmm_scene(
         report.skipped_bone_keyframes,
         report.skipped_morph_keyframes,
         report.max_frame,
+        output_path.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) fn export_pmx_from_parts_manifest(
+    input_path: &Path,
+    output_path: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let json = read_text_file(input_path)?;
+    let manifest: PmxPartsCliManifest = serde_json::from_str(&json).map_err(|error| {
+        format!(
+            "PMX parts manifest JSON deserialization failed: {error}; \
+             expected PmxPartsDescriptor fields plus positionsXyz, normalsXyz, uvsXy, and indices"
+        )
+    })?;
+    let model = mmd_anim_format::build_pmx_model_from_parts(mmd_anim_format::PmxPartsInput {
+        descriptor: manifest.descriptor,
+        positions_xyz: &manifest.positions_xyz,
+        normals_xyz: &manifest.normals_xyz,
+        uvs_xy: &manifest.uvs_xy,
+        indices: &manifest.indices,
+        skin_indices: &manifest.skin_indices,
+        skin_weights: &manifest.skin_weights,
+        edge_scale: &manifest.edge_scale,
+    })
+    .map_err(|error| format!("PMX parts validation failed: {error}"))?;
+    let exported = mmd_anim_format::export_pmx_model(&model);
+    let reparsed = mmd_anim_format::parse_pmx_model(&exported)?;
+    write_file(output_path, &exported)?;
+
+    println!(
+        "PMX parts export: ok jsonBytes={} bytesOut={} vertices={} faces={} materials={} bones={} morphs={} output={}",
+        json.len(),
+        exported.len(),
+        reparsed.metadata.counts.vertices,
+        reparsed.metadata.counts.faces,
+        reparsed.metadata.counts.materials,
+        reparsed.metadata.counts.bones,
+        reparsed.metadata.counts.morphs,
         output_path.display()
     );
     Ok(ExitCode::SUCCESS)

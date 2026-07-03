@@ -23,6 +23,9 @@ target/package/
 AGENTS.md
 CLAUDE.md
 
+/TODO.md
+/ROADMAP.md
+/PLAN.md
 docs/**
 !docs/
 !docs/README.ja.md

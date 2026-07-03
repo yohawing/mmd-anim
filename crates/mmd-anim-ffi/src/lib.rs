@@ -1,16 +1,21 @@
 //! C ABI wrapper for native hosts.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ffi::CString;
+use std::os::raw::c_char;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::{ptr, slice, str, sync::Arc};
 
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    AnimationClip, AppendPrimitiveInput, AppendTransformInit, BoneAnimationBinding, BoneIndex,
-    BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit, IkChainDefinition,
-    IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkLinkInit, IkSolveOptions,
-    IkSolverInit, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan,
-    MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
-    RuntimeInstance, solve_append_transform,
+    AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, FlatAppendTransformInput,
+    FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput, FlatIkLinkInput, FlatIkSolverInput,
+    IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver,
+    IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack,
+    MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
+    RuntimeInstance, build_append_transforms_from_flat_iter, build_bones_from_flat,
+    build_ik_solvers_from_flat_iter, build_morph_init_from_flat_iter, solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 2;
@@ -77,6 +82,10 @@ pub struct MmdRuntimeVmdSelfShadowTrack {
 pub struct MmdRuntimePmxMaterialSplit {
     split: mmd_anim_format::PmxMaterialSplitResult,
     manifest_json: Vec<u8>,
+}
+
+pub struct MmdRuntimePmxGeometry {
+    parsed: mmd_anim_format::PmxParsedModel,
 }
 
 pub struct MmdRuntimePmxRigSpec {
@@ -213,10 +222,117 @@ const APPEND_FLAG_TRANSLATION: u32 = 1 << 1;
 const APPEND_FLAG_LOCAL: u32 = 1 << 2;
 const IK_LINK_FLAG_ANGLE_LIMIT: u32 = 1;
 const RIG_BONE_FIXED_AXIS: u32 = 1;
+const FFI_PANIC_ERROR_MESSAGE: &str = "internal panic in mmd-anim-ffi";
+const FFI_ERR_INVALID_INPUT: &str = "invalid input";
+const FFI_ERR_VMD_PARSE_FAILED: &str = "vmd parse failed";
+const FFI_ERR_PMX_PARSE_FAILED: &str = "pmx parse failed";
+const FFI_ERR_PMX_IMPORT_FAILED: &str = "pmx import failed";
+const FFI_ERR_VMD_IMPORT_FAILED: &str = "vmd import failed";
+const FFI_ERR_CLIP_CREATE_FAILED: &str = "clip create failed";
+const FFI_ERR_PMX_EXPORT_FAILED: &str = "pmx export failed";
+const FFI_ERR_JSON_ENCODE_FAILED: &str = "json encode failed";
+const FFI_ERR_WORKER_PANIC: &str = "worker panic";
+
+thread_local! {
+    static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
+}
+
+fn clear_last_error() {
+    LAST_ERROR.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+fn set_last_error(message: impl AsRef<str>) {
+    LAST_ERROR.with(|cell| {
+        *cell.borrow_mut() = CString::new(message.as_ref()).ok();
+    });
+}
+
+fn ffi_guard<T, F>(default: T, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    ffi_guard_impl(default, true, f)
+}
+
+fn ffi_guard_preserve_last_error<T, F>(default: T, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    ffi_guard_impl(default, false, f)
+}
+
+fn ffi_guard_impl<T, F>(default: T, clear_before_call: bool, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    if clear_before_call {
+        clear_last_error();
+    }
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(value) => value,
+        Err(_) => {
+            set_last_error(FFI_PANIC_ERROR_MESSAGE);
+            default
+        }
+    }
+}
+
+fn ffi_guard_void<F>(f: F)
+where
+    F: FnOnce(),
+{
+    ffi_guard((), f);
+}
+
+fn empty_byte_buffer_failure(message: &str) -> MmdRuntimeFfiByteBuffer {
+    set_last_error(message);
+    empty_byte_buffer()
+}
+
+fn null_mut_failure<T>(message: &str) -> *mut T {
+    set_last_error(message);
+    ptr::null_mut()
+}
+
+fn null_failure<T>(message: &str) -> *const T {
+    set_last_error(message);
+    ptr::null()
+}
+
+fn false_failure(message: &str) -> bool {
+    set_last_error(message);
+    false
+}
+
+/// Returns the most recent FFI error message for the calling thread.
+///
+/// The pointer remains valid until the next FFI call on the same thread.
+/// Returns null when no message is available.
+#[unsafe(no_mangle)]
+pub extern "C" fn mmd_runtime_last_error_message() -> *const c_char {
+    ffi_guard_preserve_last_error(ptr::null(), || {
+        LAST_ERROR.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|message| message.as_ptr())
+                .unwrap_or(ptr::null())
+        })
+    })
+}
+
+#[cfg(test)]
+#[unsafe(no_mangle)]
+pub extern "C" fn mmd_runtime_test_trigger_panic_guard() -> bool {
+    ffi_guard(false, || {
+        panic!("test-only panic injection");
+    })
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mmd_runtime_abi_version() -> u32 {
-    ABI_VERSION
+    ffi_guard(ABI_VERSION, || ABI_VERSION)
 }
 
 fn empty_byte_buffer() -> MmdRuntimeFfiByteBuffer {
@@ -246,15 +362,17 @@ fn byte_buffer_from_vec(bytes: Vec<u8>) -> MmdRuntimeFfiByteBuffer {
 /// behavior.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_byte_buffer_free(buffer: MmdRuntimeFfiByteBuffer) {
-    if buffer.data.is_null() || buffer.len == 0 {
-        return;
-    }
-    unsafe {
-        drop(Box::from_raw(ptr::slice_from_raw_parts_mut(
-            buffer.data,
-            buffer.len,
-        )));
-    }
+    ffi_guard_void(|| {
+        if buffer.data.is_null() || buffer.len == 0 {
+            return;
+        }
+        unsafe {
+            drop(Box::from_raw(ptr::slice_from_raw_parts_mut(
+                buffer.data,
+                buffer.len,
+            )));
+        }
+    })
 }
 
 /// Creates a stateful per-chain IK primitive solver.
@@ -273,26 +391,28 @@ pub unsafe extern "C" fn mmd_runtime_ik_chain_create(
     iteration_count: u32,
     limit_angle: f32,
 ) -> *mut MmdRuntimeIkChain {
-    let definition = unsafe {
-        build_ik_chain_definition(
-            bones,
+    ffi_guard(ptr::null_mut(), || {
+        let definition = unsafe {
+            build_ik_chain_definition(
+                bones,
+                bone_count,
+                target_bone_slot,
+                links,
+                link_count,
+                iteration_count,
+                limit_angle,
+            )
+        };
+        let Some(definition) = definition else {
+            return ptr::null_mut();
+        };
+        let solver = IkChainSolver::new(definition);
+        Box::into_raw(Box::new(MmdRuntimeIkChain {
+            solver,
             bone_count,
-            target_bone_slot,
-            links,
             link_count,
-            iteration_count,
-            limit_angle,
-        )
-    };
-    let Some(definition) = definition else {
-        return ptr::null_mut();
-    };
-    let solver = IkChainSolver::new(definition);
-    Box::into_raw(Box::new(MmdRuntimeIkChain {
-        solver,
-        bone_count,
-        link_count,
-    }))
+        }))
+    })
 }
 
 /// Frees an IK primitive solver handle.
@@ -302,12 +422,14 @@ pub unsafe extern "C" fn mmd_runtime_ik_chain_create(
 /// `chain` must be null or a pointer returned by `mmd_runtime_ik_chain_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_ik_chain_free(chain: *mut MmdRuntimeIkChain) {
-    if chain.is_null() {
-        return;
-    }
-    unsafe {
-        drop(Box::from_raw(chain));
-    }
+    ffi_guard_void(|| {
+        if chain.is_null() {
+            return;
+        }
+        unsafe {
+            drop(Box::from_raw(chain));
+        }
+    })
 }
 
 /// Solves one IK chain into caller-owned link-rotation output.
@@ -329,111 +451,114 @@ pub unsafe extern "C" fn mmd_runtime_ik_chain_solve(
     out_link_rotation_f32_len: usize,
     out_stats: *mut MmdRuntimeFfiIkSolveStats,
 ) -> bool {
-    if chain.is_null()
-        || local_rotations_xyzw.is_null()
-        || goal_position_xyz.is_null()
-        || out_link_rotations_xyzw.is_null()
-    {
-        return false;
-    }
-    let chain = unsafe { &mut *chain };
-    let required_output_len = match chain.link_count.checked_mul(4) {
-        Some(len) => len,
-        None => return false,
-    };
-    if out_link_rotation_f32_len < required_output_len {
-        return false;
-    }
-
-    let parent_world_matrix = if parent_world_matrix.is_null() {
-        None
-    } else {
-        let raw = unsafe { slice::from_raw_parts(parent_world_matrix, 16) };
-        if !all_finite(raw) {
+    ffi_guard(false, || {
+        if chain.is_null()
+            || local_rotations_xyzw.is_null()
+            || goal_position_xyz.is_null()
+            || out_link_rotations_xyzw.is_null()
+        {
             return false;
         }
-        let Ok(raw) = raw.try_into() else {
-            return false;
+        let chain = unsafe { &mut *chain };
+        let required_output_len = match chain.link_count.checked_mul(4) {
+            Some(len) => len,
+            None => return false,
         };
-        Some(glam::Mat4::from_cols_array(raw))
-    };
-
-    let position_offsets = if local_position_offsets_xyz.is_null() {
-        vec![glam::Vec3A::ZERO; chain.bone_count]
-    } else {
-        let Some(len) = chain.bone_count.checked_mul(3) else {
-            return false;
-        };
-        let raw = unsafe { slice::from_raw_parts(local_position_offsets_xyz, len) };
-        if !all_finite(raw) {
+        if out_link_rotation_f32_len < required_output_len {
             return false;
         }
-        raw.chunks_exact(3)
-            .map(|v| glam::Vec3A::new(v[0], v[1], v[2]))
-            .collect()
-    };
 
-    let Some(rotation_len) = chain.bone_count.checked_mul(4) else {
-        return false;
-    };
-    let raw_rotations = unsafe { slice::from_raw_parts(local_rotations_xyzw, rotation_len) };
-    if !all_finite(raw_rotations) {
-        return false;
-    }
-    let mut rotations = Vec::with_capacity(chain.bone_count);
-    for q in raw_rotations.chunks_exact(4) {
-        let rotation = glam::Quat::from_xyzw(q[0], q[1], q[2], q[3]);
-        if rotation.length_squared() <= f32::EPSILON {
-            return false;
-        }
-        rotations.push(rotation.normalize());
-    }
-
-    let goal = unsafe { slice::from_raw_parts(goal_position_xyz, 3) };
-    if !all_finite(goal) || !tolerance.is_finite() {
-        return false;
-    }
-    let max_iterations_cap = if max_iterations_cap == 0 {
-        None
-    } else {
-        Some(max_iterations_cap)
-    };
-
-    let output = chain.solver.solve(IkChainPoseInput {
-        parent_world_matrix,
-        local_position_offsets: &position_offsets,
-        local_rotations: &rotations,
-        goal_position: glam::Vec3A::new(goal[0], goal[1], goal[2]),
-        tolerance,
-        max_iterations_cap,
-    });
-    if output.solved_link_rotations.len() != chain.link_count {
-        return false;
-    }
-
-    let out = unsafe { slice::from_raw_parts_mut(out_link_rotations_xyzw, required_output_len) };
-    for (rotation, dst) in output
-        .solved_link_rotations
-        .iter()
-        .zip(out.chunks_exact_mut(4))
-    {
-        dst.copy_from_slice(&rotation.to_array());
-    }
-    if !out_stats.is_null() {
-        unsafe {
-            *out_stats = MmdRuntimeFfiIkSolveStats {
-                executed_iterations: output.executed_iterations,
-                link_steps: output.link_steps,
-                final_distance: output.final_distance,
-                break_reason: if output.final_distance <= tolerance.max(0.0) {
-                    0
-                } else {
-                    1
-                },
+        let parent_world_matrix = if parent_world_matrix.is_null() {
+            None
+        } else {
+            let raw = unsafe { slice::from_raw_parts(parent_world_matrix, 16) };
+            if !all_finite(raw) {
+                return false;
+            }
+            let Ok(raw) = raw.try_into() else {
+                return false;
             };
+            Some(glam::Mat4::from_cols_array(raw))
+        };
+
+        let position_offsets = if local_position_offsets_xyz.is_null() {
+            vec![glam::Vec3A::ZERO; chain.bone_count]
+        } else {
+            let Some(len) = chain.bone_count.checked_mul(3) else {
+                return false;
+            };
+            let raw = unsafe { slice::from_raw_parts(local_position_offsets_xyz, len) };
+            if !all_finite(raw) {
+                return false;
+            }
+            raw.chunks_exact(3)
+                .map(|v| glam::Vec3A::new(v[0], v[1], v[2]))
+                .collect()
+        };
+
+        let Some(rotation_len) = chain.bone_count.checked_mul(4) else {
+            return false;
+        };
+        let raw_rotations = unsafe { slice::from_raw_parts(local_rotations_xyzw, rotation_len) };
+        if !all_finite(raw_rotations) {
+            return false;
         }
-    }
-    true
+        let mut rotations = Vec::with_capacity(chain.bone_count);
+        for q in raw_rotations.chunks_exact(4) {
+            let rotation = glam::Quat::from_xyzw(q[0], q[1], q[2], q[3]);
+            if rotation.length_squared() <= f32::EPSILON {
+                return false;
+            }
+            rotations.push(rotation.normalize());
+        }
+
+        let goal = unsafe { slice::from_raw_parts(goal_position_xyz, 3) };
+        if !all_finite(goal) || !tolerance.is_finite() {
+            return false;
+        }
+        let max_iterations_cap = if max_iterations_cap == 0 {
+            None
+        } else {
+            Some(max_iterations_cap)
+        };
+
+        let output = chain.solver.solve(IkChainPoseInput {
+            parent_world_matrix,
+            local_position_offsets: &position_offsets,
+            local_rotations: &rotations,
+            goal_position: glam::Vec3A::new(goal[0], goal[1], goal[2]),
+            tolerance,
+            max_iterations_cap,
+        });
+        if output.solved_link_rotations.len() != chain.link_count {
+            return false;
+        }
+
+        let out =
+            unsafe { slice::from_raw_parts_mut(out_link_rotations_xyzw, required_output_len) };
+        for (rotation, dst) in output
+            .solved_link_rotations
+            .iter()
+            .zip(out.chunks_exact_mut(4))
+        {
+            dst.copy_from_slice(&rotation.to_array());
+        }
+        if !out_stats.is_null() {
+            unsafe {
+                *out_stats = MmdRuntimeFfiIkSolveStats {
+                    executed_iterations: output.executed_iterations,
+                    link_steps: output.link_steps,
+                    final_distance: output.final_distance,
+                    break_reason: if output.final_distance <= tolerance.max(0.0) {
+                        0
+                    } else {
+                        1
+                    },
+                };
+            }
+        }
+        true
+    })
 }
 
 /// Creates a per-bone append/grant primitive solver.
@@ -445,18 +570,20 @@ pub unsafe extern "C" fn mmd_runtime_ik_chain_solve(
 pub unsafe extern "C" fn mmd_runtime_append_solver_create(
     config: *const MmdRuntimeFfiAppendConfig,
 ) -> *mut MmdRuntimeAppendSolver {
-    if config.is_null() {
-        return ptr::null_mut();
-    }
-    let config = unsafe { &*config };
-    if !config.ratio.is_finite() {
-        return ptr::null_mut();
-    }
-    Box::into_raw(Box::new(MmdRuntimeAppendSolver {
-        ratio: config.ratio,
-        affect_rotation: config.affect_rotation,
-        affect_translation: config.affect_translation,
-    }))
+    ffi_guard(ptr::null_mut(), || {
+        if config.is_null() {
+            return ptr::null_mut();
+        }
+        let config = unsafe { &*config };
+        if !config.ratio.is_finite() {
+            return ptr::null_mut();
+        }
+        Box::into_raw(Box::new(MmdRuntimeAppendSolver {
+            ratio: config.ratio,
+            affect_rotation: config.affect_rotation,
+            affect_translation: config.affect_translation,
+        }))
+    })
 }
 
 /// Frees an append primitive solver handle.
@@ -467,12 +594,14 @@ pub unsafe extern "C" fn mmd_runtime_append_solver_create(
 /// `mmd_runtime_append_solver_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_append_solver_free(solver: *mut MmdRuntimeAppendSolver) {
-    if solver.is_null() {
-        return;
-    }
-    unsafe {
-        drop(Box::from_raw(solver));
-    }
+    ffi_guard_void(|| {
+        if solver.is_null() {
+            return;
+        }
+        unsafe {
+            drop(Box::from_raw(solver));
+        }
+    })
 }
 
 /// Solves one append/grant primitive into caller-owned output arrays.
@@ -489,37 +618,40 @@ pub unsafe extern "C" fn mmd_runtime_append_solver_solve(
     out_position_offset_xyz: *mut f32,
     out_rotation_xyzw: *mut f32,
 ) -> bool {
-    if solver.is_null()
-        || source_position_offset_xyz.is_null()
-        || source_rotation_xyzw.is_null()
-        || out_position_offset_xyz.is_null()
-        || out_rotation_xyzw.is_null()
-    {
-        return false;
-    }
-    let solver = unsafe { &*solver };
-    let position = unsafe { slice::from_raw_parts(source_position_offset_xyz, 3) };
-    let rotation = unsafe { slice::from_raw_parts(source_rotation_xyzw, 4) };
-    if !all_finite(position) || !all_finite(rotation) {
-        return false;
-    }
-    let source_rotation = glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
-    if source_rotation.length_squared() <= f32::EPSILON {
-        return false;
-    }
+    ffi_guard(false, || {
+        if solver.is_null()
+            || source_position_offset_xyz.is_null()
+            || source_rotation_xyzw.is_null()
+            || out_position_offset_xyz.is_null()
+            || out_rotation_xyzw.is_null()
+        {
+            return false;
+        }
+        let solver = unsafe { &*solver };
+        let position = unsafe { slice::from_raw_parts(source_position_offset_xyz, 3) };
+        let rotation = unsafe { slice::from_raw_parts(source_rotation_xyzw, 4) };
+        if !all_finite(position) || !all_finite(rotation) {
+            return false;
+        }
+        let source_rotation =
+            glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
+        if source_rotation.length_squared() <= f32::EPSILON {
+            return false;
+        }
 
-    let output = solve_append_transform(AppendPrimitiveInput {
-        source_position_offset: glam::Vec3A::new(position[0], position[1], position[2]),
-        source_rotation: source_rotation.normalize(),
-        ratio: solver.ratio,
-        affect_rotation: solver.affect_rotation,
-        affect_translation: solver.affect_translation,
-    });
-    let out_position = unsafe { slice::from_raw_parts_mut(out_position_offset_xyz, 3) };
-    out_position.copy_from_slice(&output.position_offset.to_array());
-    let out_rotation = unsafe { slice::from_raw_parts_mut(out_rotation_xyzw, 4) };
-    out_rotation.copy_from_slice(&output.rotation.to_array());
-    true
+        let output = solve_append_transform(AppendPrimitiveInput {
+            source_position_offset: glam::Vec3A::new(position[0], position[1], position[2]),
+            source_rotation: source_rotation.normalize(),
+            ratio: solver.ratio,
+            affect_rotation: solver.affect_rotation,
+            affect_translation: solver.affect_translation,
+        });
+        let out_position = unsafe { slice::from_raw_parts_mut(out_position_offset_xyz, 3) };
+        out_position.copy_from_slice(&output.position_offset.to_array());
+        let out_rotation = unsafe { slice::from_raw_parts_mut(out_rotation_xyzw, 4) };
+        out_rotation.copy_from_slice(&output.rotation.to_array());
+        true
+    })
 }
 
 /// Parses VMD bytes and returns the serialized `VmdParsedAnimation` JSON.
@@ -534,20 +666,22 @@ pub unsafe extern "C" fn mmd_runtime_parse_vmd_json(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        if data.is_null() || len == 0 {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
 
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return empty_byte_buffer(),
-    };
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return empty_byte_buffer_failure(FFI_ERR_VMD_PARSE_FAILED),
+        };
 
-    match serde_json::to_vec(&parsed) {
-        Ok(json) => byte_buffer_from_vec(json),
-        Err(_) => empty_byte_buffer(),
-    }
+        match serde_json::to_vec(&parsed) {
+            Ok(json) => byte_buffer_from_vec(json),
+            Err(_) => empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
+        }
+    })
 }
 
 /// Parses VMD bytes and returns an owned camera-track handle.
@@ -562,22 +696,24 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_create_from_vmd_bytes(
     data: *const u8,
     len: usize,
 ) -> *mut MmdRuntimeVmdCameraTrack {
-    if data.is_null() || len == 0 {
-        return ptr::null_mut();
-    }
+    ffi_guard(ptr::null_mut(), || {
+        if data.is_null() || len == 0 {
+            return ptr::null_mut();
+        }
 
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return ptr::null_mut(),
-    };
-    if parsed.camera_frames.is_empty() {
-        return ptr::null_mut();
-    }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return ptr::null_mut(),
+        };
+        if parsed.camera_frames.is_empty() {
+            return ptr::null_mut();
+        }
 
-    Box::into_raw(Box::new(MmdRuntimeVmdCameraTrack {
-        frames: parsed.camera_frames,
-    }))
+        Box::into_raw(Box::new(MmdRuntimeVmdCameraTrack {
+            frames: parsed.camera_frames,
+        }))
+    })
 }
 
 /// Returns the number of camera keyframes in a VMD camera track.
@@ -590,10 +726,12 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_create_from_vmd_bytes(
 pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_frame_count(
     track: *const MmdRuntimeVmdCameraTrack,
 ) -> usize {
-    let Some(track) = (unsafe { track.as_ref() }) else {
-        return 0;
-    };
-    track.frames.len()
+    ffi_guard(0, || {
+        let Some(track) = (unsafe { track.as_ref() }) else {
+            return 0;
+        };
+        track.frames.len()
+    })
 }
 
 /// Samples an owned VMD camera track into a flat array.
@@ -618,19 +756,21 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_sample(
     out_values: *mut f32,
     out_len: usize,
 ) -> bool {
-    if !frame.is_finite() || out_values.is_null() || out_len < 9 {
-        return false;
-    }
-    let Some(track) = (unsafe { track.as_ref() }) else {
-        return false;
-    };
-    let Some(camera) = mmd_anim_format::sample_vmd_camera_frames(&track.frames, frame) else {
-        return false;
-    };
-    unsafe {
-        write_camera_state_array(camera, out_values);
-    }
-    true
+    ffi_guard(false, || {
+        if !frame.is_finite() || out_values.is_null() || out_len < 9 {
+            return false;
+        }
+        let Some(track) = (unsafe { track.as_ref() }) else {
+            return false;
+        };
+        let Some(camera) = mmd_anim_format::sample_vmd_camera_frames(&track.frames, frame) else {
+            return false;
+        };
+        unsafe {
+            write_camera_state_array(camera, out_values);
+        }
+        true
+    })
 }
 
 /// Samples camera motion directly from VMD bytes.
@@ -651,22 +791,24 @@ pub unsafe extern "C" fn mmd_runtime_vmd_sample_camera(
     out_values: *mut f32,
     out_len: usize,
 ) -> bool {
-    if data.is_null() || len == 0 || !frame.is_finite() || out_values.is_null() || out_len < 9 {
-        return false;
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return false,
-    };
-    let Some(camera) = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
-    else {
-        return false;
-    };
-    unsafe {
-        write_camera_state_array(camera, out_values);
-    }
-    true
+    ffi_guard(false, || {
+        if data.is_null() || len == 0 || !frame.is_finite() || out_values.is_null() || out_len < 9 {
+            return false;
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        let Some(camera) = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
+        else {
+            return false;
+        };
+        unsafe {
+            write_camera_state_array(camera, out_values);
+        }
+        true
+    })
 }
 
 /// Frees a VMD camera track created by
@@ -678,11 +820,13 @@ pub unsafe extern "C" fn mmd_runtime_vmd_sample_camera(
 /// not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_free(track: *mut MmdRuntimeVmdCameraTrack) {
-    if !track.is_null() {
-        unsafe {
-            drop(Box::from_raw(track));
+    ffi_guard_void(|| {
+        if !track.is_null() {
+            unsafe {
+                drop(Box::from_raw(track));
+            }
         }
-    }
+    })
 }
 
 /// Parses VMD bytes and returns an owned light-track handle.
@@ -697,22 +841,24 @@ pub unsafe extern "C" fn mmd_runtime_vmd_light_track_create_from_vmd_bytes(
     data: *const u8,
     len: usize,
 ) -> *mut MmdRuntimeVmdLightTrack {
-    if data.is_null() || len == 0 {
-        return ptr::null_mut();
-    }
+    ffi_guard(ptr::null_mut(), || {
+        if data.is_null() || len == 0 {
+            return ptr::null_mut();
+        }
 
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return ptr::null_mut(),
-    };
-    if parsed.light_frames.is_empty() {
-        return ptr::null_mut();
-    }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return ptr::null_mut(),
+        };
+        if parsed.light_frames.is_empty() {
+            return ptr::null_mut();
+        }
 
-    Box::into_raw(Box::new(MmdRuntimeVmdLightTrack {
-        frames: parsed.light_frames,
-    }))
+        Box::into_raw(Box::new(MmdRuntimeVmdLightTrack {
+            frames: parsed.light_frames,
+        }))
+    })
 }
 
 /// Returns the number of light keyframes in a VMD light track.
@@ -725,10 +871,12 @@ pub unsafe extern "C" fn mmd_runtime_vmd_light_track_create_from_vmd_bytes(
 pub unsafe extern "C" fn mmd_runtime_vmd_light_track_frame_count(
     track: *const MmdRuntimeVmdLightTrack,
 ) -> usize {
-    let Some(track) = (unsafe { track.as_ref() }) else {
-        return 0;
-    };
-    track.frames.len()
+    ffi_guard(0, || {
+        let Some(track) = (unsafe { track.as_ref() }) else {
+            return 0;
+        };
+        track.frames.len()
+    })
 }
 
 /// Samples an owned VMD light track into a flat array.
@@ -748,19 +896,21 @@ pub unsafe extern "C" fn mmd_runtime_vmd_light_track_sample(
     out_values: *mut f32,
     out_len: usize,
 ) -> bool {
-    if !frame.is_finite() || out_values.is_null() || out_len < 6 {
-        return false;
-    }
-    let Some(track) = (unsafe { track.as_ref() }) else {
-        return false;
-    };
-    let Some(light) = mmd_anim_format::sample_vmd_light_frames(&track.frames, frame) else {
-        return false;
-    };
-    unsafe {
-        write_light_state_array(light, out_values);
-    }
-    true
+    ffi_guard(false, || {
+        if !frame.is_finite() || out_values.is_null() || out_len < 6 {
+            return false;
+        }
+        let Some(track) = (unsafe { track.as_ref() }) else {
+            return false;
+        };
+        let Some(light) = mmd_anim_format::sample_vmd_light_frames(&track.frames, frame) else {
+            return false;
+        };
+        unsafe {
+            write_light_state_array(light, out_values);
+        }
+        true
+    })
 }
 
 /// Samples light motion directly from VMD bytes.
@@ -781,21 +931,24 @@ pub unsafe extern "C" fn mmd_runtime_vmd_sample_light(
     out_values: *mut f32,
     out_len: usize,
 ) -> bool {
-    if data.is_null() || len == 0 || !frame.is_finite() || out_values.is_null() || out_len < 6 {
-        return false;
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return false,
-    };
-    let Some(light) = mmd_anim_format::sample_vmd_light_frames(&parsed.light_frames, frame) else {
-        return false;
-    };
-    unsafe {
-        write_light_state_array(light, out_values);
-    }
-    true
+    ffi_guard(false, || {
+        if data.is_null() || len == 0 || !frame.is_finite() || out_values.is_null() || out_len < 6 {
+            return false;
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        let Some(light) = mmd_anim_format::sample_vmd_light_frames(&parsed.light_frames, frame)
+        else {
+            return false;
+        };
+        unsafe {
+            write_light_state_array(light, out_values);
+        }
+        true
+    })
 }
 
 /// Frees a VMD light track created by
@@ -807,11 +960,13 @@ pub unsafe extern "C" fn mmd_runtime_vmd_sample_light(
 /// not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_vmd_light_track_free(track: *mut MmdRuntimeVmdLightTrack) {
-    if !track.is_null() {
-        unsafe {
-            drop(Box::from_raw(track));
+    ffi_guard_void(|| {
+        if !track.is_null() {
+            unsafe {
+                drop(Box::from_raw(track));
+            }
         }
-    }
+    })
 }
 
 /// Parses VMD bytes and returns an owned self-shadow-track handle.
@@ -826,22 +981,24 @@ pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_create_from_vmd_bytes
     data: *const u8,
     len: usize,
 ) -> *mut MmdRuntimeVmdSelfShadowTrack {
-    if data.is_null() || len == 0 {
-        return ptr::null_mut();
-    }
+    ffi_guard(ptr::null_mut(), || {
+        if data.is_null() || len == 0 {
+            return ptr::null_mut();
+        }
 
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return ptr::null_mut(),
-    };
-    if parsed.self_shadow_frames.is_empty() {
-        return ptr::null_mut();
-    }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return ptr::null_mut(),
+        };
+        if parsed.self_shadow_frames.is_empty() {
+            return ptr::null_mut();
+        }
 
-    Box::into_raw(Box::new(MmdRuntimeVmdSelfShadowTrack {
-        frames: parsed.self_shadow_frames,
-    }))
+        Box::into_raw(Box::new(MmdRuntimeVmdSelfShadowTrack {
+            frames: parsed.self_shadow_frames,
+        }))
+    })
 }
 
 /// Returns the number of self-shadow keyframes in a VMD self-shadow track.
@@ -854,10 +1011,12 @@ pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_create_from_vmd_bytes
 pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_frame_count(
     track: *const MmdRuntimeVmdSelfShadowTrack,
 ) -> usize {
-    let Some(track) = (unsafe { track.as_ref() }) else {
-        return 0;
-    };
-    track.frames.len()
+    ffi_guard(0, || {
+        let Some(track) = (unsafe { track.as_ref() }) else {
+            return 0;
+        };
+        track.frames.len()
+    })
 }
 
 /// Samples an owned VMD self-shadow track into a flat array.
@@ -876,20 +1035,23 @@ pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_sample(
     out_values: *mut f32,
     out_len: usize,
 ) -> bool {
-    if !frame.is_finite() || out_values.is_null() || out_len < 2 {
-        return false;
-    }
-    let Some(track) = (unsafe { track.as_ref() }) else {
-        return false;
-    };
-    let Some(self_shadow) = mmd_anim_format::sample_vmd_self_shadow_frames(&track.frames, frame)
-    else {
-        return false;
-    };
-    unsafe {
-        write_self_shadow_state_array(self_shadow, out_values);
-    }
-    true
+    ffi_guard(false, || {
+        if !frame.is_finite() || out_values.is_null() || out_len < 2 {
+            return false;
+        }
+        let Some(track) = (unsafe { track.as_ref() }) else {
+            return false;
+        };
+        let Some(self_shadow) =
+            mmd_anim_format::sample_vmd_self_shadow_frames(&track.frames, frame)
+        else {
+            return false;
+        };
+        unsafe {
+            write_self_shadow_state_array(self_shadow, out_values);
+        }
+        true
+    })
 }
 
 /// Samples self-shadow motion directly from VMD bytes.
@@ -910,23 +1072,25 @@ pub unsafe extern "C" fn mmd_runtime_vmd_sample_self_shadow(
     out_values: *mut f32,
     out_len: usize,
 ) -> bool {
-    if data.is_null() || len == 0 || !frame.is_finite() || out_values.is_null() || out_len < 2 {
-        return false;
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return false,
-    };
-    let Some(self_shadow) =
-        mmd_anim_format::sample_vmd_self_shadow_frames(&parsed.self_shadow_frames, frame)
-    else {
-        return false;
-    };
-    unsafe {
-        write_self_shadow_state_array(self_shadow, out_values);
-    }
-    true
+    ffi_guard(false, || {
+        if data.is_null() || len == 0 || !frame.is_finite() || out_values.is_null() || out_len < 2 {
+            return false;
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let parsed = match mmd_anim_format::parse_vmd_animation(bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        let Some(self_shadow) =
+            mmd_anim_format::sample_vmd_self_shadow_frames(&parsed.self_shadow_frames, frame)
+        else {
+            return false;
+        };
+        unsafe {
+            write_self_shadow_state_array(self_shadow, out_values);
+        }
+        true
+    })
 }
 
 /// Frees a VMD self-shadow track created by
@@ -940,11 +1104,13 @@ pub unsafe extern "C" fn mmd_runtime_vmd_sample_self_shadow(
 pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_free(
     track: *mut MmdRuntimeVmdSelfShadowTrack,
 ) {
-    if !track.is_null() {
-        unsafe {
-            drop(Box::from_raw(track));
+    ffi_guard_void(|| {
+        if !track.is_null() {
+            unsafe {
+                drop(Box::from_raw(track));
+            }
         }
-    }
+    })
 }
 
 fn camera_state_array(camera: mmd_anim_format::VmdCameraState) -> [f32; 9] {
@@ -1016,52 +1182,54 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_non_geometry_json(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        if data.is_null() || len == 0 {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
 
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let parsed = match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return empty_byte_buffer(),
-    };
-
-    let mut object = serde_json::Map::with_capacity(9);
-    macro_rules! push_json_field {
-        ($key:expr, $value:expr) => {
-            match serde_json::to_value($value) {
-                Ok(value) => {
-                    object.insert($key.to_owned(), value);
-                }
-                Err(_) => return empty_byte_buffer(),
-            }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let parsed = match mmd_anim_format::parse_pmx_model(bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
         };
-    }
 
-    push_json_field!("metadata", &parsed.metadata);
-    match unity_pmx_materials_json(&parsed.materials) {
-        Ok(value) => {
-            object.insert("materials".to_owned(), value);
+        let mut object = serde_json::Map::with_capacity(9);
+        macro_rules! push_json_field {
+            ($key:expr, $value:expr) => {
+                match serde_json::to_value($value) {
+                    Ok(value) => {
+                        object.insert($key.to_owned(), value);
+                    }
+                    Err(_) => return empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
+                }
+            };
         }
-        Err(_) => return empty_byte_buffer(),
-    }
-    match unity_pmx_skeleton_json(&parsed.skeleton) {
-        Ok(value) => {
-            object.insert("skeleton".to_owned(), value);
-        }
-        Err(_) => return empty_byte_buffer(),
-    }
-    push_json_field!("morphs", &parsed.morphs);
-    push_json_field!("displayFrames", &parsed.display_frames);
-    push_json_field!("rigidBodies", &parsed.rigid_bodies);
-    push_json_field!("joints", &parsed.joints);
-    push_json_field!("softBodies", &parsed.soft_bodies);
-    push_json_field!("diagnostics", &parsed.diagnostics);
 
-    match serde_json::to_vec(&serde_json::Value::Object(object)) {
-        Ok(json) => byte_buffer_from_vec(json),
-        Err(_) => empty_byte_buffer(),
-    }
+        push_json_field!("metadata", &parsed.metadata);
+        match unity_pmx_materials_json(&parsed.materials) {
+            Ok(value) => {
+                object.insert("materials".to_owned(), value);
+            }
+            Err(_) => return empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
+        }
+        match unity_pmx_skeleton_json(&parsed.skeleton) {
+            Ok(value) => {
+                object.insert("skeleton".to_owned(), value);
+            }
+            Err(_) => return empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
+        }
+        push_json_field!("morphs", &parsed.morphs);
+        push_json_field!("displayFrames", &parsed.display_frames);
+        push_json_field!("rigidBodies", &parsed.rigid_bodies);
+        push_json_field!("joints", &parsed.joints);
+        push_json_field!("softBodies", &parsed.soft_bodies);
+        push_json_field!("diagnostics", &parsed.diagnostics);
+
+        match serde_json::to_vec(&serde_json::Value::Object(object)) {
+            Ok(json) => byte_buffer_from_vec(json),
+            Err(_) => empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
+        }
+    })
 }
 
 fn unity_pmx_materials_json(
@@ -1121,22 +1289,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_positions_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let buf: Vec<u8> = parsed
-                .geometry
-                .positions
-                .iter()
-                .flat_map(|v| v.to_ne_bytes())
-                .collect();
-            byte_buffer_from_vec(buf)
-        }
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.positions)
+    })
 }
 
 /// Parses PMX bytes and returns vertex normals as a native-endian byte buffer.
@@ -1150,22 +1305,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_normals_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let buf: Vec<u8> = parsed
-                .geometry
-                .normals
-                .iter()
-                .flat_map(|v| v.to_ne_bytes())
-                .collect();
-            byte_buffer_from_vec(buf)
-        }
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.normals)
+    })
 }
 
 /// Parses PMX bytes and returns vertex UVs as a native-endian byte buffer.
@@ -1179,22 +1321,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_uvs_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let buf: Vec<u8> = parsed
-                .geometry
-                .uvs
-                .iter()
-                .flat_map(|v| v.to_ne_bytes())
-                .collect();
-            byte_buffer_from_vec(buf)
-        }
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.uvs)
+    })
 }
 
 /// Parses PMX bytes and returns the number of additional UV channels.
@@ -1208,14 +1337,16 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_additional_uv_count(
     data: *const u8,
     len: usize,
 ) -> usize {
-    if data.is_null() || len == 0 {
-        return 0;
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => parsed.geometry.additional_uvs.len(),
-        Err(_) => 0,
-    }
+    ffi_guard(0, || {
+        if data.is_null() || len == 0 {
+            return 0;
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        match mmd_anim_format::parse_pmx_model(bytes) {
+            Ok(parsed) => parsed.geometry.additional_uvs.len(),
+            Err(_) => 0,
+        }
+    })
 }
 
 /// Parses PMX bytes and returns one additional-UV channel as a native-endian byte buffer.
@@ -1232,19 +1363,17 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_additional_uvs_buffer(
     len: usize,
     uv_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let Some(values) = parsed.geometry.additional_uvs.get(uv_index) else {
-                return empty_byte_buffer();
-            };
-            byte_buffer_from_f32_slice(values)
+    ffi_guard(empty_byte_buffer(), || {
+        match parse_pmx_model_from_raw(data, len) {
+            Ok(parsed) => {
+                let Some(values) = parsed.geometry.additional_uvs.get(uv_index) else {
+                    return empty_byte_buffer();
+                };
+                byte_buffer_from_f32_slice(values)
+            }
+            Err(buffer) => buffer,
         }
-        Err(_) => empty_byte_buffer(),
-    }
+    })
 }
 
 /// Parses PMX bytes and returns face indices as a native-endian byte buffer.
@@ -1258,22 +1387,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_indices_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let buf: Vec<u8> = parsed
-                .geometry
-                .indices
-                .iter()
-                .flat_map(|v| v.to_ne_bytes())
-                .collect();
-            byte_buffer_from_vec(buf)
-        }
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_u32_buffer(data, len, |geometry| &geometry.indices)
+    })
 }
 
 /// Parses PMX bytes and returns material groups as a native-endian byte buffer.
@@ -1288,28 +1404,12 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_material_groups_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let groups: Vec<u32> = parsed
-                .geometry
-                .material_groups
-                .iter()
-                .flat_map(|group| {
-                    [
-                        group.start as u32,
-                        group.count as u32,
-                        group.material_index as u32,
-                    ]
-                })
-                .collect();
-            byte_buffer_from_u32_slice(&groups)
+    ffi_guard(empty_byte_buffer(), || {
+        match parse_pmx_model_from_raw(data, len) {
+            Ok(parsed) => pmx_material_groups_buffer(&parsed.geometry.material_groups),
+            Err(buffer) => buffer,
         }
-        Err(_) => empty_byte_buffer(),
-    }
+    })
 }
 
 /// Parses PMX bytes and returns skin bone indices as a native-endian byte buffer.
@@ -1323,22 +1423,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_skin_indices_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let buf: Vec<u8> = parsed
-                .geometry
-                .skin_indices
-                .iter()
-                .flat_map(|v| v.to_ne_bytes())
-                .collect();
-            byte_buffer_from_vec(buf)
-        }
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_u32_buffer(data, len, |geometry| &geometry.skin_indices)
+    })
 }
 
 /// Parses PMX bytes and returns skin weights as a native-endian byte buffer.
@@ -1352,22 +1439,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_skin_weights_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let buf: Vec<u8> = parsed
-                .geometry
-                .skin_weights
-                .iter()
-                .flat_map(|v| v.to_ne_bytes())
-                .collect();
-            byte_buffer_from_vec(buf)
-        }
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.skin_weights)
+    })
 }
 
 /// Parses PMX bytes and returns per-vertex edge scale as a native-endian byte buffer.
@@ -1381,14 +1455,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_edge_scale_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => byte_buffer_from_f32_slice(&parsed.geometry.edge_scale),
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.edge_scale)
+    })
 }
 
 /// Parses PMX bytes and returns SDEF-enabled flags as a byte buffer.
@@ -1403,23 +1472,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_enabled_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let buf: Vec<u8> = parsed
-                .geometry
-                .sdef
-                .enabled
-                .iter()
-                .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
-                .collect();
-            byte_buffer_from_vec(buf)
-        }
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_flags_buffer(data, len, |geometry| &geometry.sdef.enabled)
+    })
 }
 
 /// Parses PMX bytes and returns SDEF C vectors as a native-endian byte buffer.
@@ -1433,23 +1488,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_c_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let buf: Vec<u8> = parsed
-                .geometry
-                .sdef
-                .c
-                .iter()
-                .flat_map(|v| v.to_ne_bytes())
-                .collect();
-            byte_buffer_from_vec(buf)
-        }
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.sdef.c)
+    })
 }
 
 /// Parses PMX bytes and returns SDEF R0 vectors as a native-endian byte buffer.
@@ -1463,23 +1504,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_r0_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let buf: Vec<u8> = parsed
-                .geometry
-                .sdef
-                .r0
-                .iter()
-                .flat_map(|v| v.to_ne_bytes())
-                .collect();
-            byte_buffer_from_vec(buf)
-        }
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.sdef.r0)
+    })
 }
 
 /// Parses PMX bytes and returns SDEF R1 vectors as a native-endian byte buffer.
@@ -1493,23 +1520,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_r1_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let buf: Vec<u8> = parsed
-                .geometry
-                .sdef
-                .r1
-                .iter()
-                .flat_map(|v| v.to_ne_bytes())
-                .collect();
-            byte_buffer_from_vec(buf)
-        }
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.sdef.r1)
+    })
 }
 
 /// Parses PMX bytes and returns derived SDEF RW0 vectors as a native-endian byte buffer.
@@ -1523,14 +1536,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_rw0_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => byte_buffer_from_f32_slice(&parsed.geometry.sdef.rw0),
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.sdef.rw0)
+    })
 }
 
 /// Parses PMX bytes and returns derived SDEF RW1 vectors as a native-endian byte buffer.
@@ -1544,14 +1552,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_rw1_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => byte_buffer_from_f32_slice(&parsed.geometry.sdef.rw1),
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.sdef.rw1)
+    })
 }
 
 /// Parses PMX bytes and returns QDEF-enabled flags as a byte buffer.
@@ -1566,22 +1569,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_qdef_enabled_buffer(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => byte_buffer_from_vec(
-            parsed
-                .geometry
-                .qdef
-                .enabled
-                .iter()
-                .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
-                .collect(),
-        ),
-        Err(_) => empty_byte_buffer(),
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_raw_f32_flags_buffer(data, len, |geometry| &geometry.qdef.enabled)
+    })
 }
 
 /// Parses PMX bytes and returns skinning mode names as a JSON object.
@@ -1596,56 +1586,327 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_skinning_modes_json(
     data: *const u8,
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    if data.is_null() || len == 0 {
-        return empty_byte_buffer();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    match mmd_anim_format::parse_pmx_model(bytes) {
-        Ok(parsed) => {
-            let vertex_count = parsed.geometry.positions.len() / 3;
-            let modes: Vec<&str> = (0..vertex_count)
-                .map(|i| {
-                    if parsed.geometry.sdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
-                        "sdef"
-                    } else if parsed.geometry.qdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
-                        "qdef"
-                    } else {
-                        let w2 = parsed
-                            .geometry
-                            .skin_weights
-                            .get(i * 4 + 2)
-                            .copied()
-                            .unwrap_or(0.0);
-                        let w3 = parsed
-                            .geometry
-                            .skin_weights
-                            .get(i * 4 + 3)
-                            .copied()
-                            .unwrap_or(0.0);
-                        let w1 = parsed
-                            .geometry
-                            .skin_weights
-                            .get(i * 4 + 1)
-                            .copied()
-                            .unwrap_or(0.0);
-                        if w2 != 0.0 || w3 != 0.0 {
-                            "bdef4"
-                        } else if w1 != 0.0 {
-                            "bdef2"
-                        } else {
-                            "bdef1"
-                        }
-                    }
-                })
-                .collect();
-            let wrapper = serde_json::json!({ "skinningModes": modes });
-            match serde_json::to_vec(&wrapper) {
-                Ok(json) => byte_buffer_from_vec(json),
-                Err(_) => empty_byte_buffer(),
+    ffi_guard(empty_byte_buffer(), || {
+        if data.is_null() || len == 0 {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        match mmd_anim_format::parse_pmx_model(bytes) {
+            Ok(parsed) => pmx_skinning_modes_json_buffer(&parsed.geometry),
+            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
+        }
+    })
+}
+
+/// Parses PMX bytes once and creates an opaque geometry handle.
+///
+/// Use the `mmd_runtime_pmx_geometry_*_buffer` accessors to fetch multiple
+/// geometry arrays without reparsing the PMX bytes for each array.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_create(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimePmxGeometry {
+    ffi_guard(ptr::null_mut(), || {
+        if data.is_null() || len == 0 {
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        match mmd_anim_format::parse_pmx_model(bytes) {
+            Ok(parsed) => Box::into_raw(Box::new(MmdRuntimePmxGeometry { parsed })),
+            Err(_) => null_mut_failure(FFI_ERR_PMX_PARSE_FAILED),
+        }
+    })
+}
+
+/// Frees a PMX geometry handle created by `mmd_runtime_pmx_geometry_create`.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`. Passing any other pointer is undefined
+/// behavior.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_free(geometry: *mut MmdRuntimePmxGeometry) {
+    ffi_guard_void(|| {
+        if !geometry.is_null() {
+            unsafe {
+                drop(Box::from_raw(geometry));
             }
         }
-        Err(_) => empty_byte_buffer(),
-    }
+    })
+}
+
+/// Returns the number of additional UV channels in a PMX geometry handle.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_additional_uv_count(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+            return 0;
+        };
+        geometry.parsed.geometry.additional_uvs.len()
+    })
+}
+
+/// Returns handle-owned PMX vertex positions as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_positions_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.positions)
+    })
+}
+
+/// Returns handle-owned PMX vertex normals as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_normals_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.normals)
+    })
+}
+
+/// Returns handle-owned PMX vertex UVs as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_uvs_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.uvs)
+    })
+}
+
+/// Returns one handle-owned PMX additional-UV channel as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_additional_uvs_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+    uv_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        let Some(values) = geometry.parsed.geometry.additional_uvs.get(uv_index) else {
+            return empty_byte_buffer();
+        };
+        byte_buffer_from_f32_slice(values)
+    })
+}
+
+/// Returns handle-owned PMX face indices as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_indices_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_u32_buffer(geometry, |geometry| &geometry.indices)
+    })
+}
+
+/// Returns handle-owned PMX material groups as `[start, count, material_index]` triples.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_material_groups_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        pmx_material_groups_buffer(&geometry.parsed.geometry.material_groups)
+    })
+}
+
+/// Returns handle-owned PMX skin bone indices as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_skin_indices_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_u32_buffer(geometry, |geometry| &geometry.skin_indices)
+    })
+}
+
+/// Returns handle-owned PMX skin weights as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_skin_weights_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.skin_weights)
+    })
+}
+
+/// Returns handle-owned PMX edge scale values as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_edge_scale_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.edge_scale)
+    })
+}
+
+/// Returns handle-owned PMX SDEF-enabled flags as one byte per vertex.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_enabled_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_flags_buffer(geometry, |geometry| &geometry.sdef.enabled)
+    })
+}
+
+/// Returns handle-owned PMX SDEF C vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_c_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.sdef.c)
+    })
+}
+
+/// Returns handle-owned PMX SDEF R0 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_r0_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.sdef.r0)
+    })
+}
+
+/// Returns handle-owned PMX SDEF R1 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_r1_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.sdef.r1)
+    })
+}
+
+/// Returns handle-owned PMX derived SDEF RW0 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_rw0_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.sdef.rw0)
+    })
+}
+
+/// Returns handle-owned PMX derived SDEF RW1 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_rw1_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.sdef.rw1)
+    })
+}
+
+/// Returns handle-owned PMX QDEF-enabled flags as one byte per vertex.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_qdef_enabled_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_flags_buffer(geometry, |geometry| &geometry.qdef.enabled)
+    })
+}
+
+/// Returns handle-owned PMX skinning mode names as a JSON object.
+///
+/// The returned JSON has the shape `{"skinningModes": ["bdef1", ...]}`.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_skinning_modes_json(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        pmx_skinning_modes_json_buffer(&geometry.parsed.geometry)
+    })
 }
 
 /// Parses PMX bytes once and creates an opaque material-split handle.
@@ -1658,22 +1919,24 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_create(
     len: usize,
     flags: u32,
 ) -> *mut MmdRuntimePmxMaterialSplit {
-    if data.is_null() || len == 0 {
-        return ptr::null_mut();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let split = match mmd_anim_format::parse_pmx_material_split(bytes, flags) {
-        Ok(split) => split,
-        Err(_) => return ptr::null_mut(),
-    };
-    let manifest_json = match serde_json::to_vec(&split.manifest) {
-        Ok(json) => json,
-        Err(_) => return ptr::null_mut(),
-    };
-    Box::into_raw(Box::new(MmdRuntimePmxMaterialSplit {
-        split,
-        manifest_json,
-    }))
+    ffi_guard(ptr::null_mut(), || {
+        if data.is_null() || len == 0 {
+            return ptr::null_mut();
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let split = match mmd_anim_format::parse_pmx_material_split(bytes, flags) {
+            Ok(split) => split,
+            Err(_) => return ptr::null_mut(),
+        };
+        let manifest_json = match serde_json::to_vec(&split.manifest) {
+            Ok(json) => json,
+            Err(_) => return ptr::null_mut(),
+        };
+        Box::into_raw(Box::new(MmdRuntimePmxMaterialSplit {
+            split,
+            manifest_json,
+        }))
+    })
 }
 
 /// Parses PMX bytes once and creates an opaque rig-spec handle.
@@ -1685,22 +1948,24 @@ pub unsafe extern "C" fn mmd_runtime_pmx_rig_spec_create(
     data: *const u8,
     len: usize,
 ) -> *mut MmdRuntimePmxRigSpec {
-    if data.is_null() || len == 0 {
-        return ptr::null_mut();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let spec = match mmd_anim_format::parse_pmx_rig_spec(bytes) {
-        Ok(spec) => spec,
-        Err(_) => return ptr::null_mut(),
-    };
-    let manifest_json = match serde_json::to_vec(&spec) {
-        Ok(json) => json,
-        Err(_) => return ptr::null_mut(),
-    };
-    Box::into_raw(Box::new(MmdRuntimePmxRigSpec {
-        spec,
-        manifest_json,
-    }))
+    ffi_guard(ptr::null_mut(), || {
+        if data.is_null() || len == 0 {
+            return ptr::null_mut();
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let spec = match mmd_anim_format::parse_pmx_rig_spec(bytes) {
+            Ok(spec) => spec,
+            Err(_) => return ptr::null_mut(),
+        };
+        let manifest_json = match serde_json::to_vec(&spec) {
+            Ok(json) => json,
+            Err(_) => return ptr::null_mut(),
+        };
+        Box::into_raw(Box::new(MmdRuntimePmxRigSpec {
+            spec,
+            manifest_json,
+        }))
+    })
 }
 
 /// Frees a PMX material-split handle.
@@ -1712,12 +1977,14 @@ pub unsafe extern "C" fn mmd_runtime_pmx_rig_spec_create(
 pub unsafe extern "C" fn mmd_runtime_pmx_material_split_free(
     split: *mut MmdRuntimePmxMaterialSplit,
 ) {
-    if split.is_null() {
-        return;
-    }
-    unsafe {
-        drop(Box::from_raw(split));
-    }
+    ffi_guard_void(|| {
+        if split.is_null() {
+            return;
+        }
+        unsafe {
+            drop(Box::from_raw(split));
+        }
+    })
 }
 
 /// Frees a PMX rig-spec handle.
@@ -1727,12 +1994,14 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_free(
 /// `mmd_runtime_pmx_rig_spec_create` that has not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_pmx_rig_spec_free(spec: *mut MmdRuntimePmxRigSpec) {
-    if spec.is_null() {
-        return;
-    }
-    unsafe {
-        drop(Box::from_raw(spec));
-    }
+    ffi_guard_void(|| {
+        if spec.is_null() {
+            return;
+        }
+        unsafe {
+            drop(Box::from_raw(spec));
+        }
+    })
 }
 
 /// Returns the number of material-split meshes owned by a split handle.
@@ -1745,10 +2014,12 @@ pub unsafe extern "C" fn mmd_runtime_pmx_rig_spec_free(spec: *mut MmdRuntimePmxR
 pub unsafe extern "C" fn mmd_runtime_pmx_material_split_mesh_count(
     split: *const MmdRuntimePmxMaterialSplit,
 ) -> usize {
-    let Some(split) = (unsafe { split.as_ref() }) else {
-        return 0;
-    };
-    split.split.meshes.len()
+    ffi_guard(0, || {
+        let Some(split) = (unsafe { split.as_ref() }) else {
+            return 0;
+        };
+        split.split.meshes.len()
+    })
 }
 
 /// Returns the serialized material-split manifest JSON.
@@ -1762,10 +2033,12 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_mesh_count(
 pub unsafe extern "C" fn mmd_runtime_pmx_material_split_manifest_json(
     split: *const MmdRuntimePmxMaterialSplit,
 ) -> MmdRuntimeFfiByteBuffer {
-    let Some(split) = (unsafe { split.as_ref() }) else {
-        return empty_byte_buffer();
-    };
-    byte_buffer_from_vec(split.manifest_json.clone())
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(split) = (unsafe { split.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        byte_buffer_from_vec(split.manifest_json.clone())
+    })
 }
 
 /// Returns the serialized rig-spec manifest JSON.
@@ -1779,11 +2052,13 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_manifest_json(
 pub unsafe extern "C" fn mmd_runtime_pmx_rig_spec_manifest_json(
     spec: *const MmdRuntimePmxRigSpec,
 ) -> MmdRuntimeFfiByteBuffer {
-    let Some(spec) = (unsafe { spec.as_ref() }) else {
-        return empty_byte_buffer();
-    };
-    debug_assert_eq!(spec.spec.bone_count, spec.spec.bones.len());
-    byte_buffer_from_vec(spec.manifest_json.clone())
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(spec) = (unsafe { spec.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        debug_assert_eq!(spec.spec.bone_count, spec.spec.bones.len());
+        byte_buffer_from_vec(spec.manifest_json.clone())
+    })
 }
 
 /// Returns split mesh vertex positions as a native-endian byte buffer.
@@ -1798,7 +2073,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_positions_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.positions)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.positions)
+    })
 }
 
 /// Returns split mesh vertex normals as a native-endian byte buffer.
@@ -1813,7 +2090,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_normals_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.normals)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.normals)
+    })
 }
 
 /// Returns split mesh vertex UVs as a native-endian byte buffer.
@@ -1828,7 +2107,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_uvs_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.uvs)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.uvs)
+    })
 }
 
 /// Returns one split mesh additional-UV layer as a native-endian byte buffer.
@@ -1844,16 +2125,18 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_additional_uvs_buffer(
     mesh_index: usize,
     uv_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    let Some(split) = (unsafe { split.as_ref() }) else {
-        return empty_byte_buffer();
-    };
-    let Some(mesh) = split.split.meshes.get(mesh_index) else {
-        return empty_byte_buffer();
-    };
-    let Some(values) = mesh.geometry.additional_uvs.get(uv_index) else {
-        return empty_byte_buffer();
-    };
-    byte_buffer_from_f32_slice(values)
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(split) = (unsafe { split.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        let Some(mesh) = split.split.meshes.get(mesh_index) else {
+            return empty_byte_buffer();
+        };
+        let Some(values) = mesh.geometry.additional_uvs.get(uv_index) else {
+            return empty_byte_buffer();
+        };
+        byte_buffer_from_f32_slice(values)
+    })
 }
 
 /// Returns split mesh triangle indices as a native-endian byte buffer.
@@ -1868,7 +2151,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_indices_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_u32_buffer(split, mesh_index, |mesh| &mesh.geometry.indices)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_u32_buffer(split, mesh_index, |mesh| &mesh.geometry.indices)
+    })
 }
 
 /// Returns split mesh skin bone indices as a native-endian byte buffer.
@@ -1883,7 +2168,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_skin_indices_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_u32_buffer(split, mesh_index, |mesh| &mesh.geometry.skin_indices)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_u32_buffer(split, mesh_index, |mesh| &mesh.geometry.skin_indices)
+    })
 }
 
 /// Returns split mesh skin weights as a native-endian byte buffer.
@@ -1898,7 +2185,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_skin_weights_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.skin_weights)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.skin_weights)
+    })
 }
 
 /// Returns split mesh edge scale values as a native-endian byte buffer.
@@ -1913,7 +2202,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_edge_scale_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.edge_scale)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.edge_scale)
+    })
 }
 
 /// Returns split mesh SDEF-enabled flags as a byte buffer.
@@ -1928,20 +2219,22 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_enabled_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    let Some(split) = (unsafe { split.as_ref() }) else {
-        return empty_byte_buffer();
-    };
-    let Some(mesh) = split.split.meshes.get(mesh_index) else {
-        return empty_byte_buffer();
-    };
-    byte_buffer_from_vec(
-        mesh.geometry
-            .sdef
-            .enabled
-            .iter()
-            .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
-            .collect(),
-    )
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(split) = (unsafe { split.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        let Some(mesh) = split.split.meshes.get(mesh_index) else {
+            return empty_byte_buffer();
+        };
+        byte_buffer_from_vec(
+            mesh.geometry
+                .sdef
+                .enabled
+                .iter()
+                .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
+                .collect(),
+        )
+    })
 }
 
 /// Returns split mesh SDEF C vectors as a native-endian byte buffer.
@@ -1956,7 +2249,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_c_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.c)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.c)
+    })
 }
 
 /// Returns split mesh SDEF R0 vectors as a native-endian byte buffer.
@@ -1971,7 +2266,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_r0_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.r0)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.r0)
+    })
 }
 
 /// Returns split mesh SDEF R1 vectors as a native-endian byte buffer.
@@ -1986,7 +2283,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_r1_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.r1)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.r1)
+    })
 }
 
 /// Returns split mesh derived SDEF RW0 vectors as a native-endian byte buffer.
@@ -2001,7 +2300,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_rw0_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.rw0)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.rw0)
+    })
 }
 
 /// Returns split mesh derived SDEF RW1 vectors as a native-endian byte buffer.
@@ -2016,7 +2317,9 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_sdef_rw1_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.rw1)
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_material_split_f32_buffer(split, mesh_index, |mesh| &mesh.geometry.sdef.rw1)
+    })
 }
 
 /// Returns split mesh QDEF-enabled flags as a byte buffer.
@@ -2031,20 +2334,22 @@ pub unsafe extern "C" fn mmd_runtime_pmx_material_split_qdef_enabled_buffer(
     split: *const MmdRuntimePmxMaterialSplit,
     mesh_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
-    let Some(split) = (unsafe { split.as_ref() }) else {
-        return empty_byte_buffer();
-    };
-    let Some(mesh) = split.split.meshes.get(mesh_index) else {
-        return empty_byte_buffer();
-    };
-    byte_buffer_from_vec(
-        mesh.geometry
-            .qdef
-            .enabled
-            .iter()
-            .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
-            .collect(),
-    )
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(split) = (unsafe { split.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        let Some(mesh) = split.split.meshes.get(mesh_index) else {
+            return empty_byte_buffer();
+        };
+        byte_buffer_from_vec(
+            mesh.geometry
+                .qdef
+                .enabled
+                .iter()
+                .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
+                .collect(),
+        )
+    })
 }
 
 fn pmx_material_split_f32_buffer(
@@ -2073,6 +2378,128 @@ fn pmx_material_split_u32_buffer(
         return empty_byte_buffer();
     };
     byte_buffer_from_u32_slice(accessor(mesh))
+}
+
+fn pmx_geometry_f32_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<f32>,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_f32_slice(accessor(&geometry.parsed.geometry))
+}
+
+fn pmx_geometry_u32_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<u32>,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_u32_slice(accessor(&geometry.parsed.geometry))
+}
+
+fn pmx_geometry_f32_flags_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<f32>,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(
+        accessor(&geometry.parsed.geometry)
+            .iter()
+            .map(|&value| if value > 0.5 { 1u8 } else { 0u8 })
+            .collect(),
+    )
+}
+
+fn parse_pmx_model_from_raw(
+    data: *const u8,
+    len: usize,
+) -> Result<mmd_anim_format::PmxParsedModel, MmdRuntimeFfiByteBuffer> {
+    if data.is_null() || len == 0 {
+        return Err(empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT));
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    mmd_anim_format::parse_pmx_model(bytes)
+        .map_err(|_| empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED))
+}
+
+fn pmx_raw_f32_buffer(
+    data: *const u8,
+    len: usize,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<f32>,
+) -> MmdRuntimeFfiByteBuffer {
+    match parse_pmx_model_from_raw(data, len) {
+        Ok(parsed) => byte_buffer_from_f32_slice(accessor(&parsed.geometry)),
+        Err(buffer) => buffer,
+    }
+}
+
+fn pmx_raw_u32_buffer(
+    data: *const u8,
+    len: usize,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<u32>,
+) -> MmdRuntimeFfiByteBuffer {
+    match parse_pmx_model_from_raw(data, len) {
+        Ok(parsed) => byte_buffer_from_u32_slice(accessor(&parsed.geometry)),
+        Err(buffer) => buffer,
+    }
+}
+
+fn pmx_raw_f32_flags_buffer(
+    data: *const u8,
+    len: usize,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<f32>,
+) -> MmdRuntimeFfiByteBuffer {
+    match parse_pmx_model_from_raw(data, len) {
+        Ok(parsed) => byte_buffer_from_vec(
+            accessor(&parsed.geometry)
+                .iter()
+                .map(|&value| if value > 0.5 { 1u8 } else { 0u8 })
+                .collect(),
+        ),
+        Err(buffer) => buffer,
+    }
+}
+
+fn pmx_skinning_modes_json_buffer(
+    geometry: &mmd_anim_format::pmx::PmxParsedGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    let vertex_count = geometry.positions.len() / 3;
+    let modes: Vec<&str> = (0..vertex_count)
+        .map(|i| {
+            geometry
+                .sdef
+                .skinning_modes
+                .get(i)
+                .map(String::as_str)
+                .unwrap_or("bdef1")
+        })
+        .collect();
+    let wrapper = serde_json::json!({ "skinningModes": modes });
+    match serde_json::to_vec(&wrapper) {
+        Ok(json) => byte_buffer_from_vec(json),
+        Err(_) => empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
+    }
+}
+
+fn pmx_material_groups_buffer(
+    material_groups: &[mmd_anim_format::pmx::PmxParsedMaterialGroup],
+) -> MmdRuntimeFfiByteBuffer {
+    let groups: Vec<u32> = material_groups
+        .iter()
+        .flat_map(|group| {
+            [
+                group.start as u32,
+                group.count as u32,
+                group.material_index as u32,
+            ]
+        })
+        .collect();
+    byte_buffer_from_u32_slice(&groups)
 }
 
 fn byte_buffer_from_f32_slice(values: &[f32]) -> MmdRuntimeFfiByteBuffer {
@@ -2112,82 +2539,117 @@ pub unsafe extern "C" fn mmd_runtime_export_pmx_from_parts(
     skin_weights: *const f32,
     edge_scale: *const f32,
 ) -> MmdRuntimeFfiByteBuffer {
-    if metadata_json.is_null()
-        || metadata_json_len == 0
-        || positions_xyz.is_null()
-        || normals_xyz.is_null()
-        || uvs_xy.is_null()
-        || vertex_count == 0
-    {
-        return empty_byte_buffer();
-    }
-    if index_count > 0 && indices.is_null() {
-        return empty_byte_buffer();
-    }
-    if skin_indices.is_null() != skin_weights.is_null() {
-        return empty_byte_buffer();
-    }
+    ffi_guard(empty_byte_buffer(), || {
+        if metadata_json.is_null()
+            || metadata_json_len == 0
+            || positions_xyz.is_null()
+            || normals_xyz.is_null()
+            || uvs_xy.is_null()
+            || vertex_count == 0
+        {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
+        if index_count > 0 && indices.is_null() {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
+        if skin_indices.is_null() != skin_weights.is_null() {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
 
-    let Some(positions_len) = vertex_count.checked_mul(3) else {
-        return empty_byte_buffer();
-    };
-    let Some(normals_len) = vertex_count.checked_mul(3) else {
-        return empty_byte_buffer();
-    };
-    let Some(uvs_len) = vertex_count.checked_mul(2) else {
-        return empty_byte_buffer();
-    };
-    let Some(skin_len) = vertex_count.checked_mul(4) else {
-        return empty_byte_buffer();
-    };
+        let Some(positions_len) = vertex_count.checked_mul(3) else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(normals_len) = vertex_count.checked_mul(3) else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(uvs_len) = vertex_count.checked_mul(2) else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(skin_len) = vertex_count.checked_mul(4) else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
 
-    let metadata_bytes = unsafe { slice::from_raw_parts(metadata_json, metadata_json_len) };
-    let metadata_json = match str::from_utf8(metadata_bytes) {
-        Ok(json) => json,
-        Err(_) => return empty_byte_buffer(),
-    };
-    let descriptor: mmd_anim_format::PmxPartsDescriptor = match serde_json::from_str(metadata_json)
-    {
-        Ok(descriptor) => descriptor,
-        Err(_) => return empty_byte_buffer(),
-    };
+        let metadata_bytes = unsafe { slice::from_raw_parts(metadata_json, metadata_json_len) };
+        let metadata_json = match str::from_utf8(metadata_bytes) {
+            Ok(json) => json,
+            Err(_) => return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT),
+        };
+        let descriptor: mmd_anim_format::PmxPartsDescriptor =
+            match serde_json::from_str(metadata_json) {
+                Ok(descriptor) => descriptor,
+                Err(_) => return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT),
+            };
 
-    let positions_xyz = unsafe { slice::from_raw_parts(positions_xyz, positions_len) };
-    let normals_xyz = unsafe { slice::from_raw_parts(normals_xyz, normals_len) };
-    let uvs_xy = unsafe { slice::from_raw_parts(uvs_xy, uvs_len) };
-    let indices = if index_count == 0 {
-        &[]
-    } else {
-        unsafe { slice::from_raw_parts(indices, index_count) }
-    };
-    let (skin_indices, skin_weights) = if skin_indices.is_null() {
-        (&[][..], &[][..])
-    } else {
-        (
-            unsafe { slice::from_raw_parts(skin_indices, skin_len) },
-            unsafe { slice::from_raw_parts(skin_weights, skin_len) },
-        )
-    };
-    let edge_scale = if edge_scale.is_null() {
-        &[]
-    } else {
-        unsafe { slice::from_raw_parts(edge_scale, vertex_count) }
-    };
+        let positions_xyz = unsafe { slice::from_raw_parts(positions_xyz, positions_len) };
+        let normals_xyz = unsafe { slice::from_raw_parts(normals_xyz, normals_len) };
+        let uvs_xy = unsafe { slice::from_raw_parts(uvs_xy, uvs_len) };
+        let indices = if index_count == 0 {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(indices, index_count) }
+        };
+        let (skin_indices, skin_weights) = if skin_indices.is_null() {
+            (&[][..], &[][..])
+        } else {
+            (
+                unsafe { slice::from_raw_parts(skin_indices, skin_len) },
+                unsafe { slice::from_raw_parts(skin_weights, skin_len) },
+            )
+        };
+        let edge_scale = if edge_scale.is_null() {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(edge_scale, vertex_count) }
+        };
 
-    let model = match mmd_anim_format::build_pmx_model_from_parts(mmd_anim_format::PmxPartsInput {
-        descriptor,
-        positions_xyz,
-        normals_xyz,
-        uvs_xy,
-        indices,
-        skin_indices,
-        skin_weights,
-        edge_scale,
-    }) {
-        Ok(model) => model,
-        Err(_) => return empty_byte_buffer(),
-    };
-    byte_buffer_from_vec(mmd_anim_format::export_pmx_model(&model))
+        let model =
+            match mmd_anim_format::build_pmx_model_from_parts(mmd_anim_format::PmxPartsInput {
+                descriptor,
+                positions_xyz,
+                normals_xyz,
+                uvs_xy,
+                indices,
+                skin_indices,
+                skin_weights,
+                edge_scale,
+            }) {
+                Ok(model) => model,
+                Err(_) => return empty_byte_buffer_failure(FFI_ERR_PMX_EXPORT_FAILED),
+            };
+        byte_buffer_from_vec(mmd_anim_format::export_pmx_model(&model))
+    })
+}
+
+macro_rules! create_runtime_model_ffi {
+    (
+        $parent_indices:expr,
+        $rest_positions_xyz:expr,
+        $bone_count:expr
+        $(, required: [$($required:expr),* $(,)?])?
+        $(, fields: { $($field:ident: $value:expr),* $(,)? })?
+        $(,)?
+    ) => {{
+        ffi_guard(ptr::null_mut(), || {
+            if $parent_indices.is_null()
+                || $rest_positions_xyz.is_null()
+                || $bone_count == 0
+                $($(|| $required.is_null())*)?
+            {
+                return ptr::null_mut();
+            }
+
+            unsafe {
+                create_runtime_model_from_ffi_input(RawModelInput {
+                    $($($field: $value,)*)?
+                    ..RawModelInput::with_bones(
+                        $parent_indices,
+                        $rest_positions_xyz,
+                        $bone_count,
+                    )
+                })
+            }
+        })
+    }};
 }
 
 /// Creates a model from parent indices and rest-position triples.
@@ -2203,39 +2665,7 @@ pub unsafe extern "C" fn mmd_runtime_model_create(
     rest_positions_xyz: *const f32,
     bone_count: usize,
 ) -> *mut MmdRuntimeModel {
-    if parent_indices.is_null() || rest_positions_xyz.is_null() || bone_count == 0 {
-        return ptr::null_mut();
-    }
-
-    let Some(model) = (unsafe {
-        build_model_from_ffi(RawModelInput {
-            parent_indices,
-            rest_positions_xyz,
-            bone_count,
-            inverse_bind_matrices: ptr::null(),
-            transform_orders: ptr::null(),
-            ik_solvers: ptr::null(),
-            ik_solver_count: 0,
-            ik_links: ptr::null(),
-            ik_link_count: 0,
-            append_transforms: ptr::null(),
-            append_transform_count: 0,
-            morph_count: 0,
-            bone_morph_offsets: ptr::null(),
-            bone_morph_offset_count: 0,
-            group_morph_offsets: ptr::null(),
-            group_morph_offset_count: 0,
-        })
-    }) else {
-        return ptr::null_mut();
-    };
-
-    Box::into_raw(Box::new(MmdRuntimeModel {
-        model: Arc::new(model),
-        bone_name_to_index: HashMap::new(),
-        morph_name_to_index: HashMap::new(),
-        ik_solver_bone_name_to_index: HashMap::new(),
-    }))
+    create_runtime_model_ffi!(parent_indices, rest_positions_xyz, bone_count)
 }
 
 /// Creates a model from parent indices, rest-position triples, and inverse bind matrices.
@@ -2253,43 +2683,13 @@ pub unsafe extern "C" fn mmd_runtime_model_create_with_inverse_bind(
     inverse_bind_matrices: *const f32,
     bone_count: usize,
 ) -> *mut MmdRuntimeModel {
-    if parent_indices.is_null()
-        || rest_positions_xyz.is_null()
-        || inverse_bind_matrices.is_null()
-        || bone_count == 0
-    {
-        return ptr::null_mut();
-    }
-
-    let Some(model) = (unsafe {
-        build_model_from_ffi(RawModelInput {
-            parent_indices,
-            rest_positions_xyz,
-            bone_count,
-            inverse_bind_matrices,
-            transform_orders: ptr::null(),
-            ik_solvers: ptr::null(),
-            ik_solver_count: 0,
-            ik_links: ptr::null(),
-            ik_link_count: 0,
-            append_transforms: ptr::null(),
-            append_transform_count: 0,
-            morph_count: 0,
-            bone_morph_offsets: ptr::null(),
-            bone_morph_offset_count: 0,
-            group_morph_offsets: ptr::null(),
-            group_morph_offset_count: 0,
-        })
-    }) else {
-        return ptr::null_mut();
-    };
-
-    Box::into_raw(Box::new(MmdRuntimeModel {
-        model: Arc::new(model),
-        bone_name_to_index: HashMap::new(),
-        morph_name_to_index: HashMap::new(),
-        ik_solver_bone_name_to_index: HashMap::new(),
-    }))
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        required: [inverse_bind_matrices],
+        fields: { inverse_bind_matrices: inverse_bind_matrices },
+    )
 }
 
 /// Creates a model from parent indices, rest-position triples, and append transforms.
@@ -2308,39 +2708,15 @@ pub unsafe extern "C" fn mmd_runtime_model_create_with_append(
     append_transforms: *const MmdRuntimeFfiAppendTransform,
     append_transform_count: usize,
 ) -> *mut MmdRuntimeModel {
-    if parent_indices.is_null() || rest_positions_xyz.is_null() || bone_count == 0 {
-        return ptr::null_mut();
-    }
-
-    let Some(model) = (unsafe {
-        build_model_from_ffi(RawModelInput {
-            parent_indices,
-            rest_positions_xyz,
-            bone_count,
-            inverse_bind_matrices: ptr::null(),
-            transform_orders: ptr::null(),
-            ik_solvers: ptr::null(),
-            ik_solver_count: 0,
-            ik_links: ptr::null(),
-            ik_link_count: 0,
-            append_transforms,
-            append_transform_count,
-            morph_count: 0,
-            bone_morph_offsets: ptr::null(),
-            bone_morph_offset_count: 0,
-            group_morph_offsets: ptr::null(),
-            group_morph_offset_count: 0,
-        })
-    }) else {
-        return ptr::null_mut();
-    };
-
-    Box::into_raw(Box::new(MmdRuntimeModel {
-        model: Arc::new(model),
-        bone_name_to_index: HashMap::new(),
-        morph_name_to_index: HashMap::new(),
-        ik_solver_bone_name_to_index: HashMap::new(),
-    }))
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        fields: {
+            append_transforms: append_transforms,
+            append_transform_count: append_transform_count,
+        },
+    )
 }
 
 /// Creates a model from parent indices, rest positions, inverse bind matrices,
@@ -2362,43 +2738,17 @@ pub unsafe extern "C" fn mmd_runtime_model_create_with_append_and_inverse_bind(
     append_transforms: *const MmdRuntimeFfiAppendTransform,
     append_transform_count: usize,
 ) -> *mut MmdRuntimeModel {
-    if parent_indices.is_null()
-        || rest_positions_xyz.is_null()
-        || inverse_bind_matrices.is_null()
-        || bone_count == 0
-    {
-        return ptr::null_mut();
-    }
-
-    let Some(model) = (unsafe {
-        build_model_from_ffi(RawModelInput {
-            parent_indices,
-            rest_positions_xyz,
-            bone_count,
-            inverse_bind_matrices,
-            transform_orders: ptr::null(),
-            ik_solvers: ptr::null(),
-            ik_solver_count: 0,
-            ik_links: ptr::null(),
-            ik_link_count: 0,
-            append_transforms,
-            append_transform_count,
-            morph_count: 0,
-            bone_morph_offsets: ptr::null(),
-            bone_morph_offset_count: 0,
-            group_morph_offsets: ptr::null(),
-            group_morph_offset_count: 0,
-        })
-    }) else {
-        return ptr::null_mut();
-    };
-
-    Box::into_raw(Box::new(MmdRuntimeModel {
-        model: Arc::new(model),
-        bone_name_to_index: HashMap::new(),
-        morph_name_to_index: HashMap::new(),
-        ik_solver_bone_name_to_index: HashMap::new(),
-    }))
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        required: [inverse_bind_matrices],
+        fields: {
+            inverse_bind_matrices: inverse_bind_matrices,
+            append_transforms: append_transforms,
+            append_transform_count: append_transform_count,
+        },
+    )
 }
 
 /// Creates a model from all currently supported flat descriptor arrays.
@@ -2426,39 +2776,20 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full(
     append_transforms: *const MmdRuntimeFfiAppendTransform,
     append_transform_count: usize,
 ) -> *mut MmdRuntimeModel {
-    if parent_indices.is_null() || rest_positions_xyz.is_null() || bone_count == 0 {
-        return ptr::null_mut();
-    }
-
-    let Some(model) = (unsafe {
-        build_model_from_ffi(RawModelInput {
-            parent_indices,
-            rest_positions_xyz,
-            inverse_bind_matrices,
-            transform_orders: ptr::null(),
-            bone_count,
-            ik_solvers,
-            ik_solver_count,
-            ik_links,
-            ik_link_count,
-            append_transforms,
-            append_transform_count,
-            morph_count: 0,
-            bone_morph_offsets: ptr::null(),
-            bone_morph_offset_count: 0,
-            group_morph_offsets: ptr::null(),
-            group_morph_offset_count: 0,
-        })
-    }) else {
-        return ptr::null_mut();
-    };
-
-    Box::into_raw(Box::new(MmdRuntimeModel {
-        model: Arc::new(model),
-        bone_name_to_index: HashMap::new(),
-        morph_name_to_index: HashMap::new(),
-        ik_solver_bone_name_to_index: HashMap::new(),
-    }))
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        fields: {
+            inverse_bind_matrices: inverse_bind_matrices,
+            ik_solvers: ik_solvers,
+            ik_solver_count: ik_solver_count,
+            ik_links: ik_links,
+            ik_link_count: ik_link_count,
+            append_transforms: append_transforms,
+            append_transform_count: append_transform_count,
+        },
+    )
 }
 
 /// Creates a full model with explicit PMX-style transform order values.
@@ -2481,43 +2812,22 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full_with_transform_order(
     append_transforms: *const MmdRuntimeFfiAppendTransform,
     append_transform_count: usize,
 ) -> *mut MmdRuntimeModel {
-    if parent_indices.is_null()
-        || rest_positions_xyz.is_null()
-        || transform_orders.is_null()
-        || bone_count == 0
-    {
-        return ptr::null_mut();
-    }
-
-    let Some(model) = (unsafe {
-        build_model_from_ffi(RawModelInput {
-            parent_indices,
-            rest_positions_xyz,
-            inverse_bind_matrices,
-            transform_orders,
-            bone_count,
-            ik_solvers,
-            ik_solver_count,
-            ik_links,
-            ik_link_count,
-            append_transforms,
-            append_transform_count,
-            morph_count: 0,
-            bone_morph_offsets: ptr::null(),
-            bone_morph_offset_count: 0,
-            group_morph_offsets: ptr::null(),
-            group_morph_offset_count: 0,
-        })
-    }) else {
-        return ptr::null_mut();
-    };
-
-    Box::into_raw(Box::new(MmdRuntimeModel {
-        model: Arc::new(model),
-        bone_name_to_index: HashMap::new(),
-        morph_name_to_index: HashMap::new(),
-        ik_solver_bone_name_to_index: HashMap::new(),
-    }))
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        required: [transform_orders],
+        fields: {
+            inverse_bind_matrices: inverse_bind_matrices,
+            transform_orders: transform_orders,
+            ik_solvers: ik_solvers,
+            ik_solver_count: ik_solver_count,
+            ik_links: ik_links,
+            ik_link_count: ik_link_count,
+            append_transforms: append_transforms,
+            append_transform_count: append_transform_count,
+        },
+    )
 }
 
 /// Creates a full model with PMX-style transform order, IK, append transforms,
@@ -2554,39 +2864,26 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full_with_morphs(
     group_morph_offsets: *const MmdRuntimeFfiGroupMorphOffset,
     group_morph_offset_count: usize,
 ) -> *mut MmdRuntimeModel {
-    if parent_indices.is_null() || rest_positions_xyz.is_null() || bone_count == 0 {
-        return ptr::null_mut();
-    }
-
-    let Some(model) = (unsafe {
-        build_model_from_ffi(RawModelInput {
-            parent_indices,
-            rest_positions_xyz,
-            inverse_bind_matrices,
-            transform_orders,
-            bone_count,
-            ik_solvers,
-            ik_solver_count,
-            ik_links,
-            ik_link_count,
-            append_transforms,
-            append_transform_count,
-            morph_count,
-            bone_morph_offsets,
-            bone_morph_offset_count,
-            group_morph_offsets,
-            group_morph_offset_count,
-        })
-    }) else {
-        return ptr::null_mut();
-    };
-
-    Box::into_raw(Box::new(MmdRuntimeModel {
-        model: Arc::new(model),
-        bone_name_to_index: HashMap::new(),
-        morph_name_to_index: HashMap::new(),
-        ik_solver_bone_name_to_index: HashMap::new(),
-    }))
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        fields: {
+            inverse_bind_matrices: inverse_bind_matrices,
+            transform_orders: transform_orders,
+            ik_solvers: ik_solvers,
+            ik_solver_count: ik_solver_count,
+            ik_links: ik_links,
+            ik_link_count: ik_link_count,
+            append_transforms: append_transforms,
+            append_transform_count: append_transform_count,
+            morph_count: morph_count,
+            bone_morph_offsets: bone_morph_offsets,
+            bone_morph_offset_count: bone_morph_offset_count,
+            group_morph_offsets: group_morph_offsets,
+            group_morph_offset_count: group_morph_offset_count,
+        },
+    )
 }
 
 /// Creates a model by importing a PMX binary from byte slice, keeping only
@@ -2602,20 +2899,22 @@ pub unsafe extern "C" fn mmd_runtime_model_create_from_pmx_bytes(
     data: *const u8,
     len: usize,
 ) -> *mut MmdRuntimeModel {
-    if data.is_null() || len == 0 {
-        return ptr::null_mut();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let import = match mmd_anim_format::import_pmx_runtime(bytes) {
-        Ok(imp) => imp,
-        Err(_) => return ptr::null_mut(),
-    };
-    Box::into_raw(Box::new(MmdRuntimeModel {
-        model: Arc::new(import.model),
-        bone_name_to_index: import.bone_name_to_index,
-        morph_name_to_index: import.morph_name_to_index,
-        ik_solver_bone_name_to_index: import.ik_solver_bone_name_to_index,
-    }))
+    ffi_guard(ptr::null_mut(), || {
+        if data.is_null() || len == 0 {
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let import = match mmd_anim_format::import_pmx_runtime(bytes) {
+            Ok(imp) => imp,
+            Err(_) => return null_mut_failure(FFI_ERR_PMX_IMPORT_FAILED),
+        };
+        Box::into_raw(Box::new(MmdRuntimeModel {
+            model: Arc::new(import.model),
+            bone_name_to_index: import.bone_name_to_index,
+            morph_name_to_index: import.morph_name_to_index,
+            ik_solver_bone_name_to_index: import.ik_solver_bone_name_to_index,
+        }))
+    })
 }
 
 /// Creates an animation clip by importing a VMD motion binary and resolving
@@ -2637,29 +2936,31 @@ pub unsafe extern "C" fn mmd_runtime_clip_create_from_vmd_bytes_for_model(
     data: *const u8,
     len: usize,
 ) -> *mut MmdRuntimeClip {
-    let Some(model) = (unsafe { model.as_ref() }) else {
-        return ptr::null_mut();
-    };
-    if data.is_null() || len == 0 {
-        return ptr::null_mut();
-    }
-    if model.bone_name_to_index.is_empty() && model.morph_name_to_index.is_empty() {
-        return ptr::null_mut();
-    }
-    let bytes = unsafe { slice::from_raw_parts(data, len) };
-    let motion = match mmd_anim_format::import_vmd_motion(bytes) {
-        Ok(m) => m,
-        Err(_) => return ptr::null_mut(),
-    };
-    let solver_count = model.model.ik_count();
-    let clip = mmd_anim_format::build_pair_clip(
-        &motion,
-        &model.bone_name_to_index,
-        &model.morph_name_to_index,
-        &model.ik_solver_bone_name_to_index,
-        solver_count,
-    );
-    Box::into_raw(Box::new(MmdRuntimeClip { clip }))
+    ffi_guard(ptr::null_mut(), || {
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
+        };
+        if data.is_null() || len == 0 {
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
+        }
+        if model.bone_name_to_index.is_empty() && model.morph_name_to_index.is_empty() {
+            return null_mut_failure(FFI_ERR_CLIP_CREATE_FAILED);
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let motion = match mmd_anim_format::import_vmd_motion(bytes) {
+            Ok(m) => m,
+            Err(_) => return null_mut_failure(FFI_ERR_VMD_IMPORT_FAILED),
+        };
+        let solver_count = model.model.ik_count();
+        let clip = mmd_anim_format::build_pair_clip(
+            &motion,
+            &model.bone_name_to_index,
+            &model.morph_name_to_index,
+            &model.ik_solver_bone_name_to_index,
+            solver_count,
+        );
+        Box::into_raw(Box::new(MmdRuntimeClip { clip }))
+    })
 }
 
 /// Returns the number of bones in a model handle, or 0 for null.
@@ -2669,10 +2970,12 @@ pub unsafe extern "C" fn mmd_runtime_clip_create_from_vmd_bytes_for_model(
 /// `model` must be null or a valid pointer returned by a model create function.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_model_bone_count(model: *const MmdRuntimeModel) -> usize {
-    let Some(model) = (unsafe { model.as_ref() }) else {
-        return 0;
-    };
-    model.model.bone_count()
+    ffi_guard(0, || {
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return 0;
+        };
+        model.model.bone_count()
+    })
 }
 
 /// Returns the number of morph slots in a model handle, or 0 for null.
@@ -2682,10 +2985,12 @@ pub unsafe extern "C" fn mmd_runtime_model_bone_count(model: *const MmdRuntimeMo
 /// `model` must be null or a valid pointer returned by a model create function.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_model_morph_count(model: *const MmdRuntimeModel) -> usize {
-    let Some(model) = (unsafe { model.as_ref() }) else {
-        return 0;
-    };
-    model.model.morph_count() as usize
+    ffi_guard(0, || {
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return 0;
+        };
+        model.model.morph_count() as usize
+    })
 }
 
 /// Returns the number of IK solvers in a model handle, or 0 for null.
@@ -2695,10 +3000,12 @@ pub unsafe extern "C" fn mmd_runtime_model_morph_count(model: *const MmdRuntimeM
 /// `model` must be null or a valid pointer returned by a model create function.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_model_ik_count(model: *const MmdRuntimeModel) -> usize {
-    let Some(model) = (unsafe { model.as_ref() }) else {
-        return 0;
-    };
-    model.model.ik_count()
+    ffi_guard(0, || {
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return 0;
+        };
+        model.model.ik_count()
+    })
 }
 
 /// Frees a model created by `mmd_runtime_model_create`.
@@ -2709,11 +3016,13 @@ pub unsafe extern "C" fn mmd_runtime_model_ik_count(model: *const MmdRuntimeMode
 /// that has not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_model_free(model: *mut MmdRuntimeModel) {
-    if !model.is_null() {
-        unsafe {
-            drop(Box::from_raw(model));
+    ffi_guard_void(|| {
+        if !model.is_null() {
+            unsafe {
+                drop(Box::from_raw(model));
+            }
         }
-    }
+    })
 }
 
 /// Creates a runtime instance sharing the immutable model arena.
@@ -2727,18 +3036,20 @@ pub unsafe extern "C" fn mmd_runtime_instance_create(
     model: *const MmdRuntimeModel,
     morph_count: usize,
 ) -> *mut MmdRuntimeInstance {
-    let Some(model) = (unsafe { model.as_ref() }) else {
-        return ptr::null_mut();
-    };
-    let model_arena = Arc::clone(&model.model);
-    let mut inst = MmdRuntimeInstance {
-        model: Arc::clone(&model_arena),
-        runtime: RuntimeInstance::new_with_morph_count(model_arena, morph_count),
-        cached_world_matrices: Vec::new(),
-        cached_skinning_matrices: Vec::new(),
-    };
-    inst.refresh_matrix_caches();
-    Box::into_raw(Box::new(inst))
+    ffi_guard(ptr::null_mut(), || {
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return ptr::null_mut();
+        };
+        let model_arena = Arc::clone(&model.model);
+        let mut inst = MmdRuntimeInstance {
+            model: Arc::clone(&model_arena),
+            runtime: RuntimeInstance::new_with_morph_count(model_arena, morph_count),
+            cached_world_matrices: Vec::new(),
+            cached_skinning_matrices: Vec::new(),
+        };
+        inst.refresh_matrix_caches();
+        Box::into_raw(Box::new(inst))
+    })
 }
 
 /// Creates a runtime instance sized from the model's own morph and IK counts.
@@ -2755,18 +3066,20 @@ pub unsafe extern "C" fn mmd_runtime_instance_create(
 pub unsafe extern "C" fn mmd_runtime_instance_create_for_model(
     model: *const MmdRuntimeModel,
 ) -> *mut MmdRuntimeInstance {
-    let Some(model) = (unsafe { model.as_ref() }) else {
-        return ptr::null_mut();
-    };
-    let model_arena = Arc::clone(&model.model);
-    let mut inst = MmdRuntimeInstance {
-        model: Arc::clone(&model_arena),
-        runtime: RuntimeInstance::new(model_arena),
-        cached_world_matrices: Vec::new(),
-        cached_skinning_matrices: Vec::new(),
-    };
-    inst.refresh_matrix_caches();
-    Box::into_raw(Box::new(inst))
+    ffi_guard(ptr::null_mut(), || {
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return ptr::null_mut();
+        };
+        let model_arena = Arc::clone(&model.model);
+        let mut inst = MmdRuntimeInstance {
+            model: Arc::clone(&model_arena),
+            runtime: RuntimeInstance::new(model_arena),
+            cached_world_matrices: Vec::new(),
+            cached_skinning_matrices: Vec::new(),
+        };
+        inst.refresh_matrix_caches();
+        Box::into_raw(Box::new(inst))
+    })
 }
 
 /// Creates a runtime instance with explicit morph and IK state counts.
@@ -2781,18 +3094,20 @@ pub unsafe extern "C" fn mmd_runtime_instance_create_with_counts(
     morph_count: usize,
     ik_count: usize,
 ) -> *mut MmdRuntimeInstance {
-    let Some(model) = (unsafe { model.as_ref() }) else {
-        return ptr::null_mut();
-    };
-    let model_arena = Arc::clone(&model.model);
-    let mut inst = MmdRuntimeInstance {
-        model: Arc::clone(&model_arena),
-        runtime: RuntimeInstance::new_with_counts(model_arena, morph_count, ik_count),
-        cached_world_matrices: Vec::new(),
-        cached_skinning_matrices: Vec::new(),
-    };
-    inst.refresh_matrix_caches();
-    Box::into_raw(Box::new(inst))
+    ffi_guard(ptr::null_mut(), || {
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return ptr::null_mut();
+        };
+        let model_arena = Arc::clone(&model.model);
+        let mut inst = MmdRuntimeInstance {
+            model: Arc::clone(&model_arena),
+            runtime: RuntimeInstance::new_with_counts(model_arena, morph_count, ik_count),
+            cached_world_matrices: Vec::new(),
+            cached_skinning_matrices: Vec::new(),
+        };
+        inst.refresh_matrix_caches();
+        Box::into_raw(Box::new(inst))
+    })
 }
 
 /// Frees a runtime instance created by `mmd_runtime_instance_create`.
@@ -2803,11 +3118,13 @@ pub unsafe extern "C" fn mmd_runtime_instance_create_with_counts(
 /// `mmd_runtime_instance_create` that has not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_instance_free(instance: *mut MmdRuntimeInstance) {
-    if !instance.is_null() {
-        unsafe {
-            drop(Box::from_raw(instance));
+    ffi_guard_void(|| {
+        if !instance.is_null() {
+            unsafe {
+                drop(Box::from_raw(instance));
+            }
         }
-    }
+    })
 }
 
 /// Evaluates the instance rest pose.
@@ -2820,12 +3137,14 @@ pub unsafe extern "C" fn mmd_runtime_instance_free(instance: *mut MmdRuntimeInst
 pub unsafe extern "C" fn mmd_runtime_instance_evaluate_rest_pose(
     instance: *mut MmdRuntimeInstance,
 ) -> bool {
-    let Some(instance) = (unsafe { instance.as_mut() }) else {
-        return false;
-    };
-    instance.runtime.evaluate_rest_pose();
-    instance.refresh_matrix_caches();
-    true
+    ffi_guard(false, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return false;
+        };
+        instance.runtime.evaluate_rest_pose();
+        instance.refresh_matrix_caches();
+        true
+    })
 }
 
 /// Evaluates a clip at `frame`.
@@ -2840,15 +3159,17 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame(
     clip: *const MmdRuntimeClip,
     frame: f32,
 ) -> bool {
-    let Some(instance) = (unsafe { instance.as_mut() }) else {
-        return false;
-    };
-    let Some(clip) = (unsafe { clip.as_ref() }) else {
-        return false;
-    };
-    instance.runtime.evaluate_clip_frame(&clip.clip, frame);
-    instance.refresh_matrix_caches();
-    true
+    ffi_guard(false, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return false;
+        };
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return false;
+        };
+        instance.runtime.evaluate_clip_frame(&clip.clip, frame);
+        instance.refresh_matrix_caches();
+        true
+    })
 }
 
 /// Evaluates a clip at `frame` with custom IK solver options.
@@ -2868,29 +3189,31 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_with_ik_option
     ik_tolerance: f32,
     ik_max_iterations_cap: u32,
 ) -> bool {
-    let Some(instance) = (unsafe { instance.as_mut() }) else {
-        return false;
-    };
-    let Some(clip) = (unsafe { clip.as_ref() }) else {
-        return false;
-    };
-    if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
-        return false;
-    }
-    instance.runtime.evaluate_clip_frame_with_ik_options(
-        &clip.clip,
-        frame,
-        IkSolveOptions {
-            tolerance: ik_tolerance,
-            max_iterations_cap: if ik_max_iterations_cap == 0 {
-                None
-            } else {
-                Some(ik_max_iterations_cap)
+    ffi_guard(false, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return false;
+        };
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return false;
+        };
+        if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
+            return false;
+        }
+        instance.runtime.evaluate_clip_frame_with_ik_options(
+            &clip.clip,
+            frame,
+            IkSolveOptions {
+                tolerance: ik_tolerance,
+                max_iterations_cap: if ik_max_iterations_cap == 0 {
+                    None
+                } else {
+                    Some(ik_max_iterations_cap)
+                },
             },
-        },
-    );
-    instance.refresh_matrix_caches();
-    true
+        );
+        instance.refresh_matrix_caches();
+        true
+    })
 }
 
 /// Evaluates a clip at `frame` without solving IK.
@@ -2909,17 +3232,19 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_without_ik(
     clip: *const MmdRuntimeClip,
     frame: f32,
 ) -> bool {
-    let Some(instance) = (unsafe { instance.as_mut() }) else {
-        return false;
-    };
-    let Some(clip) = (unsafe { clip.as_ref() }) else {
-        return false;
-    };
-    instance
-        .runtime
-        .evaluate_clip_frame_without_ik(&clip.clip, frame);
-    instance.refresh_matrix_caches();
-    true
+    ffi_guard(false, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return false;
+        };
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return false;
+        };
+        instance
+            .runtime
+            .evaluate_clip_frame_without_ik(&clip.clip, frame);
+        instance.refresh_matrix_caches();
+        true
+    })
 }
 
 /// Returns the required `f32` count for batch world matrix output.
@@ -2936,16 +3261,18 @@ pub unsafe extern "C" fn mmd_runtime_instance_clip_frame_batch_world_matrix_f32_
     instance: *const MmdRuntimeInstance,
     frame_count: usize,
 ) -> usize {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return 0;
-    };
-    instance
-        .runtime
-        .world_matrices()
-        .len()
-        .checked_mul(16)
-        .and_then(|frame_len| frame_len.checked_mul(frame_count))
-        .unwrap_or(0)
+    ffi_guard(0, || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return 0;
+        };
+        instance
+            .runtime
+            .world_matrices()
+            .len()
+            .checked_mul(16)
+            .and_then(|frame_len| frame_len.checked_mul(frame_count))
+            .unwrap_or(0)
+    })
 }
 
 /// Returns the required `f32` count for batch morph weight output.
@@ -2961,15 +3288,17 @@ pub unsafe extern "C" fn mmd_runtime_instance_clip_frame_batch_morph_weight_f32_
     instance: *const MmdRuntimeInstance,
     frame_count: usize,
 ) -> usize {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return 0;
-    };
-    instance
-        .runtime
-        .morph_weights()
-        .len()
-        .checked_mul(frame_count)
-        .unwrap_or(0)
+    ffi_guard(0, || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return 0;
+        };
+        instance
+            .runtime
+            .morph_weights()
+            .len()
+            .checked_mul(frame_count)
+            .unwrap_or(0)
+    })
 }
 
 /// Evaluates a contiguous clip frame range into caller-owned batch buffers.
@@ -3003,121 +3332,123 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_batch(
     out_morph_weights_f32: *mut f32,
     out_morph_weights_f32_len: usize,
 ) -> bool {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return false;
-    };
-    let Some(clip) = (unsafe { clip.as_ref() }) else {
-        return false;
-    };
-    if !start_frame.is_finite() || !frame_step.is_finite() {
-        return false;
-    }
-
-    let world_frame_len = match instance.runtime.world_matrices().len().checked_mul(16) {
-        Some(len) => len,
-        None => return false,
-    };
-    let morph_frame_len = instance.runtime.morph_weights().len();
-    let required_world_len = match world_frame_len.checked_mul(frame_count) {
-        Some(len) => len,
-        None => return false,
-    };
-    let required_morph_len = match morph_frame_len.checked_mul(frame_count) {
-        Some(len) => len,
-        None => return false,
-    };
-
-    if out_world_matrices_f32_len < required_world_len
-        || out_morph_weights_f32_len < required_morph_len
-    {
-        return false;
-    }
-    if required_world_len > 0 && out_world_matrices_f32.is_null() {
-        return false;
-    }
-    if required_morph_len > 0 && out_morph_weights_f32.is_null() {
-        return false;
-    }
-    if frame_count == 0 {
-        return true;
-    }
-
-    let model = Arc::clone(&instance.model);
-    let morph_count = morph_frame_len;
-    let ik_count = instance.runtime.ik_enabled().len();
-    let workers = resolve_batch_worker_count(worker_count, frame_count);
-
-    let out_world = if required_world_len == 0 {
-        &mut []
-    } else {
-        unsafe { slice::from_raw_parts_mut(out_world_matrices_f32, required_world_len) }
-    };
-    let out_morph = if required_morph_len == 0 {
-        &mut []
-    } else {
-        unsafe { slice::from_raw_parts_mut(out_morph_weights_f32, required_morph_len) }
-    };
-
-    if workers <= 1 {
-        let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, ik_count);
-        evaluate_clip_frame_batch_chunk(
-            &mut runtime,
-            &clip.clip,
-            start_frame,
-            frame_step,
-            0,
-            frame_count,
-            world_frame_len,
-            morph_frame_len,
-            out_world,
-            out_morph,
-        );
-        return true;
-    }
-
-    let frames_per_chunk = frame_count.div_ceil(workers);
-    std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(workers);
-        let mut remaining_world = out_world;
-        let mut remaining_morph = out_morph;
-        for chunk_index in 0..workers {
-            let first_frame_index = chunk_index * frames_per_chunk;
-            if first_frame_index >= frame_count {
-                break;
-            }
-            let frames_in_chunk = (frame_count - first_frame_index).min(frames_per_chunk);
-            let world_chunk_len = frames_in_chunk * world_frame_len;
-            let morph_chunk_len = frames_in_chunk * morph_frame_len;
-            let (world_chunk, next_world) = remaining_world.split_at_mut(world_chunk_len);
-            let (morph_chunk, next_morph) = remaining_morph.split_at_mut(morph_chunk_len);
-            remaining_world = next_world;
-            remaining_morph = next_morph;
-            let worker_model = Arc::clone(&model);
-            let worker_clip = &clip.clip;
-            handles.push(scope.spawn(move || {
-                let mut runtime =
-                    RuntimeInstance::new_with_counts(worker_model, morph_count, ik_count);
-                evaluate_clip_frame_batch_chunk(
-                    &mut runtime,
-                    worker_clip,
-                    start_frame,
-                    frame_step,
-                    first_frame_index,
-                    frames_in_chunk,
-                    world_frame_len,
-                    morph_frame_len,
-                    world_chunk,
-                    morph_chunk,
-                );
-            }));
+    ffi_guard(false, || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return false;
+        };
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return false;
+        };
+        if !start_frame.is_finite() || !frame_step.is_finite() {
+            return false;
         }
 
-        for handle in handles {
-            if handle.join().is_err() {
-                return false;
-            }
+        let world_frame_len = match instance.runtime.world_matrices().len().checked_mul(16) {
+            Some(len) => len,
+            None => return false,
+        };
+        let morph_frame_len = instance.runtime.morph_weights().len();
+        let required_world_len = match world_frame_len.checked_mul(frame_count) {
+            Some(len) => len,
+            None => return false,
+        };
+        let required_morph_len = match morph_frame_len.checked_mul(frame_count) {
+            Some(len) => len,
+            None => return false,
+        };
+
+        if out_world_matrices_f32_len < required_world_len
+            || out_morph_weights_f32_len < required_morph_len
+        {
+            return false;
         }
-        true
+        if required_world_len > 0 && out_world_matrices_f32.is_null() {
+            return false;
+        }
+        if required_morph_len > 0 && out_morph_weights_f32.is_null() {
+            return false;
+        }
+        if frame_count == 0 {
+            return true;
+        }
+
+        let model = Arc::clone(&instance.model);
+        let morph_count = morph_frame_len;
+        let ik_count = instance.runtime.ik_enabled().len();
+        let workers = resolve_batch_worker_count(worker_count, frame_count);
+
+        let out_world = if required_world_len == 0 {
+            &mut []
+        } else {
+            unsafe { slice::from_raw_parts_mut(out_world_matrices_f32, required_world_len) }
+        };
+        let out_morph = if required_morph_len == 0 {
+            &mut []
+        } else {
+            unsafe { slice::from_raw_parts_mut(out_morph_weights_f32, required_morph_len) }
+        };
+
+        if workers <= 1 {
+            let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, ik_count);
+            evaluate_clip_frame_batch_chunk(
+                &mut runtime,
+                &clip.clip,
+                start_frame,
+                frame_step,
+                0,
+                frame_count,
+                world_frame_len,
+                morph_frame_len,
+                out_world,
+                out_morph,
+            );
+            return true;
+        }
+
+        let frames_per_chunk = frame_count.div_ceil(workers);
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            let mut remaining_world = out_world;
+            let mut remaining_morph = out_morph;
+            for chunk_index in 0..workers {
+                let first_frame_index = chunk_index * frames_per_chunk;
+                if first_frame_index >= frame_count {
+                    break;
+                }
+                let frames_in_chunk = (frame_count - first_frame_index).min(frames_per_chunk);
+                let world_chunk_len = frames_in_chunk * world_frame_len;
+                let morph_chunk_len = frames_in_chunk * morph_frame_len;
+                let (world_chunk, next_world) = remaining_world.split_at_mut(world_chunk_len);
+                let (morph_chunk, next_morph) = remaining_morph.split_at_mut(morph_chunk_len);
+                remaining_world = next_world;
+                remaining_morph = next_morph;
+                let worker_model = Arc::clone(&model);
+                let worker_clip = &clip.clip;
+                handles.push(scope.spawn(move || {
+                    let mut runtime =
+                        RuntimeInstance::new_with_counts(worker_model, morph_count, ik_count);
+                    evaluate_clip_frame_batch_chunk(
+                        &mut runtime,
+                        worker_clip,
+                        start_frame,
+                        frame_step,
+                        first_frame_index,
+                        frames_in_chunk,
+                        world_frame_len,
+                        morph_frame_len,
+                        world_chunk,
+                        morph_chunk,
+                    );
+                }));
+            }
+
+            for handle in handles {
+                if handle.join().is_err() {
+                    return false_failure(FFI_ERR_WORKER_PANIC);
+                }
+            }
+            true
+        })
     })
 }
 
@@ -3177,10 +3508,12 @@ fn evaluate_clip_frame_batch_chunk(
 pub unsafe extern "C" fn mmd_runtime_instance_world_matrix_f32_len(
     instance: *const MmdRuntimeInstance,
 ) -> usize {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return 0;
-    };
-    instance.runtime.world_matrices().len() * 16
+    ffi_guard(0, || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return 0;
+        };
+        instance.runtime.world_matrices().len() * 16
+    })
 }
 
 /// Copies world matrices as column-major `f32[16]` values.
@@ -3197,23 +3530,23 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_world_matrices(
     out_f32: *mut f32,
     out_f32_len: usize,
 ) -> bool {
-    if out_f32.is_null() {
-        return false;
-    }
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return false;
-    };
-    let matrices = instance.runtime.world_matrices();
-    let required_len = matrices.len() * 16;
-    if out_f32_len < required_len {
-        return false;
-    }
+    ffi_guard(false, || {
+        if out_f32.is_null() {
+            return false;
+        }
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return false;
+        };
+        let matrices = instance.runtime.world_matrices();
+        let required_len = matrices.len() * 16;
+        if out_f32_len < required_len {
+            return false;
+        }
 
-    let out = unsafe { slice::from_raw_parts_mut(out_f32, required_len) };
-    for (matrix_index, matrix) in matrices.iter().enumerate() {
-        out[matrix_index * 16..matrix_index * 16 + 16].copy_from_slice(&matrix.to_cols_array());
-    }
-    true
+        let out = unsafe { slice::from_raw_parts_mut(out_f32, required_len) };
+        flatten_matrices_into_slice(out, matrices);
+        true
+    })
 }
 
 /// Returns the required `f32` count for copying skinning matrices.
@@ -3226,10 +3559,12 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_world_matrices(
 pub unsafe extern "C" fn mmd_runtime_instance_skinning_matrix_f32_len(
     instance: *const MmdRuntimeInstance,
 ) -> usize {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return 0;
-    };
-    instance.runtime.skinning_matrices().len() * 16
+    ffi_guard(0, || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return 0;
+        };
+        instance.runtime.skinning_matrices().len() * 16
+    })
 }
 
 /// Copies skinning matrices as column-major `f32[16]` values.
@@ -3246,23 +3581,23 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_skinning_matrices(
     out_f32: *mut f32,
     out_f32_len: usize,
 ) -> bool {
-    if out_f32.is_null() {
-        return false;
-    }
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return false;
-    };
-    let matrices = instance.runtime.skinning_matrices();
-    let required_len = matrices.len() * 16;
-    if out_f32_len < required_len {
-        return false;
-    }
+    ffi_guard(false, || {
+        if out_f32.is_null() {
+            return false;
+        }
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return false;
+        };
+        let matrices = instance.runtime.skinning_matrices();
+        let required_len = matrices.len() * 16;
+        if out_f32_len < required_len {
+            return false;
+        }
 
-    let out = unsafe { slice::from_raw_parts_mut(out_f32, required_len) };
-    for (matrix_index, matrix) in matrices.iter().enumerate() {
-        out[matrix_index * 16..matrix_index * 16 + 16].copy_from_slice(&matrix.to_cols_array());
-    }
-    true
+        let out = unsafe { slice::from_raw_parts_mut(out_f32, required_len) };
+        flatten_matrices_into_slice(out, matrices);
+        true
+    })
 }
 
 /// Returns the number of bones in the instance's model.
@@ -3275,10 +3610,12 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_skinning_matrices(
 pub unsafe extern "C" fn mmd_runtime_instance_bone_count(
     instance: *const MmdRuntimeInstance,
 ) -> usize {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return 0;
-    };
-    instance.runtime.model().bone_count()
+    ffi_guard(0, || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return 0;
+        };
+        instance.runtime.model().bone_count()
+    })
 }
 
 /// Returns a pointer to the cached world matrices array.
@@ -3295,10 +3632,12 @@ pub unsafe extern "C" fn mmd_runtime_instance_bone_count(
 pub unsafe extern "C" fn mmd_runtime_instance_world_matrices(
     instance: *const MmdRuntimeInstance,
 ) -> *const f32 {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return ptr::null();
-    };
-    instance.cached_world_matrices.as_ptr()
+    ffi_guard(ptr::null(), || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return null_failure(FFI_ERR_INVALID_INPUT);
+        };
+        instance.cached_world_matrices.as_ptr()
+    })
 }
 
 /// Returns a pointer to the cached skinning matrices array.
@@ -3315,10 +3654,12 @@ pub unsafe extern "C" fn mmd_runtime_instance_world_matrices(
 pub unsafe extern "C" fn mmd_runtime_instance_skinning_matrices(
     instance: *const MmdRuntimeInstance,
 ) -> *const f32 {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return ptr::null();
-    };
-    instance.cached_skinning_matrices.as_ptr()
+    ffi_guard(ptr::null(), || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return null_failure(FFI_ERR_INVALID_INPUT);
+        };
+        instance.cached_skinning_matrices.as_ptr()
+    })
 }
 
 /// Returns the morph weight count for an instance.
@@ -3331,10 +3672,12 @@ pub unsafe extern "C" fn mmd_runtime_instance_skinning_matrices(
 pub unsafe extern "C" fn mmd_runtime_instance_morph_weight_len(
     instance: *const MmdRuntimeInstance,
 ) -> usize {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return 0;
-    };
-    instance.runtime.morph_weights().len()
+    ffi_guard(0, || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return 0;
+        };
+        instance.runtime.morph_weights().len()
+    })
 }
 
 /// Copies morph weights into caller-owned memory.
@@ -3350,19 +3693,21 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_morph_weights(
     out_f32: *mut f32,
     out_f32_len: usize,
 ) -> bool {
-    if out_f32.is_null() {
-        return false;
-    }
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return false;
-    };
-    let weights = instance.runtime.morph_weights();
-    if out_f32_len < weights.len() {
-        return false;
-    }
-    let out = unsafe { slice::from_raw_parts_mut(out_f32, weights.len()) };
-    out.copy_from_slice(weights);
-    true
+    ffi_guard(false, || {
+        if out_f32.is_null() {
+            return false;
+        }
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return false;
+        };
+        let weights = instance.runtime.morph_weights();
+        if out_f32_len < weights.len() {
+            return false;
+        }
+        let out = unsafe { slice::from_raw_parts_mut(out_f32, weights.len()) };
+        out.copy_from_slice(weights);
+        true
+    })
 }
 
 /// Returns the IK enabled-state count for an instance.
@@ -3375,10 +3720,12 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_morph_weights(
 pub unsafe extern "C" fn mmd_runtime_instance_ik_enabled_len(
     instance: *const MmdRuntimeInstance,
 ) -> usize {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return 0;
-    };
-    instance.runtime.ik_enabled().len()
+    ffi_guard(0, || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return 0;
+        };
+        instance.runtime.ik_enabled().len()
+    })
 }
 
 /// Copies IK enabled states into caller-owned memory.
@@ -3394,19 +3741,21 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_ik_enabled(
     out_u8: *mut u8,
     out_u8_len: usize,
 ) -> bool {
-    if out_u8.is_null() {
-        return false;
-    }
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return false;
-    };
-    let states = instance.runtime.ik_enabled();
-    if out_u8_len < states.len() {
-        return false;
-    }
-    let out = unsafe { slice::from_raw_parts_mut(out_u8, states.len()) };
-    out.copy_from_slice(states);
-    true
+    ffi_guard(false, || {
+        if out_u8.is_null() {
+            return false;
+        }
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return false;
+        };
+        let states = instance.runtime.ik_enabled();
+        if out_u8_len < states.len() {
+            return false;
+        }
+        let out = unsafe { slice::from_raw_parts_mut(out_u8, states.len()) };
+        out.copy_from_slice(states);
+        true
+    })
 }
 
 /// Returns a direct pointer to the morph weights array.
@@ -3423,10 +3772,12 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_ik_enabled(
 pub unsafe extern "C" fn mmd_runtime_instance_morph_weights(
     instance: *const MmdRuntimeInstance,
 ) -> *const f32 {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return ptr::null();
-    };
-    instance.runtime.morph_weights().as_ptr()
+    ffi_guard(ptr::null(), || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return null_failure(FFI_ERR_INVALID_INPUT);
+        };
+        instance.runtime.morph_weights().as_ptr()
+    })
 }
 
 /// Returns a direct pointer to the IK enabled states array.
@@ -3443,10 +3794,12 @@ pub unsafe extern "C" fn mmd_runtime_instance_morph_weights(
 pub unsafe extern "C" fn mmd_runtime_instance_ik_enabled(
     instance: *const MmdRuntimeInstance,
 ) -> *const u8 {
-    let Some(instance) = (unsafe { instance.as_ref() }) else {
-        return ptr::null();
-    };
-    instance.runtime.ik_enabled().as_ptr()
+    ffi_guard(ptr::null(), || {
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return null_failure(FFI_ERR_INVALID_INPUT);
+        };
+        instance.runtime.ik_enabled().as_ptr()
+    })
 }
 
 /// Creates an animation clip from flat track/keyframe arrays.
@@ -3472,24 +3825,26 @@ pub unsafe extern "C" fn mmd_runtime_clip_create(
     property_ik_enabled: *const u8,
     property_ik_enabled_count: usize,
 ) -> *mut MmdRuntimeClip {
-    let input = RawClipInput {
-        bone_tracks,
-        bone_track_count,
-        bone_keyframes,
-        bone_keyframe_count,
-        morph_tracks,
-        morph_track_count,
-        morph_keyframes,
-        morph_keyframe_count,
-        property_keyframes,
-        property_keyframe_count,
-        property_ik_enabled,
-        property_ik_enabled_count,
-    };
-    let Some(clip) = (unsafe { build_clip_from_ffi(input) }) else {
-        return ptr::null_mut();
-    };
-    Box::into_raw(Box::new(MmdRuntimeClip { clip }))
+    ffi_guard(ptr::null_mut(), || {
+        let input = RawClipInput {
+            bone_tracks,
+            bone_track_count,
+            bone_keyframes,
+            bone_keyframe_count,
+            morph_tracks,
+            morph_track_count,
+            morph_keyframes,
+            morph_keyframe_count,
+            property_keyframes,
+            property_keyframe_count,
+            property_ik_enabled,
+            property_ik_enabled_count,
+        };
+        let Some(clip) = (unsafe { build_clip_from_ffi(input) }) else {
+            return ptr::null_mut();
+        };
+        Box::into_raw(Box::new(MmdRuntimeClip { clip }))
+    })
 }
 
 /// Writes the inclusive first and last keyed frames for a clip.
@@ -3507,20 +3862,22 @@ pub unsafe extern "C" fn mmd_runtime_clip_frame_range(
     out_first_frame: *mut u32,
     out_last_frame: *mut u32,
 ) -> bool {
-    let Some(clip) = (unsafe { clip.as_ref() }) else {
-        return false;
-    };
-    if out_first_frame.is_null() || out_last_frame.is_null() {
-        return false;
-    }
-    let Some((first, last)) = clip.clip.frame_range() else {
-        return false;
-    };
-    unsafe {
-        *out_first_frame = first;
-        *out_last_frame = last;
-    }
-    true
+    ffi_guard(false, || {
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return false;
+        };
+        if out_first_frame.is_null() || out_last_frame.is_null() {
+            return false;
+        }
+        let Some((first, last)) = clip.clip.frame_range() else {
+            return false;
+        };
+        unsafe {
+            *out_first_frame = first;
+            *out_last_frame = last;
+        }
+        true
+    })
 }
 
 /// Frees a clip created by `mmd_runtime_clip_create`.
@@ -3531,11 +3888,13 @@ pub unsafe extern "C" fn mmd_runtime_clip_frame_range(
 /// has not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_clip_free(clip: *mut MmdRuntimeClip) {
-    if !clip.is_null() {
-        unsafe {
-            drop(Box::from_raw(clip));
+    ffi_guard_void(|| {
+        if !clip.is_null() {
+            unsafe {
+                drop(Box::from_raw(clip));
+            }
         }
-    }
+    })
 }
 
 struct RawClipInput {
@@ -3766,6 +4125,57 @@ struct RawModelInput {
     group_morph_offset_count: usize,
 }
 
+impl Default for RawModelInput {
+    fn default() -> Self {
+        Self {
+            parent_indices: ptr::null(),
+            rest_positions_xyz: ptr::null(),
+            inverse_bind_matrices: ptr::null(),
+            transform_orders: ptr::null(),
+            bone_count: 0,
+            ik_solvers: ptr::null(),
+            ik_solver_count: 0,
+            ik_links: ptr::null(),
+            ik_link_count: 0,
+            append_transforms: ptr::null(),
+            append_transform_count: 0,
+            morph_count: 0,
+            bone_morph_offsets: ptr::null(),
+            bone_morph_offset_count: 0,
+            group_morph_offsets: ptr::null(),
+            group_morph_offset_count: 0,
+        }
+    }
+}
+
+impl RawModelInput {
+    fn with_bones(
+        parent_indices: *const i32,
+        rest_positions_xyz: *const f32,
+        bone_count: usize,
+    ) -> Self {
+        Self {
+            parent_indices,
+            rest_positions_xyz,
+            bone_count,
+            ..Self::default()
+        }
+    }
+}
+
+unsafe fn create_runtime_model_from_ffi_input(input: RawModelInput) -> *mut MmdRuntimeModel {
+    let Some(model) = (unsafe { build_model_from_ffi(input) }) else {
+        return ptr::null_mut();
+    };
+
+    Box::into_raw(Box::new(MmdRuntimeModel {
+        model: Arc::new(model),
+        bone_name_to_index: HashMap::new(),
+        morph_name_to_index: HashMap::new(),
+        ik_solver_bone_name_to_index: HashMap::new(),
+    }))
+}
+
 unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
     let parents = unsafe { slice::from_raw_parts(input.parent_indices, input.bone_count) };
     let positions =
@@ -3784,91 +4194,47 @@ unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
     let ik_links = unsafe { checked_slice(input.ik_links, input.ik_link_count) }?;
     let append_transforms =
         unsafe { checked_slice(input.append_transforms, input.append_transform_count) }?;
-    let mut bones = Vec::with_capacity(input.bone_count);
+    let bones = build_bones_from_flat(FlatBoneInput {
+        parent_indices: parents,
+        rest_positions_xyz: positions,
+        inverse_bind_matrices,
+        transform_orders,
+    })
+    .ok()?;
 
-    for (bone_index, parent_index) in parents.iter().enumerate() {
-        let parent = match *parent_index {
-            -1 => None,
-            parent if parent >= 0 => Some(BoneIndex(parent as u32)),
-            _ => return None,
-        };
-        let position_offset = bone_index * 3;
-        let mut bone = BoneInit::new(
-            parent,
-            glam::Vec3A::new(
-                positions[position_offset],
-                positions[position_offset + 1],
-                positions[position_offset + 2],
-            ),
-        );
-        if !inverse_bind_matrices.is_empty() {
-            let inverse_bind_offset = bone_index * 16;
-            let inverse_bind_matrix = inverse_bind_matrices
-                [inverse_bind_offset..inverse_bind_offset + 16]
-                .try_into()
-                .ok()?;
-            bone.inverse_bind_matrix = glam::Mat4::from_cols_array(inverse_bind_matrix);
-        }
-        if !transform_orders.is_empty() {
-            bone.transform_order = transform_orders[bone_index];
-        }
-        bones.push(bone);
-    }
-
-    let ik_solvers = ik_solvers
+    let ik_links = ik_links
         .iter()
-        .map(|solver| {
-            let links = checked_range(ik_links, solver.link_offset, solver.link_count)?
-                .iter()
-                .map(|link| {
-                    let mut init = IkLinkInit::new(BoneIndex(link.bone_index));
-                    if link.flags & IK_LINK_FLAG_ANGLE_LIMIT != 0 {
-                        init = init.with_angle_limit(IkAngleLimit::new(
-                            glam::Vec3A::new(
-                                link.angle_limit_min_xyz[0],
-                                link.angle_limit_min_xyz[1],
-                                link.angle_limit_min_xyz[2],
-                            ),
-                            glam::Vec3A::new(
-                                link.angle_limit_max_xyz[0],
-                                link.angle_limit_max_xyz[1],
-                                link.angle_limit_max_xyz[2],
-                            ),
-                        ));
-                    }
-                    Some(init)
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some(IkSolverInit {
-                ik_bone: BoneIndex(solver.ik_bone_index),
-                target_bone: BoneIndex(solver.target_bone_index),
-                links,
-                iteration_count: solver.iteration_count,
-                limit_angle: solver.limit_angle,
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
-
-    let append_transforms = append_transforms
-        .iter()
-        .map(|append| {
-            let mut init = AppendTransformInit::new(
-                BoneIndex(append.target_bone_index),
-                BoneIndex(append.source_bone_index),
-                append.ratio,
-            );
-            if append.flags & APPEND_FLAG_ROTATION != 0 {
-                init = init.with_rotation();
-            }
-            if append.flags & APPEND_FLAG_TRANSLATION != 0 {
-                init = init.with_translation();
-            }
-            if append.flags & APPEND_FLAG_LOCAL != 0 {
-                init = init.with_local();
-            }
-            init
+        .map(|link| FlatIkLinkInput {
+            bone_index: link.bone_index,
+            has_angle_limit: link.flags & IK_LINK_FLAG_ANGLE_LIMIT != 0,
+            angle_limit_min_xyz: link.angle_limit_min_xyz,
+            angle_limit_max_xyz: link.angle_limit_max_xyz,
         })
         .collect::<Vec<_>>();
+    let ik_solvers = build_ik_solvers_from_flat_iter(
+        ik_solvers.iter().map(|solver| FlatIkSolverInput {
+            ik_bone_index: solver.ik_bone_index,
+            target_bone_index: solver.target_bone_index,
+            link_offset: solver.link_offset,
+            link_count: solver.link_count,
+            iteration_count: solver.iteration_count,
+            limit_angle: solver.limit_angle,
+        }),
+        &ik_links,
+    )
+    .ok()?;
+
+    let append_transforms =
+        build_append_transforms_from_flat_iter(append_transforms.iter().map(|append| {
+            FlatAppendTransformInput {
+                target_bone_index: append.target_bone_index,
+                source_bone_index: append.source_bone_index,
+                ratio: append.ratio,
+                affect_rotation: append.flags & APPEND_FLAG_ROTATION != 0,
+                affect_translation: append.flags & APPEND_FLAG_TRANSLATION != 0,
+                local: append.flags & APPEND_FLAG_LOCAL != 0,
+            }
+        }));
 
     let bone_morph_offsets =
         unsafe { checked_slice(input.bone_morph_offsets, input.bone_morph_offset_count) }?;
@@ -3885,2943 +4251,22 @@ fn build_morph_init_from_ffi(
     bone_morph_offsets: &[MmdRuntimeFfiBoneMorphOffset],
     group_morph_offsets: &[MmdRuntimeFfiGroupMorphOffset],
 ) -> Option<MorphInit> {
-    if morph_count == 0 {
-        return if bone_morph_offsets.is_empty() && group_morph_offsets.is_empty() {
-            Some(MorphInit::default())
-        } else {
-            None
-        };
-    }
-    let mc = morph_count as usize;
-
-    let (bone_offsets, bone_spans) = if bone_morph_offsets.is_empty() {
-        (Vec::new(), vec![MorphOffsetSpan::default(); mc])
-    } else {
-        let mut sorted: Vec<_> = bone_morph_offsets.iter().collect();
-        sorted.sort_by_key(|a| a.morph_index);
-        if sorted.last().unwrap().morph_index as usize >= mc {
-            return None;
-        }
-        let mut offsets = Vec::with_capacity(bone_morph_offsets.len());
-        let mut spans = vec![MorphOffsetSpan::default(); mc];
-        let mut i = 0;
-        while i < sorted.len() {
-            let morph = sorted[i].morph_index as usize;
-            let start = offsets.len() as u32;
-            let mut count = 0u32;
-            while i < sorted.len() && sorted[i].morph_index == morph as u32 {
-                let entry = sorted[i];
-                offsets.push(BoneMorphOffset {
-                    target_bone: BoneIndex(entry.target_bone_index),
-                    position_offset: glam::Vec3A::new(
-                        entry.position_offset_xyz[0],
-                        entry.position_offset_xyz[1],
-                        entry.position_offset_xyz[2],
-                    ),
-                    rotation_offset: glam::Quat::from_xyzw(
-                        entry.rotation_offset_xyzw[0],
-                        entry.rotation_offset_xyzw[1],
-                        entry.rotation_offset_xyzw[2],
-                        entry.rotation_offset_xyzw[3],
-                    ),
-                });
-                count += 1;
-                i += 1;
-            }
-            spans[morph] = MorphOffsetSpan { start, count };
-        }
-        (offsets, spans)
-    };
-
-    let (group_offsets, group_spans) = if group_morph_offsets.is_empty() {
-        (Vec::new(), vec![MorphOffsetSpan::default(); mc])
-    } else {
-        let mut sorted: Vec<_> = group_morph_offsets.iter().collect();
-        sorted.sort_by_key(|a| a.morph_index);
-        if sorted.last().unwrap().morph_index as usize >= mc {
-            return None;
-        }
-        let mut offsets = Vec::with_capacity(group_morph_offsets.len());
-        let mut spans = vec![MorphOffsetSpan::default(); mc];
-        let mut i = 0;
-        while i < sorted.len() {
-            let morph = sorted[i].morph_index as usize;
-            let start = offsets.len() as u32;
-            let mut count = 0u32;
-            while i < sorted.len() && sorted[i].morph_index == morph as u32 {
-                let entry = sorted[i];
-                offsets.push(GroupMorphOffset {
-                    child_morph: MorphIndex(entry.child_morph_index),
-                    ratio: entry.ratio,
-                });
-                count += 1;
-                i += 1;
-            }
-            spans[morph] = MorphOffsetSpan { start, count };
-        }
-        (offsets, spans)
-    };
-
-    Some(MorphInit {
+    build_morph_init_from_flat_iter(
         morph_count,
-        bone_offsets,
-        bone_spans,
-        group_offsets,
-        group_spans,
-        ..MorphInit::default()
-    })
+        bone_morph_offsets.iter().map(|entry| FlatBoneMorphInput {
+            morph_index: entry.morph_index,
+            target_bone_index: entry.target_bone_index,
+            position_offset_xyz: entry.position_offset_xyz,
+            rotation_offset_xyzw: entry.rotation_offset_xyzw,
+        }),
+        group_morph_offsets.iter().map(|entry| FlatGroupMorphInput {
+            morph_index: entry.morph_index,
+            child_morph_index: entry.child_morph_index,
+            ratio: entry.ratio,
+        }),
+    )
+    .ok()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn abi_version_matches_current_breaking_surface() {
-        assert_eq!(ABI_VERSION, 2);
-        assert_eq!(mmd_runtime_abi_version(), ABI_VERSION);
-    }
-
-    fn assert_near(actual: f32, expected: f32, tolerance: f32) {
-        assert!(
-            (actual - expected).abs() <= tolerance,
-            "actual={actual} expected={expected} tolerance={tolerance}"
-        );
-    }
-
-    fn assert_slice_near(actual: &[f32], expected: &[f32], tolerance: f32) {
-        assert_eq!(actual.len(), expected.len());
-        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
-            assert!(
-                (*actual - *expected).abs() <= tolerance,
-                "index={index} actual={actual} expected={expected} tolerance={tolerance}"
-            );
-        }
-    }
-
-    fn simple_ik_chain() -> *mut MmdRuntimeIkChain {
-        let bones = [
-            MmdRuntimeFfiRigBone {
-                parent_slot: -1,
-                rest_position_xyz: [0.0, 0.0, 0.0],
-                flags: 0,
-                fixed_axis_xyz: [0.0, 0.0, 0.0],
-            },
-            MmdRuntimeFfiRigBone {
-                parent_slot: 0,
-                rest_position_xyz: [1.0, 0.0, 0.0],
-                flags: 0,
-                fixed_axis_xyz: [0.0, 0.0, 0.0],
-            },
-        ];
-        let links = [MmdRuntimeFfiRigIkLink {
-            bone_slot: 0,
-            has_angle_limit: false,
-            angle_limit_min_xyz: [0.0, 0.0, 0.0],
-            angle_limit_max_xyz: [0.0, 0.0, 0.0],
-        }];
-        unsafe {
-            mmd_runtime_ik_chain_create(
-                bones.as_ptr(),
-                bones.len(),
-                1,
-                links.as_ptr(),
-                links.len(),
-                4,
-                0.0,
-            )
-        }
-    }
-
-    #[test]
-    fn append_solver_lifecycle_and_expected_output_use_xyzw_quaternion() {
-        let config = MmdRuntimeFfiAppendConfig {
-            ratio: 0.5,
-            affect_rotation: true,
-            affect_translation: true,
-        };
-        let solver = unsafe { mmd_runtime_append_solver_create(&config) };
-        assert!(!solver.is_null());
-
-        let source_position = [2.0, 4.0, -6.0];
-        let source_rotation = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2).to_array();
-        let mut out_position = [0.0; 3];
-        let mut out_rotation = [0.0; 4];
-        assert!(unsafe {
-            mmd_runtime_append_solver_solve(
-                solver,
-                source_position.as_ptr(),
-                source_rotation.as_ptr(),
-                out_position.as_mut_ptr(),
-                out_rotation.as_mut_ptr(),
-            )
-        });
-
-        assert_slice_near(&out_position, &[1.0, 2.0, -3.0], 1.0e-5);
-        let solved = glam::Quat::from_xyzw(
-            out_rotation[0],
-            out_rotation[1],
-            out_rotation[2],
-            out_rotation[3],
-        );
-        let rotated_x = solved.mul_vec3(glam::Vec3::X);
-        assert_near(rotated_x.x, std::f32::consts::FRAC_1_SQRT_2, 1.0e-5);
-        assert_near(rotated_x.y, std::f32::consts::FRAC_1_SQRT_2, 1.0e-5);
-        assert_near(out_rotation[3], solved.w, 0.0);
-
-        unsafe { mmd_runtime_append_solver_free(solver) };
-    }
-
-    #[test]
-    fn append_solver_rejects_null_inputs() {
-        let config = MmdRuntimeFfiAppendConfig {
-            ratio: 1.0,
-            affect_rotation: true,
-            affect_translation: true,
-        };
-        assert!(unsafe { mmd_runtime_append_solver_create(ptr::null()) }.is_null());
-        let solver = unsafe { mmd_runtime_append_solver_create(&config) };
-        assert!(!solver.is_null());
-
-        let source_position = [0.0; 3];
-        let source_rotation = [0.0, 0.0, 0.0, 1.0];
-        let mut out_position = [0.0; 3];
-        let mut out_rotation = [0.0; 4];
-        assert!(!unsafe {
-            mmd_runtime_append_solver_solve(
-                ptr::null(),
-                source_position.as_ptr(),
-                source_rotation.as_ptr(),
-                out_position.as_mut_ptr(),
-                out_rotation.as_mut_ptr(),
-            )
-        });
-        assert!(!unsafe {
-            mmd_runtime_append_solver_solve(
-                solver,
-                ptr::null(),
-                source_rotation.as_ptr(),
-                out_position.as_mut_ptr(),
-                out_rotation.as_mut_ptr(),
-            )
-        });
-        assert!(!unsafe {
-            mmd_runtime_append_solver_solve(
-                solver,
-                source_position.as_ptr(),
-                ptr::null(),
-                out_position.as_mut_ptr(),
-                out_rotation.as_mut_ptr(),
-            )
-        });
-
-        unsafe { mmd_runtime_append_solver_free(solver) };
-    }
-
-    #[test]
-    fn ik_chain_lifecycle_solve_converges_and_uses_column_major_parent_matrix() {
-        let chain = simple_ik_chain();
-        assert!(!chain.is_null());
-
-        let parent_world =
-            glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.0, 0.0)).to_cols_array();
-        let local_rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-        let goal = [2.0, 1.0, 0.0];
-        let mut out_rotations = [0.0; 4];
-        let mut stats = MmdRuntimeFfiIkSolveStats {
-            executed_iterations: 0,
-            link_steps: 0,
-            final_distance: f32::MAX,
-            break_reason: u32::MAX,
-        };
-
-        assert!(unsafe {
-            mmd_runtime_ik_chain_solve(
-                chain,
-                parent_world.as_ptr(),
-                ptr::null(),
-                local_rotations.as_ptr(),
-                goal.as_ptr(),
-                1.0e-3,
-                0,
-                out_rotations.as_mut_ptr(),
-                out_rotations.len(),
-                &mut stats,
-            )
-        });
-        assert!(
-            stats.final_distance <= 1.0e-3,
-            "IK should converge to the goal, stats={:?}",
-            (
-                stats.executed_iterations,
-                stats.link_steps,
-                stats.final_distance,
-                stats.break_reason
-            )
-        );
-        assert_eq!(stats.break_reason, 0);
-
-        let solved = glam::Quat::from_xyzw(
-            out_rotations[0],
-            out_rotations[1],
-            out_rotations[2],
-            out_rotations[3],
-        );
-        let rotated_x = solved.mul_vec3(glam::Vec3::X);
-        assert_near(rotated_x.x, 0.0, 1.0e-3);
-        assert_near(rotated_x.y, 1.0, 1.0e-3);
-        assert_near(out_rotations[3], solved.w, 0.0);
-
-        unsafe { mmd_runtime_ik_chain_free(chain) };
-    }
-
-    #[test]
-    fn ik_chain_rejects_null_and_short_buffer_inputs() {
-        let chain = simple_ik_chain();
-        assert!(!chain.is_null());
-
-        let local_rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-        let goal = [0.0, 1.0, 0.0];
-        let mut out_rotations = [0.0; 4];
-
-        assert!(
-            unsafe { mmd_runtime_ik_chain_create(ptr::null(), 2, 1, ptr::null(), 1, 1, 0.0) }
-                .is_null()
-        );
-        assert!(!unsafe {
-            mmd_runtime_ik_chain_solve(
-                ptr::null_mut(),
-                ptr::null(),
-                ptr::null(),
-                local_rotations.as_ptr(),
-                goal.as_ptr(),
-                1.0e-3,
-                0,
-                out_rotations.as_mut_ptr(),
-                out_rotations.len(),
-                ptr::null_mut(),
-            )
-        });
-        assert!(!unsafe {
-            mmd_runtime_ik_chain_solve(
-                chain,
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                goal.as_ptr(),
-                1.0e-3,
-                0,
-                out_rotations.as_mut_ptr(),
-                out_rotations.len(),
-                ptr::null_mut(),
-            )
-        });
-        assert!(!unsafe {
-            mmd_runtime_ik_chain_solve(
-                chain,
-                ptr::null(),
-                ptr::null(),
-                local_rotations.as_ptr(),
-                goal.as_ptr(),
-                1.0e-3,
-                0,
-                out_rotations.as_mut_ptr(),
-                out_rotations.len() - 1,
-                ptr::null_mut(),
-            )
-        });
-
-        unsafe { mmd_runtime_ik_chain_free(chain) };
-    }
-
-    #[test]
-    fn exports_pmx_from_parts_through_c_abi() {
-        let metadata = serde_json::json!({
-            "name": "ffi-parts-model",
-            "englishName": "ffi-parts-model-en",
-            "comment": "built through C ABI",
-            "encoding": "utf-8",
-            "indexSizes": {
-                "vertex": 1,
-                "texture": 1,
-                "material": 1,
-                "bone": 1,
-                "morph": 1,
-                "rigidBody": 1
-            },
-            "materialName": "ffi-default-mat"
-        })
-        .to_string();
-        let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-
-        let buffer = unsafe {
-            mmd_runtime_export_pmx_from_parts(
-                metadata.as_ptr(),
-                metadata.len(),
-                positions.as_ptr(),
-                3,
-                normals.as_ptr(),
-                uvs.as_ptr(),
-                indices.as_ptr(),
-                indices.len(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-            )
-        };
-        assert!(!buffer.data.is_null());
-        assert!(buffer.len > 0);
-
-        let bytes = unsafe { slice::from_raw_parts(buffer.data, buffer.len) };
-        let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
-        assert_eq!(parsed.metadata.name, "ffi-parts-model");
-        assert_eq!(parsed.metadata.english_name, "ffi-parts-model-en");
-        assert_eq!(parsed.metadata.counts.vertices, 3);
-        assert_eq!(parsed.metadata.counts.faces, 1);
-        assert_eq!(parsed.metadata.counts.materials, 1);
-        assert_eq!(parsed.metadata.counts.bones, 1);
-        assert_eq!(parsed.materials[0].name, "ffi-default-mat");
-        assert_eq!(parsed.geometry.indices, vec![0, 1, 2]);
-
-        unsafe {
-            mmd_runtime_byte_buffer_free(buffer);
-        }
-    }
-
-    #[test]
-    fn export_pmx_from_parts_rejects_invalid_c_abi_input() {
-        let metadata = "{}";
-        let positions = [0.0, 0.0, 0.0];
-        let normals = [0.0, 0.0, 1.0];
-        let uvs = [0.0, 0.0];
-        let skin_indices = [0, 0, 0, 0];
-
-        let partial_skin = unsafe {
-            mmd_runtime_export_pmx_from_parts(
-                metadata.as_ptr(),
-                metadata.len(),
-                positions.as_ptr(),
-                1,
-                normals.as_ptr(),
-                uvs.as_ptr(),
-                ptr::null(),
-                0,
-                skin_indices.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-            )
-        };
-        assert!(partial_skin.data.is_null());
-        assert_eq!(partial_skin.len, 0);
-
-        let null_metadata = unsafe {
-            mmd_runtime_export_pmx_from_parts(
-                ptr::null(),
-                0,
-                positions.as_ptr(),
-                1,
-                normals.as_ptr(),
-                uvs.as_ptr(),
-                ptr::null(),
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-            )
-        };
-        assert!(null_metadata.data.is_null());
-        assert_eq!(null_metadata.len, 0);
-    }
-
-    #[test]
-    fn evaluates_rest_pose_through_c_abi() {
-        let parents = [-1, 0];
-        let rest_positions = [1.0, 0.0, 0.0, 0.0, 2.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 2) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
-        assert_eq!(
-            unsafe { mmd_runtime_instance_world_matrix_f32_len(instance) },
-            32
-        );
-
-        let mut matrices = [0.0f32; 32];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_world_matrices(
-                instance,
-                matrices.as_mut_ptr(),
-                matrices.len(),
-            )
-        });
-        assert_eq!(matrices[12], 1.0);
-        assert_eq!(matrices[16 + 12], 1.0);
-        assert_eq!(matrices[16 + 13], 2.0);
-
-        let mut skinning_matrices = [0.0f32; 32];
-        assert_eq!(
-            unsafe { mmd_runtime_instance_skinning_matrix_f32_len(instance) },
-            32
-        );
-        assert!(unsafe {
-            mmd_runtime_instance_copy_skinning_matrices(
-                instance,
-                skinning_matrices.as_mut_ptr(),
-                skinning_matrices.len(),
-            )
-        });
-        assert_eq!(skinning_matrices, matrices);
-
-        unsafe {
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn applies_inverse_bind_through_c_abi() {
-        let parents = [-1];
-        let rest_positions = [2.0, 0.0, 0.0];
-        let inverse_bind =
-            glam::Mat4::from_translation(glam::Vec3::new(-2.0, 0.0, 0.0)).to_cols_array();
-        let model = unsafe {
-            mmd_runtime_model_create_with_inverse_bind(
-                parents.as_ptr(),
-                rest_positions.as_ptr(),
-                inverse_bind.as_ptr(),
-                1,
-            )
-        };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
-
-        let mut world_matrices = [0.0f32; 16];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_world_matrices(
-                instance,
-                world_matrices.as_mut_ptr(),
-                world_matrices.len(),
-            )
-        });
-        assert_eq!(world_matrices[12], 2.0);
-
-        let mut skinning_matrices = [0.0f32; 16];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_skinning_matrices(
-                instance,
-                skinning_matrices.as_mut_ptr(),
-                skinning_matrices.len(),
-            )
-        });
-        assert_eq!(skinning_matrices[12], 0.0);
-
-        unsafe {
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn creates_ik_solver_through_full_c_abi() {
-        let parents = [-1, 0, 1];
-        let rest_positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-        let ik_links = [MmdRuntimeFfiIkLink {
-            bone_index: 1,
-            flags: IK_LINK_FLAG_ANGLE_LIMIT,
-            angle_limit_min_xyz: [-1.0, -0.5, -0.25],
-            angle_limit_max_xyz: [1.0, 0.5, 0.25],
-        }];
-        let ik_solvers = [MmdRuntimeFfiIkSolver {
-            ik_bone_index: 0,
-            target_bone_index: 2,
-            link_offset: 0,
-            link_count: 1,
-            iteration_count: 2,
-            limit_angle: 0.5,
-        }];
-        let model = unsafe {
-            mmd_runtime_model_create_full(
-                parents.as_ptr(),
-                rest_positions.as_ptr(),
-                ptr::null(),
-                3,
-                ik_solvers.as_ptr(),
-                ik_solvers.len(),
-                ik_links.as_ptr(),
-                ik_links.len(),
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        assert_eq!(unsafe { mmd_runtime_instance_ik_enabled_len(instance) }, 1);
-        let mut ik_enabled = [0u8; 1];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_ik_enabled(
-                instance,
-                ik_enabled.as_mut_ptr(),
-                ik_enabled.len(),
-            )
-        });
-        assert_eq!(ik_enabled[0], 1);
-
-        unsafe {
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn evaluates_clip_frame_through_c_abi() {
-        let parents = [-1];
-        let rest_positions = [0.0, 0.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create_with_counts(model, 1, 1) };
-        assert!(!instance.is_null());
-
-        let bone_tracks = [MmdRuntimeFfiBoneTrack {
-            bone_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 2,
-        }];
-        let bone_keyframes = [
-            MmdRuntimeFfiBoneKeyframe {
-                frame: 0,
-                position_xyz: [0.0, 0.0, 0.0],
-                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            },
-            MmdRuntimeFfiBoneKeyframe {
-                frame: 60,
-                position_xyz: [2.0, 0.0, 0.0],
-                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            },
-        ];
-        let morph_tracks = [MmdRuntimeFfiMorphTrack {
-            morph_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 2,
-        }];
-        let morph_keyframes = [
-            MmdRuntimeFfiMorphKeyframe {
-                frame: 0,
-                weight: 0.0,
-            },
-            MmdRuntimeFfiMorphKeyframe {
-                frame: 60,
-                weight: 1.0,
-            },
-        ];
-        let property_keyframes = [
-            MmdRuntimeFfiPropertyKeyframe {
-                frame: 0,
-                ik_enabled_offset: 0,
-                ik_enabled_count: 1,
-            },
-            MmdRuntimeFfiPropertyKeyframe {
-                frame: 30,
-                ik_enabled_offset: 1,
-                ik_enabled_count: 1,
-            },
-        ];
-        let property_ik_enabled = [1u8, 0u8];
-        let clip = unsafe {
-            mmd_runtime_clip_create(
-                bone_tracks.as_ptr(),
-                bone_tracks.len(),
-                bone_keyframes.as_ptr(),
-                bone_keyframes.len(),
-                morph_tracks.as_ptr(),
-                morph_tracks.len(),
-                morph_keyframes.as_ptr(),
-                morph_keyframes.len(),
-                property_keyframes.as_ptr(),
-                property_keyframes.len(),
-                property_ik_enabled.as_ptr(),
-                property_ik_enabled.len(),
-            )
-        };
-        assert!(!clip.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(instance, clip, 30.0) });
-
-        let mut matrices = [0.0f32; 16];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_world_matrices(
-                instance,
-                matrices.as_mut_ptr(),
-                matrices.len(),
-            )
-        });
-        assert_eq!(matrices[12], 1.0);
-
-        let mut morph_weights = [0.0f32; 1];
-        assert_eq!(
-            unsafe { mmd_runtime_instance_morph_weight_len(instance) },
-            1
-        );
-        assert!(unsafe {
-            mmd_runtime_instance_copy_morph_weights(
-                instance,
-                morph_weights.as_mut_ptr(),
-                morph_weights.len(),
-            )
-        });
-        assert_eq!(morph_weights[0], 0.5);
-
-        let mut ik_enabled = [1u8; 1];
-        assert_eq!(unsafe { mmd_runtime_instance_ik_enabled_len(instance) }, 1);
-        assert!(unsafe {
-            mmd_runtime_instance_copy_ik_enabled(
-                instance,
-                ik_enabled.as_mut_ptr(),
-                ik_enabled.len(),
-            )
-        });
-        assert_eq!(ik_enabled[0], 0);
-
-        unsafe {
-            mmd_runtime_clip_free(clip);
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn evaluates_clip_frame_batch_through_c_abi_without_mutating_source_instance() {
-        let parents = [-1];
-        let rest_positions = [1.0, 0.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create_with_counts(model, 1, 1) };
-        assert!(!instance.is_null());
-
-        let bone_tracks = [MmdRuntimeFfiBoneTrack {
-            bone_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 2,
-        }];
-        let bone_keyframes = [
-            MmdRuntimeFfiBoneKeyframe {
-                frame: 0,
-                position_xyz: [0.0, 0.0, 0.0],
-                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            },
-            MmdRuntimeFfiBoneKeyframe {
-                frame: 60,
-                position_xyz: [2.0, 0.0, 0.0],
-                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            },
-        ];
-        let morph_tracks = [MmdRuntimeFfiMorphTrack {
-            morph_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 2,
-        }];
-        let morph_keyframes = [
-            MmdRuntimeFfiMorphKeyframe {
-                frame: 0,
-                weight: 0.0,
-            },
-            MmdRuntimeFfiMorphKeyframe {
-                frame: 60,
-                weight: 1.0,
-            },
-        ];
-        let property_keyframes = [
-            MmdRuntimeFfiPropertyKeyframe {
-                frame: 0,
-                ik_enabled_offset: 0,
-                ik_enabled_count: 1,
-            },
-            MmdRuntimeFfiPropertyKeyframe {
-                frame: 30,
-                ik_enabled_offset: 1,
-                ik_enabled_count: 1,
-            },
-        ];
-        let property_ik_enabled = [1u8, 0u8];
-        let clip = unsafe {
-            mmd_runtime_clip_create(
-                bone_tracks.as_ptr(),
-                bone_tracks.len(),
-                bone_keyframes.as_ptr(),
-                bone_keyframes.len(),
-                morph_tracks.as_ptr(),
-                morph_tracks.len(),
-                morph_keyframes.as_ptr(),
-                morph_keyframes.len(),
-                property_keyframes.as_ptr(),
-                property_keyframes.len(),
-                property_ik_enabled.as_ptr(),
-                property_ik_enabled.len(),
-            )
-        };
-        assert!(!clip.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(instance, clip, 30.0) });
-        let mut source_morph = [0.0f32; 1];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_morph_weights(instance, source_morph.as_mut_ptr(), 1)
-        });
-        assert_eq!(source_morph[0], 0.5);
-
-        assert_eq!(
-            unsafe { mmd_runtime_instance_clip_frame_batch_world_matrix_f32_len(instance, 3) },
-            48
-        );
-        assert_eq!(
-            unsafe { mmd_runtime_instance_clip_frame_batch_morph_weight_f32_len(instance, 3) },
-            3
-        );
-
-        let mut batch_world = [0.0f32; 48];
-        let mut batch_morphs = [0.0f32; 3];
-        assert!(unsafe {
-            mmd_runtime_instance_evaluate_clip_frame_batch(
-                instance,
-                clip,
-                0.0,
-                30.0,
-                3,
-                2,
-                batch_world.as_mut_ptr(),
-                batch_world.len(),
-                batch_morphs.as_mut_ptr(),
-                batch_morphs.len(),
-            )
-        });
-
-        assert_eq!(batch_world[12], 1.0);
-        assert_eq!(batch_world[16 + 12], 2.0);
-        assert_eq!(batch_world[32 + 12], 3.0);
-        assert_slice_near(&batch_morphs, &[0.0, 0.5, 1.0], 0.0);
-
-        let mut auto_worker_world = [0.0f32; 48];
-        let mut auto_worker_morphs = [0.0f32; 3];
-        assert!(unsafe {
-            mmd_runtime_instance_evaluate_clip_frame_batch(
-                instance,
-                clip,
-                0.0,
-                30.0,
-                3,
-                0,
-                auto_worker_world.as_mut_ptr(),
-                auto_worker_world.len(),
-                auto_worker_morphs.as_mut_ptr(),
-                auto_worker_morphs.len(),
-            )
-        });
-        assert_slice_near(&auto_worker_world, &batch_world, 0.0);
-        assert_slice_near(&auto_worker_morphs, &batch_morphs, 0.0);
-
-        assert!(unsafe {
-            mmd_runtime_instance_evaluate_clip_frame_batch(
-                instance,
-                clip,
-                0.0,
-                30.0,
-                0,
-                0,
-                ptr::null_mut(),
-                0,
-                ptr::null_mut(),
-                0,
-            )
-        });
-
-        let mut source_morph_after = [0.0f32; 1];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_morph_weights(instance, source_morph_after.as_mut_ptr(), 1)
-        });
-        assert_eq!(source_morph_after[0], 0.5);
-
-        assert!(!unsafe {
-            mmd_runtime_instance_evaluate_clip_frame_batch(
-                instance,
-                clip,
-                0.0,
-                30.0,
-                3,
-                2,
-                batch_world.as_mut_ptr(),
-                batch_world.len() - 1,
-                batch_morphs.as_mut_ptr(),
-                batch_morphs.len(),
-            )
-        });
-        assert!(!unsafe {
-            mmd_runtime_instance_evaluate_clip_frame_batch(
-                instance,
-                clip,
-                f32::NAN,
-                30.0,
-                3,
-                2,
-                batch_world.as_mut_ptr(),
-                batch_world.len(),
-                batch_morphs.as_mut_ptr(),
-                batch_morphs.len(),
-            )
-        });
-
-        unsafe {
-            mmd_runtime_clip_free(clip);
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn evaluates_clip_frame_batch_allows_null_morph_buffer_when_model_has_no_morphs() {
-        let parents = [-1];
-        let rest_positions = [1.0, 0.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        let bone_tracks = [MmdRuntimeFfiBoneTrack {
-            bone_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 2,
-        }];
-        let bone_keyframes = [
-            MmdRuntimeFfiBoneKeyframe {
-                frame: 0,
-                position_xyz: [0.0, 0.0, 0.0],
-                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            },
-            MmdRuntimeFfiBoneKeyframe {
-                frame: 10,
-                position_xyz: [1.0, 0.0, 0.0],
-                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            },
-        ];
-        let clip = unsafe {
-            mmd_runtime_clip_create(
-                bone_tracks.as_ptr(),
-                bone_tracks.len(),
-                bone_keyframes.as_ptr(),
-                bone_keyframes.len(),
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(!clip.is_null());
-
-        assert_eq!(
-            unsafe { mmd_runtime_instance_clip_frame_batch_morph_weight_f32_len(instance, 2) },
-            0
-        );
-        let mut batch_world = [0.0f32; 32];
-        assert!(unsafe {
-            mmd_runtime_instance_evaluate_clip_frame_batch(
-                instance,
-                clip,
-                0.0,
-                10.0,
-                2,
-                2,
-                batch_world.as_mut_ptr(),
-                batch_world.len(),
-                ptr::null_mut(),
-                0,
-            )
-        });
-        assert_eq!(batch_world[12], 1.0);
-        assert_eq!(batch_world[16 + 12], 2.0);
-
-        unsafe {
-            mmd_runtime_clip_free(clip);
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn evaluates_clip_frame_without_ik_through_c_abi() {
-        let parents = [-1];
-        let rest_positions = [0.0, 0.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        let bone_tracks = [MmdRuntimeFfiBoneTrack {
-            bone_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 2,
-        }];
-        let bone_keyframes = [
-            MmdRuntimeFfiBoneKeyframe {
-                frame: 0,
-                position_xyz: [0.0, 0.0, 0.0],
-                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            },
-            MmdRuntimeFfiBoneKeyframe {
-                frame: 60,
-                position_xyz: [2.0, 0.0, 0.0],
-                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            },
-        ];
-        let clip = unsafe {
-            mmd_runtime_clip_create(
-                bone_tracks.as_ptr(),
-                bone_tracks.len(),
-                bone_keyframes.as_ptr(),
-                bone_keyframes.len(),
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(!clip.is_null());
-
-        assert!(unsafe {
-            mmd_runtime_instance_evaluate_clip_frame_without_ik(instance, clip, 30.0)
-        });
-        let mut matrices = [0.0f32; 16];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_world_matrices(
-                instance,
-                matrices.as_mut_ptr(),
-                matrices.len(),
-            )
-        });
-        assert_eq!(matrices[12], 1.0);
-
-        unsafe {
-            mmd_runtime_clip_free(clip);
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn evaluates_append_rotation_through_c_abi() {
-        let parents = [-1, -1, 1];
-        let rest_positions = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-        let append = [MmdRuntimeFfiAppendTransform {
-            target_bone_index: 1,
-            source_bone_index: 0,
-            ratio: 1.0,
-            flags: APPEND_FLAG_ROTATION,
-        }];
-        let model = unsafe {
-            mmd_runtime_model_create_with_append(
-                parents.as_ptr(),
-                rest_positions.as_ptr(),
-                3,
-                append.as_ptr(),
-                append.len(),
-            )
-        };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        let bone_tracks = [MmdRuntimeFfiBoneTrack {
-            bone_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 1,
-        }];
-        let rotation = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2).to_array();
-        let bone_keyframes = [MmdRuntimeFfiBoneKeyframe {
-            frame: 0,
-            position_xyz: [0.0, 0.0, 0.0],
-            rotation_xyzw: rotation,
-        }];
-        let clip = unsafe {
-            mmd_runtime_clip_create(
-                bone_tracks.as_ptr(),
-                bone_tracks.len(),
-                bone_keyframes.as_ptr(),
-                bone_keyframes.len(),
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(!clip.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(instance, clip, 0.0) });
-        let mut matrices = [0.0f32; 48];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_world_matrices(
-                instance,
-                matrices.as_mut_ptr(),
-                matrices.len(),
-            )
-        });
-        assert!(matrices[32 + 12].abs() < 1.0e-5);
-        assert!((matrices[32 + 13] - 1.0).abs() < 1.0e-5);
-
-        unsafe {
-            mmd_runtime_clip_free(clip);
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn copy_functions_reject_short_buffer() {
-        let parents = [-1, 0];
-        let rest_positions = [1.0, 0.0, 0.0, 0.0, 2.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 2) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create_with_counts(model, 1, 1) };
-        assert!(!instance.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
-
-        let mut buf32 = [0.0f32; 32];
-        assert!(!unsafe {
-            mmd_runtime_instance_copy_world_matrices(instance, buf32.as_mut_ptr(), 31)
-        });
-        assert!(!unsafe {
-            mmd_runtime_instance_copy_world_matrices(instance, buf32.as_mut_ptr(), 0)
-        });
-
-        assert!(!unsafe {
-            mmd_runtime_instance_copy_skinning_matrices(instance, buf32.as_mut_ptr(), 31)
-        });
-        assert!(!unsafe {
-            mmd_runtime_instance_copy_skinning_matrices(instance, buf32.as_mut_ptr(), 0)
-        });
-
-        let mut buf_f32 = [0.0f32; 1];
-        assert!(!unsafe {
-            mmd_runtime_instance_copy_morph_weights(instance, buf_f32.as_mut_ptr(), 0)
-        });
-
-        let mut buf_u8 = [0u8; 1];
-        assert!(!unsafe { mmd_runtime_instance_copy_ik_enabled(instance, buf_u8.as_mut_ptr(), 0) });
-
-        unsafe {
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn applies_transform_order_to_append_chain_through_c_abi() {
-        let parents = [-1, -1, -1, 1];
-        let rest_positions = [
-            0.0, 0.0, 0.0, //
-            0.0, 0.0, 0.0, //
-            0.0, 0.0, 0.0, //
-            1.0, 0.0, 0.0,
-        ];
-        let transform_orders = [0, 2, 1, 3];
-        let append = [
-            MmdRuntimeFfiAppendTransform {
-                target_bone_index: 2,
-                source_bone_index: 0,
-                ratio: 1.0,
-                flags: APPEND_FLAG_ROTATION,
-            },
-            MmdRuntimeFfiAppendTransform {
-                target_bone_index: 1,
-                source_bone_index: 2,
-                ratio: 1.0,
-                flags: APPEND_FLAG_ROTATION,
-            },
-        ];
-        let model = unsafe {
-            mmd_runtime_model_create_full_with_transform_order(
-                parents.as_ptr(),
-                rest_positions.as_ptr(),
-                ptr::null(),
-                transform_orders.as_ptr(),
-                4,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                append.as_ptr(),
-                append.len(),
-            )
-        };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        let bone_tracks = [MmdRuntimeFfiBoneTrack {
-            bone_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 1,
-        }];
-        let rotation = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2).to_array();
-        let bone_keyframes = [MmdRuntimeFfiBoneKeyframe {
-            frame: 0,
-            position_xyz: [0.0, 0.0, 0.0],
-            rotation_xyzw: rotation,
-        }];
-        let clip = unsafe {
-            mmd_runtime_clip_create(
-                bone_tracks.as_ptr(),
-                bone_tracks.len(),
-                bone_keyframes.as_ptr(),
-                bone_keyframes.len(),
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(!clip.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(instance, clip, 0.0) });
-        let mut matrices = [0.0f32; 64];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_world_matrices(
-                instance,
-                matrices.as_mut_ptr(),
-                matrices.len(),
-            )
-        });
-        assert!(matrices[48 + 12].abs() < 1.0e-5);
-        assert!((matrices[48 + 13] - 1.0).abs() < 1.0e-5);
-
-        unsafe {
-            mmd_runtime_clip_free(clip);
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn creates_bone_morph_through_c_abi() {
-        let parents = [-1];
-        let rest_positions = [0.0, 0.0, 0.0];
-        let bone_morphs = [MmdRuntimeFfiBoneMorphOffset {
-            morph_index: 0,
-            target_bone_index: 0,
-            position_offset_xyz: [2.0, 0.0, 0.0],
-            rotation_offset_xyzw: [0.0, 0.0, 0.0, 1.0],
-        }];
-        let model = unsafe {
-            mmd_runtime_model_create_full_with_morphs(
-                parents.as_ptr(),
-                rest_positions.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-                1,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                1,
-                bone_morphs.as_ptr(),
-                bone_morphs.len(),
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 1) };
-        assert!(!instance.is_null());
-
-        let bone_tracks = [MmdRuntimeFfiBoneTrack {
-            bone_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 1,
-        }];
-        let rotation = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2).to_array();
-        let bone_keyframes = [MmdRuntimeFfiBoneKeyframe {
-            frame: 0,
-            position_xyz: [0.0, 0.0, 0.0],
-            rotation_xyzw: rotation,
-        }];
-        let morph_tracks = [MmdRuntimeFfiMorphTrack {
-            morph_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 2,
-        }];
-        let morph_keyframes = [
-            MmdRuntimeFfiMorphKeyframe {
-                frame: 0,
-                weight: 0.0,
-            },
-            MmdRuntimeFfiMorphKeyframe {
-                frame: 60,
-                weight: 1.0,
-            },
-        ];
-        let clip = unsafe {
-            mmd_runtime_clip_create(
-                bone_tracks.as_ptr(),
-                bone_tracks.len(),
-                bone_keyframes.as_ptr(),
-                bone_keyframes.len(),
-                morph_tracks.as_ptr(),
-                morph_tracks.len(),
-                morph_keyframes.as_ptr(),
-                morph_keyframes.len(),
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(!clip.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(instance, clip, 60.0) });
-        let mut morph_weights = [0.0f32; 1];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_morph_weights(
-                instance,
-                morph_weights.as_mut_ptr(),
-                morph_weights.len(),
-            )
-        });
-        assert_eq!(morph_weights[0], 1.0);
-
-        let mut matrices = [0.0f32; 16];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_world_matrices(
-                instance,
-                matrices.as_mut_ptr(),
-                matrices.len(),
-            )
-        });
-        assert!((matrices[12] - 2.0).abs() < 1.0e-5);
-
-        unsafe {
-            mmd_runtime_clip_free(clip);
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn rejects_null_bone_morph_with_nonzero_count() {
-        let parents = [-1];
-        let rest_positions = [0.0, 0.0, 0.0];
-        let model = unsafe {
-            mmd_runtime_model_create_full_with_morphs(
-                parents.as_ptr(),
-                rest_positions.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-                1,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                1,
-                ptr::null(),
-                1,
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(model.is_null());
-    }
-
-    #[test]
-    fn rejects_morph_count_zero_with_bone_data() {
-        let parents = [-1];
-        let rest_positions = [0.0, 0.0, 0.0];
-        let bone_morphs = [MmdRuntimeFfiBoneMorphOffset {
-            morph_index: 0,
-            target_bone_index: 0,
-            position_offset_xyz: [1.0, 0.0, 0.0],
-            rotation_offset_xyzw: [0.0, 0.0, 0.0, 1.0],
-        }];
-        let model = unsafe {
-            mmd_runtime_model_create_full_with_morphs(
-                parents.as_ptr(),
-                rest_positions.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-                1,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                0,
-                bone_morphs.as_ptr(),
-                bone_morphs.len(),
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(model.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // Phase 6: direct output view tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn bone_count_returns_correct_value() {
-        let parents = [-1, 0, 1];
-        let rest_positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 3) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        assert_eq!(unsafe { mmd_runtime_instance_bone_count(instance) }, 3);
-
-        unsafe {
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn model_count_accessors_return_expected_values() {
-        let parents = [-1, 0, 1];
-        let rest_positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0];
-        let transform_orders = [0, 1, 2];
-        let ik_links = [MmdRuntimeFfiIkLink {
-            bone_index: 1,
-            flags: 0,
-            angle_limit_min_xyz: [0.0, 0.0, 0.0],
-            angle_limit_max_xyz: [0.0, 0.0, 0.0],
-        }];
-        let ik_solvers = [MmdRuntimeFfiIkSolver {
-            ik_bone_index: 2,
-            target_bone_index: 0,
-            link_offset: 0,
-            link_count: 1,
-            iteration_count: 1,
-            limit_angle: 1.0,
-        }];
-        let bone_morphs = [MmdRuntimeFfiBoneMorphOffset {
-            morph_index: 1,
-            target_bone_index: 0,
-            position_offset_xyz: [1.0, 0.0, 0.0],
-            rotation_offset_xyzw: [0.0, 0.0, 0.0, 1.0],
-        }];
-        let model = unsafe {
-            mmd_runtime_model_create_full_with_morphs(
-                parents.as_ptr(),
-                rest_positions.as_ptr(),
-                ptr::null(),
-                transform_orders.as_ptr(),
-                3,
-                ik_solvers.as_ptr(),
-                ik_solvers.len(),
-                ik_links.as_ptr(),
-                ik_links.len(),
-                ptr::null(),
-                0,
-                2,
-                bone_morphs.as_ptr(),
-                bone_morphs.len(),
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(!model.is_null());
-
-        assert_eq!(unsafe { mmd_runtime_model_bone_count(model) }, 3);
-        assert_eq!(unsafe { mmd_runtime_model_morph_count(model) }, 2);
-        assert_eq!(unsafe { mmd_runtime_model_ik_count(model) }, 1);
-
-        unsafe {
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn model_count_accessors_return_zero_for_null() {
-        assert_eq!(unsafe { mmd_runtime_model_bone_count(ptr::null()) }, 0);
-        assert_eq!(unsafe { mmd_runtime_model_morph_count(ptr::null()) }, 0);
-        assert_eq!(unsafe { mmd_runtime_model_ik_count(ptr::null()) }, 0);
-    }
-
-    #[test]
-    fn instance_create_for_model_uses_model_counts() {
-        let parents = [-1, 0, 1];
-        let rest_positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0];
-        let transform_orders = [0, 1, 2];
-        let ik_links = [MmdRuntimeFfiIkLink {
-            bone_index: 1,
-            flags: 0,
-            angle_limit_min_xyz: [0.0, 0.0, 0.0],
-            angle_limit_max_xyz: [0.0, 0.0, 0.0],
-        }];
-        let ik_solvers = [MmdRuntimeFfiIkSolver {
-            ik_bone_index: 2,
-            target_bone_index: 0,
-            link_offset: 0,
-            link_count: 1,
-            iteration_count: 1,
-            limit_angle: 1.0,
-        }];
-        let bone_morphs = [MmdRuntimeFfiBoneMorphOffset {
-            morph_index: 1,
-            target_bone_index: 0,
-            position_offset_xyz: [1.0, 0.0, 0.0],
-            rotation_offset_xyzw: [0.0, 0.0, 0.0, 1.0],
-        }];
-        let model = unsafe {
-            mmd_runtime_model_create_full_with_morphs(
-                parents.as_ptr(),
-                rest_positions.as_ptr(),
-                ptr::null(),
-                transform_orders.as_ptr(),
-                3,
-                ik_solvers.as_ptr(),
-                ik_solvers.len(),
-                ik_links.as_ptr(),
-                ik_links.len(),
-                ptr::null(),
-                0,
-                2,
-                bone_morphs.as_ptr(),
-                bone_morphs.len(),
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create_for_model(model) };
-        assert!(!instance.is_null());
-
-        assert_eq!(unsafe { mmd_runtime_instance_bone_count(instance) }, 3);
-        assert_eq!(
-            unsafe { mmd_runtime_instance_morph_weight_len(instance) },
-            2
-        );
-        assert_eq!(unsafe { mmd_runtime_instance_ik_enabled_len(instance) }, 1);
-
-        unsafe {
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn instance_create_for_model_returns_null_for_null() {
-        assert!(unsafe { mmd_runtime_instance_create_for_model(ptr::null()) }.is_null());
-    }
-
-    #[test]
-    fn bone_count_returns_zero_for_null() {
-        assert_eq!(unsafe { mmd_runtime_instance_bone_count(ptr::null()) }, 0);
-    }
-
-    #[test]
-    fn pointer_view_returns_non_null_after_evaluation() {
-        let parents = [-1, 0];
-        let rest_positions = [1.0, 0.0, 0.0, 0.0, 2.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 2) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
-
-        let world_ptr = unsafe { mmd_runtime_instance_world_matrices(instance) };
-        assert!(!world_ptr.is_null());
-
-        let skin_ptr = unsafe { mmd_runtime_instance_skinning_matrices(instance) };
-        assert!(!skin_ptr.is_null());
-
-        unsafe {
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn pointer_view_returns_null_for_null_instance() {
-        assert!(unsafe { mmd_runtime_instance_world_matrices(ptr::null()) }.is_null());
-        assert!(unsafe { mmd_runtime_instance_skinning_matrices(ptr::null()) }.is_null());
-    }
-
-    #[test]
-    fn pointer_view_contains_expected_translation() {
-        let parents = [-1, 0];
-        let rest_positions = [1.0, 0.0, 0.0, 0.0, 2.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 2) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
-
-        let world_ptr = unsafe { mmd_runtime_instance_world_matrices(instance) };
-        assert!(!world_ptr.is_null());
-
-        // column-major: translation is at indices [12, 13, 14]
-        unsafe {
-            assert_eq!(*world_ptr.add(12), 1.0);
-            assert_eq!(*world_ptr.add(16 + 12), 1.0);
-            assert_eq!(*world_ptr.add(16 + 13), 2.0);
-        }
-
-        unsafe {
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn pointer_view_consistent_with_copy_api() {
-        let parents = [-1, 0];
-        let rest_positions = [1.0, 0.0, 0.0, 0.0, 2.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 2) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create(model, 0) };
-        assert!(!instance.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
-
-        // Read via pointer view
-        let world_ptr = unsafe { mmd_runtime_instance_world_matrices(instance) };
-        let world_slice = unsafe { std::slice::from_raw_parts(world_ptr, 32) };
-
-        // Read via copy API
-        let mut copy_buf = [0.0f32; 32];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_world_matrices(
-                instance,
-                copy_buf.as_mut_ptr(),
-                copy_buf.len(),
-            )
-        });
-
-        assert_eq!(world_slice, &copy_buf);
-
-        // Same for skinning
-        let skin_ptr = unsafe { mmd_runtime_instance_skinning_matrices(instance) };
-        let skin_slice = unsafe { std::slice::from_raw_parts(skin_ptr, 32) };
-
-        let mut skin_copy = [0.0f32; 32];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_skinning_matrices(
-                instance,
-                skin_copy.as_mut_ptr(),
-                skin_copy.len(),
-            )
-        });
-
-        assert_eq!(skin_slice, &skin_copy);
-
-        unsafe {
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Phase 6b: morph/IK direct pointer view tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn morph_ik_direct_pointer_returns_null_for_null_instance() {
-        assert!(unsafe { mmd_runtime_instance_morph_weights(ptr::null()) }.is_null());
-        assert!(unsafe { mmd_runtime_instance_ik_enabled(ptr::null()) }.is_null());
-    }
-
-    #[test]
-    fn morph_ik_direct_pointer_consistent_with_copy_api() {
-        let parents = [-1];
-        let rest_positions = [0.0, 0.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
-        assert!(!model.is_null());
-        let instance = unsafe { mmd_runtime_instance_create_with_counts(model, 1, 1) };
-        assert!(!instance.is_null());
-
-        let bone_tracks = [MmdRuntimeFfiBoneTrack {
-            bone_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 1,
-        }];
-        let bone_keyframes = [MmdRuntimeFfiBoneKeyframe {
-            frame: 0,
-            position_xyz: [0.0, 0.0, 0.0],
-            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-        }];
-        let morph_tracks = [MmdRuntimeFfiMorphTrack {
-            morph_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 2,
-        }];
-        let morph_keyframes = [
-            MmdRuntimeFfiMorphKeyframe {
-                frame: 0,
-                weight: 0.0,
-            },
-            MmdRuntimeFfiMorphKeyframe {
-                frame: 60,
-                weight: 1.0,
-            },
-        ];
-        let property_keyframes = [MmdRuntimeFfiPropertyKeyframe {
-            frame: 0,
-            ik_enabled_offset: 0,
-            ik_enabled_count: 1,
-        }];
-        let property_ik_enabled = [1u8];
-        let clip = unsafe {
-            mmd_runtime_clip_create(
-                bone_tracks.as_ptr(),
-                bone_tracks.len(),
-                bone_keyframes.as_ptr(),
-                bone_keyframes.len(),
-                morph_tracks.as_ptr(),
-                morph_tracks.len(),
-                morph_keyframes.as_ptr(),
-                morph_keyframes.len(),
-                property_keyframes.as_ptr(),
-                property_keyframes.len(),
-                property_ik_enabled.as_ptr(),
-                property_ik_enabled.len(),
-            )
-        };
-        assert!(!clip.is_null());
-
-        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(instance, clip, 30.0) });
-
-        // Direct pointer read
-        let morph_ptr = unsafe { mmd_runtime_instance_morph_weights(instance) };
-        assert!(!morph_ptr.is_null());
-        let morph_slice = unsafe { std::slice::from_raw_parts(morph_ptr, 1) };
-
-        let ik_ptr = unsafe { mmd_runtime_instance_ik_enabled(instance) };
-        assert!(!ik_ptr.is_null());
-        let ik_slice = unsafe { std::slice::from_raw_parts(ik_ptr, 1) };
-
-        // Copy API read
-        let mut morph_copy = [0.0f32; 1];
-        assert!(unsafe {
-            mmd_runtime_instance_copy_morph_weights(instance, morph_copy.as_mut_ptr(), 1)
-        });
-
-        let mut ik_copy = [0u8; 1];
-        assert!(unsafe { mmd_runtime_instance_copy_ik_enabled(instance, ik_copy.as_mut_ptr(), 1) });
-
-        assert_eq!(morph_slice, &morph_copy);
-        assert_eq!(ik_slice, &ik_copy);
-
-        unsafe {
-            mmd_runtime_clip_free(clip);
-            mmd_runtime_instance_free(instance);
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn clip_frame_range_reports_all_track_frames() {
-        let bone_tracks = [MmdRuntimeFfiBoneTrack {
-            bone_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 1,
-        }];
-        let bone_keyframes = [MmdRuntimeFfiBoneKeyframe {
-            frame: 30,
-            position_xyz: [0.0, 0.0, 0.0],
-            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-        }];
-        let morph_tracks = [MmdRuntimeFfiMorphTrack {
-            morph_index: 0,
-            keyframe_offset: 0,
-            keyframe_count: 2,
-        }];
-        let morph_keyframes = [
-            MmdRuntimeFfiMorphKeyframe {
-                frame: 10,
-                weight: 0.0,
-            },
-            MmdRuntimeFfiMorphKeyframe {
-                frame: 60,
-                weight: 1.0,
-            },
-        ];
-        let property_keyframes = [MmdRuntimeFfiPropertyKeyframe {
-            frame: 5,
-            ik_enabled_offset: 0,
-            ik_enabled_count: 1,
-        }];
-        let property_ik_enabled = [1_u8];
-        let clip = unsafe {
-            mmd_runtime_clip_create(
-                bone_tracks.as_ptr(),
-                bone_tracks.len(),
-                bone_keyframes.as_ptr(),
-                bone_keyframes.len(),
-                morph_tracks.as_ptr(),
-                morph_tracks.len(),
-                morph_keyframes.as_ptr(),
-                morph_keyframes.len(),
-                property_keyframes.as_ptr(),
-                property_keyframes.len(),
-                property_ik_enabled.as_ptr(),
-                property_ik_enabled.len(),
-            )
-        };
-        assert!(!clip.is_null());
-
-        let mut first = 0;
-        let mut last = 0;
-        assert!(unsafe { mmd_runtime_clip_frame_range(clip, &mut first, &mut last) });
-        assert_eq!((first, last), (5, 60));
-
-        unsafe {
-            mmd_runtime_clip_free(clip);
-        }
-    }
-
-    #[test]
-    fn clip_frame_range_rejects_null_or_empty() {
-        let mut first = 99;
-        let mut last = 99;
-        assert!(!unsafe { mmd_runtime_clip_frame_range(ptr::null(), &mut first, &mut last) });
-        assert_eq!((first, last), (99, 99));
-
-        let empty_clip = unsafe {
-            mmd_runtime_clip_create(
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-            )
-        };
-        assert!(!empty_clip.is_null());
-        assert!(!unsafe { mmd_runtime_clip_frame_range(empty_clip, &mut first, &mut last) });
-        assert!(!unsafe { mmd_runtime_clip_frame_range(empty_clip, ptr::null_mut(), &mut last) });
-        assert!(!unsafe { mmd_runtime_clip_frame_range(empty_clip, &mut first, ptr::null_mut()) });
-
-        unsafe {
-            mmd_runtime_clip_free(empty_clip);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // PMX/VMD byte-import ABI tests (Phase 9)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn import_pmx_bytes_rejects_null() {
-        assert!(unsafe { mmd_runtime_model_create_from_pmx_bytes(ptr::null(), 0) }.is_null());
-        assert!(unsafe { mmd_runtime_model_create_from_pmx_bytes(ptr::null(), 100) }.is_null());
-        let dummy = 0u8;
-        assert!(
-            unsafe { mmd_runtime_model_create_from_pmx_bytes(&dummy as *const u8, 0) }.is_null()
-        );
-    }
-
-    #[test]
-    fn import_pmx_bytes_rejects_garbage() {
-        let garbage = [0u8; 32];
-        let model =
-            unsafe { mmd_runtime_model_create_from_pmx_bytes(garbage.as_ptr(), garbage.len()) };
-        assert!(model.is_null());
-    }
-
-    #[test]
-    fn import_vmd_bytes_for_model_rejects_null_and_empty() {
-        let parents = [-1];
-        let rest_positions = [0.0, 0.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
-        assert!(!model.is_null());
-
-        // Null model
-        assert!(
-            unsafe {
-                mmd_runtime_clip_create_from_vmd_bytes_for_model(ptr::null(), ptr::null(), 0)
-            }
-            .is_null()
-        );
-        // Null bytes
-        assert!(
-            unsafe { mmd_runtime_clip_create_from_vmd_bytes_for_model(model, ptr::null(), 100) }
-                .is_null()
-        );
-        // Zero length
-        let dummy = 0u8;
-        assert!(
-            unsafe {
-                mmd_runtime_clip_create_from_vmd_bytes_for_model(model, &dummy as *const u8, 0)
-            }
-            .is_null()
-        );
-
-        unsafe {
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    #[test]
-    fn flat_array_model_returns_null_from_vmd_import() {
-        // Flat-array constructed models have empty name maps, so VMD import
-        // should return null.
-        let parents = [-1];
-        let rest_positions = [0.0, 0.0, 0.0];
-        let model =
-            unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
-        assert!(!model.is_null());
-
-        let garbage = [0u8; 32];
-        assert!(
-            unsafe {
-                mmd_runtime_clip_create_from_vmd_bytes_for_model(
-                    model,
-                    garbage.as_ptr(),
-                    garbage.len(),
-                )
-            }
-            .is_null()
-        );
-
-        unsafe {
-            mmd_runtime_model_free(model);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    //  JSON / geometry buffer API tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn vmd_json_rejects_null_empty_invalid() {
-        let null_empty = unsafe { mmd_runtime_parse_vmd_json(ptr::null(), 0) };
-        assert!(null_empty.data.is_null());
-        assert_eq!(null_empty.len, 0);
-
-        let null_nonempty = unsafe { mmd_runtime_parse_vmd_json(ptr::null(), 10) };
-        assert!(null_nonempty.data.is_null());
-        assert_eq!(null_nonempty.len, 0);
-
-        let d = 0u8;
-        let empty = unsafe { mmd_runtime_parse_vmd_json(&d as *const u8, 0) };
-        assert!(empty.data.is_null());
-        assert_eq!(empty.len, 0);
-
-        let garbage = [0u8; 16];
-        let invalid = unsafe { mmd_runtime_parse_vmd_json(garbage.as_ptr(), garbage.len()) };
-        assert!(invalid.data.is_null());
-        assert_eq!(invalid.len, 0);
-    }
-
-    #[test]
-    fn vmd_json_serializes_camera_fixture() {
-        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
-        let json_buf = unsafe { mmd_runtime_parse_vmd_json(bytes.as_ptr(), bytes.len()) };
-        assert!(!json_buf.data.is_null());
-        assert!(json_buf.len > 0);
-
-        let json_str =
-            unsafe { str::from_utf8(slice::from_raw_parts(json_buf.data, json_buf.len)) }.unwrap();
-        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
-        assert!(v.is_object(), "vmd json must be an object");
-
-        unsafe { mmd_runtime_byte_buffer_free(json_buf) };
-    }
-
-    #[test]
-    fn vmd_camera_track_samples_camera_fixture() {
-        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
-        let track = unsafe {
-            mmd_runtime_vmd_camera_track_create_from_vmd_bytes(bytes.as_ptr(), bytes.len())
-        };
-        assert!(!track.is_null());
-        assert_eq!(
-            unsafe { mmd_runtime_vmd_camera_track_frame_count(track) },
-            2
-        );
-
-        let mut values = [0.0f32; 9];
-        assert!(unsafe {
-            mmd_runtime_vmd_camera_track_sample(track, 22.5, values.as_mut_ptr(), values.len())
-        });
-        assert_slice_near(
-            &values,
-            &[-40.25, -0.25, 6.0, 1.625, -0.1, -0.1, 0.75, 47.5, 1.0],
-            1.0e-4,
-        );
-
-        unsafe { mmd_runtime_vmd_camera_track_free(track) };
-    }
-
-    #[test]
-    fn vmd_camera_one_shot_samples_camera_fixture() {
-        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
-        let mut values = [0.0f32; 9];
-        assert!(unsafe {
-            mmd_runtime_vmd_sample_camera(
-                bytes.as_ptr(),
-                bytes.len(),
-                22.5,
-                values.as_mut_ptr(),
-                values.len(),
-            )
-        });
-        assert_slice_near(
-            &values,
-            &[-40.25, -0.25, 6.0, 1.625, -0.1, -0.1, 0.75, 47.5, 1.0],
-            1.0e-4,
-        );
-    }
-
-    #[test]
-    fn vmd_light_track_and_one_shot_sample_buffers() {
-        let bytes = light_and_self_shadow_vmd_bytes();
-        let track = unsafe {
-            mmd_runtime_vmd_light_track_create_from_vmd_bytes(bytes.as_ptr(), bytes.len())
-        };
-        assert!(!track.is_null());
-        assert_eq!(unsafe { mmd_runtime_vmd_light_track_frame_count(track) }, 2);
-
-        let mut track_values = [0.0f32; 6];
-        assert!(unsafe {
-            mmd_runtime_vmd_light_track_sample(
-                track,
-                20.0,
-                track_values.as_mut_ptr(),
-                track_values.len(),
-            )
-        });
-        assert_slice_near(&track_values, &[0.5, 0.25, 0.5, 0.5, -0.5, 0.0], 1.0e-4);
-
-        let mut one_shot_values = [0.0f32; 6];
-        assert!(unsafe {
-            mmd_runtime_vmd_sample_light(
-                bytes.as_ptr(),
-                bytes.len(),
-                20.0,
-                one_shot_values.as_mut_ptr(),
-                one_shot_values.len(),
-            )
-        });
-        assert_slice_near(&one_shot_values, &track_values, 1.0e-4);
-
-        unsafe { mmd_runtime_vmd_light_track_free(track) };
-    }
-
-    #[test]
-    fn vmd_self_shadow_track_and_one_shot_sample_buffers() {
-        let bytes = light_and_self_shadow_vmd_bytes();
-        let track = unsafe {
-            mmd_runtime_vmd_self_shadow_track_create_from_vmd_bytes(bytes.as_ptr(), bytes.len())
-        };
-        assert!(!track.is_null());
-        assert_eq!(
-            unsafe { mmd_runtime_vmd_self_shadow_track_frame_count(track) },
-            2
-        );
-
-        let mut track_values = [0.0f32; 2];
-        assert!(unsafe {
-            mmd_runtime_vmd_self_shadow_track_sample(
-                track,
-                20.0,
-                track_values.as_mut_ptr(),
-                track_values.len(),
-            )
-        });
-        assert_slice_near(&track_values, &[1.0, 40.0], 1.0e-4);
-
-        let mut one_shot_values = [0.0f32; 2];
-        assert!(unsafe {
-            mmd_runtime_vmd_sample_self_shadow(
-                bytes.as_ptr(),
-                bytes.len(),
-                20.0,
-                one_shot_values.as_mut_ptr(),
-                one_shot_values.len(),
-            )
-        });
-        assert_slice_near(&one_shot_values, &track_values, 1.0e-4);
-
-        unsafe { mmd_runtime_vmd_self_shadow_track_free(track) };
-    }
-
-    #[test]
-    fn vmd_camera_sample_rejects_invalid_inputs() {
-        assert!(
-            unsafe { mmd_runtime_vmd_camera_track_create_from_vmd_bytes(ptr::null(), 0) }.is_null()
-        );
-        let mut values = [0.0f32; 8];
-        assert!(!unsafe {
-            mmd_runtime_vmd_camera_track_sample(ptr::null(), 0.0, values.as_mut_ptr(), values.len())
-        });
-        assert!(!unsafe {
-            mmd_runtime_vmd_sample_camera(ptr::null(), 0, 0.0, values.as_mut_ptr(), 9)
-        });
-        assert!(!unsafe {
-            mmd_runtime_vmd_sample_camera(
-                [0u8; 1].as_ptr(),
-                1,
-                0.0,
-                values.as_mut_ptr(),
-                values.len(),
-            )
-        });
-    }
-
-    fn light_and_self_shadow_vmd_bytes() -> Vec<u8> {
-        mmd_anim_format::export_vmd_animation(&mmd_anim_format::vmd::VmdParsedAnimation {
-            kind: "vmd",
-            metadata: mmd_anim_format::vmd::VmdParsedMetadata {
-                format: "vmd",
-                model_name: "light_shadow".to_owned(),
-                model_name_bytes: Vec::new(),
-                counts: mmd_anim_format::vmd::VmdParsedCounts {
-                    bones: 0,
-                    morphs: 0,
-                    cameras: 0,
-                    lights: 2,
-                    self_shadows: 2,
-                    properties: 0,
-                },
-                max_frame: 30,
-            },
-            bone_frames: Vec::new(),
-            morph_frames: Vec::new(),
-            camera_frames: Vec::new(),
-            light_frames: vec![
-                mmd_anim_format::vmd::VmdParsedLightFrame {
-                    frame: 10,
-                    color: [0.0, 0.0, 1.0],
-                    direction: [1.0, 0.0, 0.0],
-                },
-                mmd_anim_format::vmd::VmdParsedLightFrame {
-                    frame: 30,
-                    color: [1.0, 0.5, 0.0],
-                    direction: [0.0, -1.0, 0.0],
-                },
-            ],
-            self_shadow_frames: vec![
-                mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
-                    frame: 10,
-                    mode: 1,
-                    distance: 20.0,
-                },
-                mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
-                    frame: 30,
-                    mode: 2,
-                    distance: 60.0,
-                },
-            ],
-            property_frames: Vec::new(),
-        })
-    }
-
-    #[test]
-    fn pmx_non_geometry_json_rejects_null_empty_invalid() {
-        let null_empty = unsafe { mmd_runtime_parse_pmx_non_geometry_json(ptr::null(), 0) };
-        assert!(null_empty.data.is_null());
-        assert_eq!(null_empty.len, 0);
-
-        let null_nonempty = unsafe { mmd_runtime_parse_pmx_non_geometry_json(ptr::null(), 10) };
-        assert!(null_nonempty.data.is_null());
-        assert_eq!(null_nonempty.len, 0);
-
-        let d = 0u8;
-        let empty = unsafe { mmd_runtime_parse_pmx_non_geometry_json(&d as *const u8, 0) };
-        assert!(empty.data.is_null());
-        assert_eq!(empty.len, 0);
-
-        let garbage = [0u8; 16];
-        let invalid =
-            unsafe { mmd_runtime_parse_pmx_non_geometry_json(garbage.as_ptr(), garbage.len()) };
-        assert!(invalid.data.is_null());
-        assert_eq!(invalid.len, 0);
-    }
-
-    #[test]
-    fn pmx_non_geometry_json_omits_geometry_and_normalizes_fields() {
-        let bytes: &[u8] =
-            include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
-        let json_buf =
-            unsafe { mmd_runtime_parse_pmx_non_geometry_json(bytes.as_ptr(), bytes.len()) };
-        assert!(!json_buf.data.is_null());
-        assert!(json_buf.len > 0);
-
-        let json_str =
-            unsafe { str::from_utf8(slice::from_raw_parts(json_buf.data, json_buf.len)) }.unwrap();
-        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
-
-        // geometry field must not be present
-        assert!(v.get("geometry").is_none(), "geometry must be omitted");
-
-        // required non-geometry fields must be present
-        assert!(v.get("metadata").is_some());
-        assert!(v.get("materials").is_some());
-        assert!(v.get("skeleton").is_some());
-        assert!(v.get("morphs").is_some());
-
-        // sharedToonIndex null -> -1
-        if let Some(mats) = v.get("materials").and_then(|m| m.as_array()) {
-            for mat in mats {
-                if let Some(idx) = mat.get("sharedToonIndex") {
-                    assert!(
-                        !idx.is_null(),
-                        "sharedToonIndex must not be null in output JSON"
-                    );
-                }
-            }
-        }
-
-        // externalParentKey null -> -1
-        if let Some(bones) = v
-            .get("skeleton")
-            .and_then(|s| s.get("bones"))
-            .and_then(|b| b.as_array())
-        {
-            for bone in bones {
-                if let Some(key) = bone.get("externalParentKey") {
-                    assert!(
-                        !key.is_null(),
-                        "externalParentKey must not be null in output JSON"
-                    );
-                }
-            }
-        }
-
-        unsafe { mmd_runtime_byte_buffer_free(json_buf) };
-    }
-
-    #[test]
-    fn pmx_geometry_buffers_reject_null_empty_invalid() {
-        macro_rules! check_rejects {
-            ($fn:ident) => {{
-                let null = unsafe { $fn(ptr::null(), 0) };
-                assert!(null.data.is_null(), stringify!($fn null));
-                assert_eq!(null.len, 0, stringify!($fn null len));
-
-                let d = 0u8;
-                let empty = unsafe { $fn(&d as *const u8, 0) };
-                assert!(empty.data.is_null(), stringify!($fn empty));
-
-                let garbage = [0u8; 16];
-                let invalid = unsafe { $fn(garbage.as_ptr(), garbage.len()) };
-                assert!(invalid.data.is_null(), stringify!($fn invalid));
-            }};
-        }
-
-        check_rejects!(mmd_runtime_parse_pmx_positions_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_normals_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_uvs_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_indices_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_material_groups_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_skin_indices_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_skin_weights_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_edge_scale_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_sdef_enabled_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_sdef_c_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_sdef_r0_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_sdef_r1_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_sdef_rw0_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_sdef_rw1_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_qdef_enabled_buffer);
-        check_rejects!(mmd_runtime_parse_pmx_skinning_modes_json);
-
-        assert_eq!(
-            unsafe { mmd_runtime_parse_pmx_additional_uv_count(ptr::null(), 0) },
-            0
-        );
-        let d = 0u8;
-        assert_eq!(
-            unsafe { mmd_runtime_parse_pmx_additional_uv_count(&d as *const u8, 0) },
-            0
-        );
-        let garbage = [0u8; 16];
-        assert_eq!(
-            unsafe { mmd_runtime_parse_pmx_additional_uv_count(garbage.as_ptr(), garbage.len()) },
-            0
-        );
-
-        let null = unsafe { mmd_runtime_parse_pmx_additional_uvs_buffer(ptr::null(), 0, 0) };
-        assert!(null.data.is_null(), "additional UV null");
-        assert_eq!(null.len, 0, "additional UV null len");
-
-        let empty = unsafe { mmd_runtime_parse_pmx_additional_uvs_buffer(&d as *const u8, 0, 0) };
-        assert!(empty.data.is_null(), "additional UV empty");
-
-        let invalid = unsafe {
-            mmd_runtime_parse_pmx_additional_uvs_buffer(garbage.as_ptr(), garbage.len(), 0)
-        };
-        assert!(invalid.data.is_null(), "additional UV invalid");
-    }
-
-    fn ffi_buffer_to_vec(buffer: MmdRuntimeFfiByteBuffer) -> Vec<u8> {
-        let bytes = if buffer.data.is_null() || buffer.len == 0 {
-            Vec::new()
-        } else {
-            unsafe { slice::from_raw_parts(buffer.data, buffer.len).to_vec() }
-        };
-        unsafe { mmd_runtime_byte_buffer_free(buffer) };
-        bytes
-    }
-
-    fn assert_empty_ffi_buffer(buffer: MmdRuntimeFfiByteBuffer, context: &str) {
-        assert!(buffer.data.is_null(), "{context}: data must be null");
-        assert_eq!(buffer.len, 0, "{context}: len must be zero");
-    }
-
-    fn assert_material_split_geometry_invariants(
-        split: *mut MmdRuntimePmxMaterialSplit,
-        manifest: &serde_json::Value,
-        context: &str,
-    ) {
-        let mesh_count = unsafe { mmd_runtime_pmx_material_split_mesh_count(split) };
-        assert!(mesh_count > 0, "{context}: mesh_count must be positive");
-        assert_eq!(
-            manifest.get("meshCount").and_then(|v| v.as_u64()),
-            Some(mesh_count as u64),
-            "{context}: manifest meshCount must match mesh_count"
-        );
-
-        let meshes = manifest
-            .get("meshes")
-            .and_then(|v| v.as_array())
-            .unwrap_or_else(|| panic!("{context}: manifest meshes must be an array"));
-        assert_eq!(
-            meshes.len(),
-            mesh_count,
-            "{context}: manifest mesh array length must match mesh_count"
-        );
-
-        for mesh_index in 0..mesh_count {
-            let mesh_context = format!("{context}: mesh {mesh_index}");
-            let mesh_manifest = meshes
-                .iter()
-                .find(|mesh| {
-                    mesh.get("meshIndex").and_then(|v| v.as_u64()) == Some(mesh_index as u64)
-                })
-                .unwrap_or_else(|| panic!("{mesh_context}: manifest mesh entry missing"));
-
-            let positions = ffi_buffer_to_vec(unsafe {
-                mmd_runtime_pmx_material_split_positions_buffer(split, mesh_index)
-            });
-            assert_eq!(
-                positions.len() % (3 * 4),
-                0,
-                "{mesh_context}: positions len must be xyz f32 aligned"
-            );
-            let vertex_count = positions.len() / (3 * 4);
-
-            let normals = ffi_buffer_to_vec(unsafe {
-                mmd_runtime_pmx_material_split_normals_buffer(split, mesh_index)
-            });
-            assert_eq!(
-                normals.len(),
-                positions.len(),
-                "{mesh_context}: normals len"
-            );
-
-            let uvs = ffi_buffer_to_vec(unsafe {
-                mmd_runtime_pmx_material_split_uvs_buffer(split, mesh_index)
-            });
-            assert_eq!(uvs.len(), vertex_count * 2 * 4, "{mesh_context}: uvs len");
-
-            let skin_indices = ffi_buffer_to_vec(unsafe {
-                mmd_runtime_pmx_material_split_skin_indices_buffer(split, mesh_index)
-            });
-            assert_eq!(
-                skin_indices.len(),
-                vertex_count * 4 * 4,
-                "{mesh_context}: skin_indices len"
-            );
-
-            let skin_weights = ffi_buffer_to_vec(unsafe {
-                mmd_runtime_pmx_material_split_skin_weights_buffer(split, mesh_index)
-            });
-            assert_eq!(
-                skin_weights.len(),
-                vertex_count * 4 * 4,
-                "{mesh_context}: skin_weights len"
-            );
-
-            let edge_scale = ffi_buffer_to_vec(unsafe {
-                mmd_runtime_pmx_material_split_edge_scale_buffer(split, mesh_index)
-            });
-            assert_eq!(
-                edge_scale.len(),
-                vertex_count * 4,
-                "{mesh_context}: edge_scale len"
-            );
-
-            let sdef_enabled = ffi_buffer_to_vec(unsafe {
-                mmd_runtime_pmx_material_split_sdef_enabled_buffer(split, mesh_index)
-            });
-            assert_eq!(
-                sdef_enabled.len(),
-                vertex_count,
-                "{mesh_context}: sdef_enabled len"
-            );
-
-            let qdef_enabled = ffi_buffer_to_vec(unsafe {
-                mmd_runtime_pmx_material_split_qdef_enabled_buffer(split, mesh_index)
-            });
-            assert_eq!(
-                qdef_enabled.len(),
-                vertex_count,
-                "{mesh_context}: qdef_enabled len"
-            );
-
-            macro_rules! check_vec3_f32_buffer {
-                ($fn:ident, $name:literal) => {{
-                    let buf = ffi_buffer_to_vec(unsafe { $fn(split, mesh_index) });
-                    assert_eq!(
-                        buf.len(),
-                        vertex_count * 3 * 4,
-                        "{}: {} len",
-                        mesh_context,
-                        $name
-                    );
-                }};
-            }
-
-            check_vec3_f32_buffer!(mmd_runtime_pmx_material_split_sdef_c_buffer, "sdef_c");
-            check_vec3_f32_buffer!(mmd_runtime_pmx_material_split_sdef_r0_buffer, "sdef_r0");
-            check_vec3_f32_buffer!(mmd_runtime_pmx_material_split_sdef_r1_buffer, "sdef_r1");
-            check_vec3_f32_buffer!(mmd_runtime_pmx_material_split_sdef_rw0_buffer, "sdef_rw0");
-            check_vec3_f32_buffer!(mmd_runtime_pmx_material_split_sdef_rw1_buffer, "sdef_rw1");
-
-            let indices = ffi_buffer_to_vec(unsafe {
-                mmd_runtime_pmx_material_split_indices_buffer(split, mesh_index)
-            });
-            assert_eq!(
-                indices.len() % 4,
-                0,
-                "{mesh_context}: indices len must be u32 aligned"
-            );
-            for (index_offset, index_bytes) in indices.chunks_exact(4).enumerate() {
-                let index = u32::from_ne_bytes(index_bytes.try_into().unwrap()) as usize;
-                assert!(
-                    index < vertex_count,
-                    "{mesh_context}: index {index_offset} value {index} must be < vertex_count {vertex_count}"
-                );
-            }
-
-            for uv_index in 0..4 {
-                let additional_uvs = ffi_buffer_to_vec(unsafe {
-                    mmd_runtime_pmx_material_split_additional_uvs_buffer(
-                        split, mesh_index, uv_index,
-                    )
-                });
-                if !additional_uvs.is_empty() {
-                    assert_eq!(
-                        additional_uvs.len(),
-                        vertex_count * 4 * 4,
-                        "{mesh_context}: additional_uvs[{uv_index}] len"
-                    );
-                }
-            }
-
-            let original_vertex_indices = mesh_manifest
-                .get("originalVertexIndices")
-                .and_then(|v| v.as_array())
-                .unwrap_or_else(|| {
-                    panic!("{mesh_context}: originalVertexIndices must be an array")
-                });
-            assert_eq!(
-                original_vertex_indices.len(),
-                vertex_count,
-                "{mesh_context}: originalVertexIndices len"
-            );
-
-            let morph_index_map = mesh_manifest
-                .get("morphIndexMap")
-                .and_then(|v| v.as_array())
-                .unwrap_or_else(|| panic!("{mesh_context}: morphIndexMap must be an array"));
-            let mut seen_local_indices = vec![false; morph_index_map.len()];
-            for entry in morph_index_map {
-                let local_index = entry
-                    .get("localIndex")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or_else(|| panic!("{mesh_context}: localIndex missing"))
-                    as usize;
-                assert!(
-                    local_index < morph_index_map.len(),
-                    "{mesh_context}: localIndex {local_index} out of range"
-                );
-                assert!(
-                    !seen_local_indices[local_index],
-                    "{mesh_context}: duplicate localIndex {local_index}"
-                );
-                seen_local_indices[local_index] = true;
-            }
-            assert!(
-                seen_local_indices.iter().all(|seen| *seen),
-                "{mesh_context}: localIndex values must be contiguous from zero"
-            );
-        }
-    }
-
-    fn assert_material_split_rejects_null_and_out_of_range(
-        split: *mut MmdRuntimePmxMaterialSplit,
-        mesh_count: usize,
-    ) {
-        assert_eq!(
-            unsafe { mmd_runtime_pmx_material_split_mesh_count(ptr::null()) },
-            0
-        );
-        assert_empty_ffi_buffer(
-            unsafe { mmd_runtime_pmx_material_split_manifest_json(ptr::null()) },
-            "null material split manifest",
-        );
-
-        macro_rules! check_empty_getter {
-            ($fn:ident) => {{
-                assert_empty_ffi_buffer(
-                    unsafe { $fn(ptr::null(), 0) },
-                    concat!(stringify!($fn), " null"),
-                );
-                assert_empty_ffi_buffer(
-                    unsafe { $fn(split, mesh_count) },
-                    concat!(stringify!($fn), " out of range"),
-                );
-            }};
-        }
-
-        check_empty_getter!(mmd_runtime_pmx_material_split_positions_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_normals_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_uvs_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_indices_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_skin_indices_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_skin_weights_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_edge_scale_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_enabled_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_c_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_r0_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_r1_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_rw0_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_sdef_rw1_buffer);
-        check_empty_getter!(mmd_runtime_pmx_material_split_qdef_enabled_buffer);
-
-        assert_empty_ffi_buffer(
-            unsafe { mmd_runtime_pmx_material_split_additional_uvs_buffer(ptr::null(), 0, 0) },
-            "additional_uvs null",
-        );
-        assert_empty_ffi_buffer(
-            unsafe { mmd_runtime_pmx_material_split_additional_uvs_buffer(split, mesh_count, 0) },
-            "additional_uvs out of range",
-        );
-    }
-
-    fn material_split_manifest_json(
-        split: *mut MmdRuntimePmxMaterialSplit,
-        context: &str,
-    ) -> serde_json::Value {
-        let manifest_bytes =
-            ffi_buffer_to_vec(unsafe { mmd_runtime_pmx_material_split_manifest_json(split) });
-        assert!(
-            !manifest_bytes.is_empty(),
-            "{context}: manifest_json must not be empty"
-        );
-        serde_json::from_slice(&manifest_bytes)
-            .unwrap_or_else(|err| panic!("{context}: manifest_json parse failed: {err}"))
-    }
-
-    fn rig_spec_manifest_json(spec: *mut MmdRuntimePmxRigSpec, context: &str) -> serde_json::Value {
-        let manifest_bytes =
-            ffi_buffer_to_vec(unsafe { mmd_runtime_pmx_rig_spec_manifest_json(spec) });
-        assert!(
-            !manifest_bytes.is_empty(),
-            "{context}: manifest_json must not be empty"
-        );
-        serde_json::from_slice(&manifest_bytes)
-            .unwrap_or_else(|err| panic!("{context}: manifest_json parse failed: {err}"))
-    }
-
-    fn assert_json_array3(value: &serde_json::Value, context: &str) {
-        let array = value
-            .as_array()
-            .unwrap_or_else(|| panic!("{context}: must be an array"));
-        assert_eq!(array.len(), 3, "{context}: must have three elements");
-        assert!(
-            array.iter().all(|item| item.is_number()),
-            "{context}: elements must be numbers"
-        );
-    }
-
-    #[test]
-    fn rig_spec_manifest_json_has_expected_shape() {
-        let bytes: &[u8] =
-            include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
-        let spec = unsafe { mmd_runtime_pmx_rig_spec_create(bytes.as_ptr(), bytes.len()) };
-        assert!(!spec.is_null(), "rig spec handle must not be null");
-
-        let manifest = rig_spec_manifest_json(spec, "fixture rig spec");
-        let bone_count = manifest
-            .get("boneCount")
-            .and_then(|v| v.as_u64())
-            .expect("fixture rig spec: boneCount must be a number");
-        let ik_chain_count = manifest
-            .get("ikChainCount")
-            .and_then(|v| v.as_u64())
-            .expect("fixture rig spec: ikChainCount must be a number");
-        let grant_count = manifest
-            .get("grantCount")
-            .and_then(|v| v.as_u64())
-            .expect("fixture rig spec: grantCount must be a number");
-
-        let bones = manifest
-            .get("bones")
-            .and_then(|v| v.as_array())
-            .expect("fixture rig spec: bones must be an array");
-        let ik_chains = manifest
-            .get("ikChains")
-            .and_then(|v| v.as_array())
-            .expect("fixture rig spec: ikChains must be an array");
-        let grants = manifest
-            .get("grants")
-            .and_then(|v| v.as_array())
-            .expect("fixture rig spec: grants must be an array");
-
-        assert_eq!(bones.len(), bone_count as usize, "boneCount mismatch");
-        assert_eq!(
-            ik_chains.len(),
-            ik_chain_count as usize,
-            "ikChainCount mismatch"
-        );
-        assert_eq!(grants.len(), grant_count as usize, "grantCount mismatch");
-        assert!(
-            bone_count > 0,
-            "fixture rig spec: boneCount must be positive"
-        );
-        assert!(
-            ik_chain_count > 0,
-            "fixture rig spec: ikChainCount must be positive"
-        );
-
-        for (bone_index, bone) in bones.iter().enumerate() {
-            let context = format!("fixture rig spec: bone {bone_index}");
-            assert!(
-                bone.get("name").is_some_and(|v| v.is_string()),
-                "{context}: name"
-            );
-            assert!(
-                bone.get("nameBytes").is_some_and(|v| v.is_string()),
-                "{context}: nameBytes"
-            );
-            assert!(
-                bone.get("parentIndex").is_some_and(|v| v.is_number()),
-                "{context}: parentIndex"
-            );
-            assert_json_array3(
-                bone.get("restPosition")
-                    .unwrap_or_else(|| panic!("{context}: restPosition missing")),
-                &format!("{context}: restPosition"),
-            );
-            assert!(
-                bone.get("deformLayer").is_some_and(|v| v.is_number()),
-                "{context}: deformLayer"
-            );
-            assert!(
-                bone.get("fixedAxis").is_some(),
-                "{context}: fixedAxis missing"
-            );
-            assert!(
-                bone.get("localAxis").is_some(),
-                "{context}: localAxis missing"
-            );
-            assert!(
-                bone.get("transformAfterPhysics")
-                    .is_some_and(|v| v.is_boolean()),
-                "{context}: transformAfterPhysics"
-            );
-            if let Some(local_axis) = bone.get("localAxis").filter(|v| !v.is_null()) {
-                assert_json_array3(
-                    local_axis
-                        .get("x")
-                        .unwrap_or_else(|| panic!("{context}: localAxis.x missing")),
-                    &format!("{context}: localAxis.x"),
-                );
-                assert_json_array3(
-                    local_axis
-                        .get("z")
-                        .unwrap_or_else(|| panic!("{context}: localAxis.z missing")),
-                    &format!("{context}: localAxis.z"),
-                );
-            }
-        }
-
-        for (chain_index, chain) in ik_chains.iter().enumerate() {
-            let context = format!("fixture rig spec: ik chain {chain_index}");
-            assert!(
-                chain
-                    .get("controllerBoneIndex")
-                    .is_some_and(|v| v.is_number()),
-                "{context}: controllerBoneIndex"
-            );
-            assert!(
-                chain.get("targetBoneIndex").is_some_and(|v| v.is_number()),
-                "{context}: targetBoneIndex"
-            );
-            assert!(
-                chain.get("iterationCount").is_some_and(|v| v.is_number()),
-                "{context}: iterationCount"
-            );
-            assert!(
-                chain.get("limitAngle").is_some_and(|v| v.is_number()),
-                "{context}: limitAngle"
-            );
-            let links = chain
-                .get("links")
-                .and_then(|v| v.as_array())
-                .unwrap_or_else(|| panic!("{context}: links must be an array"));
-            for (link_index, link) in links.iter().enumerate() {
-                let context = format!("{context}: link {link_index}");
-                assert!(
-                    link.get("boneIndex").is_some_and(|v| v.is_number()),
-                    "{context}: boneIndex"
-                );
-                assert!(
-                    link.get("hasAngleLimit").is_some_and(|v| v.is_boolean()),
-                    "{context}: hasAngleLimit"
-                );
-                assert_json_array3(
-                    link.get("angleLimitMin")
-                        .unwrap_or_else(|| panic!("{context}: angleLimitMin missing")),
-                    &format!("{context}: angleLimitMin"),
-                );
-                assert_json_array3(
-                    link.get("angleLimitMax")
-                        .unwrap_or_else(|| panic!("{context}: angleLimitMax missing")),
-                    &format!("{context}: angleLimitMax"),
-                );
-            }
-        }
-
-        for (grant_index, grant) in grants.iter().enumerate() {
-            let context = format!("fixture rig spec: grant {grant_index}");
-            assert!(
-                grant.get("targetBoneIndex").is_some_and(|v| v.is_number()),
-                "{context}: targetBoneIndex"
-            );
-            assert!(
-                grant.get("sourceBoneIndex").is_some_and(|v| v.is_number()),
-                "{context}: sourceBoneIndex"
-            );
-            assert!(
-                grant.get("ratio").is_some_and(|v| v.is_number()),
-                "{context}: ratio"
-            );
-            assert!(
-                grant.get("affectRotation").is_some_and(|v| v.is_boolean()),
-                "{context}: affectRotation"
-            );
-            assert!(
-                grant
-                    .get("affectTranslation")
-                    .is_some_and(|v| v.is_boolean()),
-                "{context}: affectTranslation"
-            );
-            assert!(
-                grant.get("local").is_some_and(|v| v.is_boolean()),
-                "{context}: local"
-            );
-        }
-
-        unsafe { mmd_runtime_pmx_rig_spec_free(spec) };
-    }
-
-    #[test]
-    fn rig_spec_rejects_null_and_invalid_input() {
-        let null_spec = unsafe { mmd_runtime_pmx_rig_spec_create(ptr::null(), 1) };
-        assert!(null_spec.is_null(), "null input must return null handle");
-
-        let byte = 0_u8;
-        let empty_spec = unsafe { mmd_runtime_pmx_rig_spec_create(&byte as *const u8, 0) };
-        assert!(empty_spec.is_null(), "empty input must return null handle");
-
-        let garbage = b"not a pmx";
-        let invalid_spec =
-            unsafe { mmd_runtime_pmx_rig_spec_create(garbage.as_ptr(), garbage.len()) };
-        assert!(
-            invalid_spec.is_null(),
-            "invalid input must return null handle"
-        );
-
-        assert_empty_ffi_buffer(
-            unsafe { mmd_runtime_pmx_rig_spec_manifest_json(ptr::null()) },
-            "null rig spec manifest",
-        );
-        unsafe { mmd_runtime_pmx_rig_spec_free(ptr::null_mut()) };
-    }
-
-    #[test]
-    fn pmx_material_split_buffers_have_consistent_dimensions() {
-        let bytes: &[u8] =
-            include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
-        let split =
-            unsafe { mmd_runtime_pmx_material_split_create(bytes.as_ptr(), bytes.len(), 0) };
-        assert!(!split.is_null(), "material split handle must not be null");
-
-        let mesh_count = unsafe { mmd_runtime_pmx_material_split_mesh_count(split) };
-        let manifest = material_split_manifest_json(split, "fixture material split");
-        assert_material_split_geometry_invariants(split, &manifest, "fixture material split");
-        assert_material_split_rejects_null_and_out_of_range(split, mesh_count);
-
-        unsafe { mmd_runtime_pmx_material_split_free(split) };
-    }
-
-    #[test]
-    fn pmx_geometry_buffers_have_correct_dimensions() {
-        let bytes: &[u8] =
-            include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
-        let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
-        let vertex_count = parsed.metadata.counts.vertices as usize;
-        let index_count = parsed.metadata.counts.faces as usize * 3;
-        let additional_uv_count = parsed.geometry.additional_uvs.len();
-        let material_group_count = parsed.geometry.material_groups.len();
-
-        macro_rules! check_buf {
-            ($fn:ident, $expected_bytes:expr) => {{
-                let buf = unsafe { $fn(bytes.as_ptr(), bytes.len()) };
-                assert!(!buf.data.is_null(), stringify!($fn must not be null));
-                assert_eq!(
-                    buf.len,
-                    $expected_bytes,
-                    stringify!($fn dimension mismatch)
-                );
-                unsafe { mmd_runtime_byte_buffer_free(buf) };
-            }};
-        }
-
-        check_buf!(mmd_runtime_parse_pmx_positions_buffer, vertex_count * 3 * 4);
-        check_buf!(mmd_runtime_parse_pmx_normals_buffer, vertex_count * 3 * 4);
-        check_buf!(mmd_runtime_parse_pmx_uvs_buffer, vertex_count * 2 * 4);
-        check_buf!(mmd_runtime_parse_pmx_indices_buffer, index_count * 4);
-        check_buf!(
-            mmd_runtime_parse_pmx_material_groups_buffer,
-            material_group_count * 3 * 4
-        );
-        check_buf!(
-            mmd_runtime_parse_pmx_skin_indices_buffer,
-            vertex_count * 4 * 4
-        );
-        check_buf!(
-            mmd_runtime_parse_pmx_skin_weights_buffer,
-            vertex_count * 4 * 4
-        );
-        check_buf!(mmd_runtime_parse_pmx_edge_scale_buffer, vertex_count * 4);
-        check_buf!(mmd_runtime_parse_pmx_sdef_enabled_buffer, vertex_count);
-        check_buf!(mmd_runtime_parse_pmx_sdef_c_buffer, vertex_count * 3 * 4);
-        check_buf!(mmd_runtime_parse_pmx_sdef_r0_buffer, vertex_count * 3 * 4);
-        check_buf!(mmd_runtime_parse_pmx_sdef_r1_buffer, vertex_count * 3 * 4);
-        check_buf!(mmd_runtime_parse_pmx_sdef_rw0_buffer, vertex_count * 3 * 4);
-        check_buf!(mmd_runtime_parse_pmx_sdef_rw1_buffer, vertex_count * 3 * 4);
-        check_buf!(mmd_runtime_parse_pmx_qdef_enabled_buffer, vertex_count);
-
-        assert_eq!(
-            unsafe { mmd_runtime_parse_pmx_additional_uv_count(bytes.as_ptr(), bytes.len()) },
-            additional_uv_count
-        );
-        for uv_index in 0..additional_uv_count {
-            let buf = unsafe {
-                mmd_runtime_parse_pmx_additional_uvs_buffer(bytes.as_ptr(), bytes.len(), uv_index)
-            };
-            assert!(
-                !buf.data.is_null(),
-                "additional UV channel {uv_index} must not be null"
-            );
-            assert_eq!(
-                buf.len,
-                vertex_count * 4 * 4,
-                "additional UV channel {uv_index} dimension mismatch"
-            );
-            unsafe { mmd_runtime_byte_buffer_free(buf) };
-        }
-        let invalid_uv = unsafe {
-            mmd_runtime_parse_pmx_additional_uvs_buffer(
-                bytes.as_ptr(),
-                bytes.len(),
-                additional_uv_count,
-            )
-        };
-        assert!(invalid_uv.data.is_null(), "invalid additional UV index");
-        assert_eq!(invalid_uv.len, 0, "invalid additional UV index len");
-    }
-
-    #[test]
-    fn pmx_skinning_modes_json_has_correct_shape() {
-        let bytes: &[u8] =
-            include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
-        let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
-        let vertex_count = parsed.metadata.counts.vertices as usize;
-
-        let buf = unsafe { mmd_runtime_parse_pmx_skinning_modes_json(bytes.as_ptr(), bytes.len()) };
-        assert!(!buf.data.is_null());
-        assert!(buf.len > 0);
-
-        let json_str = unsafe { str::from_utf8(slice::from_raw_parts(buf.data, buf.len)) }.unwrap();
-        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
-
-        let modes = v
-            .get("skinningModes")
-            .and_then(|m| m.as_array())
-            .expect("skinningModes array must be present");
-        assert_eq!(modes.len(), vertex_count);
-        for mode in modes {
-            let s = mode.as_str().expect("each skinning mode must be a string");
-            assert!(
-                matches!(s, "bdef1" | "bdef2" | "bdef4" | "sdef" | "qdef"),
-                "unexpected skinning mode: {s}"
-            );
-        }
-
-        unsafe { mmd_runtime_byte_buffer_free(buf) };
-    }
-}
+mod tests;

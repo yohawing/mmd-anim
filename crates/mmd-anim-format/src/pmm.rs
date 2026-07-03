@@ -1159,6 +1159,100 @@ fn make_asset_binding(
     }
 }
 
+fn build_project_asset_bindings(
+    doc: &PmmDocumentSummary,
+    glob: &PmmDocumentGlobalSummary,
+    asset_references: &[PmmAssetReference],
+) -> Vec<PmmProjectAssetBinding> {
+    let mut asset_bindings: Vec<PmmProjectAssetBinding> = Vec::new();
+
+    for model in &doc.models {
+        asset_bindings.push(make_asset_binding(
+            "model",
+            "model",
+            Some(model.slot_index),
+            Some(model.document_model_index),
+            Some(model.name.clone()),
+            model.path.clone(),
+            Some(model.path_offset),
+            model.asset_reference_index,
+            asset_references,
+        ));
+    }
+    for acc in &glob.accessories.accessories {
+        asset_bindings.push(make_asset_binding(
+            "accessory",
+            "accessory",
+            Some(acc.slot_index),
+            Some(acc.document_accessory_index),
+            Some(acc.name.clone()),
+            acc.path.clone(),
+            Some(acc.path_offset),
+            acc.asset_reference_index,
+            asset_references,
+        ));
+    }
+
+    let settings = &glob.settings;
+    let audio_asset_reference_index = if settings.audio_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "audio", &settings.audio_path)
+    };
+    let background_video_asset_reference_index = if settings.background_video_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "video", &settings.background_video_path)
+    };
+    let background_image_asset_reference_index = if settings.background_image_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "image", &settings.background_image_path)
+    };
+
+    if !settings.audio_path.is_empty() {
+        asset_bindings.push(make_asset_binding(
+            "sceneSettings",
+            "audio",
+            None,
+            None,
+            None,
+            settings.audio_path.clone(),
+            Some(settings.audio_path_offset),
+            audio_asset_reference_index,
+            asset_references,
+        ));
+    }
+    if !settings.background_video_path.is_empty() {
+        asset_bindings.push(make_asset_binding(
+            "sceneSettings",
+            "video",
+            None,
+            None,
+            None,
+            settings.background_video_path.clone(),
+            Some(settings.background_video_path_offset),
+            background_video_asset_reference_index,
+            asset_references,
+        ));
+    }
+    if !settings.background_image_path.is_empty() {
+        asset_bindings.push(make_asset_binding(
+            "sceneSettings",
+            "image",
+            None,
+            None,
+            None,
+            settings.background_image_path.clone(),
+            Some(settings.background_image_path_offset),
+            background_image_asset_reference_index,
+            asset_references,
+        ));
+    }
+
+    asset_bindings
+}
+
 const PMM_MANIFEST_PREFIX: &[u8] = b"Polygon Movie maker ";
 
 fn parse_pmm_manifest_version(data: &[u8]) -> Result<(String, Option<u32>), ImportError> {
@@ -1529,35 +1623,7 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
             // Build assetBindings derived only from already-decoded summaries + asset_references.
             // Exporter-prep read-only slice: connects owners (model/accessory/sceneSettings) to their asset paths + resolved asset reference metadata.
             // No new parsing.
-            let mut asset_bindings: Vec<PmmProjectAssetBinding> = Vec::new();
-
-            for model in &doc.models {
-                asset_bindings.push(make_asset_binding(
-                    "model",
-                    "model",
-                    Some(model.slot_index),
-                    Some(model.document_model_index),
-                    Some(model.name.clone()),
-                    model.path.clone(),
-                    Some(model.path_offset),
-                    model.asset_reference_index,
-                    &asset_references,
-                ));
-            }
-            for acc in &glob.accessories.accessories {
-                asset_bindings.push(make_asset_binding(
-                    "accessory",
-                    "accessory",
-                    Some(acc.slot_index),
-                    Some(acc.document_accessory_index),
-                    Some(acc.name.clone()),
-                    acc.path.clone(),
-                    Some(acc.path_offset),
-                    acc.asset_reference_index,
-                    &asset_references,
-                ));
-            }
-
+            let asset_bindings = build_project_asset_bindings(doc, glob, &asset_references);
             let settings = &glob.settings;
             let audio_asset_reference_index = if settings.audio_path.is_empty() {
                 None
@@ -1584,47 +1650,6 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
                         &settings.background_image_path,
                     )
                 };
-
-            // non-empty scene settings paths only (empty in synthetic fixture -> no binding)
-            if !settings.audio_path.is_empty() {
-                asset_bindings.push(make_asset_binding(
-                    "sceneSettings",
-                    "audio",
-                    None,
-                    None,
-                    None,
-                    settings.audio_path.clone(),
-                    Some(settings.audio_path_offset),
-                    audio_asset_reference_index,
-                    &asset_references,
-                ));
-            }
-            if !settings.background_video_path.is_empty() {
-                asset_bindings.push(make_asset_binding(
-                    "sceneSettings",
-                    "video",
-                    None,
-                    None,
-                    None,
-                    settings.background_video_path.clone(),
-                    Some(settings.background_video_path_offset),
-                    background_video_asset_reference_index,
-                    &asset_references,
-                ));
-            }
-            if !settings.background_image_path.is_empty() {
-                asset_bindings.push(make_asset_binding(
-                    "sceneSettings",
-                    "image",
-                    None,
-                    None,
-                    None,
-                    settings.background_image_path.clone(),
-                    Some(settings.background_image_path_offset),
-                    background_image_asset_reference_index,
-                    &asset_references,
-                ));
-            }
 
             // Build exportReadiness immediately before PmmProjectGraph construction (exporter-prep diagnostics only).
             // lossless parsed byte supported; semantic graph export remains false (full exporter unfinished).

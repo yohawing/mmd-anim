@@ -3137,12 +3137,12 @@ fn read_document_model_summary(
     let asset_reference_index = asset_reference_index_for_path(references, "model", &path);
     cursor.read_u8()?;
     let bone_count = usize_from_i32(cursor.read_i32()?)?;
-    let mut bone_names = Vec::with_capacity(bone_count);
+    let mut bone_names = Vec::new();
     for _ in 0..bone_count {
         bone_names.push(cursor.read_variable_string()?);
     }
     let morph_count = usize_from_i32(cursor.read_i32()?)?;
-    let mut morph_names = Vec::with_capacity(morph_count);
+    let mut morph_names = Vec::new();
     for _ in 0..morph_count {
         morph_names.push(cursor.read_variable_string()?);
     }

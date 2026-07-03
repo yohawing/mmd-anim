@@ -391,7 +391,7 @@ impl WasmPmxGeometry {
             sdef_rw0: g.sdef.rw0.clone(),
             sdef_rw1: g.sdef.rw1.clone(),
             qdef_enabled: g.qdef.enabled.iter().map(|&v| u8::from(v != 0.0)).collect(),
-            skinning_modes: pmx_skinning_modes(g),
+            skinning_modes: g.sdef.skinning_modes.clone(),
         }
     }
 
@@ -537,31 +537,6 @@ impl WasmPmxGeometry {
     pub fn skinning_modes(&self) -> Vec<String> {
         self.skinning_modes.clone()
     }
-}
-
-fn pmx_skinning_modes(g: &mmd_anim_format::pmx::PmxParsedGeometry) -> Vec<String> {
-    let vertex_count = g.positions.len() / 3;
-    (0..vertex_count)
-        .map(|i| {
-            if g.sdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
-                "sdef"
-            } else if g.qdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
-                "qdef"
-            } else {
-                let w2 = g.skin_weights.get(i * 4 + 2).copied().unwrap_or(0.0);
-                let w3 = g.skin_weights.get(i * 4 + 3).copied().unwrap_or(0.0);
-                let w1 = g.skin_weights.get(i * 4 + 1).copied().unwrap_or(0.0);
-                if w2 != 0.0 || w3 != 0.0 {
-                    "bdef4"
-                } else if w1 != 0.0 {
-                    "bdef2"
-                } else {
-                    "bdef1"
-                }
-            }
-            .to_owned()
-        })
-        .collect()
 }
 
 /// Parsed PMX handle for the split loader ABI.
@@ -3044,7 +3019,7 @@ TextureFilename { "tex/main.png"; }
         assert_eq!(geo.sdef_rw0().len(), 9);
         assert_eq!(geo.sdef_rw1().len(), 9);
         assert_eq!(geo.qdef_enabled(), vec![0u8, 0, 0]);
-        assert_eq!(geo.skinning_modes(), vec!["bdef1", "bdef1", "bdef1"]);
+        assert_eq!(geo.skinning_modes(), vec!["bdef4", "bdef4", "bdef4"]);
     }
 
     #[test]

@@ -227,6 +227,15 @@ fn import_frame_range_parser_is_inclusive() {
 }
 
 #[test]
+fn import_frame_range_parser_emits_decimal_end() {
+    let spec = import::parse_import_frame_range("0:1:0.1").unwrap();
+    let import::ImportFrameSpec::Range(frames) = spec else {
+        panic!("expected range frame spec");
+    };
+    assert_eq!(frames.last().copied(), Some(1.0));
+}
+
+#[test]
 fn import_frame_parsers_reject_invalid_values() {
     assert!(import::parse_import_frames_list("").is_err());
     assert!(import::parse_import_frames_list("0,,30").is_err());

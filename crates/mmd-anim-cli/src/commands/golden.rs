@@ -412,9 +412,15 @@ pub(crate) fn compute_root_motion_oracle_lag(
             let prev = window[0];
             let curr = window[1];
 
-            let dx = f64::from(curr.oracle_translation[0] - prev.runtime_translation[0]).abs();
-            let dy = f64::from(curr.oracle_translation[1] - prev.runtime_translation[1]).abs();
-            let dz = f64::from(curr.oracle_translation[2] - prev.runtime_translation[2]).abs();
+            let dx = (f64::from(curr.oracle_translation[0])
+                - f64::from(prev.runtime_translation[0]))
+            .abs();
+            let dy = (f64::from(curr.oracle_translation[1])
+                - f64::from(prev.runtime_translation[1]))
+            .abs();
+            let dz = (f64::from(curr.oracle_translation[2])
+                - f64::from(prev.runtime_translation[2]))
+            .abs();
             let max_delta = dx.max(dy).max(dz);
 
             if max_delta <= ORACLE_LAG_DELTA_THRESHOLD {
@@ -578,21 +584,21 @@ pub(crate) fn compute_ik_solver_residuals(
 }
 
 #[derive(Serialize)]
-struct UnsupportedGoldenCaseSummaryEntry<'a> {
-    name: &'a str,
-    model: &'a str,
-    extension: &'a str,
+struct UnsupportedGoldenCaseSummaryEntry {
+    name: String,
+    model: String,
+    extension: String,
     reason: String,
 }
 
 #[derive(Serialize)]
-struct UnsupportedGoldenCasePerCaseEntry<'a> {
-    name: &'a str,
+struct UnsupportedGoldenCasePerCaseEntry {
+    name: String,
     status: &'static str,
-    model: &'a str,
+    model: String,
     reason: String,
     #[serde(rename = "maxAbsError")]
-    max_abs_error: f64,
+    max_abs_error: f32,
     worst: &'static str,
     #[serde(rename = "rootMotionOracleLag")]
     root_motion_oracle_lag: GoldenRootMotionOracleLag,
@@ -615,6 +621,13 @@ struct GoldenIkComparePerCaseEntry {
 }
 
 #[derive(Serialize)]
+#[serde(untagged)]
+enum GoldenIkCompareCaseEntry {
+    Unsupported(UnsupportedGoldenCasePerCaseEntry),
+    Compared(GoldenIkComparePerCaseEntry),
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoldenIkCompareJsonReport {
     command: &'static str,
@@ -622,7 +635,7 @@ struct GoldenIkCompareJsonReport {
     sample_frame_offset: f32,
     summary: GoldenIkCompareJsonSummary,
     #[serde(rename = "perCase")]
-    per_case: Vec<serde_json::Value>,
+    per_case: Vec<GoldenIkCompareCaseEntry>,
 }
 
 #[derive(Serialize)]
@@ -631,7 +644,7 @@ struct GoldenIkCompareJsonSummary {
     cases: usize,
     compared_cases: usize,
     skipped_unsupported: usize,
-    skipped_unsupported_cases: Vec<serde_json::Value>,
+    skipped_unsupported_cases: Vec<UnsupportedGoldenCaseSummaryEntry>,
     missing: usize,
     import_errors: usize,
     compared_frames: usize,
@@ -642,7 +655,7 @@ struct GoldenIkCompareJsonSummary {
     worst_component_type: &'static str,
     worst_case_max_error: f32,
     diagnostics_total: usize,
-    worst_diagnostic: Option<serde_json::Value>,
+    worst_diagnostic: Option<GoldenRootMotionDiagnostic>,
     worst_likely_root_control_dominated: bool,
     solver_focused: GoldenIkCompareSolverFocusedSummary,
     root_motion_oracle_lag: GoldenIkCompareRootMotionOracleLagSummary,
@@ -685,22 +698,24 @@ fn golden_component_type(component: usize) -> &'static str {
 fn make_unsupported_case_entry(
     pmx_path: &Path,
     case_name: &str,
-) -> (serde_json::Value, serde_json::Value) {
+) -> (
+    UnsupportedGoldenCaseSummaryEntry,
+    UnsupportedGoldenCasePerCaseEntry,
+) {
     let ext = pmx_path.extension().and_then(|e| e.to_str()).unwrap_or("?");
     let model_name = pmx_path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
     let reason = format!("unsupported model format: only .pmx and .pmd are supported (got .{ext})");
 
-    let summary = serde_json::to_value(UnsupportedGoldenCaseSummaryEntry {
-        name: case_name,
-        model: model_name,
-        extension: ext,
+    let summary = UnsupportedGoldenCaseSummaryEntry {
+        name: case_name.to_owned(),
+        model: model_name.to_owned(),
+        extension: ext.to_owned(),
         reason: reason.clone(),
-    })
-    .expect("unsupported golden case summary entry should serialize");
-    let per_case = serde_json::to_value(UnsupportedGoldenCasePerCaseEntry {
-        name: case_name,
+    };
+    let per_case = UnsupportedGoldenCasePerCaseEntry {
+        name: case_name.to_owned(),
         status: "skipped",
-        model: model_name,
+        model: model_name.to_owned(),
         reason,
         max_abs_error: 0.0,
         worst: "",
@@ -708,8 +723,7 @@ fn make_unsupported_case_entry(
             match_count: 0,
             matches: Vec::new(),
         },
-    })
-    .expect("unsupported golden case per-case entry should serialize");
+    };
 
     (summary, per_case)
 }
@@ -778,8 +792,8 @@ pub(crate) fn golden_ik_compare(
     let mut cases = 0usize;
     let mut compared_cases = 0usize;
     let mut skipped_unsupported = 0usize;
-    let mut skipped_unsupported_cases: Vec<serde_json::Value> = Vec::new();
-    let mut per_case_entries: Vec<serde_json::Value> = Vec::new();
+    let mut skipped_unsupported_cases: Vec<UnsupportedGoldenCaseSummaryEntry> = Vec::new();
+    let mut per_case_entries: Vec<GoldenIkCompareCaseEntry> = Vec::new();
     let mut missing = 0usize;
     let mut import_errors = 0usize;
     let mut compared_frames = 0usize;
@@ -815,7 +829,7 @@ pub(crate) fn golden_ik_compare(
             skipped_unsupported += 1;
             let (summary, per_case) = make_unsupported_case_entry(&pmx_path, &case.name);
             skipped_unsupported_cases.push(summary);
-            per_case_entries.push(per_case);
+            per_case_entries.push(GoldenIkCompareCaseEntry::Unsupported(per_case));
             continue;
         }
 
@@ -1005,15 +1019,17 @@ pub(crate) fn golden_ik_compare(
         let case_lag = compute_root_motion_oracle_lag(&case.name, &case_diagnostics);
         all_lag_matches.extend(case_lag.matches.iter().cloned());
 
-        per_case_entries.push(serde_json::to_value(GoldenIkComparePerCaseEntry {
-            name: case.name.clone(),
-            max_abs_error: case_max_error,
-            worst: case_worst,
-            status: "compared",
-            diagnostics: case_diagnostics,
-            import_diagnostics: model_import.diagnostics,
-            root_motion_oracle_lag: case_lag,
-        })?);
+        per_case_entries.push(GoldenIkCompareCaseEntry::Compared(
+            GoldenIkComparePerCaseEntry {
+                name: case.name.clone(),
+                max_abs_error: case_max_error,
+                worst: case_worst,
+                status: "compared",
+                diagnostics: case_diagnostics,
+                import_diagnostics: model_import.diagnostics,
+                root_motion_oracle_lag: case_lag,
+            },
+        ));
         compared_cases += 1;
     }
 
@@ -1052,11 +1068,6 @@ pub(crate) fn golden_ik_compare(
         .map(|d| f64::from(d.max_abs_error))
         .map(|err| err >= max_abs_error as f64 * 0.5)
         .unwrap_or(false);
-    let worst_diagnostic = worst_diagnostic
-        .as_ref()
-        .map(serde_json::to_value)
-        .transpose()?;
-
     let summary_lag_total = all_lag_matches.len();
     let summary_lag_worst = all_lag_matches
         .iter()
@@ -1128,8 +1139,8 @@ pub(crate) fn golden_ik_compare(
         if skipped_unsupported > 0 {
             println!("Skipped unsupported cases:");
             for case in &skipped_unsupported_cases {
-                let name = case["name"].as_str().unwrap_or("?");
-                let reason = case["reason"].as_str().unwrap_or("?");
+                let name = &case.name;
+                let reason = &case.reason;
                 println!("  {name}: {reason}");
             }
         }

@@ -2453,49 +2453,19 @@ fn pmx_skinning_modes_json_buffer(
 ) -> MmdRuntimeFfiByteBuffer {
     let vertex_count = geometry.positions.len() / 3;
     let modes: Vec<&str> = (0..vertex_count)
-        .map(|i| pmx_skinning_mode(geometry, i))
+        .map(|i| {
+            geometry
+                .sdef
+                .skinning_modes
+                .get(i)
+                .map(String::as_str)
+                .unwrap_or("bdef1")
+        })
         .collect();
     let wrapper = serde_json::json!({ "skinningModes": modes });
     match serde_json::to_vec(&wrapper) {
         Ok(json) => byte_buffer_from_vec(json),
         Err(_) => empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
-    }
-}
-
-fn pmx_skinning_mode(
-    geometry: &mmd_anim_format::pmx::PmxParsedGeometry,
-    vertex_index: usize,
-) -> &'static str {
-    if geometry
-        .sdef
-        .enabled
-        .get(vertex_index)
-        .copied()
-        .unwrap_or(0.0)
-        > 0.5
-    {
-        "sdef"
-    } else if geometry
-        .qdef
-        .enabled
-        .get(vertex_index)
-        .copied()
-        .unwrap_or(0.0)
-        > 0.5
-    {
-        "qdef"
-    } else {
-        let base = vertex_index * 4;
-        let w1 = geometry.skin_weights.get(base + 1).copied().unwrap_or(0.0);
-        let w2 = geometry.skin_weights.get(base + 2).copied().unwrap_or(0.0);
-        let w3 = geometry.skin_weights.get(base + 3).copied().unwrap_or(0.0);
-        if w2 != 0.0 || w3 != 0.0 {
-            "bdef4"
-        } else if w1 != 0.0 {
-            "bdef2"
-        } else {
-            "bdef1"
-        }
     }
 }
 

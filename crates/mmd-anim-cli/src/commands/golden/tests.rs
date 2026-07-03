@@ -416,6 +416,8 @@ fn is_dominated_control_bone_abs_alone_does_not_dominate() {
 fn unsupported_case_entry_x_extension() {
     let pmx_path = Path::new("some/case/accessory.x");
     let (summary, per_case) = make_unsupported_case_entry(pmx_path, "test-case");
+    let summary = serde_json::to_value(summary).unwrap();
+    let per_case = serde_json::to_value(per_case).unwrap();
 
     assert_eq!(summary["name"], "test-case");
     assert_eq!(summary["model"], "accessory.x");
@@ -440,6 +442,8 @@ fn unsupported_case_entry_x_extension() {
 fn unsupported_case_entry_no_extension() {
     let pmx_path = Path::new("some/case/model_no_ext");
     let (summary, per_case) = make_unsupported_case_entry(pmx_path, "test-case");
+    let summary = serde_json::to_value(summary).unwrap();
+    let per_case = serde_json::to_value(per_case).unwrap();
 
     assert_eq!(summary["name"], "test-case");
     assert_eq!(summary["model"], "model_no_ext");

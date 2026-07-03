@@ -357,15 +357,30 @@ pub(crate) fn parse_import_frame_range(text: &str) -> Result<ImportFrameSpec, St
     }
 
     let mut frames = Vec::new();
-    let mut frame = start;
-    while frame <= end {
+    let mut index = 0usize;
+    loop {
+        let frame = start + index as f32 * step;
+        if frame > end {
+            if frames.last().copied() != Some(end) {
+                frames.push(end);
+                if frames.len() > MAX_IMPORT_BATCH_FRAMES {
+                    return Err(format!(
+                        "import batch frame count exceeds limit {MAX_IMPORT_BATCH_FRAMES}"
+                    ));
+                }
+            }
+            break;
+        }
         frames.push(frame);
         if frames.len() > MAX_IMPORT_BATCH_FRAMES {
             return Err(format!(
                 "import batch frame count exceeds limit {MAX_IMPORT_BATCH_FRAMES}"
             ));
         }
-        frame += step;
+        if frame == end {
+            break;
+        }
+        index += 1;
     }
     validate_batch_frames(&frames)?;
     Ok(ImportFrameSpec::Range(frames))

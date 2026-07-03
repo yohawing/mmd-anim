@@ -3027,3 +3027,32 @@ fn pmx_skinning_modes_json_has_correct_shape() {
         );
     }
 }
+
+#[test]
+fn pmx_skinning_modes_json_uses_parser_recorded_mode() {
+    let geometry = mmd_anim_format::pmx::PmxParsedGeometry {
+        positions: vec![0.0, 0.0, 0.0],
+        normals: vec![0.0, 1.0, 0.0],
+        uvs: vec![0.0, 0.0],
+        additional_uvs: Vec::new(),
+        indices: Vec::new(),
+        skin_indices: vec![0, 1, 0, 0],
+        skin_weights: vec![1.0, 0.0, 0.0, 0.0],
+        edge_scale: vec![1.0],
+        material_groups: Vec::new(),
+        sdef: mmd_anim_format::pmx::PmxParsedSdef {
+            skinning_modes: vec!["bdef2".to_owned()],
+            enabled: vec![0.0],
+            c: vec![0.0; 3],
+            r0: vec![0.0; 3],
+            r1: vec![0.0; 3],
+            rw0: vec![0.0; 3],
+            rw1: vec![0.0; 3],
+        },
+        qdef: mmd_anim_format::pmx::PmxParsedQdef { enabled: vec![0.0] },
+    };
+
+    let json = ffi_buffer_to_vec(pmx_skinning_modes_json_buffer(&geometry));
+    let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(v["skinningModes"][0], "bdef2");
+}

@@ -2731,8 +2731,8 @@ fn pmx_material_split_buffers_have_consistent_dimensions() {
 fn pmx_geometry_buffers_have_correct_dimensions() {
     let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
     let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
-    let vertex_count = parsed.metadata.counts.vertices as usize;
-    let index_count = parsed.metadata.counts.faces as usize * 3;
+    let vertex_count = parsed.metadata.counts.vertices;
+    let index_count = parsed.metadata.counts.faces * 3;
     let additional_uv_count = parsed.geometry.additional_uvs.len();
     let material_group_count = parsed.geometry.material_groups.len();
 
@@ -2808,8 +2808,8 @@ fn pmx_geometry_buffers_have_correct_dimensions() {
 fn pmx_geometry_handle_buffers_have_correct_dimensions() {
     let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
     let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
-    let vertex_count = parsed.metadata.counts.vertices as usize;
-    let index_count = parsed.metadata.counts.faces as usize * 3;
+    let vertex_count = parsed.metadata.counts.vertices;
+    let index_count = parsed.metadata.counts.faces * 3;
     let additional_uv_count = parsed.geometry.additional_uvs.len();
     let material_group_count = parsed.geometry.material_groups.len();
 
@@ -3018,7 +3018,7 @@ fn pmx_geometry_handle_buffers_match_legacy_raw_byte_api() {
 fn pmx_skinning_modes_json_has_correct_shape() {
     let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
     let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
-    let vertex_count = parsed.metadata.counts.vertices as usize;
+    let vertex_count = parsed.metadata.counts.vertices;
 
     let legacy_json = ffi_buffer_to_vec(unsafe {
         mmd_runtime_parse_pmx_skinning_modes_json(bytes.as_ptr(), bytes.len())

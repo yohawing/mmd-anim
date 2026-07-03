@@ -10,11 +10,11 @@ use std::{ptr, slice, str, sync::Arc};
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
     AnimationClip, AppendPrimitiveInput, AppendTransformInit, BoneAnimationBinding, BoneIndex,
-    BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit, IkChainDefinition,
+    BoneMorphOffset, FlatBoneInput, GroupMorphOffset, IkAngleLimit, IkChainDefinition,
     IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkLinkInit, IkSolveOptions,
     IkSolverInit, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan,
     MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
-    RuntimeInstance, solve_append_transform,
+    RuntimeInstance, build_bones_from_flat, solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 2;
@@ -4279,36 +4279,13 @@ unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
     let ik_links = unsafe { checked_slice(input.ik_links, input.ik_link_count) }?;
     let append_transforms =
         unsafe { checked_slice(input.append_transforms, input.append_transform_count) }?;
-    let mut bones = Vec::with_capacity(input.bone_count);
-
-    for (bone_index, parent_index) in parents.iter().enumerate() {
-        let parent = match *parent_index {
-            -1 => None,
-            parent if parent >= 0 => Some(BoneIndex(parent as u32)),
-            _ => return None,
-        };
-        let position_offset = bone_index * 3;
-        let mut bone = BoneInit::new(
-            parent,
-            glam::Vec3A::new(
-                positions[position_offset],
-                positions[position_offset + 1],
-                positions[position_offset + 2],
-            ),
-        );
-        if !inverse_bind_matrices.is_empty() {
-            let inverse_bind_offset = bone_index * 16;
-            let inverse_bind_matrix = inverse_bind_matrices
-                [inverse_bind_offset..inverse_bind_offset + 16]
-                .try_into()
-                .ok()?;
-            bone.inverse_bind_matrix = glam::Mat4::from_cols_array(inverse_bind_matrix);
-        }
-        if !transform_orders.is_empty() {
-            bone.transform_order = transform_orders[bone_index];
-        }
-        bones.push(bone);
-    }
+    let bones = build_bones_from_flat(FlatBoneInput {
+        parent_indices: parents,
+        rest_positions_xyz: positions,
+        inverse_bind_matrices,
+        transform_orders,
+    })
+    .ok()?;
 
     let ik_solvers = ik_solvers
         .iter()

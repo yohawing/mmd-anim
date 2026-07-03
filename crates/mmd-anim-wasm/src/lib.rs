@@ -7,14 +7,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneInit, BoneMorphOffset,
+    AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneMorphOffset,
     GroupMorphOffset, IkAngleLimit, IkLinkInit, IkSolveOptions, IkSolverInit,
     MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan, MorphTrack,
     MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
     RuntimeInstance,
 };
+use mmd_anim_runtime::{FlatBoneInput, ModelArena, build_bones_from_flat};
 use wasm_bindgen::prelude::*;
 
 pub const WASM_WRAPPER_VERSION: u32 = 2;
@@ -1643,22 +1643,13 @@ struct ModelInput<'a> {
 }
 
 fn build_model(input: ModelInput<'_>) -> Result<ModelArena, String> {
-    if input.parent_indices.is_empty() {
-        return Err("model must contain at least one bone".to_owned());
-    }
-    if input.rest_positions_xyz.len() != input.parent_indices.len() * 3 {
-        return Err("rest_positions_xyz must contain bone_count * 3 values".to_owned());
-    }
-    if !input.inverse_bind_matrices.is_empty()
-        && input.inverse_bind_matrices.len() != input.parent_indices.len() * 16
-    {
-        return Err("inverse_bind_matrices must contain bone_count * 16 values".to_owned());
-    }
-    if !input.transform_orders.is_empty()
-        && input.transform_orders.len() != input.parent_indices.len()
-    {
-        return Err("transform_orders must contain bone_count values".to_owned());
-    }
+    let bones = build_bones_from_flat(FlatBoneInput {
+        parent_indices: input.parent_indices,
+        rest_positions_xyz: input.rest_positions_xyz,
+        inverse_bind_matrices: input.inverse_bind_matrices,
+        transform_orders: input.transform_orders,
+    })
+    .map_err(|error| error.to_string())?;
     if !input.ik_solvers_u32.len().is_multiple_of(5) {
         return Err(
             "ik_solvers_u32 must contain ik/target/linkOffset/linkCount/iteration quintets"
@@ -1681,36 +1672,6 @@ fn build_model(input: ModelInput<'_>) -> Result<ModelArena, String> {
     }
     if input.append_ratios.len() != input.append_u32.len() / 3 {
         return Err("append_ratios length must match append transform count".to_owned());
-    }
-
-    let mut bones = Vec::with_capacity(input.parent_indices.len());
-    for (bone_index, parent_index) in input.parent_indices.iter().enumerate() {
-        let parent = match *parent_index {
-            -1 => None,
-            parent if parent >= 0 => Some(BoneIndex(parent as u32)),
-            _ => return Err("parent index must be -1 or non-negative".to_owned()),
-        };
-        let position_offset = bone_index * 3;
-        let mut bone = BoneInit::new(
-            parent,
-            glam::Vec3A::new(
-                input.rest_positions_xyz[position_offset],
-                input.rest_positions_xyz[position_offset + 1],
-                input.rest_positions_xyz[position_offset + 2],
-            ),
-        );
-        if !input.inverse_bind_matrices.is_empty() {
-            let inverse_bind_offset = bone_index * 16;
-            let inverse_bind_matrix = input.inverse_bind_matrices
-                [inverse_bind_offset..inverse_bind_offset + 16]
-                .try_into()
-                .map_err(|_| "inverse bind matrix slice conversion failed".to_owned())?;
-            bone.inverse_bind_matrix = glam::Mat4::from_cols_array(inverse_bind_matrix);
-        }
-        if !input.transform_orders.is_empty() {
-            bone.transform_order = input.transform_orders[bone_index];
-        }
-        bones.push(bone);
     }
 
     let ik_links = input

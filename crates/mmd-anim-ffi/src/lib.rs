@@ -2624,35 +2624,13 @@ pub unsafe extern "C" fn mmd_runtime_model_create(
             return ptr::null_mut();
         }
 
-        let Some(model) = (unsafe {
-            build_model_from_ffi(RawModelInput {
+        unsafe {
+            create_runtime_model_from_ffi_input(RawModelInput::with_bones(
                 parent_indices,
                 rest_positions_xyz,
                 bone_count,
-                inverse_bind_matrices: ptr::null(),
-                transform_orders: ptr::null(),
-                ik_solvers: ptr::null(),
-                ik_solver_count: 0,
-                ik_links: ptr::null(),
-                ik_link_count: 0,
-                append_transforms: ptr::null(),
-                append_transform_count: 0,
-                morph_count: 0,
-                bone_morph_offsets: ptr::null(),
-                bone_morph_offset_count: 0,
-                group_morph_offsets: ptr::null(),
-                group_morph_offset_count: 0,
-            })
-        }) else {
-            return ptr::null_mut();
-        };
-
-        Box::into_raw(Box::new(MmdRuntimeModel {
-            model: Arc::new(model),
-            bone_name_to_index: HashMap::new(),
-            morph_name_to_index: HashMap::new(),
-            ik_solver_bone_name_to_index: HashMap::new(),
-        }))
+            ))
+        }
     })
 }
 
@@ -2680,35 +2658,12 @@ pub unsafe extern "C" fn mmd_runtime_model_create_with_inverse_bind(
             return ptr::null_mut();
         }
 
-        let Some(model) = (unsafe {
-            build_model_from_ffi(RawModelInput {
-                parent_indices,
-                rest_positions_xyz,
-                bone_count,
+        unsafe {
+            create_runtime_model_from_ffi_input(RawModelInput {
                 inverse_bind_matrices,
-                transform_orders: ptr::null(),
-                ik_solvers: ptr::null(),
-                ik_solver_count: 0,
-                ik_links: ptr::null(),
-                ik_link_count: 0,
-                append_transforms: ptr::null(),
-                append_transform_count: 0,
-                morph_count: 0,
-                bone_morph_offsets: ptr::null(),
-                bone_morph_offset_count: 0,
-                group_morph_offsets: ptr::null(),
-                group_morph_offset_count: 0,
+                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
             })
-        }) else {
-            return ptr::null_mut();
-        };
-
-        Box::into_raw(Box::new(MmdRuntimeModel {
-            model: Arc::new(model),
-            bone_name_to_index: HashMap::new(),
-            morph_name_to_index: HashMap::new(),
-            ik_solver_bone_name_to_index: HashMap::new(),
-        }))
+        }
     })
 }
 
@@ -2733,35 +2688,13 @@ pub unsafe extern "C" fn mmd_runtime_model_create_with_append(
             return ptr::null_mut();
         }
 
-        let Some(model) = (unsafe {
-            build_model_from_ffi(RawModelInput {
-                parent_indices,
-                rest_positions_xyz,
-                bone_count,
-                inverse_bind_matrices: ptr::null(),
-                transform_orders: ptr::null(),
-                ik_solvers: ptr::null(),
-                ik_solver_count: 0,
-                ik_links: ptr::null(),
-                ik_link_count: 0,
+        unsafe {
+            create_runtime_model_from_ffi_input(RawModelInput {
                 append_transforms,
                 append_transform_count,
-                morph_count: 0,
-                bone_morph_offsets: ptr::null(),
-                bone_morph_offset_count: 0,
-                group_morph_offsets: ptr::null(),
-                group_morph_offset_count: 0,
+                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
             })
-        }) else {
-            return ptr::null_mut();
-        };
-
-        Box::into_raw(Box::new(MmdRuntimeModel {
-            model: Arc::new(model),
-            bone_name_to_index: HashMap::new(),
-            morph_name_to_index: HashMap::new(),
-            ik_solver_bone_name_to_index: HashMap::new(),
-        }))
+        }
     })
 }
 
@@ -2793,35 +2726,14 @@ pub unsafe extern "C" fn mmd_runtime_model_create_with_append_and_inverse_bind(
             return ptr::null_mut();
         }
 
-        let Some(model) = (unsafe {
-            build_model_from_ffi(RawModelInput {
-                parent_indices,
-                rest_positions_xyz,
-                bone_count,
+        unsafe {
+            create_runtime_model_from_ffi_input(RawModelInput {
                 inverse_bind_matrices,
-                transform_orders: ptr::null(),
-                ik_solvers: ptr::null(),
-                ik_solver_count: 0,
-                ik_links: ptr::null(),
-                ik_link_count: 0,
                 append_transforms,
                 append_transform_count,
-                morph_count: 0,
-                bone_morph_offsets: ptr::null(),
-                bone_morph_offset_count: 0,
-                group_morph_offsets: ptr::null(),
-                group_morph_offset_count: 0,
+                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
             })
-        }) else {
-            return ptr::null_mut();
-        };
-
-        Box::into_raw(Box::new(MmdRuntimeModel {
-            model: Arc::new(model),
-            bone_name_to_index: HashMap::new(),
-            morph_name_to_index: HashMap::new(),
-            ik_solver_bone_name_to_index: HashMap::new(),
-        }))
+        }
     })
 }
 
@@ -2855,35 +2767,18 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full(
             return ptr::null_mut();
         }
 
-        let Some(model) = (unsafe {
-            build_model_from_ffi(RawModelInput {
-                parent_indices,
-                rest_positions_xyz,
+        unsafe {
+            create_runtime_model_from_ffi_input(RawModelInput {
                 inverse_bind_matrices,
-                transform_orders: ptr::null(),
-                bone_count,
                 ik_solvers,
                 ik_solver_count,
                 ik_links,
                 ik_link_count,
                 append_transforms,
                 append_transform_count,
-                morph_count: 0,
-                bone_morph_offsets: ptr::null(),
-                bone_morph_offset_count: 0,
-                group_morph_offsets: ptr::null(),
-                group_morph_offset_count: 0,
+                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
             })
-        }) else {
-            return ptr::null_mut();
-        };
-
-        Box::into_raw(Box::new(MmdRuntimeModel {
-            model: Arc::new(model),
-            bone_name_to_index: HashMap::new(),
-            morph_name_to_index: HashMap::new(),
-            ik_solver_bone_name_to_index: HashMap::new(),
-        }))
+        }
     })
 }
 
@@ -2916,35 +2811,19 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full_with_transform_order(
             return ptr::null_mut();
         }
 
-        let Some(model) = (unsafe {
-            build_model_from_ffi(RawModelInput {
-                parent_indices,
-                rest_positions_xyz,
+        unsafe {
+            create_runtime_model_from_ffi_input(RawModelInput {
                 inverse_bind_matrices,
                 transform_orders,
-                bone_count,
                 ik_solvers,
                 ik_solver_count,
                 ik_links,
                 ik_link_count,
                 append_transforms,
                 append_transform_count,
-                morph_count: 0,
-                bone_morph_offsets: ptr::null(),
-                bone_morph_offset_count: 0,
-                group_morph_offsets: ptr::null(),
-                group_morph_offset_count: 0,
+                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
             })
-        }) else {
-            return ptr::null_mut();
-        };
-
-        Box::into_raw(Box::new(MmdRuntimeModel {
-            model: Arc::new(model),
-            bone_name_to_index: HashMap::new(),
-            morph_name_to_index: HashMap::new(),
-            ik_solver_bone_name_to_index: HashMap::new(),
-        }))
+        }
     })
 }
 
@@ -2987,13 +2866,10 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full_with_morphs(
             return ptr::null_mut();
         }
 
-        let Some(model) = (unsafe {
-            build_model_from_ffi(RawModelInput {
-                parent_indices,
-                rest_positions_xyz,
+        unsafe {
+            create_runtime_model_from_ffi_input(RawModelInput {
                 inverse_bind_matrices,
                 transform_orders,
-                bone_count,
                 ik_solvers,
                 ik_solver_count,
                 ik_links,
@@ -3005,17 +2881,9 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full_with_morphs(
                 bone_morph_offset_count,
                 group_morph_offsets,
                 group_morph_offset_count,
+                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
             })
-        }) else {
-            return ptr::null_mut();
-        };
-
-        Box::into_raw(Box::new(MmdRuntimeModel {
-            model: Arc::new(model),
-            bone_name_to_index: HashMap::new(),
-            morph_name_to_index: HashMap::new(),
-            ik_solver_bone_name_to_index: HashMap::new(),
-        }))
+        }
     })
 }
 
@@ -4260,6 +4128,57 @@ struct RawModelInput {
     bone_morph_offset_count: usize,
     group_morph_offsets: *const MmdRuntimeFfiGroupMorphOffset,
     group_morph_offset_count: usize,
+}
+
+impl Default for RawModelInput {
+    fn default() -> Self {
+        Self {
+            parent_indices: ptr::null(),
+            rest_positions_xyz: ptr::null(),
+            inverse_bind_matrices: ptr::null(),
+            transform_orders: ptr::null(),
+            bone_count: 0,
+            ik_solvers: ptr::null(),
+            ik_solver_count: 0,
+            ik_links: ptr::null(),
+            ik_link_count: 0,
+            append_transforms: ptr::null(),
+            append_transform_count: 0,
+            morph_count: 0,
+            bone_morph_offsets: ptr::null(),
+            bone_morph_offset_count: 0,
+            group_morph_offsets: ptr::null(),
+            group_morph_offset_count: 0,
+        }
+    }
+}
+
+impl RawModelInput {
+    fn with_bones(
+        parent_indices: *const i32,
+        rest_positions_xyz: *const f32,
+        bone_count: usize,
+    ) -> Self {
+        Self {
+            parent_indices,
+            rest_positions_xyz,
+            bone_count,
+            ..Self::default()
+        }
+    }
+}
+
+unsafe fn create_runtime_model_from_ffi_input(input: RawModelInput) -> *mut MmdRuntimeModel {
+    let Some(model) = (unsafe { build_model_from_ffi(input) }) else {
+        return ptr::null_mut();
+    };
+
+    Box::into_raw(Box::new(MmdRuntimeModel {
+        model: Arc::new(model),
+        bone_name_to_index: HashMap::new(),
+        morph_name_to_index: HashMap::new(),
+        ik_solver_bone_name_to_index: HashMap::new(),
+    }))
 }
 
 unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {

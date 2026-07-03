@@ -4,7 +4,9 @@ use glam::{Quat, Vec3A};
 
 use crate::{
     AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneInit, IkAngleLimit,
-    IkLinkInit, IkSolverInit, ModelArena, MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
+    IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkLinkInit,
+    IkSolveOptions, IkSolverInit, ModelArena, MovableBoneKeyframe, MovableBoneTrack,
+    RuntimeInstance,
 };
 
 fn translation(matrix: glam::Mat4) -> Vec3A {
@@ -16,6 +18,14 @@ fn assert_vec3a_near(actual: Vec3A, expected: Vec3A) {
     assert!(
         delta.x < 1.0e-5 && delta.y < 1.0e-5 && delta.z < 1.0e-5,
         "actual={actual:?} expected={expected:?} delta={delta:?}"
+    );
+}
+
+fn assert_quat_near(actual: Quat, expected: Quat) {
+    let alignment = actual.dot(expected).abs();
+    assert!(
+        (1.0 - alignment) < 1.0e-5,
+        "actual={actual:?} expected={expected:?} alignment={alignment}"
     );
 }
 
@@ -300,6 +310,81 @@ fn solves_two_link_ik_chain_toward_controller_bone() {
     assert_vec3a_near(
         translation(runtime.world_matrices()[2]),
         Vec3A::new(1.0, 1.0, 0.0),
+    );
+}
+
+#[test]
+fn primitive_ik_solver_matches_runtime_ik_driver_for_two_link_chain() {
+    let bones = vec![
+        BoneInit::new(None, Vec3A::ZERO),
+        BoneInit::new(Some(BoneIndex(0)), Vec3A::new(1.0, 0.0, 0.0)),
+        BoneInit::new(Some(BoneIndex(1)), Vec3A::new(1.0, 0.0, 0.0)),
+        BoneInit::new(None, Vec3A::new(1.0, 1.0, 0.0)),
+    ];
+    let solver = IkSolverInit {
+        ik_bone: BoneIndex(3),
+        target_bone: BoneIndex(2),
+        links: vec![IkLinkInit::new(BoneIndex(1)), IkLinkInit::new(BoneIndex(0))],
+        iteration_count: 4,
+        limit_angle: 0.0,
+    };
+    let model = Arc::new(ModelArena::new_with_ik(bones, vec![solver]).unwrap());
+    let mut runtime = RuntimeInstance::new(Arc::clone(&model));
+    runtime.evaluate_current_pose_without_ik();
+
+    let mut primitive = IkChainSolver::new(IkChainDefinition {
+        parent_slots: vec![None, Some(0), Some(1), None],
+        rest_positions: vec![
+            Vec3A::ZERO,
+            Vec3A::new(1.0, 0.0, 0.0),
+            Vec3A::new(1.0, 0.0, 0.0),
+            Vec3A::new(1.0, 1.0, 0.0),
+        ],
+        fixed_axes: vec![None, None, None, None],
+        target_slot: 2,
+        links: vec![
+            IkChainLinkDefinition {
+                bone_slot: 1,
+                angle_limit: None,
+            },
+            IkChainLinkDefinition {
+                bone_slot: 0,
+                angle_limit: None,
+            },
+        ],
+        iteration_count: 4,
+        limit_angle: 0.0,
+    });
+    let primitive_output = primitive.solve(IkChainPoseInput {
+        parent_world_matrix: None,
+        local_position_offsets: &[Vec3A::ZERO; 4],
+        local_rotations: &[Quat::IDENTITY; 4],
+        goal_position: Vec3A::new(1.0, 1.0, 0.0),
+        tolerance: 0.0,
+        max_iterations_cap: None,
+    });
+
+    runtime.solve_ik_solver(0, IkSolveOptions::default(), false);
+
+    assert_quat_near(
+        runtime.pose().local_rotation(BoneIndex(1)),
+        primitive_output.solved_link_rotations[0],
+    );
+    assert_quat_near(
+        runtime.pose().local_rotation(BoneIndex(0)),
+        primitive_output.solved_link_rotations[1],
+    );
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[2]),
+        Vec3A::new(1.0, 1.0, 0.0),
+    );
+    assert_eq!(
+        runtime.ik_runtime_stats()[0].executed_iterations,
+        u64::from(primitive_output.executed_iterations)
+    );
+    assert_eq!(
+        runtime.ik_runtime_stats()[0].link_steps,
+        u64::from(primitive_output.link_steps)
     );
 }
 

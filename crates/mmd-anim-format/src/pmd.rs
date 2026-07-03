@@ -7,7 +7,9 @@ use mmd_anim_runtime::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::binary::ByteReader;
+use crate::binary::{
+    ByteReader, write_f32_le as write_f32, write_u16_le as write_u16, write_u32_le as write_u32,
+};
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
 use crate::sjis::{decode_sjis_fixed_trimmed, encode_sjis, encode_sjis_prefix_fit};
@@ -1010,18 +1012,6 @@ fn write_vec3(out: &mut Vec<u8>, values: [f32; 3]) {
     for value in values {
         write_f32(out, value);
     }
-}
-
-fn write_f32(out: &mut Vec<u8>, value: f32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
 }
 
 fn should_export_pmd_english(

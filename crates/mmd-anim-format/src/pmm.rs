@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
+use crate::binary::{write_f32_le as push_f32, write_i32_le as push_i32, write_u32_le as push_u32};
 use crate::error::ImportError;
 use crate::pmx::PmxParsedModel;
 use crate::sjis::{decode_sjis, decode_sjis_trim_nul, encode_sjis};
@@ -2422,10 +2423,6 @@ fn next_keyframe_index<T>(
     }
 }
 
-fn push_i32(out: &mut Vec<u8>, value: i32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
 fn push_pmm_fixed_sjis(out: &mut Vec<u8>, text: &str, length: usize) {
     let encoded = encode_sjis(text);
     let mut bytes = vec![0u8; length];
@@ -2651,14 +2648,6 @@ fn write_pmm_global_tail(out: &mut Vec<u8>, max_frame: u32, camera_fov: f32) {
     out.push(1);
     out.push(0);
     push_i32(out, 0);
-}
-
-fn push_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_f32(out: &mut Vec<u8>, value: f32) {
-    out.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_pmm_len_prefixed_sjis(out: &mut Vec<u8>, text: &str, original_bytes: &[u8]) {

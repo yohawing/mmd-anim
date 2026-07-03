@@ -850,6 +850,188 @@ fn make_global_track_ref(
     }
 }
 
+fn append_global_keyframe_refs(
+    refs: &mut Vec<PmmProjectKeyframeReference>,
+    track: &PmmDocumentTrackSummary,
+    kind: &'static str,
+) {
+    if let Some(kf) = &track.initial_keyframe {
+        let (index, frame, prev, next, off, blen, poff, plen) = match kf {
+            PmmDocumentKeyframeSummary::Camera {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::Light {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::Gravity {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::SelfShadow {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+        };
+        refs.push(make_keyframe_reference(
+            "global", kind, None, None, None, true, index, frame, prev, next, off, blen, poff, plen,
+        ));
+    }
+    for kf in &track.keyframe_summaries {
+        let (index, frame, prev, next, off, blen, poff, plen) = match kf {
+            PmmDocumentKeyframeSummary::Camera {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::Light {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::Gravity {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+            PmmDocumentKeyframeSummary::SelfShadow {
+                index,
+                frame_index,
+                previous_keyframe_index,
+                next_keyframe_index,
+                offset,
+                byte_length,
+                payload_offset,
+                payload_byte_length,
+                ..
+            } => (
+                *index,
+                *frame_index,
+                *previous_keyframe_index,
+                *next_keyframe_index,
+                *offset,
+                *byte_length,
+                *payload_offset,
+                *payload_byte_length,
+            ),
+        };
+        refs.push(make_keyframe_reference(
+            "global", kind, None, None, None, false, index, frame, prev, next, off, blen, poff,
+            plen,
+        ));
+    }
+}
+
 fn make_global_track_byte_range(
     track: &PmmDocumentTrackSummary,
     kind: &'static str,
@@ -1143,188 +1325,6 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
 
             // global: initial + additional for camera, light, gravity, selfShadow
             // helper to append from PmmDocumentTrackSummary + variant kind (uses existing summaries only)
-            fn append_global_keyframe_refs(
-                refs: &mut Vec<PmmProjectKeyframeReference>,
-                track: &PmmDocumentTrackSummary,
-                kind: &'static str,
-            ) {
-                if let Some(kf) = &track.initial_keyframe {
-                    let (index, frame, prev, next, off, blen, poff, plen) = match kf {
-                        PmmDocumentKeyframeSummary::Camera {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::Light {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::Gravity {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::SelfShadow {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                    };
-                    refs.push(make_keyframe_reference(
-                        "global", kind, None, None, None, true, index, frame, prev, next, off,
-                        blen, poff, plen,
-                    ));
-                }
-                for kf in &track.keyframe_summaries {
-                    let (index, frame, prev, next, off, blen, poff, plen) = match kf {
-                        PmmDocumentKeyframeSummary::Camera {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::Light {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::Gravity {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                        PmmDocumentKeyframeSummary::SelfShadow {
-                            index,
-                            frame_index,
-                            previous_keyframe_index,
-                            next_keyframe_index,
-                            offset,
-                            byte_length,
-                            payload_offset,
-                            payload_byte_length,
-                            ..
-                        } => (
-                            *index,
-                            *frame_index,
-                            *previous_keyframe_index,
-                            *next_keyframe_index,
-                            *offset,
-                            *byte_length,
-                            *payload_offset,
-                            *payload_byte_length,
-                        ),
-                    };
-                    refs.push(make_keyframe_reference(
-                        "global", kind, None, None, None, false, index, frame, prev, next, off,
-                        blen, poff, plen,
-                    ));
-                }
-            }
             append_global_keyframe_refs(&mut keyframe_references, &glob.camera, "camera");
             append_global_keyframe_refs(&mut keyframe_references, &glob.light, "light");
             append_global_keyframe_refs(&mut keyframe_references, &glob.gravity, "gravity");

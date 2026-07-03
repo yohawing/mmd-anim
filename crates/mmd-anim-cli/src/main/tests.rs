@@ -637,6 +637,102 @@ fn vmd_roundtrip_json_reports_machine_readable_counts() {
     assert_eq!(value["maxFrame"], 120);
 }
 
+fn full_vmd_dto_for_cli_export() -> mmd_anim_format::VmdParsedAnimation {
+    mmd_anim_format::VmdParsedAnimation {
+        kind: "vmd",
+        metadata: mmd_anim_format::vmd::VmdParsedMetadata {
+            format: "vmd",
+            model_name: "cli-dto".to_owned(),
+            model_name_bytes: Vec::new(),
+            counts: mmd_anim_format::vmd::VmdParsedCounts {
+                bones: 1,
+                morphs: 1,
+                cameras: 1,
+                lights: 1,
+                self_shadows: 1,
+                properties: 1,
+            },
+            max_frame: 60,
+        },
+        bone_frames: vec![mmd_anim_format::vmd::VmdParsedBoneFrame {
+            bone_name: "center".to_owned(),
+            bone_name_bytes: Vec::new(),
+            frame: 10,
+            translation: [1.0, 2.0, 3.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            interpolation: vec![20; 64],
+        }],
+        morph_frames: vec![mmd_anim_format::vmd::VmdParsedMorphFrame {
+            morph_name: "smile".to_owned(),
+            morph_name_bytes: Vec::new(),
+            frame: 20,
+            weight: 0.75,
+        }],
+        camera_frames: vec![mmd_anim_format::vmd::VmdParsedCameraFrame {
+            frame: 30,
+            distance: -35.0,
+            position: [0.0, 10.0, 5.0],
+            rotation: [0.1, 0.2, 0.3],
+            interpolation: [20; 24],
+            fov: 42,
+            perspective: true,
+        }],
+        light_frames: vec![mmd_anim_format::vmd::VmdParsedLightFrame {
+            frame: 40,
+            color: [1.0, 0.8, 0.6],
+            direction: [0.0, -1.0, 0.0],
+        }],
+        self_shadow_frames: vec![mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+            frame: 50,
+            mode: 1,
+            distance: 35.0,
+        }],
+        property_frames: vec![mmd_anim_format::vmd::VmdParsedPropertyFrame {
+            frame: 60,
+            visible: true,
+            ik_states: vec![mmd_anim_format::vmd::VmdParsedIkState {
+                bone_name: "legIK".to_owned(),
+                bone_name_bytes: Vec::new(),
+                enabled: false,
+            }],
+        }],
+    }
+}
+
+#[test]
+fn export_json_format_writes_full_vmd_dto_workflow() {
+    let temp = unique_test_dir("vmd-dto-export");
+    fs::create_dir_all(&temp).unwrap();
+    let input = temp.join("motion-dto.json");
+    let output = temp.join("motion.vmd");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&full_vmd_dto_for_cli_export()).unwrap(),
+    )
+    .unwrap();
+
+    export::export_json_format(&input, &output).unwrap();
+    export::export_roundtrip_summary(&output).unwrap();
+
+    let reparsed = mmd_anim_format::parse_vmd_animation(&fs::read(&output).unwrap()).unwrap();
+    assert_eq!(reparsed.metadata.model_name, "cli-dto");
+    assert_eq!(reparsed.metadata.counts.bones, 1);
+    assert_eq!(reparsed.metadata.counts.morphs, 1);
+    assert_eq!(reparsed.metadata.counts.cameras, 1);
+    assert_eq!(reparsed.metadata.counts.lights, 1);
+    assert_eq!(reparsed.metadata.counts.self_shadows, 1);
+    assert_eq!(reparsed.metadata.counts.properties, 1);
+    assert_eq!(reparsed.bone_frames[0].bone_name, "center");
+    assert_eq!(reparsed.morph_frames[0].morph_name, "smile");
+    assert_eq!(reparsed.camera_frames[0].fov, 42);
+    assert_eq!(reparsed.light_frames[0].color, [1.0, 0.8, 0.6]);
+    assert_eq!(reparsed.self_shadow_frames[0].mode, 1);
+    assert_eq!(reparsed.property_frames[0].ik_states[0].bone_name, "legIK");
+    assert!(!reparsed.property_frames[0].ik_states[0].enabled);
+
+    fs::remove_dir_all(temp).unwrap();
+}
+
 #[test]
 fn vpd_roundtrip_json_reports_machine_readable_counts() {
     let parsed = mmd_anim_format::VpdParsedPose {

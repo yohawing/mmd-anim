@@ -201,8 +201,8 @@ enum Commands {
 
     /// Export an asset to another binary file.
     #[command(
-        long_about = "Write an MMD asset to an output path, optionally starting from JSON.\nWith --from-json, the input must be UTF-8 JSON text and the output extension selects the binary format.\nThe JSON shape is the raw parsed DTO emitted by `mmd-anim inspect <asset> --json`, for example PmxParsedModel for .pmx, PmdParsedModel for .pmd, or VmdParsedAnimation for .vmd.\nUse this for parser/exporter smoke checks and JSON-to-binary conversion.\n\nSupported formats: .pmx, .pmd, .vmd",
-        after_help = "Examples:\n  mmd-anim export input.vmd output.vmd\n  mmd-anim export input.json output.vmd --from-json"
+        long_about = "Write an MMD asset to an output path, optionally starting from JSON.\nWith --from-json, the input must be UTF-8 JSON text and the output extension selects the binary format.\nThe JSON shape is the raw parsed DTO emitted by `mmd-anim inspect <asset> --json`, for example PmxParsedModel for .pmx, PmdParsedModel for .pmd, or VmdParsedAnimation for .vmd. For new VMD generation, use the raw VmdParsedAnimation DTO shape directly.\nUse this for parser/exporter smoke checks and JSON-to-binary conversion.\n\nSupported formats: .pmx, .pmd, .vmd",
+        after_help = "Examples:\n  mmd-anim export input.vmd output.vmd\n  mmd-anim export input.json output.vmd --from-json\n  mmd-anim export motion-dto.json motion.vmd --from-json"
     )]
     Export {
         /// Path to the input asset or JSON file

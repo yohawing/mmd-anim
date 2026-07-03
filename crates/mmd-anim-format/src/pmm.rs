@@ -823,6 +823,83 @@ fn make_keyframe_reference(
     }
 }
 
+fn make_global_track_ref(
+    track: &PmmDocumentTrackSummary,
+    kind: &'static str,
+) -> PmmProjectTrackReference {
+    let initial_kf_offset = track.initial_keyframe.as_ref().map(|kf| match kf {
+        PmmDocumentKeyframeSummary::Camera { offset, .. } => *offset,
+        PmmDocumentKeyframeSummary::Light { offset, .. } => *offset,
+        PmmDocumentKeyframeSummary::Gravity { offset, .. } => *offset,
+        PmmDocumentKeyframeSummary::SelfShadow { offset, .. } => *offset,
+    });
+    PmmProjectTrackReference {
+        scope: "global",
+        track_kind: kind,
+        owner_index: None,
+        document_index: None,
+        owner_name: None,
+        initial_keyframes: track.initial_keyframes,
+        keyframes: track.keyframes,
+        initial_keyframes_offset: initial_kf_offset,
+        keyframe_count_offset: Some(track.keyframe_count_offset),
+        keyframes_offset: track.keyframes_offset,
+        keyframes_end_offset: track.keyframes_end_offset,
+        state_offset: track.state_offset,
+        state_end_offset: track.state_end_offset,
+    }
+}
+
+fn make_global_track_byte_range(
+    track: &PmmDocumentTrackSummary,
+    kind: &'static str,
+) -> PmmProjectByteRange {
+    let byte_length = track.offset_end - track.offset;
+    PmmProjectByteRange {
+        scope: "global",
+        kind,
+        owner_index: None,
+        document_index: None,
+        name: None,
+        offset: track.offset,
+        offset_end: track.offset_end,
+        byte_length,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_asset_binding(
+    scope: &'static str,
+    asset_kind: &'static str,
+    owner_index: Option<usize>,
+    document_index: Option<u8>,
+    owner_name: Option<String>,
+    path: String,
+    path_offset: Option<usize>,
+    asset_reference_index: Option<usize>,
+    asset_references: &[PmmAssetReference],
+) -> PmmProjectAssetBinding {
+    let (ar_offset, ar_end, ar_conf) = match asset_reference_index {
+        Some(idx) => asset_references.get(idx).map_or((None, None, None), |ar| {
+            (Some(ar.offset), Some(ar.offset_end), Some(ar.confidence))
+        }),
+        None => (None, None, None),
+    };
+    PmmProjectAssetBinding {
+        scope,
+        asset_kind,
+        owner_index,
+        document_index,
+        owner_name,
+        path,
+        path_offset,
+        asset_reference_index,
+        asset_reference_offset: ar_offset,
+        asset_reference_end_offset: ar_end,
+        asset_reference_confidence: ar_conf,
+    }
+}
+
 const PMM_MANIFEST_PREFIX: &[u8] = b"Polygon Movie maker ";
 
 fn parse_pmm_manifest_version(data: &[u8]) -> Result<(String, Option<u32>), ImportError> {
@@ -924,32 +1001,6 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
                 });
             }
             // global track groups (camera/light/gravity/selfShadow)
-            fn make_global_track_ref(
-                track: &PmmDocumentTrackSummary,
-                kind: &'static str,
-            ) -> PmmProjectTrackReference {
-                let initial_kf_offset = track.initial_keyframe.as_ref().map(|kf| match kf {
-                    PmmDocumentKeyframeSummary::Camera { offset, .. } => *offset,
-                    PmmDocumentKeyframeSummary::Light { offset, .. } => *offset,
-                    PmmDocumentKeyframeSummary::Gravity { offset, .. } => *offset,
-                    PmmDocumentKeyframeSummary::SelfShadow { offset, .. } => *offset,
-                });
-                PmmProjectTrackReference {
-                    scope: "global",
-                    track_kind: kind,
-                    owner_index: None,
-                    document_index: None,
-                    owner_name: None,
-                    initial_keyframes: track.initial_keyframes,
-                    keyframes: track.keyframes,
-                    initial_keyframes_offset: initial_kf_offset,
-                    keyframe_count_offset: Some(track.keyframe_count_offset),
-                    keyframes_offset: track.keyframes_offset,
-                    keyframes_end_offset: track.keyframes_end_offset,
-                    state_offset: track.state_offset,
-                    state_end_offset: track.state_end_offset,
-                }
-            }
             track_references.push(make_global_track_ref(&glob.camera, "camera"));
             track_references.push(make_global_track_ref(&glob.light, "light"));
             track_references.push(make_global_track_ref(&glob.gravity, "gravity"));
@@ -1356,22 +1407,6 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
             }
 
             // global tracks (camera/light/gravity/selfShadow) - use their track.offset..offset_end
-            fn make_global_track_byte_range(
-                track: &PmmDocumentTrackSummary,
-                kind: &'static str,
-            ) -> PmmProjectByteRange {
-                let bl = track.offset_end - track.offset;
-                PmmProjectByteRange {
-                    scope: "global",
-                    kind,
-                    owner_index: None,
-                    document_index: None,
-                    name: None,
-                    offset: track.offset,
-                    offset_end: track.offset_end,
-                    byte_length: bl,
-                }
-            }
             bc_ranges.push(make_global_track_byte_range(&glob.camera, "camera"));
             bc_ranges.push(make_global_track_byte_range(&glob.light, "light"));
             bc_ranges.push(make_global_track_byte_range(&glob.gravity, "gravity"));
@@ -1490,41 +1525,8 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
 
             // Build assetBindings derived only from already-decoded summaries + asset_references.
             // Exporter-prep read-only slice: connects owners (model/accessory/sceneSettings) to their asset paths + resolved asset reference metadata.
-            // No new parsing. Small local helper for DRY (kept inside graph construction block).
+            // No new parsing.
             let mut asset_bindings: Vec<PmmProjectAssetBinding> = Vec::new();
-
-            #[allow(clippy::too_many_arguments)]
-            fn make_asset_binding(
-                scope: &'static str,
-                asset_kind: &'static str,
-                owner_index: Option<usize>,
-                document_index: Option<u8>,
-                owner_name: Option<String>,
-                path: String,
-                path_offset: Option<usize>,
-                asset_reference_index: Option<usize>,
-                asset_references: &[PmmAssetReference],
-            ) -> PmmProjectAssetBinding {
-                let (ar_offset, ar_end, ar_conf) = match asset_reference_index {
-                    Some(idx) => asset_references.get(idx).map_or((None, None, None), |ar| {
-                        (Some(ar.offset), Some(ar.offset_end), Some(ar.confidence))
-                    }),
-                    None => (None, None, None),
-                };
-                PmmProjectAssetBinding {
-                    scope,
-                    asset_kind,
-                    owner_index,
-                    document_index,
-                    owner_name,
-                    path,
-                    path_offset,
-                    asset_reference_index,
-                    asset_reference_offset: ar_offset,
-                    asset_reference_end_offset: ar_end,
-                    asset_reference_confidence: ar_conf,
-                }
-            }
 
             for model in &doc.models {
                 asset_bindings.push(make_asset_binding(

@@ -1,4 +1,10 @@
-use std::{collections::HashMap, fs, path::Path, process::ExitCode, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Arc,
+};
 
 use crate::schema::{
     DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
@@ -59,6 +65,183 @@ pub(crate) fn parse_golden_ik_compare_args(
     }
 
     Ok((root, offset, use_json))
+}
+
+pub(crate) fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let manifest_path = root.join("oracle-batch.json");
+    let manifest = GoldenIkBatchManifest::from_json_str(&crate::read_text_file(&manifest_path)?)?;
+    let mut parsed_cases = 0usize;
+    let mut parsed_frames = 0usize;
+    let mut parsed_bones = 0usize;
+    let mut focused_frame_hits = 0usize;
+    let mut missing = Vec::new();
+
+    for case in &manifest.cases {
+        let case_root = root.join(&case.name);
+        let fixture_path = case_root.join("fixture.json");
+        if !fixture_path.exists() {
+            missing.push(fixture_path);
+            continue;
+        }
+
+        let fixture = GoldenIkFixture::from_json_str(&crate::read_text_file(&fixture_path)?)?;
+        let oracle_path = crate::resolve_maybe_absolute(&case_root, &fixture.output);
+        if !oracle_path.exists() {
+            missing.push(oracle_path);
+            continue;
+        }
+
+        let frames = if fixture.frames.is_empty() {
+            case.frames.as_slice()
+        } else {
+            fixture.frames.as_slice()
+        };
+        let dump = MmdDumperOracleDump::from_jsonl_str(
+            &crate::read_text_file(&oracle_path)?,
+            Some(frames),
+        )?;
+        parsed_cases += 1;
+        parsed_frames += dump.frames.len();
+        parsed_bones += dump
+            .frames
+            .first()
+            .and_then(|frame| frame.models.first())
+            .map(|model| model.bones.len())
+            .unwrap_or(0);
+        for frame in &dump.frames {
+            let focused_count = frame
+                .models
+                .first()
+                .map(|model| {
+                    model
+                        .focused_ik_bones(DEFAULT_FOCUSED_IK_BONE_NAMES)
+                        .count()
+                })
+                .unwrap_or(0);
+            if focused_count == 0 {
+                return Err(format!(
+                    "{} frame={} has no focused IK bones",
+                    case.name, frame.frame
+                )
+                .into());
+            }
+            focused_frame_hits += 1;
+        }
+    }
+
+    if !missing.is_empty() {
+        for path in missing {
+            eprintln!("missing: {}", path.display());
+        }
+        return Err("one or more golden IK oracle files are missing".into());
+    }
+
+    println!(
+        "MMDDumper golden IK: cases={} selectedFrames={} firstFrameBoneTotal={} focusedFrameHits={}",
+        parsed_cases, parsed_frames, parsed_bones, focused_frame_hits
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) fn golden_parser_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let manifest_path = root.join("oracle-batch.json");
+    let manifest = GoldenIkBatchManifest::from_json_str(&crate::read_text_file(&manifest_path)?)?;
+    let mut parsed_cases = 0usize;
+    let mut skipped_unsupported = 0usize;
+    let mut missing_files = Vec::new();
+    let mut matched_bones = 0usize;
+    let mut missing_bones = 0usize;
+    let mut matched_morphs = 0usize;
+    let mut missing_morphs = 0usize;
+
+    for case in &manifest.cases {
+        let pmx_path = PathBuf::from(&case.pmx);
+        if pmx_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_none_or(|ext| !ext.eq_ignore_ascii_case("pmx"))
+        {
+            skipped_unsupported += 1;
+            continue;
+        }
+        if !pmx_path.exists() {
+            missing_files.push(pmx_path);
+            continue;
+        }
+
+        let case_root = root.join(&case.name);
+        let fixture_path = case_root.join("fixture.json");
+        if !fixture_path.exists() {
+            missing_files.push(fixture_path);
+            continue;
+        }
+        let fixture = GoldenIkFixture::from_json_str(&crate::read_text_file(&fixture_path)?)?;
+        let oracle_path = crate::resolve_maybe_absolute(&case_root, &fixture.output);
+        if !oracle_path.exists() {
+            missing_files.push(oracle_path);
+            continue;
+        }
+
+        let parsed = mmd_anim_format::parse_pmx_model(&crate::read_file(&pmx_path)?)?;
+        let bone_names = parsed
+            .skeleton
+            .bones
+            .iter()
+            .map(|bone| bone.name.as_str())
+            .collect::<HashSet<_>>();
+        let morph_names = parsed
+            .morphs
+            .iter()
+            .map(|morph| morph.name.as_str())
+            .collect::<HashSet<_>>();
+
+        let frames = if fixture.frames.is_empty() {
+            case.frames.as_slice()
+        } else {
+            fixture.frames.as_slice()
+        };
+        let dump = MmdDumperOracleDump::from_jsonl_str(
+            &crate::read_text_file(&oracle_path)?,
+            Some(frames),
+        )?;
+        parsed_cases += 1;
+
+        let Some(model) = dump.frames.first().and_then(|frame| frame.models.first()) else {
+            continue;
+        };
+        for bone in &model.bones {
+            if bone_names.contains(bone.name.as_str()) {
+                matched_bones += 1;
+            } else {
+                missing_bones += 1;
+            }
+        }
+        for morph in &model.morphs {
+            if morph_names.contains(morph.name.as_str()) {
+                matched_morphs += 1;
+            } else {
+                missing_morphs += 1;
+            }
+        }
+    }
+
+    if !missing_files.is_empty() {
+        for path in missing_files {
+            eprintln!("missing: {}", path.display());
+        }
+        return Err("one or more Golden parser files are missing".into());
+    }
+
+    println!(
+        "MMDDumper parser golden: cases={} skippedUnsupported={} matchedBones={} missingBones={} matchedMorphs={} missingMorphs={}",
+        parsed_cases,
+        skipped_unsupported,
+        matched_bones,
+        missing_bones,
+        matched_morphs,
+        missing_morphs
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Root/control bone names to watch for translation deltas that indicate

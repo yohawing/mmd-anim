@@ -1049,6 +1049,83 @@ fn make_global_track_byte_range(
     }
 }
 
+fn build_project_track_references(
+    doc: &PmmDocumentSummary,
+    glob: &PmmDocumentGlobalSummary,
+) -> Vec<PmmProjectTrackReference> {
+    let mut track_references: Vec<PmmProjectTrackReference> = Vec::new();
+    for model in &doc.models {
+        let s = &model.sections;
+        track_references.push(PmmProjectTrackReference {
+            scope: "model",
+            track_kind: "bone",
+            owner_index: Some(model.slot_index),
+            document_index: Some(model.document_model_index),
+            owner_name: Some(model.name.clone()),
+            initial_keyframes: model.initial_bone_keyframes,
+            keyframes: model.bone_keyframes,
+            initial_keyframes_offset: Some(s.initial_bone_keyframes_offset),
+            keyframe_count_offset: Some(s.bone_keyframe_count_offset),
+            keyframes_offset: s.bone_keyframes_offset,
+            keyframes_end_offset: s.bone_keyframes_end_offset,
+            state_offset: None,
+            state_end_offset: None,
+        });
+        track_references.push(PmmProjectTrackReference {
+            scope: "model",
+            track_kind: "morph",
+            owner_index: Some(model.slot_index),
+            document_index: Some(model.document_model_index),
+            owner_name: Some(model.name.clone()),
+            initial_keyframes: model.initial_morph_keyframes,
+            keyframes: model.morph_keyframes,
+            initial_keyframes_offset: Some(s.initial_morph_keyframes_offset),
+            keyframe_count_offset: Some(s.morph_keyframe_count_offset),
+            keyframes_offset: s.morph_keyframes_offset,
+            keyframes_end_offset: s.morph_keyframes_end_offset,
+            state_offset: None,
+            state_end_offset: None,
+        });
+        track_references.push(PmmProjectTrackReference {
+            scope: "model",
+            track_kind: "model",
+            owner_index: Some(model.slot_index),
+            document_index: Some(model.document_model_index),
+            owner_name: Some(model.name.clone()),
+            initial_keyframes: model.initial_model_keyframes,
+            keyframes: model.model_keyframes,
+            initial_keyframes_offset: Some(s.initial_model_keyframe_offset),
+            keyframe_count_offset: Some(s.model_keyframe_count_offset),
+            keyframes_offset: s.model_keyframes_offset,
+            keyframes_end_offset: s.model_keyframes_end_offset,
+            state_offset: None,
+            state_end_offset: None,
+        });
+    }
+    track_references.push(make_global_track_ref(&glob.camera, "camera"));
+    track_references.push(make_global_track_ref(&glob.light, "light"));
+    track_references.push(make_global_track_ref(&glob.gravity, "gravity"));
+    track_references.push(make_global_track_ref(&glob.self_shadow, "selfShadow"));
+    for acc in &glob.accessories.accessories {
+        track_references.push(PmmProjectTrackReference {
+            scope: "accessory",
+            track_kind: "accessory",
+            owner_index: Some(acc.slot_index),
+            document_index: Some(acc.document_accessory_index),
+            owner_name: Some(acc.name.clone()),
+            initial_keyframes: 1,
+            keyframes: acc.keyframes,
+            initial_keyframes_offset: Some(acc.initial_keyframe.offset),
+            keyframe_count_offset: Some(acc.keyframe_count_offset),
+            keyframes_offset: acc.keyframes_offset,
+            keyframes_end_offset: acc.keyframes_end_offset,
+            state_offset: Some(acc.state_offset),
+            state_end_offset: Some(acc.state_end_offset),
+        });
+    }
+    track_references
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_asset_binding(
     scope: &'static str,
@@ -1130,81 +1207,7 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
     );
     let project_graph = match (&document_summary, &document_global_summary) {
         (Some(doc), Some(glob)) => {
-            let mut track_references: Vec<PmmProjectTrackReference> = Vec::new();
-            for model in &doc.models {
-                let s = &model.sections;
-                // per-model bone track group
-                track_references.push(PmmProjectTrackReference {
-                    scope: "model",
-                    track_kind: "bone",
-                    owner_index: Some(model.slot_index),
-                    document_index: Some(model.document_model_index),
-                    owner_name: Some(model.name.clone()),
-                    initial_keyframes: model.initial_bone_keyframes,
-                    keyframes: model.bone_keyframes,
-                    initial_keyframes_offset: Some(s.initial_bone_keyframes_offset),
-                    keyframe_count_offset: Some(s.bone_keyframe_count_offset),
-                    keyframes_offset: s.bone_keyframes_offset,
-                    keyframes_end_offset: s.bone_keyframes_end_offset,
-                    state_offset: None,
-                    state_end_offset: None,
-                });
-                // per-model morph track group
-                track_references.push(PmmProjectTrackReference {
-                    scope: "model",
-                    track_kind: "morph",
-                    owner_index: Some(model.slot_index),
-                    document_index: Some(model.document_model_index),
-                    owner_name: Some(model.name.clone()),
-                    initial_keyframes: model.initial_morph_keyframes,
-                    keyframes: model.morph_keyframes,
-                    initial_keyframes_offset: Some(s.initial_morph_keyframes_offset),
-                    keyframe_count_offset: Some(s.morph_keyframe_count_offset),
-                    keyframes_offset: s.morph_keyframes_offset,
-                    keyframes_end_offset: s.morph_keyframes_end_offset,
-                    state_offset: None,
-                    state_end_offset: None,
-                });
-                // per-model model track group
-                track_references.push(PmmProjectTrackReference {
-                    scope: "model",
-                    track_kind: "model",
-                    owner_index: Some(model.slot_index),
-                    document_index: Some(model.document_model_index),
-                    owner_name: Some(model.name.clone()),
-                    initial_keyframes: model.initial_model_keyframes,
-                    keyframes: model.model_keyframes,
-                    initial_keyframes_offset: Some(s.initial_model_keyframe_offset),
-                    keyframe_count_offset: Some(s.model_keyframe_count_offset),
-                    keyframes_offset: s.model_keyframes_offset,
-                    keyframes_end_offset: s.model_keyframes_end_offset,
-                    state_offset: None,
-                    state_end_offset: None,
-                });
-            }
-            // global track groups (camera/light/gravity/selfShadow)
-            track_references.push(make_global_track_ref(&glob.camera, "camera"));
-            track_references.push(make_global_track_ref(&glob.light, "light"));
-            track_references.push(make_global_track_ref(&glob.gravity, "gravity"));
-            track_references.push(make_global_track_ref(&glob.self_shadow, "selfShadow"));
-            // per-accessory track groups
-            for acc in &glob.accessories.accessories {
-                track_references.push(PmmProjectTrackReference {
-                    scope: "accessory",
-                    track_kind: "accessory",
-                    owner_index: Some(acc.slot_index),
-                    document_index: Some(acc.document_accessory_index),
-                    owner_name: Some(acc.name.clone()),
-                    initial_keyframes: 1,
-                    keyframes: acc.keyframes,
-                    initial_keyframes_offset: Some(acc.initial_keyframe.offset),
-                    keyframe_count_offset: Some(acc.keyframe_count_offset),
-                    keyframes_offset: acc.keyframes_offset,
-                    keyframes_end_offset: acc.keyframes_end_offset,
-                    state_offset: Some(acc.state_offset),
-                    state_end_offset: Some(acc.state_end_offset),
-                });
-            }
+            let track_references = build_project_track_references(doc, glob);
 
             // Build keyframeReferences inventory derived only from already-decoded summaries.
             // This is a graph index slice; no new parsing, no payload bytes duplication.

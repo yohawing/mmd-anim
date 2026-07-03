@@ -22,6 +22,7 @@ extern "C" {
 typedef struct mmd_runtime_model_t    mmd_runtime_model_t;
 typedef struct mmd_runtime_instance_t mmd_runtime_instance_t;
 typedef struct mmd_runtime_clip_t     mmd_runtime_clip_t;
+typedef struct mmd_runtime_pmx_geometry_t mmd_runtime_pmx_geometry_t;
 typedef struct mmd_runtime_pmx_material_split_t mmd_runtime_pmx_material_split_t;
 typedef struct mmd_runtime_pmx_rig_spec_t mmd_runtime_pmx_rig_spec_t;
 typedef struct mmd_runtime_ik_chain_t mmd_runtime_ik_chain_t;
@@ -313,6 +314,72 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_qdef_enabled_buffer(
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_skinning_modes_json(
     const uint8_t* data,
     size_t         len);
+
+/* PMX geometry handle API.
+   mmd_runtime_pmx_geometry_create parses PMX bytes once and returns an owned
+   opaque handle. Free it with mmd_runtime_pmx_geometry_free. Geometry buffers
+   are native-endian flat arrays and must be freed with
+   mmd_runtime_byte_buffer_free. Invalid input, invalid handles, or out-of-range
+   UV indices return null handles, zero counts, or empty buffers. */
+
+mmd_runtime_pmx_geometry_t* mmd_runtime_pmx_geometry_create(
+    const uint8_t* data,
+    size_t         len);
+
+void mmd_runtime_pmx_geometry_free(
+    mmd_runtime_pmx_geometry_t* geometry);
+
+size_t mmd_runtime_pmx_geometry_additional_uv_count(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_positions_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_normals_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_uvs_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_additional_uvs_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry,
+    size_t                            uv_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_indices_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_material_groups_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_skin_indices_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_skin_weights_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_edge_scale_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_enabled_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_c_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_r0_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_r1_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_rw0_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_rw1_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_qdef_enabled_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
 
 /* Rig primitive API.
    Coordinates use the MMD convention: left-handed, Y-up, xyz vectors.

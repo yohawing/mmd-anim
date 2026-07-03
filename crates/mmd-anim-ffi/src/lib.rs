@@ -83,6 +83,10 @@ pub struct MmdRuntimePmxMaterialSplit {
     manifest_json: Vec<u8>,
 }
 
+pub struct MmdRuntimePmxGeometry {
+    parsed: mmd_anim_format::PmxParsedModel,
+}
+
 pub struct MmdRuntimePmxRigSpec {
     spec: mmd_anim_format::PmxRigSpec,
     manifest_json: Vec<u8>,
@@ -1831,6 +1835,311 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_skinning_modes_json(
     })
 }
 
+/// Parses PMX bytes once and creates an opaque geometry handle.
+///
+/// Use the `mmd_runtime_pmx_geometry_*_buffer` accessors to fetch multiple
+/// geometry arrays without reparsing the PMX bytes for each array.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_create(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimePmxGeometry {
+    ffi_guard(ptr::null_mut(), || {
+        if data.is_null() || len == 0 {
+            return ptr::null_mut();
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        match mmd_anim_format::parse_pmx_model(bytes) {
+            Ok(parsed) => Box::into_raw(Box::new(MmdRuntimePmxGeometry { parsed })),
+            Err(_) => ptr::null_mut(),
+        }
+    })
+}
+
+/// Frees a PMX geometry handle created by `mmd_runtime_pmx_geometry_create`.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`. Passing any other pointer is undefined
+/// behavior.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_free(geometry: *mut MmdRuntimePmxGeometry) {
+    ffi_guard_void(|| {
+        if !geometry.is_null() {
+            unsafe {
+                drop(Box::from_raw(geometry));
+            }
+        }
+    })
+}
+
+/// Returns the number of additional UV channels in a PMX geometry handle.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_additional_uv_count(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+            return 0;
+        };
+        geometry.parsed.geometry.additional_uvs.len()
+    })
+}
+
+/// Returns handle-owned PMX vertex positions as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_positions_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.positions)
+    })
+}
+
+/// Returns handle-owned PMX vertex normals as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_normals_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.normals)
+    })
+}
+
+/// Returns handle-owned PMX vertex UVs as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_uvs_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.uvs)
+    })
+}
+
+/// Returns one handle-owned PMX additional-UV channel as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_additional_uvs_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+    uv_index: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        let Some(values) = geometry.parsed.geometry.additional_uvs.get(uv_index) else {
+            return empty_byte_buffer();
+        };
+        byte_buffer_from_f32_slice(values)
+    })
+}
+
+/// Returns handle-owned PMX face indices as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_indices_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_u32_buffer(geometry, |geometry| &geometry.indices)
+    })
+}
+
+/// Returns handle-owned PMX material groups as `[start, count, material_index]` triples.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_material_groups_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        let groups: Vec<u32> = geometry
+            .parsed
+            .geometry
+            .material_groups
+            .iter()
+            .flat_map(|group| {
+                [
+                    group.start as u32,
+                    group.count as u32,
+                    group.material_index as u32,
+                ]
+            })
+            .collect();
+        byte_buffer_from_u32_slice(&groups)
+    })
+}
+
+/// Returns handle-owned PMX skin bone indices as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_skin_indices_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_u32_buffer(geometry, |geometry| &geometry.skin_indices)
+    })
+}
+
+/// Returns handle-owned PMX skin weights as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_skin_weights_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.skin_weights)
+    })
+}
+
+/// Returns handle-owned PMX edge scale values as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_edge_scale_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.edge_scale)
+    })
+}
+
+/// Returns handle-owned PMX SDEF-enabled flags as one byte per vertex.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_enabled_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_flags_buffer(geometry, |geometry| &geometry.sdef.enabled)
+    })
+}
+
+/// Returns handle-owned PMX SDEF C vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_c_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.sdef.c)
+    })
+}
+
+/// Returns handle-owned PMX SDEF R0 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_r0_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.sdef.r0)
+    })
+}
+
+/// Returns handle-owned PMX SDEF R1 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_r1_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.sdef.r1)
+    })
+}
+
+/// Returns handle-owned PMX derived SDEF RW0 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_rw0_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.sdef.rw0)
+    })
+}
+
+/// Returns handle-owned PMX derived SDEF RW1 vectors as a native-endian byte buffer.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_sdef_rw1_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_buffer(geometry, |geometry| &geometry.sdef.rw1)
+    })
+}
+
+/// Returns handle-owned PMX QDEF-enabled flags as one byte per vertex.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_qdef_enabled_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        pmx_geometry_f32_flags_buffer(geometry, |geometry| &geometry.qdef.enabled)
+    })
+}
+
 /// Parses PMX bytes once and creates an opaque material-split handle.
 ///
 /// # Safety
@@ -2300,6 +2609,41 @@ fn pmx_material_split_u32_buffer(
         return empty_byte_buffer();
     };
     byte_buffer_from_u32_slice(accessor(mesh))
+}
+
+fn pmx_geometry_f32_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<f32>,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_f32_slice(accessor(&geometry.parsed.geometry))
+}
+
+fn pmx_geometry_u32_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<u32>,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_u32_slice(accessor(&geometry.parsed.geometry))
+}
+
+fn pmx_geometry_f32_flags_buffer(
+    geometry: *const MmdRuntimePmxGeometry,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<f32>,
+) -> MmdRuntimeFfiByteBuffer {
+    let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+        return empty_byte_buffer();
+    };
+    byte_buffer_from_vec(
+        accessor(&geometry.parsed.geometry)
+            .iter()
+            .map(|&value| if value > 0.5 { 1u8 } else { 0u8 })
+            .collect(),
+    )
 }
 
 fn byte_buffer_from_f32_slice(values: &[f32]) -> MmdRuntimeFfiByteBuffer {

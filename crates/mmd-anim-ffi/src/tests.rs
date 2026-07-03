@@ -2781,6 +2781,114 @@ fn pmx_geometry_buffers_have_correct_dimensions() {
 }
 
 #[test]
+fn pmx_geometry_handle_buffers_have_correct_dimensions() {
+    let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+    let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
+    let vertex_count = parsed.metadata.counts.vertices as usize;
+    let index_count = parsed.metadata.counts.faces as usize * 3;
+    let additional_uv_count = parsed.geometry.additional_uvs.len();
+    let material_group_count = parsed.geometry.material_groups.len();
+
+    let geometry = unsafe { mmd_runtime_pmx_geometry_create(bytes.as_ptr(), bytes.len()) };
+    assert!(!geometry.is_null(), "geometry handle must not be null");
+
+    macro_rules! check_buf {
+        ($fn:ident, $expected_bytes:expr) => {{
+            let buf = unsafe { $fn(geometry) };
+            assert!(!buf.data.is_null(), stringify!($fn must not be null));
+            assert_eq!(
+                buf.len,
+                $expected_bytes,
+                stringify!($fn dimension mismatch)
+            );
+            unsafe { mmd_runtime_byte_buffer_free(buf) };
+        }};
+    }
+
+    check_buf!(
+        mmd_runtime_pmx_geometry_positions_buffer,
+        vertex_count * 3 * 4
+    );
+    check_buf!(
+        mmd_runtime_pmx_geometry_normals_buffer,
+        vertex_count * 3 * 4
+    );
+    check_buf!(mmd_runtime_pmx_geometry_uvs_buffer, vertex_count * 2 * 4);
+    check_buf!(mmd_runtime_pmx_geometry_indices_buffer, index_count * 4);
+    check_buf!(
+        mmd_runtime_pmx_geometry_material_groups_buffer,
+        material_group_count * 3 * 4
+    );
+    check_buf!(
+        mmd_runtime_pmx_geometry_skin_indices_buffer,
+        vertex_count * 4 * 4
+    );
+    check_buf!(
+        mmd_runtime_pmx_geometry_skin_weights_buffer,
+        vertex_count * 4 * 4
+    );
+    check_buf!(mmd_runtime_pmx_geometry_edge_scale_buffer, vertex_count * 4);
+    check_buf!(mmd_runtime_pmx_geometry_sdef_enabled_buffer, vertex_count);
+    check_buf!(mmd_runtime_pmx_geometry_sdef_c_buffer, vertex_count * 3 * 4);
+    check_buf!(
+        mmd_runtime_pmx_geometry_sdef_r0_buffer,
+        vertex_count * 3 * 4
+    );
+    check_buf!(
+        mmd_runtime_pmx_geometry_sdef_r1_buffer,
+        vertex_count * 3 * 4
+    );
+    check_buf!(
+        mmd_runtime_pmx_geometry_sdef_rw0_buffer,
+        vertex_count * 3 * 4
+    );
+    check_buf!(
+        mmd_runtime_pmx_geometry_sdef_rw1_buffer,
+        vertex_count * 3 * 4
+    );
+    check_buf!(mmd_runtime_pmx_geometry_qdef_enabled_buffer, vertex_count);
+
+    assert_eq!(
+        unsafe { mmd_runtime_pmx_geometry_additional_uv_count(geometry) },
+        additional_uv_count
+    );
+    for uv_index in 0..additional_uv_count {
+        let buf = unsafe { mmd_runtime_pmx_geometry_additional_uvs_buffer(geometry, uv_index) };
+        assert!(
+            !buf.data.is_null(),
+            "geometry additional UV channel {uv_index} must not be null"
+        );
+        assert_eq!(
+            buf.len,
+            vertex_count * 4 * 4,
+            "geometry additional UV channel {uv_index} dimension mismatch"
+        );
+        unsafe { mmd_runtime_byte_buffer_free(buf) };
+    }
+
+    assert_empty_ffi_buffer(
+        unsafe { mmd_runtime_pmx_geometry_positions_buffer(ptr::null()) },
+        "null PMX geometry positions",
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_pmx_geometry_additional_uv_count(ptr::null()) },
+        0
+    );
+    assert_empty_ffi_buffer(
+        unsafe { mmd_runtime_pmx_geometry_additional_uvs_buffer(geometry, additional_uv_count) },
+        "invalid PMX geometry additional UV",
+    );
+    unsafe { mmd_runtime_pmx_geometry_free(geometry) };
+
+    let invalid = unsafe { mmd_runtime_pmx_geometry_create(ptr::null(), 0) };
+    assert!(
+        invalid.is_null(),
+        "invalid PMX geometry input must return null"
+    );
+    unsafe { mmd_runtime_pmx_geometry_free(ptr::null_mut()) };
+}
+
+#[test]
 fn pmx_skinning_modes_json_has_correct_shape() {
     let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
     let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();

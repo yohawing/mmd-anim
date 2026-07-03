@@ -1582,6 +1582,54 @@ fn build_project_asset_bindings(
     asset_bindings
 }
 
+fn build_project_scene_settings(
+    glob: &PmmDocumentGlobalSummary,
+    asset_references: &[PmmAssetReference],
+) -> PmmProjectSceneSettings {
+    let settings = &glob.settings;
+    let audio_asset_reference_index = if settings.audio_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "audio", &settings.audio_path)
+    };
+    let background_video_asset_reference_index = if settings.background_video_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "video", &settings.background_video_path)
+    };
+    let background_image_asset_reference_index = if settings.background_image_path.is_empty() {
+        None
+    } else {
+        asset_reference_index_for_path(asset_references, "image", &settings.background_image_path)
+    };
+
+    PmmProjectSceneSettings {
+        offset: settings.offset,
+        offset_end: settings.offset_end,
+        current_frame_index: settings.current_frame_index,
+        current_frame_index_in_text_field: settings.current_frame_index_in_text_field,
+        begin_frame_index_enabled: settings.begin_frame_index_enabled,
+        end_frame_index_enabled: settings.end_frame_index_enabled,
+        begin_frame_index: settings.begin_frame_index,
+        end_frame_index: settings.end_frame_index,
+        preferred_fps: settings.preferred_fps,
+        loop_enabled: settings.loop_enabled,
+        audio_enabled: settings.audio_enabled,
+        audio_path: settings.audio_path.clone(),
+        audio_asset_reference_index,
+        background_video_enabled: settings.background_video_enabled,
+        background_video_path: settings.background_video_path.clone(),
+        background_video_asset_reference_index,
+        background_video_offset: settings.background_video_offset,
+        background_video_scale_factor: settings.background_video_scale_factor,
+        background_image_enabled: settings.background_image_enabled,
+        background_image_path: settings.background_image_path.clone(),
+        background_image_asset_reference_index,
+        background_image_offset: settings.background_image_offset,
+        background_image_scale_factor: settings.background_image_scale_factor,
+    }
+}
+
 fn build_project_export_readiness(
     byte_coverage: &PmmProjectByteCoverage,
     asset_bindings: &[PmmProjectAssetBinding],
@@ -1694,32 +1742,7 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
             // Exporter-prep read-only slice: connects owners (model/accessory/sceneSettings) to their asset paths + resolved asset reference metadata.
             // No new parsing.
             let asset_bindings = build_project_asset_bindings(doc, glob, &asset_references);
-            let settings = &glob.settings;
-            let audio_asset_reference_index = if settings.audio_path.is_empty() {
-                None
-            } else {
-                asset_reference_index_for_path(&asset_references, "audio", &settings.audio_path)
-            };
-            let background_video_asset_reference_index =
-                if settings.background_video_path.is_empty() {
-                    None
-                } else {
-                    asset_reference_index_for_path(
-                        &asset_references,
-                        "video",
-                        &settings.background_video_path,
-                    )
-                };
-            let background_image_asset_reference_index =
-                if settings.background_image_path.is_empty() {
-                    None
-                } else {
-                    asset_reference_index_for_path(
-                        &asset_references,
-                        "image",
-                        &settings.background_image_path,
-                    )
-                };
+            let scene_settings = build_project_scene_settings(glob, &asset_references);
 
             // Build exportReadiness immediately before PmmProjectGraph construction (exporter-prep diagnostics only).
             // lossless parsed byte supported; semantic graph export remains false (full exporter unfinished).
@@ -1741,31 +1764,7 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
                 track_references,
                 keyframe_references,
                 byte_coverage,
-                scene_settings: PmmProjectSceneSettings {
-                    offset: settings.offset,
-                    offset_end: settings.offset_end,
-                    current_frame_index: settings.current_frame_index,
-                    current_frame_index_in_text_field: settings.current_frame_index_in_text_field,
-                    begin_frame_index_enabled: settings.begin_frame_index_enabled,
-                    end_frame_index_enabled: settings.end_frame_index_enabled,
-                    begin_frame_index: settings.begin_frame_index,
-                    end_frame_index: settings.end_frame_index,
-                    preferred_fps: settings.preferred_fps,
-                    loop_enabled: settings.loop_enabled,
-                    audio_enabled: settings.audio_enabled,
-                    audio_path: settings.audio_path.clone(),
-                    audio_asset_reference_index,
-                    background_video_enabled: settings.background_video_enabled,
-                    background_video_path: settings.background_video_path.clone(),
-                    background_video_asset_reference_index,
-                    background_video_offset: settings.background_video_offset,
-                    background_video_scale_factor: settings.background_video_scale_factor,
-                    background_image_enabled: settings.background_image_enabled,
-                    background_image_path: settings.background_image_path.clone(),
-                    background_image_asset_reference_index,
-                    background_image_offset: settings.background_image_offset,
-                    background_image_scale_factor: settings.background_image_scale_factor,
-                },
+                scene_settings,
                 asset_bindings,
                 export_readiness,
             })

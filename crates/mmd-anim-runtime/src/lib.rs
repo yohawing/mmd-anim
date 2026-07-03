@@ -13,9 +13,10 @@ mod pose;
 mod runtime;
 
 pub use animation::{
-    AnimationClip, BoneAnimationBinding, InterpolationScalar, InterpolationVector3,
-    MorphAnimationBinding, MorphKeyframe, MorphTrack, MovableBoneKeyframe, MovableBoneTrack,
-    PropertyAnimationBinding, PropertyKeyframe,
+    AnimationClip, AnimationClipBuilder, BoneAnimationBinding, BoneSample, ClipFrameBounds,
+    ClipSample, InterpolationScalar, InterpolationVector3, MorphAnimationBinding, MorphKeyframe,
+    MorphSample, MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding,
+    PropertyKeyframe,
 };
 pub use append_primitive::{AppendPrimitiveInput, AppendPrimitiveOutput, solve_append_transform};
 pub use flat_model::{

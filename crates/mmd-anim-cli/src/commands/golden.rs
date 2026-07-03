@@ -286,11 +286,23 @@ const ORACLE_LAG_DELTA_THRESHOLD: f64 = 0.001;
 /// on root/control bones. Returns zero or more diagnostic entries, each with
 /// bone name, frame, runtime/oracle translation, delta, max component error,
 /// and a short classification.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoldenRootMotionDiagnostic {
+    bone: String,
+    frame: i32,
+    runtime_translation: [f32; 3],
+    oracle_translation: [f32; 3],
+    delta: [f32; 3],
+    max_abs_error: f32,
+    classification: &'static str,
+}
+
 pub(crate) fn compute_root_motion_diagnostics(
     oracle_model: &MmdDumperOracleModel,
     world_matrices: &[glam::Mat4],
     frame: i32,
-) -> Vec<serde_json::Value> {
+) -> Vec<GoldenRootMotionDiagnostic> {
     let mut diagnostics = Vec::new();
 
     for &bone_name in ROOT_MOTION_WATCH_BONES {
@@ -323,15 +335,15 @@ pub(crate) fn compute_root_motion_diagnostics(
                 _ => "control_bone_mismatch",
             };
 
-            diagnostics.push(json!({
-                "bone": bone_name,
-                "frame": frame,
-                "runtimeTranslation": [rt_t.x, rt_t.y, rt_t.z],
-                "oracleTranslation": [or_t.x, or_t.y, or_t.z],
-                "delta": [delta.x, delta.y, delta.z],
-                "maxAbsError": max_abs,
-                "classification": classification,
-            }));
+            diagnostics.push(GoldenRootMotionDiagnostic {
+                bone: bone_name.to_owned(),
+                frame,
+                runtime_translation: [rt_t.x, rt_t.y, rt_t.z],
+                oracle_translation: [or_t.x, or_t.y, or_t.z],
+                delta: [delta.x, delta.y, delta.z],
+                max_abs_error: max_abs,
+                classification,
+            });
         }
     }
 
@@ -348,58 +360,44 @@ pub(crate) fn compute_root_motion_diagnostics(
 /// and `prev.runtimeTranslation` is <= `ORACLE_LAG_DELTA_THRESHOLD`.
 pub(crate) fn compute_root_motion_oracle_lag(
     case_name: &str,
-    diagnostics: &[serde_json::Value],
+    diagnostics: &[GoldenRootMotionDiagnostic],
 ) -> serde_json::Value {
     use std::collections::BTreeMap;
 
     // Filter to root_motion_mismatch only
-    let root_motion: Vec<&serde_json::Value> = diagnostics
+    let root_motion: Vec<&GoldenRootMotionDiagnostic> = diagnostics
         .iter()
-        .filter(|d| d["classification"].as_str() == Some("root_motion_mismatch"))
+        .filter(|d| d.classification == "root_motion_mismatch")
         .collect();
 
     // Group by bone name
-    let mut by_bone: BTreeMap<&str, Vec<&serde_json::Value>> = BTreeMap::new();
+    let mut by_bone: BTreeMap<&str, Vec<&GoldenRootMotionDiagnostic>> = BTreeMap::new();
     for d in &root_motion {
-        if let Some(name) = d["bone"].as_str() {
-            by_bone.entry(name).or_default().push(d);
-        }
+        by_bone.entry(d.bone.as_str()).or_default().push(d);
     }
 
     let mut matches: Vec<serde_json::Value> = Vec::new();
 
     for (_bone, entries) in by_bone.iter_mut() {
         // Sort by frame ascending
-        entries.sort_by_key(|d| d["frame"].as_i64().unwrap_or(0));
+        entries.sort_by_key(|d| d.frame);
 
         for window in entries.windows(2) {
             let prev = window[0];
             let curr = window[1];
 
-            let curr_oracle = curr["oracleTranslation"].as_array();
-            let prev_runtime = prev["runtimeTranslation"].as_array();
-
-            let (co, pr) = match (curr_oracle, prev_runtime) {
-                (Some(co), Some(pr)) => (co, pr),
-                _ => continue,
-            };
-
-            if co.len() < 3 || pr.len() < 3 {
-                continue;
-            }
-
-            let dx = (co[0].as_f64().unwrap_or(0.0) - pr[0].as_f64().unwrap_or(0.0)).abs();
-            let dy = (co[1].as_f64().unwrap_or(0.0) - pr[1].as_f64().unwrap_or(0.0)).abs();
-            let dz = (co[2].as_f64().unwrap_or(0.0) - pr[2].as_f64().unwrap_or(0.0)).abs();
+            let dx = f64::from(curr.oracle_translation[0] - prev.runtime_translation[0]).abs();
+            let dy = f64::from(curr.oracle_translation[1] - prev.runtime_translation[1]).abs();
+            let dz = f64::from(curr.oracle_translation[2] - prev.runtime_translation[2]).abs();
             let max_delta = dx.max(dy).max(dz);
 
             if max_delta <= ORACLE_LAG_DELTA_THRESHOLD {
                 matches.push(json!({
                     "case": case_name,
-                    "bone": curr["bone"],
-                    "frame": curr["frame"],
-                    "previousFrame": prev["frame"],
-                    "maxAbsError": curr["maxAbsError"],
+                    "bone": &curr.bone,
+                    "frame": curr.frame,
+                    "previousFrame": prev.frame,
+                    "maxAbsError": curr.max_abs_error,
                     "matchDelta": max_delta,
                 }));
             }
@@ -425,13 +423,13 @@ pub(crate) fn compute_root_motion_oracle_lag(
 /// Returns `false` when `frame_max_error <= 0.0`.
 fn is_frame_root_control_dominated(
     frame_max_error: f32,
-    frame_diagnostics: &[serde_json::Value],
+    frame_diagnostics: &[GoldenRootMotionDiagnostic],
 ) -> bool {
     if frame_max_error <= 0.0 {
         return false;
     }
     frame_diagnostics.iter().any(|d| {
-        let abs_err = d["maxAbsError"].as_f64().unwrap_or(0.0);
+        let abs_err = f64::from(d.max_abs_error);
         // Ratio rule: a diagnostic error >= 50% of frame max error
         // dominates regardless of classification.
         abs_err >= ROOT_CONTROL_DOMINATED_RATIO * frame_max_error as f64
@@ -439,7 +437,7 @@ fn is_frame_root_control_dominated(
             // above ROOT_MOTION_DOMINATED_ABS_THRESHOLD dominates
             // even when the ratio check fails (capture mismatch
             // propagated through hierarchy).
-            || (d["classification"].as_str() == Some("root_motion_mismatch")
+            || (d.classification == "root_motion_mismatch"
                 && abs_err >= ROOT_MOTION_DOMINATED_ABS_THRESHOLD)
     })
 }
@@ -577,7 +575,7 @@ struct GoldenIkComparePerCaseEntry {
     worst: String,
     status: &'static str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    diagnostics: Vec<serde_json::Value>,
+    diagnostics: Vec<GoldenRootMotionDiagnostic>,
     #[serde(rename = "importDiagnostics", skip_serializing_if = "Vec::is_empty")]
     import_diagnostics: Vec<serde_json::Value>,
     #[serde(rename = "rootMotionOracleLag")]
@@ -764,7 +762,7 @@ pub(crate) fn golden_ik_compare(
     let mut worst_frame: i32 = 0;
 
     let mut per_case_errors: Vec<(String, f32, String)> = Vec::new();
-    let mut per_case_diagnostics: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut per_case_diagnostics: Vec<Vec<GoldenRootMotionDiagnostic>> = Vec::new();
     let mut all_lag_matches: Vec<serde_json::Value> = Vec::new();
 
     // Solver-focused tracking (excludes root/control-dominated frames)
@@ -868,7 +866,7 @@ pub(crate) fn golden_ik_compare(
 
         let mut case_max_error: f32 = 0.0;
         let mut case_worst = String::new();
-        let mut case_diagnostics: Vec<serde_json::Value> = Vec::new();
+        let mut case_diagnostics: Vec<GoldenRootMotionDiagnostic> = Vec::new();
 
         for oracle_frame in &dump.frames {
             let sample_frame = oracle_frame.frame as f32 + sample_frame_offset;
@@ -999,7 +997,7 @@ pub(crate) fn golden_ik_compare(
     // Find the diagnostic entry at the same case+frame as the worst matrix error,
     // picking the one with the largest maxAbsError if multiple match.
     let worst_diagnostic = {
-        let mut result: Option<serde_json::Value> = None;
+        let mut result: Option<GoldenRootMotionDiagnostic> = None;
         for ((name, _error, _worst_bone), case_diags) in
             per_case_errors.iter().zip(per_case_diagnostics.iter())
         {
@@ -1007,16 +1005,12 @@ pub(crate) fn golden_ik_compare(
                 continue;
             }
             for diag in case_diags {
-                if diag["frame"].as_i64() != Some(worst_frame as i64) {
+                if diag.frame != worst_frame {
                     continue;
                 }
                 let larger = match &result {
                     None => true,
-                    Some(best) => {
-                        let cur = diag["maxAbsError"].as_f64().unwrap_or(0.0);
-                        let best_val = best["maxAbsError"].as_f64().unwrap_or(0.0);
-                        cur > best_val
-                    }
+                    Some(best) => diag.max_abs_error > best.max_abs_error,
                 };
                 if larger {
                     result = Some(diag.clone());
@@ -1029,9 +1023,13 @@ pub(crate) fn golden_ik_compare(
 
     let worst_likely_root_control_dominated = worst_diagnostic
         .as_ref()
-        .and_then(|d| d["maxAbsError"].as_f64())
+        .map(|d| f64::from(d.max_abs_error))
         .map(|err| err >= max_abs_error as f64 * 0.5)
         .unwrap_or(false);
+    let worst_diagnostic = worst_diagnostic
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()?;
 
     let summary_lag_total = all_lag_matches.len();
     let summary_lag_worst = all_lag_matches

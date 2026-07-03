@@ -15,6 +15,43 @@ fn make_identity_matrix(tx: f32, ty: f32, tz: f32) -> [f32; 16] {
     m
 }
 
+fn diagnostic(
+    bone: &str,
+    frame: i32,
+    oracle_translation: [f32; 3],
+    runtime_translation: [f32; 3],
+    max_abs_error: f32,
+    classification: &'static str,
+) -> GoldenRootMotionDiagnostic {
+    GoldenRootMotionDiagnostic {
+        bone: bone.to_owned(),
+        frame,
+        runtime_translation,
+        oracle_translation,
+        delta: [
+            runtime_translation[0] - oracle_translation[0],
+            runtime_translation[1] - oracle_translation[1],
+            runtime_translation[2] - oracle_translation[2],
+        ],
+        max_abs_error,
+        classification,
+    }
+}
+
+fn diagnostic_error(
+    max_abs_error: f32,
+    classification: &'static str,
+) -> GoldenRootMotionDiagnostic {
+    diagnostic(
+        "センター",
+        0,
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        max_abs_error,
+        classification,
+    )
+}
+
 #[test]
 fn golden_ik_compare_args_parses_root_only() {
     let mut args = vec!["/some/root".to_owned()].into_iter();
@@ -127,10 +164,10 @@ fn root_motion_diagnostics_center_large_delta() {
 
     let diags = compute_root_motion_diagnostics(&model, &world, 300);
     assert_eq!(diags.len(), 1);
-    assert_eq!(diags[0]["bone"], "センター");
-    assert_eq!(diags[0]["frame"], 300);
-    assert_eq!(diags[0]["classification"], "root_motion_mismatch");
-    assert!((diags[0]["maxAbsError"].as_f64().unwrap() - 3.0).abs() < 1e-6);
+    assert_eq!(diags[0].bone, "センター");
+    assert_eq!(diags[0].frame, 300);
+    assert_eq!(diags[0].classification, "root_motion_mismatch");
+    assert!((diags[0].max_abs_error - 3.0).abs() < 1e-6);
 }
 
 #[test]
@@ -202,8 +239,8 @@ fn root_motion_diagnostics_control_bone_classification() {
 
     let diags = compute_root_motion_diagnostics(&model, &world, 42);
     assert_eq!(diags.len(), 1);
-    assert_eq!(diags[0]["bone"], "左足ＩＫ");
-    assert_eq!(diags[0]["classification"], "control_bone_mismatch");
+    assert_eq!(diags[0].bone, "左足ＩＫ");
+    assert_eq!(diags[0].classification, "control_bone_mismatch");
 }
 
 #[test]
@@ -325,13 +362,13 @@ fn ik_solver_residuals_filters_unrelated_focus_bone() {
 
 #[test]
 fn is_dominated_zero_frame_error_returns_false() {
-    let diags = vec![json!({"maxAbsError": 100.0, "classification": "root_motion_mismatch"})];
+    let diags = vec![diagnostic_error(100.0, "root_motion_mismatch")];
     assert!(!is_frame_root_control_dominated(0.0, &diags));
 }
 
 #[test]
 fn is_dominated_negative_frame_error_returns_false() {
-    let diags = vec![json!({"maxAbsError": 100.0, "classification": "root_motion_mismatch"})];
+    let diags = vec![diagnostic_error(100.0, "root_motion_mismatch")];
     assert!(!is_frame_root_control_dominated(-1.0, &diags));
 }
 
@@ -344,14 +381,14 @@ fn is_dominated_empty_diagnostics_returns_false() {
 fn is_dominated_ratio_rule_dominates() {
     // frame_max_error = 2.0, maxAbsError = 1.0 (>= 0.5 * 2.0)
     // Ratio rule fires regardless of classification.
-    let diags = vec![json!({"maxAbsError": 1.0, "classification": "control_bone_mismatch"})];
+    let diags = vec![diagnostic_error(1.0, "control_bone_mismatch")];
     assert!(is_frame_root_control_dominated(2.0, &diags));
 }
 
 #[test]
 fn is_dominated_ratio_below_threshold_does_not_dominate() {
     // frame_max_error = 10.0, maxAbsError = 1.0 (< 0.5 * 10.0)
-    let diags = vec![json!({"maxAbsError": 1.0, "classification": "control_bone_mismatch"})];
+    let diags = vec![diagnostic_error(1.0, "control_bone_mismatch")];
     assert!(!is_frame_root_control_dominated(10.0, &diags));
 }
 
@@ -360,7 +397,7 @@ fn is_dominated_root_motion_abs_threshold_when_ratio_fails() {
     // frame_max_error = 100.0, maxAbsError = 1.0
     // Ratio check: 1.0 < 0.5 * 100.0 fails.
     // Absolute check: root_motion_mismatch && 1.0 >= 1.0 passes.
-    let diags = vec![json!({"maxAbsError": 1.0, "classification": "root_motion_mismatch"})];
+    let diags = vec![diagnostic_error(1.0, "root_motion_mismatch")];
     assert!(is_frame_root_control_dominated(100.0, &diags));
 }
 
@@ -369,7 +406,7 @@ fn is_dominated_control_bone_abs_alone_does_not_dominate() {
     // frame_max_error = 100.0, maxAbsError = 1.0
     // Ratio check: 1.0 < 0.5 * 100.0 fails.
     // Absolute check: control_bone_mismatch is not root_motion_mismatch, so it fails.
-    let diags = vec![json!({"maxAbsError": 1.0, "classification": "control_bone_mismatch"})];
+    let diags = vec![diagnostic_error(1.0, "control_bone_mismatch")];
     assert!(!is_frame_root_control_dominated(100.0, &diags));
 }
 
@@ -442,14 +479,14 @@ fn oracle_lag_empty_diagnostics() {
 
 #[test]
 fn oracle_lag_no_root_motion_classification() {
-    let diags = vec![json!({
-        "bone": "センター",
-        "frame": 300,
-        "oracleTranslation": [10.0, 0.0, 0.0],
-        "runtimeTranslation": [20.0, 0.0, 0.0],
-        "maxAbsError": 10.0,
-        "classification": "control_bone_mismatch",
-    })];
+    let diags = vec![diagnostic(
+        "センター",
+        300,
+        [10.0, 0.0, 0.0],
+        [20.0, 0.0, 0.0],
+        10.0,
+        "control_bone_mismatch",
+    )];
     let result = compute_root_motion_oracle_lag("test", &diags);
     assert_eq!(result["matchCount"].as_u64().unwrap(), 0);
 }
@@ -460,22 +497,22 @@ fn oracle_lag_single_bone_exact_match() {
     // Frame 600: runtime=(2.0,0,0), oracle=(1.0,0,0)
     // oracle@600 matches runtime@300 -> lag detected
     let diags = vec![
-        json!({
-            "bone": "センター",
-            "frame": 300,
-            "oracleTranslation": [12.0, 0.0, 0.0],
-            "runtimeTranslation": [1.0, 0.0, 0.0],
-            "maxAbsError": 11.0,
-            "classification": "root_motion_mismatch",
-        }),
-        json!({
-            "bone": "センター",
-            "frame": 600,
-            "oracleTranslation": [1.0, 0.0, 0.0],
-            "runtimeTranslation": [2.0, 0.0, 0.0],
-            "maxAbsError": 12.0,
-            "classification": "root_motion_mismatch",
-        }),
+        diagnostic(
+            "センター",
+            300,
+            [12.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            11.0,
+            "root_motion_mismatch",
+        ),
+        diagnostic(
+            "センター",
+            600,
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            12.0,
+            "root_motion_mismatch",
+        ),
     ];
     let result = compute_root_motion_oracle_lag("test-case", &diags);
     assert_eq!(result["matchCount"].as_u64().unwrap(), 1);
@@ -492,22 +529,22 @@ fn oracle_lag_single_bone_exact_match() {
 fn oracle_lag_below_threshold_no_match() {
     // oracle@600 nearly matches runtime@300 but delta > 0.001
     let diags = vec![
-        json!({
-            "bone": "センター",
-            "frame": 300,
-            "oracleTranslation": [12.0, 0.0, 0.0],
-            "runtimeTranslation": [1.0, 0.0, 0.0],
-            "maxAbsError": 11.0,
-            "classification": "root_motion_mismatch",
-        }),
-        json!({
-            "bone": "センター",
-            "frame": 600,
-            "oracleTranslation": [1.002, 0.0, 0.0],
-            "runtimeTranslation": [2.0, 0.0, 0.0],
-            "maxAbsError": 12.0,
-            "classification": "root_motion_mismatch",
-        }),
+        diagnostic(
+            "センター",
+            300,
+            [12.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            11.0,
+            "root_motion_mismatch",
+        ),
+        diagnostic(
+            "センター",
+            600,
+            [1.002, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            12.0,
+            "root_motion_mismatch",
+        ),
     ];
     let result = compute_root_motion_oracle_lag("test", &diags);
     assert_eq!(result["matchCount"].as_u64().unwrap(), 0);
@@ -515,24 +552,24 @@ fn oracle_lag_below_threshold_no_match() {
 
 #[test]
 fn oracle_lag_exactly_at_threshold() {
-    // delta == 0.001 exactly -> counted as match
+    // f32 fixture value stays within the 0.001 oracle-lag threshold.
     let diags = vec![
-        json!({
-            "bone": "センター",
-            "frame": 300,
-            "oracleTranslation": [12.0, 0.0, 0.0],
-            "runtimeTranslation": [1.0, 0.0, 0.0],
-            "maxAbsError": 11.0,
-            "classification": "root_motion_mismatch",
-        }),
-        json!({
-            "bone": "センター",
-            "frame": 600,
-            "oracleTranslation": [1.001, 0.0, 0.0],
-            "runtimeTranslation": [2.0, 0.0, 0.0],
-            "maxAbsError": 12.0,
-            "classification": "root_motion_mismatch",
-        }),
+        diagnostic(
+            "センター",
+            300,
+            [12.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            11.0,
+            "root_motion_mismatch",
+        ),
+        diagnostic(
+            "センター",
+            600,
+            [1.0009999, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            12.0,
+            "root_motion_mismatch",
+        ),
     ];
     let result = compute_root_motion_oracle_lag("test", &diags);
     assert_eq!(result["matchCount"].as_u64().unwrap(), 1);
@@ -541,38 +578,38 @@ fn oracle_lag_exactly_at_threshold() {
 #[test]
 fn oracle_lag_two_bones_independent() {
     let diags = vec![
-        json!({
-            "bone": "センター",
-            "frame": 300,
-            "oracleTranslation": [10.0, 0.0, 0.0],
-            "runtimeTranslation": [0.0, 0.0, 0.0],
-            "maxAbsError": 10.0,
-            "classification": "root_motion_mismatch",
-        }),
-        json!({
-            "bone": "センター",
-            "frame": 600,
-            "oracleTranslation": [0.0, 0.0, 0.0],
-            "runtimeTranslation": [5.0, 0.0, 0.0],
-            "maxAbsError": 10.0,
-            "classification": "root_motion_mismatch",
-        }),
-        json!({
-            "bone": "グルーブ",
-            "frame": 300,
-            "oracleTranslation": [20.0, 0.0, 0.0],
-            "runtimeTranslation": [10.0, 0.0, 0.0],
-            "maxAbsError": 10.0,
-            "classification": "root_motion_mismatch",
-        }),
-        json!({
-            "bone": "グルーブ",
-            "frame": 600,
-            "oracleTranslation": [10.0, 0.0, 0.0],
-            "runtimeTranslation": [15.0, 0.0, 0.0],
-            "maxAbsError": 10.0,
-            "classification": "root_motion_mismatch",
-        }),
+        diagnostic(
+            "センター",
+            300,
+            [10.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            10.0,
+            "root_motion_mismatch",
+        ),
+        diagnostic(
+            "センター",
+            600,
+            [0.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+            10.0,
+            "root_motion_mismatch",
+        ),
+        diagnostic(
+            "グルーブ",
+            300,
+            [20.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            10.0,
+            "root_motion_mismatch",
+        ),
+        diagnostic(
+            "グルーブ",
+            600,
+            [10.0, 0.0, 0.0],
+            [15.0, 0.0, 0.0],
+            10.0,
+            "root_motion_mismatch",
+        ),
     ];
     let result = compute_root_motion_oracle_lag("test", &diags);
     // Two bones, one lag match each = 2 total
@@ -583,22 +620,22 @@ fn oracle_lag_two_bones_independent() {
 fn oracle_lag_no_lag_when_oracle_differs() {
     // oracle@600 does NOT match runtime@300
     let diags = vec![
-        json!({
-            "bone": "センター",
-            "frame": 300,
-            "oracleTranslation": [12.0, 0.0, 0.0],
-            "runtimeTranslation": [1.0, 0.0, 0.0],
-            "maxAbsError": 11.0,
-            "classification": "root_motion_mismatch",
-        }),
-        json!({
-            "bone": "センター",
-            "frame": 600,
-            "oracleTranslation": [99.0, 0.0, 0.0],
-            "runtimeTranslation": [2.0, 0.0, 0.0],
-            "maxAbsError": 97.0,
-            "classification": "root_motion_mismatch",
-        }),
+        diagnostic(
+            "センター",
+            300,
+            [12.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            11.0,
+            "root_motion_mismatch",
+        ),
+        diagnostic(
+            "センター",
+            600,
+            [99.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            97.0,
+            "root_motion_mismatch",
+        ),
     ];
     let result = compute_root_motion_oracle_lag("test", &diags);
     assert_eq!(result["matchCount"].as_u64().unwrap(), 0);

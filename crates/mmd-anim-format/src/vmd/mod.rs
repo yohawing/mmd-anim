@@ -7,7 +7,9 @@ use mmd_anim_runtime::{
     MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
 };
 
-use crate::binary::ByteReader;
+use crate::binary::{
+    ByteReader, write_f32_le as write_f32, write_fixed_bytes, write_u32_le as write_u32,
+};
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
 use crate::sjis::{decode_sjis_fixed_trimmed, encode_sjis};
@@ -869,14 +871,6 @@ fn trim_fixed_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
-fn write_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_f32(out: &mut Vec<u8>, value: f32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
 fn write_fixed_name_bytes(out: &mut Vec<u8>, value: &str, raw_bytes: &[u8], len: usize) {
     if raw_bytes.is_empty() {
         let encoded = encode_sjis(value);
@@ -884,12 +878,6 @@ fn write_fixed_name_bytes(out: &mut Vec<u8>, value: &str, raw_bytes: &[u8], len:
     } else {
         write_fixed_bytes(out, raw_bytes, len);
     }
-}
-
-fn write_fixed_bytes(out: &mut Vec<u8>, value: &[u8], len: usize) {
-    let copied = value.len().min(len);
-    out.extend_from_slice(&value[..copied]);
-    out.resize(out.len() + len - copied, 0);
 }
 
 fn decode_interpolation_scalar(data: [u8; 4]) -> InterpolationScalar {

@@ -8,7 +8,10 @@ use mmd_anim_runtime::{
     IkLinkInit, IkSolverInit, ModelArena, MorphIndex, MorphInit, MorphOffsetSpan,
 };
 
-use crate::binary::ByteReader;
+use crate::binary::{
+    ByteReader, write_f32_le as write_f32, write_f32_slice_le as write_f32_slice,
+    write_i32_le as write_i32, write_u16_le as write_u16,
+};
 use crate::error::ImportError;
 use crate::sjis::encode_sjis;
 
@@ -3889,24 +3892,6 @@ fn write_pmx_string(out: &mut Vec<u8>, text: &str, encoding: TextEncoding) {
             out.extend_from_slice(&bytes);
         }
     }
-}
-
-fn write_f32_slice(out: &mut Vec<u8>, values: &[f32]) {
-    for &value in values {
-        write_f32(out, value);
-    }
-}
-
-fn write_f32(out: &mut Vec<u8>, value: f32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_i32(out: &mut Vec<u8>, value: i32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
 }
 
 fn write_sized_index(out: &mut Vec<u8>, value: i32, size: u8) {

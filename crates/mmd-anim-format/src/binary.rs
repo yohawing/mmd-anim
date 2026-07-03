@@ -92,3 +92,31 @@ impl<'a> ByteReader<'a> {
         Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 }
+
+pub(crate) fn write_u16_le(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_u32_le(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_i32_le(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_f32_le(out: &mut Vec<u8>, value: f32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_f32_slice_le(out: &mut Vec<u8>, values: &[f32]) {
+    for &value in values {
+        write_f32_le(out, value);
+    }
+}
+
+pub(crate) fn write_fixed_bytes(out: &mut Vec<u8>, value: &[u8], len: usize) {
+    let copied = value.len().min(len);
+    out.extend_from_slice(&value[..copied]);
+    out.resize(out.len() + len - copied, 0);
+}

@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
-use crate::binary::{write_f32_le as push_f32, write_i32_le as push_i32, write_u32_le as push_u32};
+use crate::binary::{
+    ByteReader, write_f32_le as push_f32, write_i32_le as push_i32, write_u32_le as push_u32,
+};
 use crate::error::ImportError;
 use crate::pmx::PmxParsedModel;
 use crate::sjis::{decode_sjis, decode_sjis_trim_nul, encode_sjis};
@@ -2955,19 +2957,26 @@ fn read_f32_at(data: &[u8], offset: usize) -> Option<f32> {
 }
 
 struct PmmDocumentCursor<'a> {
-    data: &'a [u8],
-    offset: usize,
+    inner: ByteReader<'a>,
 }
 
 impl<'a> PmmDocumentCursor<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, offset: 0 }
+        Self {
+            inner: ByteReader::new(data),
+        }
+    }
+
+    fn offset(&self) -> usize {
+        self.inner.pos
+    }
+
+    fn data(&self) -> &'a [u8] {
+        self.inner.data
     }
 
     fn read_u8(&mut self) -> Option<u8> {
-        let value = *self.data.get(self.offset)?;
-        self.offset += 1;
-        Some(value)
+        self.inner.read_u8().ok()
     }
 
     fn read_bool(&mut self) -> Option<bool> {
@@ -2975,23 +2984,11 @@ impl<'a> PmmDocumentCursor<'a> {
     }
 
     fn read_i32(&mut self) -> Option<i32> {
-        let bytes: [u8; 4] = self
-            .data
-            .get(self.offset..self.offset + 4)?
-            .try_into()
-            .ok()?;
-        self.offset += 4;
-        Some(i32::from_le_bytes(bytes))
+        self.inner.read_i32_le().ok()
     }
 
     fn read_f32(&mut self) -> Option<f32> {
-        let bytes: [u8; 4] = self
-            .data
-            .get(self.offset..self.offset + 4)?
-            .try_into()
-            .ok()?;
-        self.offset += 4;
-        Some(f32::from_le_bytes(bytes))
+        self.inner.read_f32_le().ok()
     }
 
     fn read_f32x3(&mut self) -> Option<[f32; 3]> {
@@ -3008,35 +3005,21 @@ impl<'a> PmmDocumentCursor<'a> {
     }
 
     fn read_bytes16(&mut self) -> Option<[u8; 16]> {
-        let bytes: [u8; 16] = self
-            .data
-            .get(self.offset..self.offset + 16)?
-            .try_into()
-            .ok()?;
-        self.offset += 16;
-        Some(bytes)
+        self.inner.read_bytes(16).ok()?.try_into().ok()
     }
 
     fn read_bytes24(&mut self) -> Option<[u8; 24]> {
-        let bytes: [u8; 24] = self
-            .data
-            .get(self.offset..self.offset + 24)?
-            .try_into()
-            .ok()?;
-        self.offset += 24;
-        Some(bytes)
+        self.inner.read_bytes(24).ok()?.try_into().ok()
     }
 
     fn read_variable_string(&mut self) -> Option<String> {
         let length = self.read_u8()? as usize;
-        let bytes = self.data.get(self.offset..self.offset + length)?;
-        self.offset += length;
+        let bytes = self.inner.read_bytes(length).ok()?;
         Some(decode_shift_jis(bytes))
     }
 
     fn read_fixed_string(&mut self, length: usize) -> Option<String> {
-        let bytes = self.data.get(self.offset..self.offset + length)?;
-        self.offset += length;
+        let bytes = self.inner.read_bytes(length).ok()?;
         let end = bytes
             .iter()
             .position(|byte| *byte == 0)
@@ -3045,9 +3028,7 @@ impl<'a> PmmDocumentCursor<'a> {
     }
 
     fn skip(&mut self, length: usize) -> Option<()> {
-        self.data.get(self.offset..self.offset + length)?;
-        self.offset += length;
-        Some(())
+        self.inner.skip(length).ok()
     }
 }
 
@@ -3115,7 +3096,7 @@ fn parse_document_global_summary(
         read_document_model_summary(&mut cursor, slot_index, references)?;
     }
 
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let camera = read_document_camera_summary(&mut cursor)?;
     let light = read_document_light_summary(&mut cursor)?;
     let accessories = read_document_accessory_block_summary(&mut cursor, references)?;
@@ -3124,7 +3105,7 @@ fn parse_document_global_summary(
     let self_shadow = read_document_self_shadow_summary(&mut cursor)?;
     let settings =
         finish_document_settings_summary(settings_before_gravity, &mut cursor, model_count)?;
-    let offset_end = cursor.offset;
+    let offset_end = cursor.offset();
 
     Some(PmmDocumentGlobalSummary {
         source: "nanoem/ext/document.c PMMv2 global layout",
@@ -3145,11 +3126,11 @@ fn read_document_model_summary(
     references: &[PmmAssetReference],
 ) -> Option<PmmDocumentModelSummary> {
     const PMM_PATH_BYTE_LENGTH: usize = 256;
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let document_model_index = cursor.read_u8()?;
     let name = cursor.read_variable_string()?;
     let english_name = cursor.read_variable_string()?;
-    let path_offset = cursor.offset;
+    let path_offset = cursor.offset();
     let path = cursor.read_fixed_string(PMM_PATH_BYTE_LENGTH)?;
     let asset_reference_index = asset_reference_index_for_path(references, "model", &path);
     cursor.read_u8()?;
@@ -3179,47 +3160,47 @@ fn read_document_model_summary(
     let vertical_scroll = cursor.read_i32()?;
     let last_frame_index = cursor.read_i32()?;
 
-    let initial_bone_keyframes_offset = cursor.offset;
+    let initial_bone_keyframes_offset = cursor.offset();
     let initial_bone_keyframes = bone_count;
     let mut initial_bone_keyframe_summaries = Vec::with_capacity(initial_bone_keyframes);
     for _ in 0..initial_bone_keyframes {
         initial_bone_keyframe_summaries.push(read_document_bone_keyframe(cursor, false)?);
     }
-    let bone_keyframe_count_offset = cursor.offset;
+    let bone_keyframe_count_offset = cursor.offset();
     let bone_keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let bone_keyframes_offset = cursor.offset;
+    let bone_keyframes_offset = cursor.offset();
     let mut bone_keyframe_summaries = Vec::with_capacity(bone_keyframes);
     for _ in 0..bone_keyframes {
         bone_keyframe_summaries.push(read_document_bone_keyframe(cursor, true)?);
     }
-    let bone_keyframes_end_offset = cursor.offset;
+    let bone_keyframes_end_offset = cursor.offset();
 
-    let initial_morph_keyframes_offset = cursor.offset;
+    let initial_morph_keyframes_offset = cursor.offset();
     let initial_morph_keyframes = morph_count;
     let mut initial_morph_keyframe_summaries = Vec::with_capacity(initial_morph_keyframes);
     for _ in 0..initial_morph_keyframes {
         initial_morph_keyframe_summaries.push(read_document_morph_keyframe(cursor, false)?);
     }
-    let morph_keyframe_count_offset = cursor.offset;
+    let morph_keyframe_count_offset = cursor.offset();
     let morph_keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let morph_keyframes_offset = cursor.offset;
+    let morph_keyframes_offset = cursor.offset();
     let mut morph_keyframe_summaries = Vec::with_capacity(morph_keyframes);
     for _ in 0..morph_keyframes {
         morph_keyframe_summaries.push(read_document_morph_keyframe(cursor, true)?);
     }
-    let morph_keyframes_end_offset = cursor.offset;
+    let morph_keyframes_end_offset = cursor.offset();
 
     let initial_model_keyframes = 1;
-    let initial_model_keyframe_offset = cursor.offset;
+    let initial_model_keyframe_offset = cursor.offset();
     let initial_model_keyframe = read_document_model_keyframe(
         cursor,
         false,
         constraint_bone_count,
         outside_parent_subject_bone_count,
     )?;
-    let model_keyframe_count_offset = cursor.offset;
+    let model_keyframe_count_offset = cursor.offset();
     let model_keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let model_keyframes_offset = cursor.offset;
+    let model_keyframes_offset = cursor.offset();
     let mut model_keyframe_summaries = Vec::with_capacity(model_keyframes);
     for _ in 0..model_keyframes {
         model_keyframe_summaries.push(read_document_model_keyframe(
@@ -3229,24 +3210,24 @@ fn read_document_model_summary(
             outside_parent_subject_bone_count,
         )?);
     }
-    let model_keyframes_end_offset = cursor.offset;
+    let model_keyframes_end_offset = cursor.offset();
 
-    let bone_states_offset = cursor.offset;
+    let bone_states_offset = cursor.offset();
     let mut bone_state_summaries = Vec::with_capacity(bone_count);
     for _ in 0..bone_count {
         bone_state_summaries.push(read_document_bone_state(cursor)?);
     }
-    let morph_states_offset = cursor.offset;
+    let morph_states_offset = cursor.offset();
     let mut morph_state_summaries = Vec::with_capacity(morph_count);
     for _ in 0..morph_count {
         morph_state_summaries.push(read_document_morph_state(cursor)?);
     }
-    let constraint_states_offset = cursor.offset;
+    let constraint_states_offset = cursor.offset();
     let mut constraint_state_summaries = Vec::with_capacity(constraint_bone_count);
     for _ in 0..constraint_bone_count {
         constraint_state_summaries.push(read_document_constraint_state(cursor)?);
     }
-    let outside_parent_states_offset = cursor.offset;
+    let outside_parent_states_offset = cursor.offset();
     let mut outside_parent_state_summaries = Vec::with_capacity(outside_parent_subject_bone_count);
     for _ in 0..outside_parent_subject_bone_count {
         outside_parent_state_summaries.push(read_document_outside_parent_state(cursor)?);
@@ -3256,7 +3237,7 @@ fn read_document_model_summary(
     let edge_width = cursor.read_f32()?;
     let self_shadow_enabled = cursor.read_bool()?;
     let transform_order_index = cursor.read_u8()?;
-    let offset_end = cursor.offset;
+    let offset_end = cursor.offset();
 
     Some(PmmDocumentModelSummary {
         slot_index,
@@ -3323,17 +3304,17 @@ fn read_document_bone_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentBoneKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
+    let payload_offset = cursor.offset();
     let interpolation = cursor.read_bytes16()?;
     let translation = cursor.read_f32x3()?;
     let orientation = cursor.read_f32x4()?;
     let physics_disabled = cursor.read_bool()?;
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentBoneKeyframeSummary {
         index: base.index,
         frame_index: base.frame_index,
@@ -3356,14 +3337,14 @@ fn read_document_morph_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentMorphKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
+    let payload_offset = cursor.offset();
     let weight = cursor.read_f32()?;
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentMorphKeyframeSummary {
         index: base.index,
         frame_index: base.frame_index,
@@ -3385,18 +3366,18 @@ fn read_document_model_keyframe(
     constraint_bone_count: usize,
     outside_parent_subject_bone_count: usize,
 ) -> Option<PmmDocumentModelKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let visible_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let visible_offset = cursor.offset();
     let visible = cursor.read_bool()?;
-    let constraint_states_offset = cursor.offset;
+    let constraint_states_offset = cursor.offset();
     let mut constraint_states = Vec::with_capacity(constraint_bone_count);
     for _ in 0..constraint_bone_count {
         constraint_states.push(cursor.read_bool()?);
     }
-    let constraint_states_byte_length = cursor.offset - constraint_states_offset;
-    let outside_parent_indices_offset = cursor.offset;
+    let constraint_states_byte_length = cursor.offset() - constraint_states_offset;
+    let outside_parent_indices_offset = cursor.offset();
     let mut outside_parent_indices = Vec::with_capacity(outside_parent_subject_bone_count);
     for _ in 0..outside_parent_subject_bone_count {
         outside_parent_indices.push(PmmDocumentOutsideParentIndexSummary {
@@ -3404,12 +3385,12 @@ fn read_document_model_keyframe(
             parent_model_bone_index: cursor.read_i32()?,
         });
     }
-    let outside_parent_indices_byte_length = cursor.offset - outside_parent_indices_offset;
-    let self_shadow_enabled_offset = cursor.offset;
+    let outside_parent_indices_byte_length = cursor.offset() - outside_parent_indices_offset;
+    let self_shadow_enabled_offset = cursor.offset();
     let self_shadow_enabled = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     let constraint_state_count = constraint_bone_count;
     let outside_parent_index_count = outside_parent_subject_bone_count;
     Some(PmmDocumentModelKeyframeSummary {
@@ -3440,20 +3421,20 @@ fn read_document_model_keyframe(
 fn read_document_camera_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let initial_keyframe = read_document_camera_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset;
+    let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset;
+    let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
         keyframe_summaries.push(read_document_camera_keyframe(cursor, true)?);
     }
-    let keyframes_end_offset = cursor.offset;
-    let state_offset = cursor.offset;
+    let keyframes_end_offset = cursor.offset();
+    let state_offset = cursor.offset();
     cursor.skip(12 * 3)?;
     cursor.read_bool()?;
-    let state_end_offset = cursor.offset;
+    let state_end_offset = cursor.offset();
     Some(PmmDocumentTrackSummary {
         offset,
         offset_end: state_end_offset,
@@ -3473,33 +3454,33 @@ fn read_document_camera_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let distance_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let distance_offset = cursor.offset();
     let distance = cursor.read_f32()?;
-    let look_at_offset = cursor.offset;
+    let look_at_offset = cursor.offset();
     let look_at = cursor.read_f32x3()?;
-    let look_at_byte_length = cursor.offset - look_at_offset;
-    let angle_offset = cursor.offset;
+    let look_at_byte_length = cursor.offset() - look_at_offset;
+    let angle_offset = cursor.offset();
     let angle = cursor.read_f32x3()?;
-    let angle_byte_length = cursor.offset - angle_offset;
-    let parent_model_index_offset = cursor.offset;
+    let angle_byte_length = cursor.offset() - angle_offset;
+    let parent_model_index_offset = cursor.offset();
     let parent_model_index = cursor.read_i32()?;
-    let parent_model_bone_index_offset = cursor.offset;
+    let parent_model_bone_index_offset = cursor.offset();
     let parent_model_bone_index = cursor.read_i32()?;
-    let interpolation_offset = cursor.offset;
+    let interpolation_offset = cursor.offset();
     let interpolation = cursor.read_bytes24()?;
-    let interpolation_byte_length = cursor.offset - interpolation_offset;
-    let perspective_view_offset = cursor.offset;
+    let interpolation_byte_length = cursor.offset() - interpolation_offset;
+    let perspective_view_offset = cursor.offset();
     let perspective_view = !cursor.read_bool()?;
-    let fov_offset = cursor.offset;
+    let fov_offset = cursor.offset();
     let fov = cursor.read_i32()?;
-    let selected_offset = cursor.offset;
+    let selected_offset = cursor.offset();
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentKeyframeSummary::Camera {
         index: base.index,
         frame_index: base.frame_index,
@@ -3537,20 +3518,20 @@ fn read_document_camera_keyframe(
 fn read_document_light_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let initial_keyframe = read_document_light_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset;
+    let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset;
+    let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
         keyframe_summaries.push(read_document_light_keyframe(cursor, true)?);
     }
-    let keyframes_end_offset = cursor.offset;
-    let state_offset = cursor.offset;
+    let keyframes_end_offset = cursor.offset();
+    let state_offset = cursor.offset();
     cursor.skip(12)?;
     cursor.skip(12)?;
-    let state_end_offset = cursor.offset;
+    let state_end_offset = cursor.offset();
     Some(PmmDocumentTrackSummary {
         offset,
         offset_end: state_end_offset,
@@ -3570,20 +3551,20 @@ fn read_document_light_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let color_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let color_offset = cursor.offset();
     let color = cursor.read_f32x3()?;
-    let color_byte_length = cursor.offset - color_offset;
-    let direction_offset = cursor.offset;
+    let color_byte_length = cursor.offset() - color_offset;
+    let direction_offset = cursor.offset();
     let direction = cursor.read_f32x3()?;
-    let direction_byte_length = cursor.offset - direction_offset;
-    let selected_offset = cursor.offset;
+    let direction_byte_length = cursor.offset() - direction_offset;
+    let selected_offset = cursor.offset();
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentKeyframeSummary::Light {
         index: base.index,
         frame_index: base.frame_index,
@@ -3609,7 +3590,7 @@ fn read_document_accessory_block_summary(
     cursor: &mut PmmDocumentCursor<'_>,
     references: &[PmmAssetReference],
 ) -> Option<PmmDocumentAccessoryBlockSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let selected_accessory_index = cursor.read_u8()?;
     let horizontal_scroll = cursor.read_i32()?;
     let accessory_count = cursor.read_u8()? as usize;
@@ -3619,7 +3600,7 @@ fn read_document_accessory_block_summary(
             cursor, slot_index, references,
         )?);
     }
-    let offset_end = cursor.offset;
+    let offset_end = cursor.offset();
     let keyframes = accessories
         .iter()
         .map(|accessory| accessory.keyframes)
@@ -3642,24 +3623,24 @@ fn read_document_accessory_summary(
 ) -> Option<PmmDocumentAccessorySummary> {
     const PMM_ACCESSORY_NAME_BYTE_LENGTH: usize = 100;
     const PMM_PATH_BYTE_LENGTH: usize = 256;
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let document_accessory_index = cursor.read_u8()?;
     let name = cursor.read_fixed_string(PMM_ACCESSORY_NAME_BYTE_LENGTH)?;
-    let path_offset = cursor.offset;
+    let path_offset = cursor.offset();
     let path = cursor.read_fixed_string(PMM_PATH_BYTE_LENGTH)?;
     let asset_reference_index = asset_reference_index_for_path(references, "accessory", &path);
     let draw_order_index = cursor.read_u8()?;
     let initial_keyframe = read_document_accessory_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset;
+    let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset;
+    let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
         keyframe_summaries.push(read_document_accessory_keyframe(cursor, true)?);
     }
-    let keyframes_end_offset = cursor.offset;
+    let keyframes_end_offset = cursor.offset();
 
-    let state_offset = cursor.offset;
+    let state_offset = cursor.offset();
     let (opacity, visible) = unpack_document_accessory_opacity_and_visible(cursor.read_u8()?);
     let parent_model_index = cursor.read_i32()?;
     let parent_model_bone_index = cursor.read_i32()?;
@@ -3668,8 +3649,8 @@ fn read_document_accessory_summary(
     cursor.skip(12)?;
     let shadow_enabled = cursor.read_bool()?;
     let add_blend_enabled = cursor.read_bool()?;
-    let state_end_offset = cursor.offset;
-    let offset_end = cursor.offset;
+    let state_end_offset = cursor.offset();
+    let offset_end = cursor.offset();
 
     Some(PmmDocumentAccessorySummary {
         slot_index,
@@ -3703,30 +3684,30 @@ fn read_document_accessory_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentAccessoryKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let packed_opacity_visible_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let packed_opacity_visible_offset = cursor.offset();
     let (opacity, visible) = unpack_document_accessory_opacity_and_visible(cursor.read_u8()?);
-    let parent_model_index_offset = cursor.offset;
+    let parent_model_index_offset = cursor.offset();
     let parent_model_index = cursor.read_i32()?;
-    let parent_model_bone_index_offset = cursor.offset;
+    let parent_model_bone_index_offset = cursor.offset();
     let parent_model_bone_index = cursor.read_i32()?;
-    let translation_offset = cursor.offset;
+    let translation_offset = cursor.offset();
     let translation = cursor.read_f32x3()?;
-    let translation_byte_length = cursor.offset - translation_offset;
-    let orientation_offset = cursor.offset;
+    let translation_byte_length = cursor.offset() - translation_offset;
+    let orientation_offset = cursor.offset();
     let orientation = cursor.read_f32x3()?;
-    let orientation_byte_length = cursor.offset - orientation_offset;
-    let scale_factor_offset = cursor.offset;
+    let orientation_byte_length = cursor.offset() - orientation_offset;
+    let scale_factor_offset = cursor.offset();
     let scale_factor = cursor.read_f32()?;
-    let shadow_enabled_offset = cursor.offset;
+    let shadow_enabled_offset = cursor.offset();
     let shadow_enabled = cursor.read_bool()?;
-    let selected_offset = cursor.offset;
+    let selected_offset = cursor.offset();
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentAccessoryKeyframeSummary {
         index: base.index,
         frame_index: base.frame_index,
@@ -3804,33 +3785,33 @@ fn read_document_settings_before_gravity(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentSettingsBeforeGravity> {
     const PMM_PATH_BYTE_LENGTH: usize = 256;
-    let offset = cursor.offset;
-    let current_frame_index_offset = cursor.offset;
+    let offset = cursor.offset();
+    let current_frame_index_offset = cursor.offset();
     let current_frame_index = cursor.read_i32()?;
     let horizontal_scroll = cursor.read_i32()?;
     let horizontal_scroll_thumb = cursor.read_i32()?;
     let editing_mode = cursor.read_i32()?;
     let camera_look_mode = cursor.read_u8()?;
     let loop_enabled = cursor.read_bool()?;
-    let begin_frame_index_enabled_offset = cursor.offset;
+    let begin_frame_index_enabled_offset = cursor.offset();
     let begin_frame_index_enabled = cursor.read_bool()?;
-    let end_frame_index_enabled_offset = cursor.offset;
+    let end_frame_index_enabled_offset = cursor.offset();
     let end_frame_index_enabled = cursor.read_bool()?;
-    let begin_frame_index_offset = cursor.offset;
+    let begin_frame_index_offset = cursor.offset();
     let begin_frame_index = cursor.read_i32()?;
-    let end_frame_index_offset = cursor.offset;
+    let end_frame_index_offset = cursor.offset();
     let end_frame_index = cursor.read_i32()?;
     let audio_enabled = cursor.read_bool()?;
-    let audio_path_offset = cursor.offset;
+    let audio_path_offset = cursor.offset();
     let audio_path = cursor.read_fixed_string(PMM_PATH_BYTE_LENGTH)?;
     let background_video_offset = [cursor.read_i32()?, cursor.read_i32()?];
     let background_video_scale_factor = cursor.read_f32()?;
-    let background_video_path_offset = cursor.offset;
+    let background_video_path_offset = cursor.offset();
     let background_video_path = cursor.read_fixed_string(PMM_PATH_BYTE_LENGTH)?;
     let background_video_enabled = cursor.read_i32()? != 0;
     let background_image_offset = [cursor.read_i32()?, cursor.read_i32()?];
     let background_image_scale_factor = cursor.read_f32()?;
-    let background_image_path_offset = cursor.offset;
+    let background_image_path_offset = cursor.offset();
     let background_image_path = cursor.read_fixed_string(PMM_PATH_BYTE_LENGTH)?;
     let background_image_enabled = cursor.read_bool()?;
     let information_shown = cursor.read_bool()?;
@@ -3888,22 +3869,22 @@ fn read_document_settings_before_gravity(
 fn read_document_gravity_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset;
-    let state_offset = cursor.offset;
+    let offset = cursor.offset();
+    let state_offset = cursor.offset();
     cursor.read_f32()?;
     cursor.read_i32()?;
     cursor.skip(12)?;
     cursor.read_bool()?;
-    let state_end_offset = cursor.offset;
+    let state_end_offset = cursor.offset();
     let initial_keyframe = read_document_gravity_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset;
+    let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset;
+    let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
         keyframe_summaries.push(read_document_gravity_keyframe(cursor, true)?);
     }
-    let keyframes_end_offset = cursor.offset;
+    let keyframes_end_offset = cursor.offset();
     Some(PmmDocumentTrackSummary {
         offset,
         offset_end: keyframes_end_offset,
@@ -3923,23 +3904,23 @@ fn read_document_gravity_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let noise_enabled_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let noise_enabled_offset = cursor.offset();
     let noise_enabled = cursor.read_bool()?;
-    let noise_offset = cursor.offset;
+    let noise_offset = cursor.offset();
     let noise = cursor.read_i32()?;
-    let acceleration_offset = cursor.offset;
+    let acceleration_offset = cursor.offset();
     let acceleration = cursor.read_f32()?;
-    let direction_offset = cursor.offset;
+    let direction_offset = cursor.offset();
     let direction = cursor.read_f32x3()?;
-    let direction_byte_length = cursor.offset - direction_offset;
-    let selected_offset = cursor.offset;
+    let direction_byte_length = cursor.offset() - direction_offset;
+    let selected_offset = cursor.offset();
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentKeyframeSummary::Gravity {
         index: base.index,
         frame_index: base.frame_index,
@@ -3967,20 +3948,20 @@ fn read_document_gravity_keyframe(
 fn read_document_self_shadow_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset;
-    let state_offset = cursor.offset;
+    let offset = cursor.offset();
+    let state_offset = cursor.offset();
     cursor.read_bool()?;
     cursor.read_f32()?;
-    let state_end_offset = cursor.offset;
+    let state_end_offset = cursor.offset();
     let initial_keyframe = read_document_self_shadow_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset;
+    let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset;
+    let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
         keyframe_summaries.push(read_document_self_shadow_keyframe(cursor, true)?);
     }
-    let keyframes_end_offset = cursor.offset;
+    let keyframes_end_offset = cursor.offset();
     Some(PmmDocumentTrackSummary {
         offset,
         offset_end: keyframes_end_offset,
@@ -4000,18 +3981,18 @@ fn read_document_self_shadow_keyframe(
     cursor: &mut PmmDocumentCursor<'_>,
     include_index: bool,
 ) -> Option<PmmDocumentKeyframeSummary> {
-    let offset = cursor.offset;
+    let offset = cursor.offset();
     let base = read_document_base_keyframe(cursor, include_index)?;
-    let payload_offset = cursor.offset;
-    let mode_offset = cursor.offset;
+    let payload_offset = cursor.offset();
+    let mode_offset = cursor.offset();
     let mode = cursor.read_u8()?;
-    let distance_offset = cursor.offset;
+    let distance_offset = cursor.offset();
     let distance = cursor.read_f32()?;
-    let selected_offset = cursor.offset;
+    let selected_offset = cursor.offset();
     let selected = cursor.read_bool()?;
-    let byte_length = cursor.offset - offset;
-    let payload_byte_length = cursor.offset - payload_offset;
-    let payload_bytes = cursor.data.get(payload_offset..cursor.offset)?.to_vec();
+    let byte_length = cursor.offset() - offset;
+    let payload_byte_length = cursor.offset() - payload_offset;
+    let payload_bytes = cursor.data().get(payload_offset..cursor.offset())?.to_vec();
     Some(PmmDocumentKeyframeSummary::SelfShadow {
         index: base.index,
         frame_index: base.frame_index,
@@ -4044,20 +4025,20 @@ fn finish_document_settings_summary(
     let black_background_enabled = cursor.read_bool()?;
     let camera_look_at_model_index = cursor.read_i32()?;
     let camera_look_at_model_bone_index = cursor.read_i32()?;
-    let unknown_matrix_offset = cursor.offset;
+    let unknown_matrix_offset = cursor.offset();
     cursor.skip(16 * 4)?;
-    let unknown_matrix_end_offset = cursor.offset;
+    let unknown_matrix_end_offset = cursor.offset();
     let following_look_at_enabled = cursor.read_bool()?;
     cursor.read_bool()?;
     let physics_ground_enabled = cursor.read_bool()?;
-    let current_frame_index_in_text_field_offset = cursor.offset;
+    let current_frame_index_in_text_field_offset = cursor.offset();
     let current_frame_index_in_text_field = cursor.read_i32()?;
 
     let mut model_selection_footer_present = false;
     let mut model_selection_footer_offset = None;
     let mut model_selection_footer_end_offset = None;
-    if cursor.offset < cursor.data.len() {
-        let footer_offset = cursor.offset;
+    if cursor.offset() < cursor.data().len() {
+        let footer_offset = cursor.offset();
         if cursor.read_u8()? != 0 {
             model_selection_footer_present = true;
             model_selection_footer_offset = Some(footer_offset);
@@ -4065,10 +4046,10 @@ fn finish_document_settings_summary(
                 cursor.read_u8()?;
                 cursor.read_i32()?;
             }
-            model_selection_footer_end_offset = Some(cursor.offset);
+            model_selection_footer_end_offset = Some(cursor.offset());
         }
     }
-    let offset_end = cursor.offset;
+    let offset_end = cursor.offset();
 
     Some(PmmDocumentSettingsSummary {
         offset: before_gravity.offset,

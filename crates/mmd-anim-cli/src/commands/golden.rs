@@ -298,6 +298,25 @@ pub(crate) struct GoldenRootMotionDiagnostic {
     classification: &'static str,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoldenRootMotionOracleLagMatch {
+    case: String,
+    bone: String,
+    frame: i32,
+    previous_frame: i32,
+    #[serde(rename = "maxAbsError")]
+    max_abs_error: f32,
+    match_delta: f64,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct GoldenRootMotionOracleLag {
+    #[serde(rename = "matchCount")]
+    match_count: usize,
+    matches: Vec<GoldenRootMotionOracleLagMatch>,
+}
+
 pub(crate) fn compute_root_motion_diagnostics(
     oracle_model: &MmdDumperOracleModel,
     world_matrices: &[glam::Mat4],
@@ -361,7 +380,7 @@ pub(crate) fn compute_root_motion_diagnostics(
 pub(crate) fn compute_root_motion_oracle_lag(
     case_name: &str,
     diagnostics: &[GoldenRootMotionDiagnostic],
-) -> serde_json::Value {
+) -> GoldenRootMotionOracleLag {
     use std::collections::BTreeMap;
 
     // Filter to root_motion_mismatch only
@@ -376,7 +395,7 @@ pub(crate) fn compute_root_motion_oracle_lag(
         by_bone.entry(d.bone.as_str()).or_default().push(d);
     }
 
-    let mut matches: Vec<serde_json::Value> = Vec::new();
+    let mut matches: Vec<GoldenRootMotionOracleLagMatch> = Vec::new();
 
     for (_bone, entries) in by_bone.iter_mut() {
         // Sort by frame ascending
@@ -392,22 +411,22 @@ pub(crate) fn compute_root_motion_oracle_lag(
             let max_delta = dx.max(dy).max(dz);
 
             if max_delta <= ORACLE_LAG_DELTA_THRESHOLD {
-                matches.push(json!({
-                    "case": case_name,
-                    "bone": &curr.bone,
-                    "frame": curr.frame,
-                    "previousFrame": prev.frame,
-                    "maxAbsError": curr.max_abs_error,
-                    "matchDelta": max_delta,
-                }));
+                matches.push(GoldenRootMotionOracleLagMatch {
+                    case: case_name.to_owned(),
+                    bone: curr.bone.clone(),
+                    frame: curr.frame,
+                    previous_frame: prev.frame,
+                    max_abs_error: curr.max_abs_error,
+                    match_delta: max_delta,
+                });
             }
         }
     }
 
-    json!({
-        "matchCount": matches.len(),
-        "matches": matches,
-    })
+    GoldenRootMotionOracleLag {
+        match_count: matches.len(),
+        matches,
+    }
 }
 
 /// Return true when any root/control diagnostic dominates the frame's
@@ -547,13 +566,6 @@ struct UnsupportedGoldenCaseSummaryEntry<'a> {
 }
 
 #[derive(Serialize)]
-struct UnsupportedGoldenCaseRootMotionOracleLag {
-    #[serde(rename = "matchCount")]
-    match_count: usize,
-    matches: Vec<serde_json::Value>,
-}
-
-#[derive(Serialize)]
 struct UnsupportedGoldenCasePerCaseEntry<'a> {
     name: &'a str,
     status: &'static str,
@@ -563,7 +575,7 @@ struct UnsupportedGoldenCasePerCaseEntry<'a> {
     max_abs_error: f64,
     worst: &'static str,
     #[serde(rename = "rootMotionOracleLag")]
-    root_motion_oracle_lag: UnsupportedGoldenCaseRootMotionOracleLag,
+    root_motion_oracle_lag: GoldenRootMotionOracleLag,
 }
 
 #[derive(Serialize)]
@@ -579,7 +591,7 @@ struct GoldenIkComparePerCaseEntry {
     #[serde(rename = "importDiagnostics", skip_serializing_if = "Vec::is_empty")]
     import_diagnostics: Vec<serde_json::Value>,
     #[serde(rename = "rootMotionOracleLag")]
-    root_motion_oracle_lag: serde_json::Value,
+    root_motion_oracle_lag: GoldenRootMotionOracleLag,
 }
 
 #[derive(Serialize)]
@@ -635,7 +647,7 @@ struct GoldenIkCompareSolverFocusedSummary {
 #[serde(rename_all = "camelCase")]
 struct GoldenIkCompareRootMotionOracleLagSummary {
     total_match_count: usize,
-    worst_match: Option<serde_json::Value>,
+    worst_match: Option<GoldenRootMotionOracleLagMatch>,
 }
 
 fn golden_component_type(component: usize) -> &'static str {
@@ -672,7 +684,7 @@ fn make_unsupported_case_entry(
         reason,
         max_abs_error: 0.0,
         worst: "",
-        root_motion_oracle_lag: UnsupportedGoldenCaseRootMotionOracleLag {
+        root_motion_oracle_lag: GoldenRootMotionOracleLag {
             match_count: 0,
             matches: Vec::new(),
         },
@@ -763,7 +775,7 @@ pub(crate) fn golden_ik_compare(
 
     let mut per_case_errors: Vec<(String, f32, String)> = Vec::new();
     let mut per_case_diagnostics: Vec<Vec<GoldenRootMotionDiagnostic>> = Vec::new();
-    let mut all_lag_matches: Vec<serde_json::Value> = Vec::new();
+    let mut all_lag_matches: Vec<GoldenRootMotionOracleLagMatch> = Vec::new();
 
     // Solver-focused tracking (excludes root/control-dominated frames)
     let mut solver_compared_bones: usize = 0;
@@ -973,11 +985,7 @@ pub(crate) fn golden_ik_compare(
         per_case_diagnostics.push(case_diagnostics.clone());
 
         let case_lag = compute_root_motion_oracle_lag(&case.name, &case_diagnostics);
-        if let Some(matches) = case_lag.get("matches").and_then(|m| m.as_array()) {
-            for m in matches {
-                all_lag_matches.push(m.clone());
-            }
-        }
+        all_lag_matches.extend(case_lag.matches.iter().cloned());
 
         per_case_entries.push(serde_json::to_value(GoldenIkComparePerCaseEntry {
             name: case.name.clone(),
@@ -1035,10 +1043,8 @@ pub(crate) fn golden_ik_compare(
     let summary_lag_worst = all_lag_matches
         .iter()
         .max_by(|a, b| {
-            let a_err = a["maxAbsError"].as_f64().unwrap_or(0.0);
-            let b_err = b["maxAbsError"].as_f64().unwrap_or(0.0);
-            a_err
-                .partial_cmp(&b_err)
+            a.max_abs_error
+                .partial_cmp(&b.max_abs_error)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .cloned();

@@ -472,7 +472,7 @@ fn golden_model_supports_pmx_and_pmd_extensions() {
 
 #[test]
 fn oracle_lag_empty_diagnostics() {
-    let result = compute_root_motion_oracle_lag("test", &[]);
+    let result = serde_json::to_value(compute_root_motion_oracle_lag("test", &[])).unwrap();
     assert_eq!(result["matchCount"].as_u64().unwrap(), 0);
     assert!(result["matches"].as_array().unwrap().is_empty());
 }
@@ -487,7 +487,7 @@ fn oracle_lag_no_root_motion_classification() {
         10.0,
         "control_bone_mismatch",
     )];
-    let result = compute_root_motion_oracle_lag("test", &diags);
+    let result = serde_json::to_value(compute_root_motion_oracle_lag("test", &diags)).unwrap();
     assert_eq!(result["matchCount"].as_u64().unwrap(), 0);
 }
 
@@ -514,7 +514,7 @@ fn oracle_lag_single_bone_exact_match() {
             "root_motion_mismatch",
         ),
     ];
-    let result = compute_root_motion_oracle_lag("test-case", &diags);
+    let result = serde_json::to_value(compute_root_motion_oracle_lag("test-case", &diags)).unwrap();
     assert_eq!(result["matchCount"].as_u64().unwrap(), 1);
     let matches = result["matches"].as_array().unwrap();
     assert_eq!(matches[0]["case"], "test-case");
@@ -546,7 +546,7 @@ fn oracle_lag_below_threshold_no_match() {
             "root_motion_mismatch",
         ),
     ];
-    let result = compute_root_motion_oracle_lag("test", &diags);
+    let result = serde_json::to_value(compute_root_motion_oracle_lag("test", &diags)).unwrap();
     assert_eq!(result["matchCount"].as_u64().unwrap(), 0);
 }
 
@@ -571,7 +571,7 @@ fn oracle_lag_exactly_at_threshold() {
             "root_motion_mismatch",
         ),
     ];
-    let result = compute_root_motion_oracle_lag("test", &diags);
+    let result = serde_json::to_value(compute_root_motion_oracle_lag("test", &diags)).unwrap();
     assert_eq!(result["matchCount"].as_u64().unwrap(), 1);
 }
 
@@ -611,7 +611,7 @@ fn oracle_lag_two_bones_independent() {
             "root_motion_mismatch",
         ),
     ];
-    let result = compute_root_motion_oracle_lag("test", &diags);
+    let result = serde_json::to_value(compute_root_motion_oracle_lag("test", &diags)).unwrap();
     // Two bones, one lag match each = 2 total
     assert_eq!(result["matchCount"].as_u64().unwrap(), 2);
 }
@@ -637,6 +637,6 @@ fn oracle_lag_no_lag_when_oracle_differs() {
             "root_motion_mismatch",
         ),
     ];
-    let result = compute_root_motion_oracle_lag("test", &diags);
+    let result = serde_json::to_value(compute_root_motion_oracle_lag("test", &diags)).unwrap();
     assert_eq!(result["matchCount"].as_u64().unwrap(), 0);
 }

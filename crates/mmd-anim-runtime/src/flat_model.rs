@@ -1,12 +1,30 @@
 use std::fmt;
 
-use crate::{BoneIndex, BoneInit};
+use crate::{BoneIndex, BoneInit, IkAngleLimit, IkLinkInit, IkSolverInit};
 
 pub struct FlatBoneInput<'a> {
     pub parent_indices: &'a [i32],
     pub rest_positions_xyz: &'a [f32],
     pub inverse_bind_matrices: &'a [f32],
     pub transform_orders: &'a [i32],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FlatIkLinkInput {
+    pub bone_index: u32,
+    pub has_angle_limit: bool,
+    pub angle_limit_min_xyz: [f32; 3],
+    pub angle_limit_max_xyz: [f32; 3],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FlatIkSolverInput {
+    pub ik_bone_index: u32,
+    pub target_bone_index: u32,
+    pub link_offset: usize,
+    pub link_count: usize,
+    pub iteration_count: u32,
+    pub limit_angle: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +34,8 @@ pub enum FlatModelInputError {
     InverseBindMatricesLen,
     TransformOrdersLen,
     InvalidParentIndex,
+    RangeOverflow,
+    RangeOutOfBounds,
 }
 
 impl fmt::Display for FlatModelInputError {
@@ -28,6 +48,8 @@ impl fmt::Display for FlatModelInputError {
             }
             Self::TransformOrdersLen => "transform_orders must contain bone_count values",
             Self::InvalidParentIndex => "parent index must be -1 or non-negative",
+            Self::RangeOverflow => "range overflow",
+            Self::RangeOutOfBounds => "track keyframe range is out of bounds",
         };
         f.write_str(message)
     }
@@ -88,6 +110,52 @@ pub fn build_bones_from_flat(
     Ok(bones)
 }
 
+pub fn build_ik_solvers_from_flat(
+    solvers: &[FlatIkSolverInput],
+    links: &[FlatIkLinkInput],
+) -> Result<Vec<IkSolverInit>, FlatModelInputError> {
+    solvers
+        .iter()
+        .map(|solver| {
+            let link_end = solver
+                .link_offset
+                .checked_add(solver.link_count)
+                .ok_or(FlatModelInputError::RangeOverflow)?;
+            let solver_links = links
+                .get(solver.link_offset..link_end)
+                .ok_or(FlatModelInputError::RangeOutOfBounds)?
+                .iter()
+                .map(|link| {
+                    let mut init = IkLinkInit::new(BoneIndex(link.bone_index));
+                    if link.has_angle_limit {
+                        init = init.with_angle_limit(IkAngleLimit::new(
+                            glam::Vec3A::new(
+                                link.angle_limit_min_xyz[0],
+                                link.angle_limit_min_xyz[1],
+                                link.angle_limit_min_xyz[2],
+                            ),
+                            glam::Vec3A::new(
+                                link.angle_limit_max_xyz[0],
+                                link.angle_limit_max_xyz[1],
+                                link.angle_limit_max_xyz[2],
+                            ),
+                        ));
+                    }
+                    init
+                })
+                .collect();
+
+            Ok(IkSolverInit {
+                ik_bone: BoneIndex(solver.ik_bone_index),
+                target_bone: BoneIndex(solver.target_bone_index),
+                links: solver_links,
+                iteration_count: solver.iteration_count,
+                limit_angle: solver.limit_angle,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +193,32 @@ mod tests {
             error.to_string(),
             "rest_positions_xyz must contain bone_count * 3 values"
         );
+    }
+
+    #[test]
+    fn builds_ik_solvers_from_flat_arrays() {
+        let solvers = build_ik_solvers_from_flat(
+            &[FlatIkSolverInput {
+                ik_bone_index: 3,
+                target_bone_index: 2,
+                link_offset: 0,
+                link_count: 1,
+                iteration_count: 10,
+                limit_angle: 0.5,
+            }],
+            &[FlatIkLinkInput {
+                bone_index: 1,
+                has_angle_limit: true,
+                angle_limit_min_xyz: [-1.0, -2.0, -3.0],
+                angle_limit_max_xyz: [1.0, 2.0, 3.0],
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(solvers.len(), 1);
+        assert_eq!(solvers[0].ik_bone, BoneIndex(3));
+        assert_eq!(solvers[0].target_bone, BoneIndex(2));
+        assert_eq!(solvers[0].links.len(), 1);
+        assert!(solvers[0].links[0].angle_limit.is_some());
     }
 }

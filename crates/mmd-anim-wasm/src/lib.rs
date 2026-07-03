@@ -9,12 +9,14 @@ use std::sync::Arc;
 
 use mmd_anim_runtime::{
     AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneMorphOffset,
-    GroupMorphOffset, IkAngleLimit, IkLinkInit, IkSolveOptions, IkSolverInit,
-    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan, MorphTrack,
-    MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
-    RuntimeInstance,
+    GroupMorphOffset, IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe,
+    MorphOffsetSpan, MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding,
+    PropertyKeyframe, RuntimeInstance,
 };
-use mmd_anim_runtime::{FlatBoneInput, ModelArena, build_bones_from_flat};
+use mmd_anim_runtime::{
+    FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput, ModelArena, build_bones_from_flat,
+    build_ik_solvers_from_flat,
+};
 use wasm_bindgen::prelude::*;
 
 pub const WASM_WRAPPER_VERSION: u32 = 2;
@@ -1679,23 +1681,21 @@ fn build_model(input: ModelInput<'_>) -> Result<ModelArena, String> {
         .chunks_exact(2)
         .enumerate()
         .map(|(link_index, link)| {
-            let mut init = IkLinkInit::new(BoneIndex(link[0]));
-            if link[1] & IK_LINK_FLAG_ANGLE_LIMIT != 0 {
-                let limit_offset = link_index * 6;
-                init = init.with_angle_limit(IkAngleLimit::new(
-                    glam::Vec3A::new(
-                        input.ik_link_limits[limit_offset],
-                        input.ik_link_limits[limit_offset + 1],
-                        input.ik_link_limits[limit_offset + 2],
-                    ),
-                    glam::Vec3A::new(
-                        input.ik_link_limits[limit_offset + 3],
-                        input.ik_link_limits[limit_offset + 4],
-                        input.ik_link_limits[limit_offset + 5],
-                    ),
-                ));
+            let limit_offset = link_index * 6;
+            FlatIkLinkInput {
+                bone_index: link[0],
+                has_angle_limit: link[1] & IK_LINK_FLAG_ANGLE_LIMIT != 0,
+                angle_limit_min_xyz: [
+                    input.ik_link_limits[limit_offset],
+                    input.ik_link_limits[limit_offset + 1],
+                    input.ik_link_limits[limit_offset + 2],
+                ],
+                angle_limit_max_xyz: [
+                    input.ik_link_limits[limit_offset + 3],
+                    input.ik_link_limits[limit_offset + 4],
+                    input.ik_link_limits[limit_offset + 5],
+                ],
             }
-            init
         })
         .collect::<Vec<_>>();
 
@@ -1703,19 +1703,17 @@ fn build_model(input: ModelInput<'_>) -> Result<ModelArena, String> {
         .ik_solvers_u32
         .chunks_exact(5)
         .zip(input.ik_solver_limit_angles.iter())
-        .map(|(solver, limit_angle)| {
-            let link_offset = solver[2] as usize;
-            let link_count = solver[3] as usize;
-            let links = checked_range(&ik_links, link_offset, link_count)?.to_vec();
-            Ok(IkSolverInit {
-                ik_bone: BoneIndex(solver[0]),
-                target_bone: BoneIndex(solver[1]),
-                links,
-                iteration_count: solver[4],
-                limit_angle: *limit_angle,
-            })
+        .map(|(solver, limit_angle)| FlatIkSolverInput {
+            ik_bone_index: solver[0],
+            target_bone_index: solver[1],
+            link_offset: solver[2] as usize,
+            link_count: solver[3] as usize,
+            iteration_count: solver[4],
+            limit_angle: *limit_angle,
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
+    let ik_solvers =
+        build_ik_solvers_from_flat(&ik_solvers, &ik_links).map_err(|error| error.to_string())?;
 
     let append_transforms = input
         .append_u32

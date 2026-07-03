@@ -18,7 +18,10 @@ pub use animation::{
     PropertyAnimationBinding, PropertyKeyframe,
 };
 pub use append_primitive::{AppendPrimitiveInput, AppendPrimitiveOutput, solve_append_transform};
-pub use flat_model::{FlatBoneInput, FlatModelInputError, build_bones_from_flat};
+pub use flat_model::{
+    FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput, FlatModelInputError, build_bones_from_flat,
+    build_ik_solvers_from_flat,
+};
 pub use ik_primitive::{
     IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolveOutput, IkChainSolver,
 };

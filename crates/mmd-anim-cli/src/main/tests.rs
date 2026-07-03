@@ -11,7 +11,7 @@ use mmd_anim_runtime::{
     MovableBoneTrack, RuntimeInstance,
 };
 
-use crate::commands::{bench, compare, export, patch, vmd_sample};
+use crate::commands::{bench, compare, export, import, patch, vmd_sample};
 
 fn unique_test_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -198,6 +198,86 @@ fn bench_synthetic_args_reject_extra_values() {
     .into_iter();
     let error = bench::parse_bench_synthetic_args(&mut args).unwrap_err();
     assert!(error.to_string().contains("unexpected extra argument"));
+}
+
+fn runtime_batch_fixture_paths() -> (PathBuf, PathBuf) {
+    let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
+    (
+        format_crate.join("fixtures/pmx/ik_multi_axis_limit.pmx"),
+        format_crate.join("fixtures/vmd/ik_multi_bone_nondefault.vmd"),
+    )
+}
+
+#[test]
+fn import_frames_list_parser_preserves_order() {
+    let spec = import::parse_import_frames_list("0,30,120").unwrap();
+    let import::ImportFrameSpec::List(frames) = spec else {
+        panic!("expected list frame spec");
+    };
+    assert_eq!(frames, vec![0.0, 30.0, 120.0]);
+}
+
+#[test]
+fn import_frame_range_parser_is_inclusive() {
+    let spec = import::parse_import_frame_range("0:10:5").unwrap();
+    let import::ImportFrameSpec::Range(frames) = spec else {
+        panic!("expected range frame spec");
+    };
+    assert_eq!(frames, vec![0.0, 5.0, 10.0]);
+}
+
+#[test]
+fn import_frame_parsers_reject_invalid_values() {
+    assert!(import::parse_import_frames_list("").is_err());
+    assert!(import::parse_import_frames_list("0,,30").is_err());
+    assert!(import::parse_import_frame_range("0:30").is_err());
+    assert!(import::parse_import_frame_range("0:30:0").is_err());
+    assert!(import::parse_import_frame_range("30:0:1").is_err());
+}
+
+#[test]
+fn import_runtime_batch_report_preserves_requested_frame_order() {
+    let (pmx, vmd) = runtime_batch_fixture_paths();
+    let report = import::build_import_runtime_batch_report(
+        &pmx,
+        &vmd,
+        import::ImportFrameSpec::List(vec![30.0, 0.0, 120.0]),
+    )
+    .unwrap();
+
+    assert_eq!(report.per_frame.len(), 3);
+    assert_eq!(report.per_frame[0].frame, 30.0);
+    assert_eq!(report.per_frame[1].frame, 0.0);
+    assert_eq!(report.per_frame[2].frame, 120.0);
+    assert!(
+        report
+            .per_frame
+            .iter()
+            .all(|frame| frame.world_matrices > 0)
+    );
+}
+
+#[test]
+fn import_runtime_batch_single_frame_matches_range_frame() {
+    let (pmx, vmd) = runtime_batch_fixture_paths();
+    let list_report = import::build_import_runtime_batch_report(
+        &pmx,
+        &vmd,
+        import::ImportFrameSpec::List(vec![120.0]),
+    )
+    .unwrap();
+    let range_report = import::build_import_runtime_batch_report(
+        &pmx,
+        &vmd,
+        import::parse_import_frame_range("120:120:1").unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(list_report.per_frame[0], range_report.per_frame[0]);
+    assert_eq!(
+        list_report.per_frame[0].ik_enabled_count,
+        list_report.per_frame[0].ik_enabled.len()
+    );
 }
 
 #[test]

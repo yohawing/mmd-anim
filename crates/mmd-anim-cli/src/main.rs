@@ -58,15 +58,15 @@ enum Commands {
 
     /// Import model and optional motion into runtime structures.
     #[command(
-        long_about = "Run the runtime importer for a model, or a model/motion pair.\nUse this when checking runtime names, clip build stats, or a single evaluated frame.\n\nSupported formats: .pmx + .vmd, .pmd + .vmd",
-        after_help = "Examples:\n  mmd-anim import model.pmx\n  mmd-anim import model.pmx motion.vmd --clip\n  mmd-anim import model.pmx motion.vmd --frame 120\n    (unit: MMD coordinate)"
+        long_about = "Run the runtime importer for a model, or a model/motion pair.\nUse this when checking runtime names, clip build stats, a single evaluated frame, or batch frame JSON for host comparisons.\n--frame-range uses inclusive START:END:STEP in MMD frame units.\n\nSupported formats: .pmx + .vmd, .pmd + .vmd",
+        after_help = "Examples:\n  mmd-anim import model.pmx\n  mmd-anim import model.pmx motion.vmd --clip\n  mmd-anim import model.pmx motion.vmd --frame 120\n  mmd-anim import model.pmx motion.vmd --frames 0,30,60 --json\n  mmd-anim import model.pmx motion.vmd --frame-range 0:120:5 --json\n    (unit: MMD coordinate)"
     )]
     Import {
         /// Path to the PMX/PMD model file
         model: PathBuf,
         /// Optional path to the VMD motion file
         motion: Option<PathBuf>,
-        /// Request JSON output where supported
+        /// Request JSON output where supported. Required with --frames or --frame-range.
         #[arg(long)]
         json: bool,
         /// Show clip build statistics for a model/motion pair
@@ -75,6 +75,12 @@ enum Commands {
         /// Evaluate a single frame for a model/motion pair
         #[arg(long)]
         frame: Option<f32>,
+        /// Evaluate multiple frames for a model/motion pair, as comma-separated MMD frame values
+        #[arg(long, value_name = "LIST")]
+        frames: Option<String>,
+        /// Evaluate an inclusive frame range for a model/motion pair: START:END:STEP
+        #[arg(long, value_name = "START:END:STEP")]
+        frame_range: Option<String>,
     },
 
     /// Verify parse/export/re-parse stability.
@@ -290,7 +296,17 @@ fn main() -> ExitCode {
             json,
             clip,
             frame,
-        }) => dispatch_import(&model, motion.as_deref(), json, clip, frame),
+            frames,
+            frame_range,
+        }) => dispatch_import(
+            &model,
+            motion.as_deref(),
+            json,
+            clip,
+            frame,
+            frames,
+            frame_range,
+        ),
         Some(Commands::Roundtrip {
             asset,
             json,
@@ -424,15 +440,44 @@ fn dispatch_import(
     use_json: bool,
     show_clip: bool,
     frame: Option<f32>,
+    frames: Option<String>,
+    frame_range: Option<String>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    if use_json {
-        return usage_error("import --json is not supported by the existing import summaries");
+    let batch_requested = frames.is_some() || frame_range.is_some();
+    if use_json && !batch_requested {
+        return usage_error("import --json is only supported with --frames or --frame-range");
     }
     if show_clip && frame.is_some() {
         return usage_error("import --clip and --frame cannot be combined");
     }
+    if show_clip && batch_requested {
+        return usage_error("import --clip cannot be combined with --frames or --frame-range");
+    }
+    if frame.is_some() && batch_requested {
+        return usage_error("import --frame cannot be combined with --frames or --frame-range");
+    }
+    if frames.is_some() && frame_range.is_some() {
+        return usage_error("import --frames and --frame-range cannot be combined");
+    }
+    if batch_requested && !use_json {
+        return usage_error("import --frames and --frame-range require --json");
+    }
 
     if let Some(motion) = motion {
+        if let Some(frames) = frames {
+            let frame_spec = match commands::import::parse_import_frames_list(&frames) {
+                Ok(frame_spec) => frame_spec,
+                Err(error) => return usage_error(error),
+            };
+            return commands::import::import_pair_frames_json(model, motion, frame_spec);
+        }
+        if let Some(frame_range) = frame_range {
+            let frame_spec = match commands::import::parse_import_frame_range(&frame_range) {
+                Ok(frame_spec) => frame_spec,
+                Err(error) => return usage_error(error),
+            };
+            return commands::import::import_pair_frames_json(model, motion, frame_spec);
+        }
         if show_clip {
             return commands::import::import_pair_clip_summary(model, motion);
         }
@@ -442,8 +487,10 @@ fn dispatch_import(
         return commands::import::import_pair_summary(model, motion);
     }
 
-    if show_clip || frame.is_some() {
-        return usage_error("import --clip and --frame require a motion argument");
+    if show_clip || frame.is_some() || batch_requested {
+        return usage_error(
+            "import --clip, --frame, --frames, and --frame-range require a motion argument",
+        );
     }
     match detect_path_format(model)? {
         mmd_anim_format::MmdFormatKind::Pmx => commands::import::import_pmx_summary(model),

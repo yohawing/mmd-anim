@@ -235,6 +235,26 @@ enum Commands {
         /// Path to the output PMX file
         output: PathBuf,
     },
+
+    /// Sample a VMD camera, light, or self-shadow track at one frame.
+    #[command(
+        name = "vmd-sample",
+        long_about = "Sample a VMD camera, light, or self-shadow track at a frame.\nUse this to get canonical parser/runtime-independent values for preview, fixture, or host comparison workflows.\n\nSupported formats: .vmd",
+        after_help = "Examples:\n  mmd-anim vmd-sample motion.vmd --kind camera --frame 120\n  mmd-anim vmd-sample motion.vmd --kind light --frame 20 --json\n  mmd-anim vmd-sample motion.vmd --kind self-shadow --frame 20"
+    )]
+    VmdSample {
+        /// Path to the VMD motion file
+        motion: PathBuf,
+        /// Track kind to sample
+        #[arg(long, value_enum)]
+        kind: commands::vmd_sample::VmdSampleKind,
+        /// Frame to sample, in MMD frame units
+        #[arg(long)]
+        frame: f32,
+        /// Output sampled state as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -338,6 +358,12 @@ fn main() -> ExitCode {
         Some(Commands::BuildPmx { input, output }) => {
             commands::export::export_pmx_from_parts_manifest(&input, &output)
         }
+        Some(Commands::VmdSample {
+            motion,
+            kind,
+            frame,
+            json,
+        }) => dispatch_vmd_sample(&motion, kind, frame, json),
     };
 
     match result {
@@ -378,6 +404,18 @@ fn dispatch_inspect(
     } else {
         commands::parse::parse_format_summary(asset)
     }
+}
+
+fn dispatch_vmd_sample(
+    motion: &Path,
+    kind: commands::vmd_sample::VmdSampleKind,
+    frame: f32,
+    json: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if !frame.is_finite() {
+        return usage_error("vmd-sample --frame must be finite");
+    }
+    commands::vmd_sample::vmd_sample(motion, kind, frame, json)
 }
 
 fn dispatch_import(

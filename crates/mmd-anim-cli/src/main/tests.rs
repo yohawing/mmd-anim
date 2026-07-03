@@ -11,7 +11,7 @@ use mmd_anim_runtime::{
     MovableBoneTrack, RuntimeInstance,
 };
 
-use crate::commands::{bench, compare, export, patch};
+use crate::commands::{bench, compare, export, patch, vmd_sample};
 
 fn unique_test_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -19,6 +19,20 @@ fn unique_test_dir(name: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     env::temp_dir().join(format!("mmd-anim-cli-{name}-{nanos}"))
+}
+
+fn assert_f32_near(actual: f32, expected: f32) {
+    let delta = (actual - expected).abs();
+    assert!(
+        delta < 1.0e-4,
+        "actual={actual:?} expected={expected:?} delta={delta:?}"
+    );
+}
+
+fn assert_array3_near(actual: [f32; 3], expected: [f32; 3]) {
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        assert_f32_near(actual, expected);
+    }
 }
 
 #[test]
@@ -985,6 +999,97 @@ fn export_pmx_from_parts_manifest_rejects_partial_skinning() {
     assert!(!output.exists());
 
     fs::remove_dir_all(temp).unwrap();
+}
+
+fn light_self_shadow_vmd_bytes() -> Vec<u8> {
+    let parsed = mmd_anim_format::VmdParsedAnimation {
+        kind: "vmd",
+        metadata: mmd_anim_format::vmd::VmdParsedMetadata {
+            format: "vmd",
+            model_name: "sample".to_owned(),
+            model_name_bytes: Vec::new(),
+            counts: mmd_anim_format::vmd::VmdParsedCounts {
+                bones: 0,
+                morphs: 0,
+                cameras: 0,
+                lights: 2,
+                self_shadows: 2,
+                properties: 0,
+            },
+            max_frame: 30,
+        },
+        bone_frames: Vec::new(),
+        morph_frames: Vec::new(),
+        camera_frames: Vec::new(),
+        light_frames: vec![
+            mmd_anim_format::vmd::VmdParsedLightFrame {
+                frame: 30,
+                color: [1.0, 0.5, 0.0],
+                direction: [0.0, -1.0, 0.0],
+            },
+            mmd_anim_format::vmd::VmdParsedLightFrame {
+                frame: 10,
+                color: [0.0, 0.0, 1.0],
+                direction: [1.0, 0.0, 0.0],
+            },
+        ],
+        self_shadow_frames: vec![
+            mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+                frame: 10,
+                mode: 1,
+                distance: 20.0,
+            },
+            mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+                frame: 30,
+                mode: 2,
+                distance: 60.0,
+            },
+        ],
+        property_frames: Vec::new(),
+    };
+    mmd_anim_format::export_vmd_animation(&parsed)
+}
+
+#[test]
+fn vmd_sample_camera_matches_fixture_sampler() {
+    let data = include_bytes!("../../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+    let state =
+        vmd_sample::sample_vmd_bytes(data, vmd_sample::VmdSampleKind::Camera, 22.5).unwrap();
+
+    let vmd_sample::VmdSampleState::Camera(camera) = state else {
+        panic!("expected camera sample");
+    };
+    assert_f32_near(camera.distance, -40.25);
+    assert_array3_near(camera.position, [-0.25, 6.0, 1.625]);
+    assert_array3_near(camera.rotation, [-0.1, -0.1, 0.75]);
+    assert_f32_near(camera.fov, 47.5);
+    assert!(camera.perspective);
+}
+
+#[test]
+fn vmd_sample_light_matches_exported_fixture_sampler() {
+    let data = light_self_shadow_vmd_bytes();
+    let state =
+        vmd_sample::sample_vmd_bytes(&data, vmd_sample::VmdSampleKind::Light, 20.0).unwrap();
+
+    let vmd_sample::VmdSampleState::Light(light) = state else {
+        panic!("expected light sample");
+    };
+    assert_array3_near(light.color, [0.5, 0.25, 0.5]);
+    assert_array3_near(light.direction, [0.5, -0.5, 0.0]);
+}
+
+#[test]
+fn vmd_sample_self_shadow_matches_exported_fixture_sampler() {
+    let data = light_self_shadow_vmd_bytes();
+    let state =
+        vmd_sample::sample_vmd_bytes(&data, vmd_sample::VmdSampleKind::SelfShadow, 20.0).unwrap();
+
+    let vmd_sample::VmdSampleState::SelfShadow(self_shadow) = state else {
+        panic!("expected self-shadow sample");
+    };
+    assert_eq!(self_shadow.mode, 1);
+    assert_f32_near(self_shadow.distance, 40.0);
 }
 
 #[test]

@@ -10,6 +10,7 @@ use mmd_anim_runtime::{
 use crate::binary::ByteReader;
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
+use crate::sjis::{decode_sjis_fixed_trimmed, encode_sjis};
 
 type Reader<'a> = ByteReader<'a>;
 
@@ -860,9 +861,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 fn decode_sjis_fixed(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let (decoded, _, _) = encoding_rs::SHIFT_JIS.decode(&bytes[..end]);
-    decoded.trim().to_owned()
+    decode_sjis_fixed_trimmed(bytes)
 }
 
 fn trim_fixed_bytes(bytes: &[u8]) -> &[u8] {
@@ -880,8 +879,8 @@ fn write_f32(out: &mut Vec<u8>, value: f32) {
 
 fn write_fixed_name_bytes(out: &mut Vec<u8>, value: &str, raw_bytes: &[u8], len: usize) {
     if raw_bytes.is_empty() {
-        let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(value);
-        write_fixed_bytes(out, encoded.as_ref(), len);
+        let encoded = encode_sjis(value);
+        write_fixed_bytes(out, &encoded, len);
     } else {
         write_fixed_bytes(out, raw_bytes, len);
     }

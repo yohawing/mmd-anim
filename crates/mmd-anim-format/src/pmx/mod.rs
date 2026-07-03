@@ -10,6 +10,7 @@ use mmd_anim_runtime::{
 
 use crate::binary::ByteReader;
 use crate::error::ImportError;
+use crate::sjis::encode_sjis;
 
 type Reader<'a> = ByteReader<'a>;
 
@@ -1132,8 +1133,7 @@ pub fn pmx_model_to_rig_spec(model: &PmxParsedModel) -> PmxRigSpec {
 }
 
 fn shift_jis_hex(text: &str) -> String {
-    let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(text);
-    bytes_to_hex(&encoded)
+    bytes_to_hex(&encode_sjis(text))
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {

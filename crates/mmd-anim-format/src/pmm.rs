@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
-use encoding_rs::SHIFT_JIS;
 use serde::Serialize;
 
 use crate::error::ImportError;
 use crate::pmx::PmxParsedModel;
+use crate::sjis::{decode_sjis, decode_sjis_trim_nul, encode_sjis};
 use crate::vmd::{VmdParsedAnimation, VmdParsedBoneFrame, VmdParsedMorphFrame};
 
 #[derive(Debug, Clone, Serialize)]
@@ -2427,8 +2427,7 @@ fn push_i32(out: &mut Vec<u8>, value: i32) {
 }
 
 fn push_pmm_fixed_sjis(out: &mut Vec<u8>, text: &str, length: usize) {
-    let (encoded, _, _) = SHIFT_JIS.encode(text);
-    let encoded = encoded.into_owned();
+    let encoded = encode_sjis(text);
     let mut bytes = vec![0u8; length];
     let copy_len = encoded.len().min(length);
     bytes[..copy_len].copy_from_slice(&encoded[..copy_len]);
@@ -2439,8 +2438,7 @@ fn push_pmm_fixed_sjis(out: &mut Vec<u8>, text: &str, length: usize) {
 /// Leaves room for a trailing NUL if encoded length < slice length.
 /// Intended for patching document model path fields in source bytes.
 fn write_pmm_fixed_sjis_to_slice(dest: &mut [u8], text: &str) -> Result<(), String> {
-    let (encoded, _, _) = SHIFT_JIS.encode(text);
-    let encoded = encoded.into_owned();
+    let encoded = encode_sjis(text);
     if encoded.len() >= dest.len() {
         return Err("encoded Shift-JIS path must leave room for NUL terminator".to_owned());
     }
@@ -2667,8 +2665,7 @@ fn push_pmm_len_prefixed_sjis(out: &mut Vec<u8>, text: &str, original_bytes: &[u
     let bytes = if !original_bytes.is_empty() {
         original_bytes.to_vec()
     } else {
-        let (encoded, _, _) = SHIFT_JIS.encode(text);
-        encoded.into_owned()
+        encode_sjis(text)
     };
     let length = bytes.len().min(u8::MAX as usize);
     out.push(length as u8);
@@ -2682,8 +2679,7 @@ fn push_pmm_sjis_string(out: &mut Vec<u8>, text: &str, original_bytes: Option<&[
         out.extend_from_slice(bytes);
         return;
     }
-    let (encoded, _, _) = SHIFT_JIS.encode(text);
-    out.extend_from_slice(&encoded);
+    out.extend_from_slice(&encode_sjis(text));
 }
 
 fn timeline_from_project_settings(settings: &PmmProjectSettings) -> PmmTimeline {
@@ -2887,8 +2883,7 @@ fn parse_header_text_entries(
         }
         if index > chunk_start {
             let bytes = &data[chunk_start..index];
-            let (decoded, _, _) = SHIFT_JIS.decode(bytes);
-            let text = decoded.trim().to_owned();
+            let text = decode_sjis(bytes).trim().to_owned();
             if !text.is_empty() {
                 entries.push(PmmHeaderTextEntry {
                     index: entries.len(),
@@ -4188,8 +4183,7 @@ fn usize_from_i32(value: i32) -> Option<usize> {
 }
 
 fn decode_shift_jis(bytes: &[u8]) -> String {
-    let (decoded, _, _) = SHIFT_JIS.decode(bytes);
-    decoded.trim_end_matches('\0').to_owned()
+    decode_sjis_trim_nul(bytes)
 }
 
 #[derive(Debug, Clone)]
@@ -4272,7 +4266,7 @@ fn parse_model_slot_at(
     if path_end == path_offset {
         return Err("empty_path");
     }
-    let (decoded_path, _, _) = SHIFT_JIS.decode(&data[path_offset..path_end]);
+    let decoded_path = decode_sjis(&data[path_offset..path_end]);
     let model_path = find_asset_candidates(&decoded_path)
         .into_iter()
         .find(|candidate| {
@@ -4339,12 +4333,7 @@ fn read_pmm_len_prefixed_sjis(data: &[u8], offset: usize) -> Option<(String, Vec
     if bytes.contains(&0) {
         return None;
     }
-    let (decoded, _, _) = SHIFT_JIS.decode(bytes);
-    Some((
-        decoded.trim_end_matches('\0').to_owned(),
-        bytes.to_vec(),
-        end,
-    ))
+    Some((decode_sjis_trim_nul(bytes), bytes.to_vec(), end))
 }
 
 fn extract_asset_references(data: &[u8]) -> Vec<PmmAssetReference> {
@@ -4355,7 +4344,7 @@ fn extract_asset_references(data: &[u8]) -> Vec<PmmAssetReference> {
             continue;
         }
         if index > chunk_start {
-            let (decoded, _, _) = SHIFT_JIS.decode(&data[chunk_start..index]);
+            let decoded = decode_sjis(&data[chunk_start..index]);
             for candidate in find_asset_candidates(&decoded) {
                 let normalized = normalize_path(&candidate);
                 if refs.iter().any(|existing: &PmmAssetReference| {

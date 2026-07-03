@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use encoding_rs::SHIFT_JIS;
 use glam::Vec3A;
 use mmd_anim_runtime::{
     BoneIndex, BoneInit, IkLinkInit, IkSolverInit, ModelArena, MorphIndex, MorphInit,
@@ -11,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::binary::ByteReader;
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
+use crate::sjis::{decode_sjis_fixed_trimmed, encode_sjis, encode_sjis_prefix_fit};
 
 type Reader<'a> = ByteReader<'a>;
 
@@ -891,8 +891,8 @@ fn build_pmd_vertex_morph_offsets(
 }
 
 fn insert_sjis_name_keys<T: Copy>(map: &mut HashMap<Vec<u8>, T>, name: &str, value: T) {
-    let (encoded, _, _) = SHIFT_JIS.encode(name);
-    let normalized = normalize_vmd_name(encoded.as_ref());
+    let encoded = encode_sjis(name);
+    let normalized = normalize_vmd_name(&encoded);
     if !normalized.is_empty() {
         map.insert(normalized, value);
     }
@@ -996,18 +996,8 @@ fn write_fixed_text(out: &mut Vec<u8>, text: &str, raw: &[u8], len: usize) {
         let copy_len = raw.len().min(len);
         bytes[..copy_len].copy_from_slice(&raw[..copy_len]);
     } else {
-        let mut cursor = 0;
-        for ch in text.chars() {
-            let mut buf = [0u8; 4];
-            let s = ch.encode_utf8(&mut buf);
-            let (encoded, _, _) = SHIFT_JIS.encode(s);
-            let encoded = encoded.as_ref();
-            if cursor + encoded.len() > len {
-                break;
-            }
-            bytes[cursor..cursor + encoded.len()].copy_from_slice(encoded);
-            cursor += encoded.len();
-        }
+        let encoded = encode_sjis_prefix_fit(text, len);
+        bytes[..encoded.len()].copy_from_slice(&encoded);
     }
     out.extend_from_slice(&bytes);
 }
@@ -1062,9 +1052,7 @@ fn should_export_pmd_toon(model: &PmdParsedModel) -> bool {
 }
 
 fn decode_sjis_fixed(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let (decoded, _, _) = SHIFT_JIS.decode(&bytes[..end]);
-    decoded.trim().to_owned()
+    decode_sjis_fixed_trimmed(bytes)
 }
 
 #[cfg(test)]

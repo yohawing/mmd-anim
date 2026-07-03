@@ -1,17 +1,12 @@
 use std::sync::Arc;
 
-use glam::{Mat4, Quat};
+use glam::Quat;
 
+use crate::ik_primitive::{ChainLinkState, LinkStepInput, rotation, solve_link_step, translation};
 use crate::{AnimationClip, ModelArena, PoseArena};
-use crate::{
-    append_primitive::{AppendPrimitiveInput, solve_append_transform},
-    ik_primitive::{
-        ChainLinkState, LinkStepInput, constrain_rotation_to_axis, rotation, solve_link_step,
-        translation,
-    },
-};
 
 mod morph;
+mod world;
 
 #[cfg(test)]
 use crate::ik_primitive::{
@@ -170,167 +165,6 @@ impl RuntimeInstance {
     pub fn evaluate_current_pose_without_ik(&mut self) {
         self.pose.reset_ik_rotations();
         self.update_world_matrices();
-    }
-
-    fn update_world_matrices(&mut self) {
-        self.update_world_matrices_from_eval_order_position(0);
-    }
-
-    fn update_world_matrices_from_eval_order_position(&mut self, start_position: usize) {
-        self.update_world_matrices_from_eval_order_position_for_phase(start_position, None);
-    }
-
-    fn update_world_matrices_from_eval_order_position_for_phase(
-        &mut self,
-        start_position: usize,
-        phase: Option<bool>,
-    ) {
-        let start_position =
-            self.expand_update_start_for_append_dependencies(start_position, phase);
-        for bone in &self.model.eval_order()[start_position..] {
-            if !self.bone_matches_phase(*bone, phase) {
-                continue;
-            }
-            self.pose.reset_append_transform(*bone);
-        }
-        for position in start_position..self.model.eval_order().len() {
-            let bone = self.model.eval_order()[position];
-            if !self.bone_matches_phase(bone, phase) {
-                continue;
-            }
-            self.update_append_transform_for_bone(bone);
-            self.update_world_matrix_for_bone(bone);
-        }
-    }
-
-    fn update_world_matrices_using_current_append_from_eval_order_position(
-        &mut self,
-        start_position: usize,
-    ) {
-        self.update_world_matrices_using_current_append_from_eval_order_position_for_phase(
-            start_position,
-            None,
-        );
-    }
-
-    fn update_world_matrices_using_current_append_from_eval_order_position_for_phase(
-        &mut self,
-        start_position: usize,
-        phase: Option<bool>,
-    ) {
-        for position in start_position..self.model.eval_order().len() {
-            let bone = self.model.eval_order()[position];
-            if !self.bone_matches_phase(bone, phase) {
-                continue;
-            }
-            self.update_world_matrix_for_bone(bone);
-        }
-    }
-
-    #[inline]
-    fn bone_matches_phase(&self, bone: crate::BoneIndex, phase: Option<bool>) -> bool {
-        phase.is_none_or(|after_physics| self.model.transform_after_physics(bone) == after_physics)
-    }
-
-    fn update_append_transform_for_bone(&mut self, bone: crate::BoneIndex) {
-        let Some(append_index) = self.model.append_transform_index(bone) else {
-            return;
-        };
-        let append = self.model.append_transform(append_index);
-        let use_source_append = !append.local
-            && self
-                .model
-                .append_transform_index(append.source_bone)
-                .is_some();
-        let mut source_rotation = if use_source_append {
-            self.pose.append_rotation(append.source_bone)
-        } else {
-            self.pose.local_rotation(append.source_bone)
-        };
-        if use_source_append && self.model.is_ik_link_bone(append.source_bone) {
-            source_rotation =
-                (self.pose.ik_rotation(append.source_bone) * source_rotation).normalize();
-        }
-        let source_position_offset = if use_source_append {
-            self.pose.append_position_offset(append.source_bone)
-        } else {
-            self.pose.local_position_offset(append.source_bone)
-        };
-        let append_output = solve_append_transform(AppendPrimitiveInput {
-            source_position_offset,
-            source_rotation,
-            ratio: append.ratio,
-            affect_rotation: append.affect_rotation,
-            affect_translation: append.affect_translation,
-        });
-        self.pose.set_append_rotation(bone, append_output.rotation);
-        self.pose
-            .set_append_position_offset(bone, append_output.position_offset);
-    }
-
-    fn update_world_matrix_for_bone(&mut self, bone: crate::BoneIndex) {
-        #[cfg(test)]
-        {
-            self.world_matrix_bone_update_count += 1;
-        }
-        let mut local_position =
-            self.model.rest_position(bone) + self.pose.local_position_offset(bone);
-        let mut local_rotation = self.pose.local_rotation(bone);
-        let local_scale = self.pose.local_scale(bone);
-
-        if let Some(append_index) = self.model.append_transform_index(bone) {
-            let append = self.model.append_transform(append_index);
-            if append.affect_rotation {
-                local_rotation = (local_rotation * self.pose.append_rotation(bone)).normalize();
-            }
-            if append.affect_translation {
-                local_position += self.pose.append_position_offset(bone);
-            }
-        }
-
-        if let Some(axis) = self.model.fixed_axis_constraint(bone) {
-            local_rotation = constrain_rotation_to_axis(local_rotation, axis);
-        }
-
-        let local_matrix = Mat4::from_scale_rotation_translation(
-            local_scale.into(),
-            local_rotation,
-            local_position.into(),
-        );
-
-        let world_matrix = match self.model.parent_index(bone) {
-            Some(parent) => self.pose.world_matrices()[parent.as_usize()] * local_matrix,
-            None => local_matrix,
-        };
-
-        self.pose.set_world_matrix(bone, world_matrix);
-        self.pose
-            .set_skinning_matrix(bone, world_matrix * self.model.inverse_bind_matrix(bone));
-    }
-
-    fn expand_update_start_for_append_dependencies(
-        &self,
-        start_position: usize,
-        phase: Option<bool>,
-    ) -> usize {
-        let mut start = start_position;
-        loop {
-            let mut changed = false;
-            for append in self.model.append_transforms() {
-                if !self.bone_matches_phase(append.target_bone, phase) {
-                    continue;
-                }
-                let source_position = self.model.eval_order_position(append.source_bone);
-                let target_position = self.model.eval_order_position(append.target_bone);
-                if source_position >= start && target_position < start {
-                    start = target_position;
-                    changed = true;
-                }
-            }
-            if !changed {
-                return start;
-            }
-        }
     }
 
     fn evaluate_current_pose_ordered(&mut self, options: IkSolveOptions) {
@@ -716,26 +550,6 @@ impl RuntimeInstance {
         self.expand_morphs();
         self.pose.reset_ik_rotations();
         self.update_world_matrices();
-    }
-
-    #[inline]
-    pub fn world_matrices(&self) -> &[Mat4] {
-        self.pose.world_matrices()
-    }
-
-    #[cfg(test)]
-    fn reset_world_matrix_bone_update_count(&mut self) {
-        self.world_matrix_bone_update_count = 0;
-    }
-
-    #[cfg(test)]
-    fn world_matrix_bone_update_count(&self) -> usize {
-        self.world_matrix_bone_update_count
-    }
-
-    #[inline]
-    pub fn skinning_matrices(&self) -> &[Mat4] {
-        self.pose.skinning_matrices()
     }
 
     pub fn reset_ik_runtime_stats(&mut self) {

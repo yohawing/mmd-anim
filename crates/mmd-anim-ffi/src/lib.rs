@@ -1575,50 +1575,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_skinning_modes_json(
         }
         let bytes = unsafe { slice::from_raw_parts(data, len) };
         match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let vertex_count = parsed.geometry.positions.len() / 3;
-                let modes: Vec<&str> = (0..vertex_count)
-                    .map(|i| {
-                        if parsed.geometry.sdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
-                            "sdef"
-                        } else if parsed.geometry.qdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5
-                        {
-                            "qdef"
-                        } else {
-                            let w2 = parsed
-                                .geometry
-                                .skin_weights
-                                .get(i * 4 + 2)
-                                .copied()
-                                .unwrap_or(0.0);
-                            let w3 = parsed
-                                .geometry
-                                .skin_weights
-                                .get(i * 4 + 3)
-                                .copied()
-                                .unwrap_or(0.0);
-                            let w1 = parsed
-                                .geometry
-                                .skin_weights
-                                .get(i * 4 + 1)
-                                .copied()
-                                .unwrap_or(0.0);
-                            if w2 != 0.0 || w3 != 0.0 {
-                                "bdef4"
-                            } else if w1 != 0.0 {
-                                "bdef2"
-                            } else {
-                                "bdef1"
-                            }
-                        }
-                    })
-                    .collect();
-                let wrapper = serde_json::json!({ "skinningModes": modes });
-                match serde_json::to_vec(&wrapper) {
-                    Ok(json) => byte_buffer_from_vec(json),
-                    Err(_) => empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
-                }
-            }
+            Ok(parsed) => pmx_skinning_modes_json_buffer(&parsed.geometry),
             Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
         }
     })
@@ -1913,6 +1870,25 @@ pub unsafe extern "C" fn mmd_runtime_pmx_geometry_qdef_enabled_buffer(
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
         pmx_geometry_f32_flags_buffer(geometry, |geometry| &geometry.qdef.enabled)
+    })
+}
+
+/// Returns handle-owned PMX skinning mode names as a JSON object.
+///
+/// The returned JSON has the shape `{"skinningModes": ["bdef1", ...]}`.
+///
+/// # Safety
+/// `geometry` must be null or a valid handle returned by
+/// `mmd_runtime_pmx_geometry_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_pmx_geometry_skinning_modes_json(
+    geometry: *const MmdRuntimePmxGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(geometry) = (unsafe { geometry.as_ref() }) else {
+            return empty_byte_buffer();
+        };
+        pmx_skinning_modes_json_buffer(&geometry.parsed.geometry)
     })
 }
 
@@ -2469,6 +2445,57 @@ fn pmx_raw_f32_flags_buffer(
                 .collect(),
         ),
         Err(buffer) => buffer,
+    }
+}
+
+fn pmx_skinning_modes_json_buffer(
+    geometry: &mmd_anim_format::pmx::PmxParsedGeometry,
+) -> MmdRuntimeFfiByteBuffer {
+    let vertex_count = geometry.positions.len() / 3;
+    let modes: Vec<&str> = (0..vertex_count)
+        .map(|i| pmx_skinning_mode(geometry, i))
+        .collect();
+    let wrapper = serde_json::json!({ "skinningModes": modes });
+    match serde_json::to_vec(&wrapper) {
+        Ok(json) => byte_buffer_from_vec(json),
+        Err(_) => empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
+    }
+}
+
+fn pmx_skinning_mode(
+    geometry: &mmd_anim_format::pmx::PmxParsedGeometry,
+    vertex_index: usize,
+) -> &'static str {
+    if geometry
+        .sdef
+        .enabled
+        .get(vertex_index)
+        .copied()
+        .unwrap_or(0.0)
+        > 0.5
+    {
+        "sdef"
+    } else if geometry
+        .qdef
+        .enabled
+        .get(vertex_index)
+        .copied()
+        .unwrap_or(0.0)
+        > 0.5
+    {
+        "qdef"
+    } else {
+        let base = vertex_index * 4;
+        let w1 = geometry.skin_weights.get(base + 1).copied().unwrap_or(0.0);
+        let w2 = geometry.skin_weights.get(base + 2).copied().unwrap_or(0.0);
+        let w3 = geometry.skin_weights.get(base + 3).copied().unwrap_or(0.0);
+        if w2 != 0.0 || w3 != 0.0 {
+            "bdef4"
+        } else if w1 != 0.0 {
+            "bdef2"
+        } else {
+            "bdef1"
+        }
     }
 }
 

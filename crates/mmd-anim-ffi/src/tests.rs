@@ -2894,11 +2894,26 @@ fn pmx_skinning_modes_json_has_correct_shape() {
     let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
     let vertex_count = parsed.metadata.counts.vertices as usize;
 
-    let buf = unsafe { mmd_runtime_parse_pmx_skinning_modes_json(bytes.as_ptr(), bytes.len()) };
-    assert!(!buf.data.is_null());
-    assert!(buf.len > 0);
+    let legacy_json = ffi_buffer_to_vec(unsafe {
+        mmd_runtime_parse_pmx_skinning_modes_json(bytes.as_ptr(), bytes.len())
+    });
+    assert!(!legacy_json.is_empty());
 
-    let json_str = unsafe { str::from_utf8(slice::from_raw_parts(buf.data, buf.len)) }.unwrap();
+    let geometry = unsafe { mmd_runtime_pmx_geometry_create(bytes.as_ptr(), bytes.len()) };
+    assert!(!geometry.is_null(), "geometry handle must not be null");
+    let handle_json =
+        ffi_buffer_to_vec(unsafe { mmd_runtime_pmx_geometry_skinning_modes_json(geometry) });
+    assert_eq!(
+        handle_json, legacy_json,
+        "handle skinning modes JSON must match legacy bytes API"
+    );
+    assert_empty_ffi_buffer(
+        unsafe { mmd_runtime_pmx_geometry_skinning_modes_json(ptr::null()) },
+        "null PMX geometry skinning modes",
+    );
+    unsafe { mmd_runtime_pmx_geometry_free(geometry) };
+
+    let json_str = str::from_utf8(&legacy_json).unwrap();
     let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
 
     let modes = v
@@ -2913,6 +2928,4 @@ fn pmx_skinning_modes_json_has_correct_shape() {
             "unexpected skinning mode: {s}"
         );
     }
-
-    unsafe { mmd_runtime_byte_buffer_free(buf) };
 }

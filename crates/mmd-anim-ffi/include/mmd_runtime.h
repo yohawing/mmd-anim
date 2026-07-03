@@ -381,6 +381,10 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_rw1_buffer(
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_qdef_enabled_buffer(
     const mmd_runtime_pmx_geometry_t* geometry);
 
+/* Returns handle-owned JSON: {"skinningModes": ["bdef1", ...]} */
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_skinning_modes_json(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
 /* Rig primitive API.
    Coordinates use the MMD convention: left-handed, Y-up, xyz vectors.
    Quaternions are xyzw. Matrices are column-major f32[16].

@@ -1295,6 +1295,166 @@ fn build_project_keyframe_references(
     keyframe_references
 }
 
+fn build_project_byte_coverage(
+    doc: &PmmDocumentSummary,
+    glob: &PmmDocumentGlobalSummary,
+) -> PmmProjectByteCoverage {
+    // Build byteCoverage summary derived only from already-decoded range summaries.
+    // Diagnostic/exporter-prep slice: which top-level decoded sections cover bytes in the PMM.
+    // Includes: per decoded model, global root, global camera/light/gravity/selfShadow tracks,
+    // accessory block, and each decoded accessory. No raw bytes, no keyframe-level ranges
+    // (those are in keyframeReferences).
+    let mut bc_ranges: Vec<PmmProjectByteRange> = Vec::new();
+
+    // each decoded document model
+    for model in &doc.models {
+        let bl = model.offset_end - model.offset;
+        bc_ranges.push(PmmProjectByteRange {
+            scope: "model",
+            kind: "model",
+            owner_index: Some(model.slot_index),
+            document_index: Some(model.document_model_index),
+            name: Some(model.name.clone()),
+            offset: model.offset,
+            offset_end: model.offset_end,
+            byte_length: bl,
+        });
+    }
+
+    // global root (the document global summary span)
+    {
+        let off = glob.offset;
+        let end = glob.offset_end;
+        bc_ranges.push(PmmProjectByteRange {
+            scope: "global",
+            kind: "root",
+            owner_index: None,
+            document_index: None,
+            name: None,
+            offset: off,
+            offset_end: end,
+            byte_length: end - off,
+        });
+    }
+
+    // global tracks (camera/light/gravity/selfShadow) - use their track.offset..offset_end
+    bc_ranges.push(make_global_track_byte_range(&glob.camera, "camera"));
+    bc_ranges.push(make_global_track_byte_range(&glob.light, "light"));
+    bc_ranges.push(make_global_track_byte_range(&glob.gravity, "gravity"));
+    bc_ranges.push(make_global_track_byte_range(
+        &glob.self_shadow,
+        "selfShadow",
+    ));
+
+    // accessory block
+    {
+        let blk = &glob.accessories;
+        let bl = blk.offset_end - blk.offset;
+        bc_ranges.push(PmmProjectByteRange {
+            scope: "global",
+            kind: "accessoryBlock",
+            owner_index: None,
+            document_index: None,
+            name: None,
+            offset: blk.offset,
+            offset_end: blk.offset_end,
+            byte_length: bl,
+        });
+    }
+
+    // each decoded accessory
+    for acc in &glob.accessories.accessories {
+        let bl = acc.offset_end - acc.offset;
+        bc_ranges.push(PmmProjectByteRange {
+            scope: "accessory",
+            kind: "accessory",
+            owner_index: Some(acc.slot_index),
+            document_index: Some(acc.document_accessory_index),
+            name: Some(acc.name.clone()),
+            offset: acc.offset,
+            offset_end: acc.offset_end,
+            byte_length: bl,
+        });
+    }
+
+    // Merge overlapping decoded ranges (e.g. global root overlaps global tracks; models/tracks may abut or overlap)
+    // before summing for covered_byte_length. Compute unknown gaps within the overall span [bc_offset, bc_offset_end].
+    let mut merged: Vec<(usize, usize)> =
+        bc_ranges.iter().map(|r| (r.offset, r.offset_end)).collect();
+    merged.sort_by_key(|&(s, _)| s);
+    let mut merged_intervals: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in merged {
+        if let Some(last) = merged_intervals.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+            } else {
+                merged_intervals.push((start, end));
+            }
+        } else {
+            merged_intervals.push((start, end));
+        }
+    }
+    let covered_byte_length: usize = merged_intervals.iter().map(|&(s, e)| e - s).sum();
+
+    let bc_offset = bc_ranges.iter().map(|r| r.offset).min().unwrap_or(0);
+    let bc_offset_end = bc_ranges.iter().map(|r| r.offset_end).max().unwrap_or(0);
+    let bc_byte_length = bc_offset_end - bc_offset;
+
+    let mut gaps: Vec<PmmProjectByteRange> = Vec::new();
+    let mut cursor = bc_offset;
+    for (gstart, gend) in &merged_intervals {
+        if cursor < *gstart {
+            let goff = cursor;
+            let gend_ = *gstart;
+            let glen = gend_ - goff;
+            gaps.push(PmmProjectByteRange {
+                scope: "unknown",
+                kind: "gap",
+                owner_index: None,
+                document_index: None,
+                name: None,
+                offset: goff,
+                offset_end: gend_,
+                byte_length: glen,
+            });
+        }
+        cursor = cursor.max(*gend);
+    }
+    if cursor < bc_offset_end {
+        let goff = cursor;
+        let gend_ = bc_offset_end;
+        let glen = gend_ - goff;
+        gaps.push(PmmProjectByteRange {
+            scope: "unknown",
+            kind: "gap",
+            owner_index: None,
+            document_index: None,
+            name: None,
+            offset: goff,
+            offset_end: gend_,
+            byte_length: glen,
+        });
+    }
+
+    let coverage_ratio = if bc_byte_length == 0 {
+        1.0
+    } else {
+        covered_byte_length as f32 / bc_byte_length as f32
+    };
+
+    PmmProjectByteCoverage {
+        offset: bc_offset,
+        offset_end: bc_offset_end,
+        byte_length: bc_byte_length,
+        covered_byte_length,
+        coverage_ratio,
+        gap_count: gaps.len(),
+        gaps,
+        range_count: bc_ranges.len(),
+        ranges: bc_ranges,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_asset_binding(
     scope: &'static str,
@@ -1528,161 +1688,7 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
         (Some(doc), Some(glob)) => {
             let track_references = build_project_track_references(doc, glob);
             let keyframe_references = build_project_keyframe_references(doc, glob);
-
-            // Build byteCoverage summary derived only from already-decoded range summaries.
-            // Diagnostic/exporter-prep slice: which top-level decoded sections cover bytes in the PMM.
-            // Includes: per decoded model, global root, global camera/light/gravity/selfShadow tracks,
-            // accessory block, and each decoded accessory. No raw bytes, no keyframe-level ranges
-            // (those are in keyframeReferences).
-            let mut bc_ranges: Vec<PmmProjectByteRange> = Vec::new();
-
-            // each decoded document model
-            for model in &doc.models {
-                let bl = model.offset_end - model.offset;
-                bc_ranges.push(PmmProjectByteRange {
-                    scope: "model",
-                    kind: "model",
-                    owner_index: Some(model.slot_index),
-                    document_index: Some(model.document_model_index),
-                    name: Some(model.name.clone()),
-                    offset: model.offset,
-                    offset_end: model.offset_end,
-                    byte_length: bl,
-                });
-            }
-
-            // global root (the document global summary span)
-            {
-                let off = glob.offset;
-                let end = glob.offset_end;
-                bc_ranges.push(PmmProjectByteRange {
-                    scope: "global",
-                    kind: "root",
-                    owner_index: None,
-                    document_index: None,
-                    name: None,
-                    offset: off,
-                    offset_end: end,
-                    byte_length: end - off,
-                });
-            }
-
-            // global tracks (camera/light/gravity/selfShadow) - use their track.offset..offset_end
-            bc_ranges.push(make_global_track_byte_range(&glob.camera, "camera"));
-            bc_ranges.push(make_global_track_byte_range(&glob.light, "light"));
-            bc_ranges.push(make_global_track_byte_range(&glob.gravity, "gravity"));
-            bc_ranges.push(make_global_track_byte_range(
-                &glob.self_shadow,
-                "selfShadow",
-            ));
-
-            // accessory block
-            {
-                let blk = &glob.accessories;
-                let bl = blk.offset_end - blk.offset;
-                bc_ranges.push(PmmProjectByteRange {
-                    scope: "global",
-                    kind: "accessoryBlock",
-                    owner_index: None,
-                    document_index: None,
-                    name: None,
-                    offset: blk.offset,
-                    offset_end: blk.offset_end,
-                    byte_length: bl,
-                });
-            }
-
-            // each decoded accessory
-            for acc in &glob.accessories.accessories {
-                let bl = acc.offset_end - acc.offset;
-                bc_ranges.push(PmmProjectByteRange {
-                    scope: "accessory",
-                    kind: "accessory",
-                    owner_index: Some(acc.slot_index),
-                    document_index: Some(acc.document_accessory_index),
-                    name: Some(acc.name.clone()),
-                    offset: acc.offset,
-                    offset_end: acc.offset_end,
-                    byte_length: bl,
-                });
-            }
-
-            // Merge overlapping decoded ranges (e.g. global root overlaps global tracks; models/tracks may abut or overlap)
-            // before summing for covered_byte_length. Compute unknown gaps within the overall span [bc_offset, bc_offset_end].
-            let mut merged: Vec<(usize, usize)> =
-                bc_ranges.iter().map(|r| (r.offset, r.offset_end)).collect();
-            merged.sort_by_key(|&(s, _)| s);
-            let mut merged_intervals: Vec<(usize, usize)> = Vec::new();
-            for (start, end) in merged {
-                if let Some(last) = merged_intervals.last_mut() {
-                    if start <= last.1 {
-                        last.1 = last.1.max(end);
-                    } else {
-                        merged_intervals.push((start, end));
-                    }
-                } else {
-                    merged_intervals.push((start, end));
-                }
-            }
-            let covered_byte_length: usize = merged_intervals.iter().map(|&(s, e)| e - s).sum();
-
-            let bc_offset = bc_ranges.iter().map(|r| r.offset).min().unwrap_or(0);
-            let bc_offset_end = bc_ranges.iter().map(|r| r.offset_end).max().unwrap_or(0);
-            let bc_byte_length = bc_offset_end - bc_offset;
-
-            let mut gaps: Vec<PmmProjectByteRange> = Vec::new();
-            let mut cursor = bc_offset;
-            for (gstart, gend) in &merged_intervals {
-                if cursor < *gstart {
-                    let goff = cursor;
-                    let gend_ = *gstart;
-                    let glen = gend_ - goff;
-                    gaps.push(PmmProjectByteRange {
-                        scope: "unknown",
-                        kind: "gap",
-                        owner_index: None,
-                        document_index: None,
-                        name: None,
-                        offset: goff,
-                        offset_end: gend_,
-                        byte_length: glen,
-                    });
-                }
-                cursor = cursor.max(*gend);
-            }
-            if cursor < bc_offset_end {
-                let goff = cursor;
-                let gend_ = bc_offset_end;
-                let glen = gend_ - goff;
-                gaps.push(PmmProjectByteRange {
-                    scope: "unknown",
-                    kind: "gap",
-                    owner_index: None,
-                    document_index: None,
-                    name: None,
-                    offset: goff,
-                    offset_end: gend_,
-                    byte_length: glen,
-                });
-            }
-
-            let coverage_ratio = if bc_byte_length == 0 {
-                1.0
-            } else {
-                covered_byte_length as f32 / bc_byte_length as f32
-            };
-
-            let byte_coverage = PmmProjectByteCoverage {
-                offset: bc_offset,
-                offset_end: bc_offset_end,
-                byte_length: bc_byte_length,
-                covered_byte_length,
-                coverage_ratio,
-                gap_count: gaps.len(),
-                gaps,
-                range_count: bc_ranges.len(),
-                ranges: bc_ranges,
-            };
+            let byte_coverage = build_project_byte_coverage(doc, glob);
 
             // Build assetBindings derived only from already-decoded summaries + asset_references.
             // Exporter-prep read-only slice: connects owners (model/accessory/sceneSettings) to their asset paths + resolved asset reference metadata.

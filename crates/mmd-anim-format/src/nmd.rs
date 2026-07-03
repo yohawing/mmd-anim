@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::binary::ByteReader;
 use crate::error::ImportError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -869,14 +870,11 @@ const WIRE_FIXED64: u8 = 1;
 const WIRE_LEN: u8 = 2;
 const WIRE_FIXED32: u8 = 5;
 
-struct ProtoReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
+type ProtoReader<'a> = ByteReader<'a>;
 
-impl<'a> ProtoReader<'a> {
+impl<'a> ByteReader<'a> {
     fn is_eof(&self) -> bool {
-        self.pos >= self.data.len()
+        self.remaining() == 0
     }
 
     fn read_key(&mut self) -> Result<Option<(u32, u8)>, ImportError> {
@@ -921,15 +919,6 @@ impl<'a> ProtoReader<'a> {
         })
     }
 
-    fn read_u8(&mut self) -> Result<u8, ImportError> {
-        if self.pos >= self.data.len() {
-            return Err(ImportError::UnexpectedEof(1));
-        }
-        let byte = self.data[self.pos];
-        self.pos += 1;
-        Ok(byte)
-    }
-
     fn read_len(&mut self) -> Result<&'a [u8], ImportError> {
         let raw_len = self.read_varint()?;
         if raw_len > usize::MAX as u64 {
@@ -939,16 +928,7 @@ impl<'a> ProtoReader<'a> {
             });
         }
         let len = raw_len as usize;
-        let end = self
-            .pos
-            .checked_add(len)
-            .ok_or(ImportError::SectionOverflow)?;
-        if end > self.data.len() {
-            return Err(ImportError::UnexpectedEof(end - self.data.len()));
-        }
-        let bytes = &self.data[self.pos..end];
-        self.pos = end;
-        Ok(bytes)
+        self.read_bytes(len)
     }
 
     fn peek_len(&self) -> Result<&'a [u8], ImportError> {
@@ -964,16 +944,7 @@ impl<'a> ProtoReader<'a> {
     }
 
     fn read_f32(&mut self) -> Result<f32, ImportError> {
-        let end = self
-            .pos
-            .checked_add(4)
-            .ok_or(ImportError::SectionOverflow)?;
-        if end > self.data.len() {
-            return Err(ImportError::UnexpectedEof(end - self.data.len()));
-        }
-        let bytes = &self.data[self.pos..end];
-        self.pos = end;
-        let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let value = self.read_f32_le()?;
         if !value.is_finite() {
             return Err(ImportError::UnsupportedFormat {
                 format: "NMD",
@@ -1010,15 +981,7 @@ impl<'a> ProtoReader<'a> {
     }
 
     fn skip_bytes(&mut self, len: usize) -> Result<(), ImportError> {
-        let end = self
-            .pos
-            .checked_add(len)
-            .ok_or(ImportError::SectionOverflow)?;
-        if end > self.data.len() {
-            return Err(ImportError::UnexpectedEof(end - self.data.len()));
-        }
-        self.pos = end;
-        Ok(())
+        self.skip(len)
     }
 }
 

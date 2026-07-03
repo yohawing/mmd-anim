@@ -1253,6 +1253,62 @@ fn build_project_asset_bindings(
     asset_bindings
 }
 
+fn build_project_export_readiness(
+    byte_coverage: &PmmProjectByteCoverage,
+    asset_bindings: &[PmmProjectAssetBinding],
+) -> PmmProjectExportReadiness {
+    let mut blockers: Vec<PmmProjectExportBlocker> = Vec::new();
+    blockers.push(PmmProjectExportBlocker {
+        code: "PMM_SEMANTIC_EXPORTER_UNFINISHED",
+        severity: "blocker",
+        message: "full semantic graph export/editing is not yet supported".to_string(),
+        scope: None,
+        kind: None,
+        count: None,
+        coverage_ratio: None,
+    });
+    if byte_coverage.gap_count > 0 {
+        blockers.push(PmmProjectExportBlocker {
+            code: "PMM_DECODED_BYTE_GAPS_REMAIN",
+            severity: "warning",
+            message: format!(
+                "{} decoded byte gaps remain (coverage ratio {:.4})",
+                byte_coverage.gap_count, byte_coverage.coverage_ratio
+            ),
+            scope: Some("projectGraph"),
+            kind: Some("byteCoverage"),
+            count: Some(byte_coverage.gap_count),
+            coverage_ratio: Some(byte_coverage.coverage_ratio),
+        });
+    }
+    let unresolved_count = asset_bindings
+        .iter()
+        .filter(|binding| binding.asset_reference_index.is_none())
+        .count();
+    if unresolved_count > 0 {
+        blockers.push(PmmProjectExportBlocker {
+            code: "PMM_UNRESOLVED_ASSET_BINDINGS",
+            severity: "warning",
+            message: format!(
+                "{} asset bindings have unresolved asset references",
+                unresolved_count
+            ),
+            scope: Some("projectGraph"),
+            kind: Some("assetBindings"),
+            count: Some(unresolved_count),
+            coverage_ratio: None,
+        });
+    }
+    let blocker_count = blockers.len();
+    PmmProjectExportReadiness {
+        lossless_parsed_byte_export_supported: true,
+        semantic_graph_export_supported: false,
+        source_byte_preservation_required: true,
+        blocker_count,
+        blockers,
+    }
+}
+
 const PMM_MANIFEST_PREFIX: &[u8] = b"Polygon Movie maker ";
 
 fn parse_pmm_manifest_version(data: &[u8]) -> Result<(String, Option<u32>), ImportError> {
@@ -1653,58 +1709,7 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
 
             // Build exportReadiness immediately before PmmProjectGraph construction (exporter-prep diagnostics only).
             // lossless parsed byte supported; semantic graph export remains false (full exporter unfinished).
-            let export_readiness = {
-                let mut blockers: Vec<PmmProjectExportBlocker> = Vec::new();
-                blockers.push(PmmProjectExportBlocker {
-                    code: "PMM_SEMANTIC_EXPORTER_UNFINISHED",
-                    severity: "blocker",
-                    message: "full semantic graph export/editing is not yet supported".to_string(),
-                    scope: None,
-                    kind: None,
-                    count: None,
-                    coverage_ratio: None,
-                });
-                if byte_coverage.gap_count > 0 {
-                    blockers.push(PmmProjectExportBlocker {
-                        code: "PMM_DECODED_BYTE_GAPS_REMAIN",
-                        severity: "warning",
-                        message: format!(
-                            "{} decoded byte gaps remain (coverage ratio {:.4})",
-                            byte_coverage.gap_count, byte_coverage.coverage_ratio
-                        ),
-                        scope: Some("projectGraph"),
-                        kind: Some("byteCoverage"),
-                        count: Some(byte_coverage.gap_count),
-                        coverage_ratio: Some(byte_coverage.coverage_ratio),
-                    });
-                }
-                let unresolved_count = asset_bindings
-                    .iter()
-                    .filter(|b| b.asset_reference_index.is_none())
-                    .count();
-                if unresolved_count > 0 {
-                    blockers.push(PmmProjectExportBlocker {
-                        code: "PMM_UNRESOLVED_ASSET_BINDINGS",
-                        severity: "warning",
-                        message: format!(
-                            "{} asset bindings have unresolved asset references",
-                            unresolved_count
-                        ),
-                        scope: Some("projectGraph"),
-                        kind: Some("assetBindings"),
-                        count: Some(unresolved_count),
-                        coverage_ratio: None,
-                    });
-                }
-                let blocker_count = blockers.len();
-                PmmProjectExportReadiness {
-                    lossless_parsed_byte_export_supported: true,
-                    semantic_graph_export_supported: false,
-                    source_byte_preservation_required: true,
-                    blocker_count,
-                    blockers,
-                }
-            };
+            let export_readiness = build_project_export_readiness(&byte_coverage, &asset_bindings);
 
             Some(PmmProjectGraph {
                 source: "mmd-anim-format first PMMv2 document graph DTO slice",

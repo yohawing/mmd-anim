@@ -823,12 +823,13 @@ fn make_keyframe_reference(
     }
 }
 
-pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError> {
-    const PREFIX: &[u8] = b"Polygon Movie maker ";
-    if !data.starts_with(PREFIX) {
+const PMM_MANIFEST_PREFIX: &[u8] = b"Polygon Movie maker ";
+
+fn parse_pmm_manifest_version(data: &[u8]) -> Result<(String, Option<u32>), ImportError> {
+    if !data.starts_with(PMM_MANIFEST_PREFIX) {
         return Err(ImportError::InvalidMagic { format: "PMM" });
     }
-    let version_bytes = &data[PREFIX.len()..data.len().min(32)];
+    let version_bytes = &data[PMM_MANIFEST_PREFIX.len()..data.len().min(32)];
     let version_end = version_bytes
         .iter()
         .position(|&byte| byte == 0)
@@ -837,6 +838,11 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
         .trim()
         .to_owned();
     let parsed_version = version.parse::<u32>().ok();
+    Ok((version, parsed_version))
+}
+
+pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError> {
+    let (version, parsed_version) = parse_pmm_manifest_version(data)?;
     let project_settings = parse_project_settings(data);
     let display_state = parse_display_state(data, parsed_version);
     let asset_references = extract_asset_references(data);
@@ -8594,6 +8600,13 @@ mod tests {
 
         assert_eq!(parsed.version, "0002");
         assert_eq!(parsed.parsed_version, Some(2));
+    }
+
+    #[test]
+    fn rejects_invalid_pmm_magic() {
+        let err = parse_pmm_manifest(b"not a PMM project").unwrap_err();
+
+        assert_eq!(err, ImportError::InvalidMagic { format: "PMM" });
     }
 
     #[test]

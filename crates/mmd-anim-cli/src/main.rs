@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Read},
+    io::Read,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -10,6 +10,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 mod commands;
 mod mmd_dumper_oracle;
 mod schema;
+mod support;
+
+pub(crate) use support::{
+    copy_world_matrices_to_f32, diagnostics_suffix, f32_checksum, format_cli_error, io_error_label,
+    read_file, read_text_file, resolve_maybe_absolute, translation_checksum,
+    unsupported_format_error, write_file,
+};
 
 // ---------------------------------------------------------------------------
 // Clap CLI definition
@@ -738,122 +745,6 @@ fn detect_path_format(
 fn usage_error(message: impl AsRef<str>) -> Result<ExitCode, Box<dyn std::error::Error>> {
     eprintln!("{}", message.as_ref());
     Ok(ExitCode::from(2))
-}
-
-pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    fs::read(path).map_err(|error| {
-        format!(
-            "failed to read {}: {}",
-            path.display(),
-            io_error_label(error.kind())
-        )
-        .into()
-    })
-}
-
-pub(crate) fn read_text_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    fs::read_to_string(path).map_err(|error| {
-        format!(
-            "failed to read {}: {}",
-            path.display(),
-            io_error_label(error.kind())
-        )
-        .into()
-    })
-}
-
-pub(crate) fn write_file(
-    path: &Path,
-    data: impl AsRef<[u8]>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    fs::write(path, data).map_err(|error| {
-        format!(
-            "failed to write {}: {}",
-            path.display(),
-            io_error_label(error.kind())
-        )
-        .into()
-    })
-}
-
-pub(crate) fn diagnostics_suffix(count: usize) -> String {
-    if count == 0 {
-        String::new()
-    } else {
-        format!(" diagnostics={count}")
-    }
-}
-
-pub(crate) fn unsupported_format_error(path: &Path) -> Box<dyn std::error::Error> {
-    format!(
-        "unsupported or unrecognized file format: {}",
-        path.display()
-    )
-    .into()
-}
-
-fn format_cli_error(error: &(dyn std::error::Error + 'static)) -> String {
-    if let Some(io_error) = error.downcast_ref::<io::Error>() {
-        return format!("I/O error: {}", io_error_label(io_error.kind()));
-    }
-    error.to_string()
-}
-
-fn io_error_label(kind: io::ErrorKind) -> &'static str {
-    match kind {
-        io::ErrorKind::NotFound => "file not found",
-        io::ErrorKind::PermissionDenied => "permission denied",
-        io::ErrorKind::InvalidData => "invalid data",
-        io::ErrorKind::UnexpectedEof => "unexpected end of file",
-        io::ErrorKind::AlreadyExists => "already exists",
-        io::ErrorKind::WouldBlock => "operation would block",
-        io::ErrorKind::TimedOut => "operation timed out",
-        io::ErrorKind::Interrupted => "operation interrupted",
-        _ => "I/O error",
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Functions that remain in the crate root (used by multiple modules)
-// ---------------------------------------------------------------------------
-
-pub(crate) fn resolve_maybe_absolute(root: &Path, path: &str) -> PathBuf {
-    let path = PathBuf::from(path);
-    if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    }
-}
-
-pub(crate) fn translation_checksum(matrices: &[glam::Mat4]) -> u32 {
-    let mut hash: u32 = 0x811c_9dc5;
-    for m in matrices {
-        hash ^= m.w_axis.x.to_bits();
-        hash = hash.wrapping_mul(0x0100_0193);
-        hash ^= m.w_axis.y.to_bits();
-        hash = hash.wrapping_mul(0x0100_0193);
-        hash ^= m.w_axis.z.to_bits();
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    hash
-}
-
-pub(crate) fn f32_checksum(values: &[f32]) -> u32 {
-    let mut hash: u32 = 0x811c_9dc5;
-    for value in values {
-        hash ^= value.to_bits();
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    hash
-}
-
-pub(crate) fn copy_world_matrices_to_f32(matrices: &[glam::Mat4], out: &mut [f32]) {
-    debug_assert!(out.len() >= matrices.len() * 16);
-    for (index, matrix) in matrices.iter().enumerate() {
-        let offset = index * 16;
-        out[offset..offset + 16].copy_from_slice(&matrix.to_cols_array());
-    }
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ use crate::schema::{
 use glam::Vec3A;
 use mmd_anim_format::VmdClipBuildOptions;
 use mmd_anim_runtime::{BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance};
+use serde::Serialize;
 use serde_json::json;
 
 pub(crate) const GOLDEN_IK_COMPARE_USAGE: &str =
@@ -539,6 +540,34 @@ pub(crate) fn compute_ik_solver_residuals(
     residuals
 }
 
+#[derive(Serialize)]
+struct UnsupportedGoldenCaseSummaryEntry<'a> {
+    name: &'a str,
+    model: &'a str,
+    extension: &'a str,
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct UnsupportedGoldenCaseRootMotionOracleLag {
+    #[serde(rename = "matchCount")]
+    match_count: usize,
+    matches: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct UnsupportedGoldenCasePerCaseEntry<'a> {
+    name: &'a str,
+    status: &'static str,
+    model: &'a str,
+    reason: String,
+    #[serde(rename = "maxAbsError")]
+    max_abs_error: f64,
+    worst: &'static str,
+    #[serde(rename = "rootMotionOracleLag")]
+    root_motion_oracle_lag: UnsupportedGoldenCaseRootMotionOracleLag,
+}
+
 /// Build a JSON pair for an unsupported (non-.pmx) case.
 ///
 /// Returns `(summary_entry, per_case_entry)` so callers can push them into
@@ -551,24 +580,26 @@ fn make_unsupported_case_entry(
     let model_name = pmx_path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
     let reason = format!("unsupported model format: only .pmx and .pmd are supported (got .{ext})");
 
-    let summary = json!({
-        "name": case_name,
-        "model": model_name,
-        "extension": ext,
-        "reason": reason,
-    });
-    let per_case = json!({
-        "name": case_name,
-        "status": "skipped",
-        "model": model_name,
-        "reason": reason,
-        "maxAbsError": 0.0,
-        "worst": "",
-        "rootMotionOracleLag": {
-            "matchCount": 0,
-            "matches": [],
+    let summary = serde_json::to_value(UnsupportedGoldenCaseSummaryEntry {
+        name: case_name,
+        model: model_name,
+        extension: ext,
+        reason: reason.clone(),
+    })
+    .expect("unsupported golden case summary entry should serialize");
+    let per_case = serde_json::to_value(UnsupportedGoldenCasePerCaseEntry {
+        name: case_name,
+        status: "skipped",
+        model: model_name,
+        reason,
+        max_abs_error: 0.0,
+        worst: "",
+        root_motion_oracle_lag: UnsupportedGoldenCaseRootMotionOracleLag {
+            match_count: 0,
+            matches: Vec::new(),
         },
-    });
+    })
+    .expect("unsupported golden case per-case entry should serialize");
 
     (summary, per_case)
 }

@@ -14,10 +14,17 @@ use glam::Vec3A;
 use mmd_anim_format::VmdClipBuildOptions;
 use mmd_anim_runtime::{BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance};
 use serde::Serialize;
-use serde_json::json;
 
 pub(crate) const GOLDEN_IK_COMPARE_USAGE: &str =
     "usage: mmd-anim golden-ik-compare <golden-ik-oracle-root> [sample-frame-offset]";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoldenImportDiagnostic {
+    level: String,
+    code: String,
+    message: String,
+}
 
 pub(crate) struct RuntimeModelImport {
     pub(crate) model: ModelArena,
@@ -25,7 +32,7 @@ pub(crate) struct RuntimeModelImport {
     pub(crate) bone_name_to_index: HashMap<Vec<u8>, BoneIndex>,
     pub(crate) morph_name_to_index: HashMap<Vec<u8>, MorphIndex>,
     pub(crate) ik_solver_bone_name_to_index: HashMap<Vec<u8>, usize>,
-    pub(crate) diagnostics: Vec<serde_json::Value>,
+    pub(crate) diagnostics: Vec<GoldenImportDiagnostic>,
 }
 
 pub(crate) fn parse_golden_ik_compare_args(
@@ -602,7 +609,7 @@ struct GoldenIkComparePerCaseEntry {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     diagnostics: Vec<GoldenRootMotionDiagnostic>,
     #[serde(rename = "importDiagnostics", skip_serializing_if = "Vec::is_empty")]
-    import_diagnostics: Vec<serde_json::Value>,
+    import_diagnostics: Vec<GoldenImportDiagnostic>,
     #[serde(rename = "rootMotionOracleLag")]
     root_motion_oracle_lag: GoldenRootMotionOracleLag,
 }
@@ -738,12 +745,10 @@ pub(crate) fn import_golden_runtime_model(
                 diagnostics: import
                     .diagnostics
                     .into_iter()
-                    .map(|diagnostic| {
-                        json!({
-                            "level": diagnostic.level,
-                            "code": diagnostic.code,
-                            "message": diagnostic.message,
-                        })
+                    .map(|diagnostic| GoldenImportDiagnostic {
+                        level: diagnostic.level,
+                        code: diagnostic.code,
+                        message: diagnostic.message,
                     })
                     .collect(),
             })

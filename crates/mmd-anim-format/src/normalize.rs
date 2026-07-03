@@ -1,9 +1,8 @@
-use encoding_rs::SHIFT_JIS;
+use crate::sjis::decode_sjis;
 
 pub fn normalize_vmd_name(bytes: &[u8]) -> Vec<u8> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let (decoded, _encoding, _had_errors) = SHIFT_JIS.decode(&bytes[..end]);
-    decoded.as_bytes().to_vec()
+    decode_sjis(&bytes[..end]).into_bytes()
 }
 
 #[cfg(test)]

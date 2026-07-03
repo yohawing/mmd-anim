@@ -5,6 +5,7 @@
 //! PMX/VMD object graph — mesh, material, texture, toon, display-frame UI,
 //! rigid body, joint, and soft-body metadata are dropped during import.
 
+mod binary;
 pub mod error;
 #[cfg(feature = "fbx")]
 pub mod fbx;
@@ -14,6 +15,7 @@ pub mod normalize;
 pub mod pmd;
 pub mod pmm;
 pub mod pmx;
+mod sjis;
 pub mod vmd;
 pub mod vpd;
 pub mod xfile;
@@ -41,10 +43,11 @@ pub use pmx::{
     split_pmx_model_by_material, validate_pmx_export_model,
 };
 pub use vmd::{
-    VmdCameraState, VmdClipBuildOptions, VmdIkEntry, VmdImportResult, VmdParsedAnimation,
-    VmdPropertyIkFrame, build_clip_from_import, build_pair_clip, build_pair_clip_with_options,
-    build_property_binding_with_ik_resolver, export_vmd_animation, import_vmd_motion,
-    parse_vmd_animation, sample_vmd_camera_frames,
+    VmdCameraState, VmdClipBuildOptions, VmdIkEntry, VmdImportResult, VmdLightState,
+    VmdParsedAnimation, VmdPropertyIkFrame, VmdSelfShadowState, build_clip_from_import,
+    build_pair_clip, build_pair_clip_with_options, build_property_binding_with_ik_resolver,
+    export_vmd_animation, import_vmd_motion, parse_vmd_animation, sample_vmd_camera_frames,
+    sample_vmd_light_frames, sample_vmd_self_shadow_frames,
 };
 pub use vpd::{VpdParsedPose, export_vpd_pose, parse_vpd_pose};
 pub use xfile::{AccessoryParsedManifest, export_accessory_manifest, parse_accessory_manifest};

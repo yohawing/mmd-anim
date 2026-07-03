@@ -23,11 +23,12 @@ target/package/
 AGENTS.md
 CLAUDE.md
 
+/TODO.md
+/ROADMAP.md
+/PLAN.md
 docs/**
 !docs/
-!docs/RELEASE.md
 !docs/README.ja.md
-!docs/TESTING.md
 
 crates/mmd-runtime-wasm/harness/pkg/
 crates/mmd-runtime-wasm/harness/pkg-web/
@@ -39,3 +40,8 @@ artifacts/
 viewer/
 .venv-fbx/
 *.fbx
+scripts/
+crates/mmd-anim-ffi/csharp-smoke/
+crates/mmd-anim-ffi/scripts/smoke-csharp.ps1
+crates/mmd-anim-format/fixtures/pmm/PROVENANCE.md
+crates/mmd-anim-format/fixtures/pmm/*.inspect.json

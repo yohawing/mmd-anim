@@ -1,7 +1,7 @@
-use encoding_rs::SHIFT_JIS;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ImportError;
+use crate::sjis::{decode_sjis, encode_sjis};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,8 +103,7 @@ pub fn parse_accessory_manifest(
     let body = if text {
         String::from_utf8_lossy(data).into_owned()
     } else {
-        let (decoded, _, _) = SHIFT_JIS.decode(data);
-        decoded.into_owned()
+        decode_sjis(data)
     };
     let mesh_summaries = if text {
         parse_x_mesh_summaries(&body)
@@ -168,7 +167,7 @@ fn text_x_diagnostics(
 }
 
 fn parse_vac_manifest(data: &[u8]) -> AccessoryParsedManifest {
-    let (decoded, _, _) = SHIFT_JIS.decode(data);
+    let decoded = decode_sjis(data);
     let lines = decoded
         .lines()
         .map(|line| line.trim().to_owned())
@@ -460,8 +459,7 @@ fn export_vac_manifest(manifest: &AccessoryParsedManifest) -> Vec<u8> {
             text.push_str(line);
             text.push('\n');
         }
-        let (encoded, _, _) = SHIFT_JIS.encode(&text);
-        return encoded.into_owned();
+        return encode_sjis(&text);
     }
     if manifest.header.is_empty() {
         text.push_str("accessory\n");
@@ -493,8 +491,7 @@ fn export_vac_manifest(manifest: &AccessoryParsedManifest) -> Vec<u8> {
             text.push_str(target);
             text.push('\n');
         }
-        let (encoded, _, _) = SHIFT_JIS.encode(&text);
-        return encoded.into_owned();
+        return encode_sjis(&text);
     }
     for reference in &manifest.texture_references {
         if reference != &manifest.header {
@@ -502,8 +499,7 @@ fn export_vac_manifest(manifest: &AccessoryParsedManifest) -> Vec<u8> {
             text.push('\n');
         }
     }
-    let (encoded, _, _) = SHIFT_JIS.encode(&text);
-    encoded.into_owned()
+    encode_sjis(&text)
 }
 
 fn push_vac_vec3(text: &mut String, value: [f32; 3]) {
@@ -1738,9 +1734,9 @@ TextureFilename { "C:\My Files\tex,main;01.png"; }
 
     #[test]
     fn exports_vac_manifest_preserves_raw_display_and_attachment_lines() {
-        let (data, _, _) = SHIFT_JIS
-            .encode("sample accessory\r\nmodel.x\r\n1.5\r\n0,1,2\r\n10,20,30\r\n右手首\r\n");
-        let parsed = parse_accessory_manifest(data.as_ref(), Some("model.vac")).unwrap();
+        let data =
+            encode_sjis("sample accessory\r\nmodel.x\r\n1.5\r\n0,1,2\r\n10,20,30\r\n右手首\r\n");
+        let parsed = parse_accessory_manifest(&data, Some("model.vac")).unwrap();
         let settings = parsed.vac_settings.as_ref().unwrap();
 
         assert_eq!(settings.x_file, Some("model.x".to_owned()));
@@ -1808,9 +1804,10 @@ TextureFilename { "C:\My Files\tex,main;01.png"; }
 
     #[test]
     fn parses_real_mmd_vac_scale_position_rotation_layout() {
-        let (data, _, _) = SHIFT_JIS
-            .encode("ネギ(右手)\r\nnegi.x\r\n1.0\r\n-0.5,-1.0,0.00\r\n0.0,0.0,0.0\r\n右手首\r\n");
-        let parsed = parse_accessory_manifest(data.as_ref(), Some("negi.vac")).unwrap();
+        let data = encode_sjis(
+            "ネギ(右手)\r\nnegi.x\r\n1.0\r\n-0.5,-1.0,0.00\r\n0.0,0.0,0.0\r\n右手首\r\n",
+        );
+        let parsed = parse_accessory_manifest(&data, Some("negi.vac")).unwrap();
         let settings = parsed.vac_settings.as_ref().unwrap();
 
         assert_eq!(parsed.header, "ネギ(右手)");
@@ -1827,10 +1824,10 @@ TextureFilename { "C:\My Files\tex,main;01.png"; }
 
     #[test]
     fn vac_attachment_target_ignores_comment_lines_after_numeric_fields() {
-        let (data, _, _) = SHIFT_JIS.encode(
+        let data = encode_sjis(
             "sample accessory\r\nmodel.x\r\n1.0\r\n0,1,2\r\n10,20,30\r\n// comment\r\n右手首\r\n",
         );
-        let parsed = parse_accessory_manifest(data.as_ref(), Some("model.vac")).unwrap();
+        let parsed = parse_accessory_manifest(&data, Some("model.vac")).unwrap();
         let settings = parsed.vac_settings.as_ref().unwrap();
 
         assert_eq!(settings.scale, Some(1.0));

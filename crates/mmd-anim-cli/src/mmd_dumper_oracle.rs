@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::schema::SCHEMA_VERSION;
+
 pub const DEFAULT_FOCUSED_IK_BONE_NAMES: &[&str] = &[
     "左足",
     "右足",
@@ -110,7 +112,7 @@ impl MmdDumperOracleDump {
                     line: line_index + 1,
                     source,
                 })?;
-            if record.schema_version != 1 {
+            if record.schema_version != SCHEMA_VERSION {
                 return Err(MmdDumperOracleParseError::UnsupportedSchema {
                     schema_version: record.schema_version,
                 });
@@ -210,10 +212,6 @@ impl MmdDumperOracleModel {
         self.bones.iter().find(|bone| bone.name == name)
     }
 
-    pub fn find_morph(&self, name: &str) -> Option<&MmdDumperOracleMorph> {
-        self.morphs.iter().find(|morph| morph.name == name)
-    }
-
     pub fn focused_ik_bones<'a>(
         &'a self,
         focused_bone_names: &'a [&'a str],
@@ -287,7 +285,6 @@ struct RawOracleBone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::PathBuf};
 
     // ── inline schema parse tests (always-on, no external asset required) ─────
 
@@ -342,7 +339,7 @@ mod tests {
                 "command": "oracle-batch"
             },
             "defaults": {
-                "outDir": "F:/Develop/MMDDev/GoldenOracle/runs/test-motion-numeric",
+                "outDir": "runs/test-motion-numeric",
                 "timeoutMs": 180000,
                 "dump": { "bones": true, "morphs": true, "rigidBodies": false },
                 "focus": { "bones": ["センター", "右ひざ"], "morphs": ["まばたき"] },
@@ -423,64 +420,6 @@ mod tests {
             ),
             "expected UnsupportedSchema(99), got {:?}",
             err
-        );
-    }
-
-    // ── external fixture smoke tests (require local MMDDumper repo checkout) ──
-
-    fn workspace_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .unwrap()
-    }
-
-    fn read_external_fixture(relative_path: &str) -> Option<String> {
-        let path = workspace_root().join(relative_path);
-        match fs::read_to_string(&path) {
-            Ok(contents) => Some(contents),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!(
-                    "skipping external MMDDumper fixture smoke: {} not found",
-                    path.display()
-                );
-                None
-            }
-            Err(err) => panic!("failed to read {}: {}", path.display(), err),
-        }
-    }
-
-    #[test]
-    fn external_fixture_smoke_parses_sample_basic_oracle() {
-        let Some(oracle) =
-            read_external_fixture("MMDDumper/fixtures/sample-basic/oracle.expected.jsonl")
-        else {
-            return;
-        };
-
-        let dump = MmdDumperOracleDump::from_jsonl_str(&oracle, Some(&[30])).unwrap();
-        let frame = dump.find_frame(30).unwrap();
-        let model = &frame.models[0];
-
-        assert_eq!(dump.source.mmd_version, "9.32-x64");
-        assert_eq!(model.find_bone("センター").unwrap().world_matrix[12], 1.0);
-        assert_eq!(model.find_morph("まばたき").unwrap().weight, 0.5);
-    }
-
-    #[test]
-    fn external_fixture_smoke_parses_golden_ik_batch_manifest() {
-        let Some(manifest) =
-            read_external_fixture("MMDDumper/out/golden-ik-oracle/oracle-batch.json")
-        else {
-            return;
-        };
-        let manifest = GoldenIkBatchManifest::from_json_str(&manifest).unwrap();
-
-        assert!(
-            manifest
-                .cases
-                .iter()
-                .any(|case| case.name == "sour-miku-rabbithole")
         );
     }
 

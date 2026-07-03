@@ -7,17 +7,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneInit, BoneMorphOffset,
-    GroupMorphOffset, IkAngleLimit, IkLinkInit, IkSolveOptions, IkSolverInit,
-    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan, MorphTrack,
-    MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
-    RuntimeInstance,
+    AnimationClip, BoneAnimationBinding, BoneIndex, FlatModelInputError, IkSolveOptions,
+    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack, MovableBoneKeyframe,
+    MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
+};
+use mmd_anim_runtime::{
+    FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
+    FlatIkLinkInput, FlatIkSolverInput, ModelArena, build_append_transforms_from_flat_iter,
+    build_bones_from_flat, build_ik_solvers_from_flat_iter, build_morph_init_from_flat_iter,
 };
 use wasm_bindgen::prelude::*;
 
-pub const WASM_WRAPPER_VERSION: u32 = 1;
+pub const WASM_WRAPPER_VERSION: u32 = 2;
 
 const APPEND_FLAG_ROTATION: u32 = 1;
 const APPEND_FLAG_TRANSLATION: u32 = 1 << 1;
@@ -91,6 +93,78 @@ pub fn parse_vmd_animation_json(data: &[u8]) -> Result<String, JsValue> {
     let parsed = mmd_anim_format::parse_vmd_animation(data)
         .map_err(|error| js_parser_error("VMD", "parseVmdAnimationJson", None, error))?;
     serde_json::to_string(&parsed).map_err(js_error)
+}
+
+/// Sample VMD camera bytes into a caller-owned `Float32Array`.
+///
+/// Writes `[distance, position.x, position.y, position.z, rotation.x,
+/// rotation.y, rotation.z, fov, perspective]` to `out`.
+/// `perspective` is encoded as `1.0` when enabled, otherwise `0.0`.
+/// Returns `false` when `out.length < 9`.
+#[wasm_bindgen(js_name = sampleVmdCamera)]
+pub fn sample_vmd_camera(
+    data: &[u8],
+    frame: f32,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if data.is_empty() {
+        return Err(JsValue::from_str("VMD data is empty"));
+    }
+    if !frame.is_finite() {
+        return Err(JsValue::from_str("frame must be finite"));
+    }
+    let parsed = mmd_anim_format::parse_vmd_animation(data)
+        .map_err(|error| js_parser_error("VMD", "sampleVmdCamera", None, error))?;
+    let camera = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)
+        .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
+    copy_camera_state_array(camera, out)
+}
+
+/// Sample VMD light bytes into a caller-owned `Float32Array`.
+///
+/// Writes `[color.r, color.g, color.b, direction.x, direction.y,
+/// direction.z]` to `out`. Returns `false` when `out.length < 6`.
+#[wasm_bindgen(js_name = sampleVmdLight)]
+pub fn sample_vmd_light(
+    data: &[u8],
+    frame: f32,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if data.is_empty() {
+        return Err(JsValue::from_str("VMD data is empty"));
+    }
+    if !frame.is_finite() {
+        return Err(JsValue::from_str("frame must be finite"));
+    }
+    let parsed = mmd_anim_format::parse_vmd_animation(data)
+        .map_err(|error| js_parser_error("VMD", "sampleVmdLight", None, error))?;
+    let light = mmd_anim_format::sample_vmd_light_frames(&parsed.light_frames, frame)
+        .ok_or_else(|| JsValue::from_str("VMD has no light keyframes"))?;
+    copy_light_state_array(light, out)
+}
+
+/// Sample VMD self-shadow bytes into a caller-owned `Float32Array`.
+///
+/// Writes `[mode, distance]` to `out`. `mode` is encoded as a float.
+/// Returns `false` when `out.length < 2`.
+#[wasm_bindgen(js_name = sampleVmdSelfShadow)]
+pub fn sample_vmd_self_shadow(
+    data: &[u8],
+    frame: f32,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if data.is_empty() {
+        return Err(JsValue::from_str("VMD data is empty"));
+    }
+    if !frame.is_finite() {
+        return Err(JsValue::from_str("frame must be finite"));
+    }
+    let parsed = mmd_anim_format::parse_vmd_animation(data)
+        .map_err(|error| js_parser_error("VMD", "sampleVmdSelfShadow", None, error))?;
+    let self_shadow =
+        mmd_anim_format::sample_vmd_self_shadow_frames(&parsed.self_shadow_frames, frame)
+            .ok_or_else(|| JsValue::from_str("VMD has no self-shadow keyframes"))?;
+    copy_self_shadow_state_array(self_shadow, out)
 }
 
 #[wasm_bindgen(js_name = parseMmdFormatJson)]
@@ -316,7 +390,7 @@ impl WasmPmxGeometry {
             sdef_rw0: g.sdef.rw0.clone(),
             sdef_rw1: g.sdef.rw1.clone(),
             qdef_enabled: g.qdef.enabled.iter().map(|&v| u8::from(v != 0.0)).collect(),
-            skinning_modes: pmx_skinning_modes(g),
+            skinning_modes: g.sdef.skinning_modes.clone(),
         }
     }
 
@@ -462,31 +536,6 @@ impl WasmPmxGeometry {
     pub fn skinning_modes(&self) -> Vec<String> {
         self.skinning_modes.clone()
     }
-}
-
-fn pmx_skinning_modes(g: &mmd_anim_format::pmx::PmxParsedGeometry) -> Vec<String> {
-    let vertex_count = g.positions.len() / 3;
-    (0..vertex_count)
-        .map(|i| {
-            if g.sdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
-                "sdef"
-            } else if g.qdef.enabled.get(i).copied().unwrap_or(0.0) > 0.5 {
-                "qdef"
-            } else {
-                let w2 = g.skin_weights.get(i * 4 + 2).copied().unwrap_or(0.0);
-                let w3 = g.skin_weights.get(i * 4 + 3).copied().unwrap_or(0.0);
-                let w1 = g.skin_weights.get(i * 4 + 1).copied().unwrap_or(0.0);
-                if w2 != 0.0 || w3 != 0.0 {
-                    "bdef4"
-                } else if w1 != 0.0 {
-                    "bdef2"
-                } else {
-                    "bdef1"
-                }
-            }
-            .to_owned()
-        })
-        .collect()
 }
 
 /// Parsed PMX handle for the split loader ABI.
@@ -889,6 +938,7 @@ impl WasmMmdModel {
 
 #[wasm_bindgen]
 pub struct WasmMmdRuntimeInstance {
+    model: Arc<ModelArena>,
     runtime: RuntimeInstance,
     world_matrices_cache: Vec<f32>,
     skinning_matrices_cache: Vec<f32>,
@@ -925,11 +975,88 @@ impl WasmMmdRuntimeInstance {
 }
 
 #[wasm_bindgen]
+pub struct WasmMmdRuntimeBatchEvaluation {
+    frame_count: usize,
+    bone_count: usize,
+    morph_count: usize,
+    world_matrices: Vec<f32>,
+    morph_weights: Vec<f32>,
+}
+
+#[wasm_bindgen]
+impl WasmMmdRuntimeBatchEvaluation {
+    #[wasm_bindgen(js_name = frameCount)]
+    pub fn frame_count(&self) -> usize {
+        self.frame_count
+    }
+
+    #[wasm_bindgen(js_name = boneCount)]
+    pub fn bone_count(&self) -> usize {
+        self.bone_count
+    }
+
+    #[wasm_bindgen(js_name = morphCount)]
+    pub fn morph_count(&self) -> usize {
+        self.morph_count
+    }
+
+    #[wasm_bindgen(js_name = worldMatrixF32Len)]
+    pub fn world_matrix_f32_len(&self) -> usize {
+        self.world_matrices.len()
+    }
+
+    #[wasm_bindgen(js_name = morphWeightF32Len)]
+    pub fn morph_weight_f32_len(&self) -> usize {
+        self.morph_weights.len()
+    }
+
+    #[wasm_bindgen(js_name = worldMatrices)]
+    pub fn world_matrices(&self) -> Vec<f32> {
+        self.world_matrices.clone()
+    }
+
+    #[wasm_bindgen(js_name = morphWeights)]
+    pub fn morph_weights(&self) -> Vec<f32> {
+        self.morph_weights.clone()
+    }
+
+    #[wasm_bindgen(js_name = worldMatricesView)]
+    pub fn world_matrices_view(&self) -> js_sys::Float32Array {
+        unsafe { js_sys::Float32Array::view(&self.world_matrices) }
+    }
+
+    #[wasm_bindgen(js_name = morphWeightsView)]
+    pub fn morph_weights_view(&self) -> js_sys::Float32Array {
+        unsafe { js_sys::Float32Array::view(&self.morph_weights) }
+    }
+
+    #[wasm_bindgen(js_name = copyWorldMatrices)]
+    pub fn copy_world_matrices(&self, out: &mut [f32]) -> bool {
+        if out.len() < self.world_matrices.len() {
+            return false;
+        }
+        out[..self.world_matrices.len()].copy_from_slice(&self.world_matrices);
+        true
+    }
+
+    #[wasm_bindgen(js_name = copyMorphWeights)]
+    pub fn copy_morph_weights(&self, out: &mut [f32]) -> bool {
+        if out.len() < self.morph_weights.len() {
+            return false;
+        }
+        out[..self.morph_weights.len()].copy_from_slice(&self.morph_weights);
+        true
+    }
+}
+
+#[wasm_bindgen]
 impl WasmMmdRuntimeInstance {
     #[wasm_bindgen(constructor)]
     pub fn new(model: &WasmMmdModel, morph_count: usize) -> WasmMmdRuntimeInstance {
+        let model_arena = Arc::clone(&model.model);
         let mut instance = Self {
-            runtime: RuntimeInstance::new_with_morph_count(Arc::clone(&model.model), morph_count),
+            model: Arc::clone(&model_arena),
+            runtime: RuntimeInstance::new_with_morph_count(model_arena, morph_count),
             world_matrices_cache: Vec::new(),
             skinning_matrices_cache: Vec::new(),
             morph_weights_cache: Vec::new(),
@@ -945,12 +1072,10 @@ impl WasmMmdRuntimeInstance {
         morph_count: usize,
         ik_count: usize,
     ) -> WasmMmdRuntimeInstance {
+        let model_arena = Arc::clone(&model.model);
         let mut instance = Self {
-            runtime: RuntimeInstance::new_with_counts(
-                Arc::clone(&model.model),
-                morph_count,
-                ik_count,
-            ),
+            model: Arc::clone(&model_arena),
+            runtime: RuntimeInstance::new_with_counts(model_arena, morph_count, ik_count),
             world_matrices_cache: Vec::new(),
             skinning_matrices_cache: Vec::new(),
             morph_weights_cache: Vec::new(),
@@ -962,8 +1087,10 @@ impl WasmMmdRuntimeInstance {
 
     #[wasm_bindgen(js_name = forModel)]
     pub fn for_model(model: &WasmMmdModel) -> WasmMmdRuntimeInstance {
+        let model_arena = Arc::clone(&model.model);
         let mut instance = Self {
-            runtime: RuntimeInstance::new(Arc::clone(&model.model)),
+            model: Arc::clone(&model_arena),
+            runtime: RuntimeInstance::new(model_arena),
             world_matrices_cache: Vec::new(),
             skinning_matrices_cache: Vec::new(),
             morph_weights_cache: Vec::new(),
@@ -1012,6 +1139,78 @@ impl WasmMmdRuntimeInstance {
         );
         self.refresh_caches();
         Ok(())
+    }
+
+    #[wasm_bindgen(js_name = clipFrameBatchWorldMatrixF32Len)]
+    pub fn clip_frame_batch_world_matrix_f32_len(&self, frame_count: usize) -> usize {
+        self.runtime
+            .world_matrices()
+            .len()
+            .checked_mul(16)
+            .and_then(|frame_len| frame_len.checked_mul(frame_count))
+            .unwrap_or(0)
+    }
+
+    #[wasm_bindgen(js_name = clipFrameBatchMorphWeightF32Len)]
+    pub fn clip_frame_batch_morph_weight_f32_len(&self, frame_count: usize) -> usize {
+        self.runtime
+            .morph_weights()
+            .len()
+            .checked_mul(frame_count)
+            .unwrap_or(0)
+    }
+
+    #[wasm_bindgen(js_name = evaluateClipFrameBatch)]
+    pub fn evaluate_clip_frame_batch(
+        &self,
+        clip: &WasmMmdClip,
+        start_frame: f32,
+        frame_step: f32,
+        frame_count: usize,
+        worker_count: u32,
+    ) -> Result<WasmMmdRuntimeBatchEvaluation, JsValue> {
+        if !start_frame.is_finite() || !frame_step.is_finite() {
+            return Err(JsValue::from_str("startFrame and frameStep must be finite"));
+        }
+
+        let bone_count = self.runtime.world_matrices().len();
+        let morph_count = self.runtime.morph_weights().len();
+        let world_len = bone_count
+            .checked_mul(16)
+            .and_then(|frame_len| frame_len.checked_mul(frame_count))
+            .ok_or_else(|| JsValue::from_str("batch world matrix output length overflow"))?;
+        let morph_len = morph_count
+            .checked_mul(frame_count)
+            .ok_or_else(|| JsValue::from_str("batch morph weight output length overflow"))?;
+
+        let mut world_matrices = Vec::with_capacity(world_len);
+        let mut morph_weights = Vec::with_capacity(morph_len);
+        let morph_state_count = morph_count;
+        let ik_state_count = self.runtime.ik_enabled().len();
+        let mut runtime = RuntimeInstance::new_with_counts(
+            Arc::clone(&self.model),
+            morph_state_count,
+            ik_state_count,
+        );
+
+        // worker_count is accepted for C ABI parity. Wasm threads require a
+        // separate build/runtime contract, so this surface currently runs the
+        // batch in one worker and keeps the output layout stable.
+        let _ = worker_count;
+        for frame_index in 0..frame_count {
+            let frame = start_frame + frame_step * frame_index as f32;
+            runtime.evaluate_clip_frame(&clip.clip, frame);
+            extend_matrices(&mut world_matrices, runtime.world_matrices());
+            morph_weights.extend_from_slice(runtime.morph_weights());
+        }
+
+        Ok(WasmMmdRuntimeBatchEvaluation {
+            frame_count,
+            bone_count,
+            morph_count,
+            world_matrices,
+            morph_weights,
+        })
     }
 
     #[wasm_bindgen(js_name = worldMatrixF32Len)]
@@ -1123,6 +1322,208 @@ pub struct WasmMmdClip {
 }
 
 #[wasm_bindgen]
+pub struct WasmVmdCameraTrack {
+    frames: Vec<mmd_anim_format::vmd::VmdParsedCameraFrame>,
+}
+
+#[wasm_bindgen]
+impl WasmVmdCameraTrack {
+    #[wasm_bindgen(js_name = fromVmdBytes)]
+    pub fn from_vmd_bytes(data: &[u8]) -> Result<WasmVmdCameraTrack, JsValue> {
+        if data.is_empty() {
+            return Err(JsValue::from_str("VMD data is empty"));
+        }
+        let parsed = mmd_anim_format::parse_vmd_animation(data).map_err(|error| {
+            js_parser_error("VMD", "WasmVmdCameraTrack.fromVmdBytes", None, error)
+        })?;
+        if parsed.camera_frames.is_empty() {
+            return Err(JsValue::from_str("VMD has no camera keyframes"));
+        }
+        Ok(Self {
+            frames: parsed.camera_frames,
+        })
+    }
+
+    #[wasm_bindgen(js_name = frameCount)]
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Sample the camera track into a caller-owned `Float32Array`.
+    ///
+    /// Writes `[distance, position.x, position.y, position.z, rotation.x,
+    /// rotation.y, rotation.z, fov, perspective]` to `out`.
+    /// `perspective` is encoded as `1.0` when enabled, otherwise `0.0`.
+    /// Returns `false` when `out.length < 9`.
+    #[wasm_bindgen(js_name = sample)]
+    pub fn sample(&self, frame: f32, out: &js_sys::Float32Array) -> Result<bool, JsValue> {
+        if !frame.is_finite() {
+            return Err(JsValue::from_str("frame must be finite"));
+        }
+        let camera = mmd_anim_format::sample_vmd_camera_frames(&self.frames, frame)
+            .ok_or_else(|| JsValue::from_str("VMD has no camera keyframes"))?;
+        copy_camera_state_array(camera, out)
+    }
+}
+
+#[wasm_bindgen]
+pub struct WasmVmdLightTrack {
+    frames: Vec<mmd_anim_format::vmd::VmdParsedLightFrame>,
+}
+
+#[wasm_bindgen]
+impl WasmVmdLightTrack {
+    #[wasm_bindgen(js_name = fromVmdBytes)]
+    pub fn from_vmd_bytes(data: &[u8]) -> Result<WasmVmdLightTrack, JsValue> {
+        if data.is_empty() {
+            return Err(JsValue::from_str("VMD data is empty"));
+        }
+        let parsed = mmd_anim_format::parse_vmd_animation(data).map_err(|error| {
+            js_parser_error("VMD", "WasmVmdLightTrack.fromVmdBytes", None, error)
+        })?;
+        if parsed.light_frames.is_empty() {
+            return Err(JsValue::from_str("VMD has no light keyframes"));
+        }
+        Ok(Self {
+            frames: parsed.light_frames,
+        })
+    }
+
+    #[wasm_bindgen(js_name = frameCount)]
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Sample the light track into a caller-owned `Float32Array`.
+    ///
+    /// Writes `[color.r, color.g, color.b, direction.x, direction.y,
+    /// direction.z]` to `out`. Returns `false` when `out.length < 6`.
+    #[wasm_bindgen(js_name = sample)]
+    pub fn sample(&self, frame: f32, out: &js_sys::Float32Array) -> Result<bool, JsValue> {
+        if !frame.is_finite() {
+            return Err(JsValue::from_str("frame must be finite"));
+        }
+        let light = mmd_anim_format::sample_vmd_light_frames(&self.frames, frame)
+            .ok_or_else(|| JsValue::from_str("VMD has no light keyframes"))?;
+        copy_light_state_array(light, out)
+    }
+}
+
+#[wasm_bindgen]
+pub struct WasmVmdSelfShadowTrack {
+    frames: Vec<mmd_anim_format::vmd::VmdParsedSelfShadowFrame>,
+}
+
+#[wasm_bindgen]
+impl WasmVmdSelfShadowTrack {
+    #[wasm_bindgen(js_name = fromVmdBytes)]
+    pub fn from_vmd_bytes(data: &[u8]) -> Result<WasmVmdSelfShadowTrack, JsValue> {
+        if data.is_empty() {
+            return Err(JsValue::from_str("VMD data is empty"));
+        }
+        let parsed = mmd_anim_format::parse_vmd_animation(data).map_err(|error| {
+            js_parser_error("VMD", "WasmVmdSelfShadowTrack.fromVmdBytes", None, error)
+        })?;
+        if parsed.self_shadow_frames.is_empty() {
+            return Err(JsValue::from_str("VMD has no self-shadow keyframes"));
+        }
+        Ok(Self {
+            frames: parsed.self_shadow_frames,
+        })
+    }
+
+    #[wasm_bindgen(js_name = frameCount)]
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Sample the self-shadow track into a caller-owned `Float32Array`.
+    ///
+    /// Writes `[mode, distance]` to `out`. `mode` is encoded as a float.
+    /// Returns `false` when `out.length < 2`.
+    #[wasm_bindgen(js_name = sample)]
+    pub fn sample(&self, frame: f32, out: &js_sys::Float32Array) -> Result<bool, JsValue> {
+        if !frame.is_finite() {
+            return Err(JsValue::from_str("frame must be finite"));
+        }
+        let self_shadow = mmd_anim_format::sample_vmd_self_shadow_frames(&self.frames, frame)
+            .ok_or_else(|| JsValue::from_str("VMD has no self-shadow keyframes"))?;
+        copy_self_shadow_state_array(self_shadow, out)
+    }
+}
+
+fn camera_state_array(camera: mmd_anim_format::VmdCameraState) -> [f32; 9] {
+    [
+        camera.distance,
+        camera.position[0],
+        camera.position[1],
+        camera.position[2],
+        camera.rotation[0],
+        camera.rotation[1],
+        camera.rotation[2],
+        camera.fov,
+        if camera.perspective { 1.0 } else { 0.0 },
+    ]
+}
+
+fn copy_camera_state_array(
+    camera: mmd_anim_format::VmdCameraState,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if out.length() < 9 {
+        return Ok(false);
+    }
+    let values = camera_state_array(camera);
+    for (index, value) in values.into_iter().enumerate() {
+        out.set_index(index as u32, value);
+    }
+    Ok(true)
+}
+
+fn light_state_array(light: mmd_anim_format::VmdLightState) -> [f32; 6] {
+    [
+        light.color[0],
+        light.color[1],
+        light.color[2],
+        light.direction[0],
+        light.direction[1],
+        light.direction[2],
+    ]
+}
+
+fn copy_light_state_array(
+    light: mmd_anim_format::VmdLightState,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if out.length() < 6 {
+        return Ok(false);
+    }
+    let values = light_state_array(light);
+    for (index, value) in values.into_iter().enumerate() {
+        out.set_index(index as u32, value);
+    }
+    Ok(true)
+}
+
+fn self_shadow_state_array(self_shadow: mmd_anim_format::VmdSelfShadowState) -> [f32; 2] {
+    [self_shadow.mode as f32, self_shadow.distance]
+}
+
+fn copy_self_shadow_state_array(
+    self_shadow: mmd_anim_format::VmdSelfShadowState,
+    out: &js_sys::Float32Array,
+) -> Result<bool, JsValue> {
+    if out.length() < 2 {
+        return Ok(false);
+    }
+    let values = self_shadow_state_array(self_shadow);
+    for (index, value) in values.into_iter().enumerate() {
+        out.set_index(index as u32, value);
+    }
+    Ok(true)
+}
+
+#[wasm_bindgen]
 impl WasmMmdClip {
     #[wasm_bindgen(constructor)]
     #[allow(clippy::too_many_arguments)]
@@ -1219,22 +1620,13 @@ struct ModelInput<'a> {
 }
 
 fn build_model(input: ModelInput<'_>) -> Result<ModelArena, String> {
-    if input.parent_indices.is_empty() {
-        return Err("model must contain at least one bone".to_owned());
-    }
-    if input.rest_positions_xyz.len() != input.parent_indices.len() * 3 {
-        return Err("rest_positions_xyz must contain bone_count * 3 values".to_owned());
-    }
-    if !input.inverse_bind_matrices.is_empty()
-        && input.inverse_bind_matrices.len() != input.parent_indices.len() * 16
-    {
-        return Err("inverse_bind_matrices must contain bone_count * 16 values".to_owned());
-    }
-    if !input.transform_orders.is_empty()
-        && input.transform_orders.len() != input.parent_indices.len()
-    {
-        return Err("transform_orders must contain bone_count values".to_owned());
-    }
+    let bones = build_bones_from_flat(FlatBoneInput {
+        parent_indices: input.parent_indices,
+        rest_positions_xyz: input.rest_positions_xyz,
+        inverse_bind_matrices: input.inverse_bind_matrices,
+        transform_orders: input.transform_orders,
+    })
+    .map_err(|error| error.to_string())?;
     if !input.ik_solvers_u32.len().is_multiple_of(5) {
         return Err(
             "ik_solvers_u32 must contain ik/target/linkOffset/linkCount/iteration quintets"
@@ -1259,99 +1651,60 @@ fn build_model(input: ModelInput<'_>) -> Result<ModelArena, String> {
         return Err("append_ratios length must match append transform count".to_owned());
     }
 
-    let mut bones = Vec::with_capacity(input.parent_indices.len());
-    for (bone_index, parent_index) in input.parent_indices.iter().enumerate() {
-        let parent = match *parent_index {
-            -1 => None,
-            parent if parent >= 0 => Some(BoneIndex(parent as u32)),
-            _ => return Err("parent index must be -1 or non-negative".to_owned()),
-        };
-        let position_offset = bone_index * 3;
-        let mut bone = BoneInit::new(
-            parent,
-            glam::Vec3A::new(
-                input.rest_positions_xyz[position_offset],
-                input.rest_positions_xyz[position_offset + 1],
-                input.rest_positions_xyz[position_offset + 2],
-            ),
-        );
-        if !input.inverse_bind_matrices.is_empty() {
-            let inverse_bind_offset = bone_index * 16;
-            let inverse_bind_matrix = input.inverse_bind_matrices
-                [inverse_bind_offset..inverse_bind_offset + 16]
-                .try_into()
-                .map_err(|_| "inverse bind matrix slice conversion failed".to_owned())?;
-            bone.inverse_bind_matrix = glam::Mat4::from_cols_array(inverse_bind_matrix);
-        }
-        if !input.transform_orders.is_empty() {
-            bone.transform_order = input.transform_orders[bone_index];
-        }
-        bones.push(bone);
-    }
-
     let ik_links = input
         .ik_links_u32
         .chunks_exact(2)
         .enumerate()
         .map(|(link_index, link)| {
-            let mut init = IkLinkInit::new(BoneIndex(link[0]));
-            if link[1] & IK_LINK_FLAG_ANGLE_LIMIT != 0 {
-                let limit_offset = link_index * 6;
-                init = init.with_angle_limit(IkAngleLimit::new(
-                    glam::Vec3A::new(
-                        input.ik_link_limits[limit_offset],
-                        input.ik_link_limits[limit_offset + 1],
-                        input.ik_link_limits[limit_offset + 2],
-                    ),
-                    glam::Vec3A::new(
-                        input.ik_link_limits[limit_offset + 3],
-                        input.ik_link_limits[limit_offset + 4],
-                        input.ik_link_limits[limit_offset + 5],
-                    ),
-                ));
+            let limit_offset = link_index * 6;
+            FlatIkLinkInput {
+                bone_index: link[0],
+                has_angle_limit: link[1] & IK_LINK_FLAG_ANGLE_LIMIT != 0,
+                angle_limit_min_xyz: [
+                    input.ik_link_limits[limit_offset],
+                    input.ik_link_limits[limit_offset + 1],
+                    input.ik_link_limits[limit_offset + 2],
+                ],
+                angle_limit_max_xyz: [
+                    input.ik_link_limits[limit_offset + 3],
+                    input.ik_link_limits[limit_offset + 4],
+                    input.ik_link_limits[limit_offset + 5],
+                ],
             }
-            init
         })
         .collect::<Vec<_>>();
 
-    let ik_solvers = input
-        .ik_solvers_u32
-        .chunks_exact(5)
-        .zip(input.ik_solver_limit_angles.iter())
-        .map(|(solver, limit_angle)| {
-            let link_offset = solver[2] as usize;
-            let link_count = solver[3] as usize;
-            let links = checked_range(&ik_links, link_offset, link_count)?.to_vec();
-            Ok(IkSolverInit {
-                ik_bone: BoneIndex(solver[0]),
-                target_bone: BoneIndex(solver[1]),
-                links,
+    let ik_solvers = build_ik_solvers_from_flat_iter(
+        input
+            .ik_solvers_u32
+            .chunks_exact(5)
+            .zip(input.ik_solver_limit_angles.iter())
+            .map(|(solver, limit_angle)| FlatIkSolverInput {
+                ik_bone_index: solver[0],
+                target_bone_index: solver[1],
+                link_offset: solver[2] as usize,
+                link_count: solver[3] as usize,
                 iteration_count: solver[4],
                 limit_angle: *limit_angle,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+            }),
+        &ik_links,
+    )
+    .map_err(|error| error.to_string())?;
 
-    let append_transforms = input
-        .append_u32
-        .chunks_exact(3)
-        .zip(input.append_ratios.iter())
-        .map(|(append, ratio)| {
-            let mut init =
-                AppendTransformInit::new(BoneIndex(append[0]), BoneIndex(append[1]), *ratio);
-            let flags = append[2];
-            if flags & APPEND_FLAG_ROTATION != 0 {
-                init = init.with_rotation();
-            }
-            if flags & APPEND_FLAG_TRANSLATION != 0 {
-                init = init.with_translation();
-            }
-            if flags & APPEND_FLAG_LOCAL != 0 {
-                init = init.with_local();
-            }
-            init
-        })
-        .collect::<Vec<_>>();
+    let append_transforms = build_append_transforms_from_flat_iter(
+        input
+            .append_u32
+            .chunks_exact(3)
+            .zip(input.append_ratios.iter())
+            .map(|(append, ratio)| FlatAppendTransformInput {
+                target_bone_index: append[0],
+                source_bone_index: append[1],
+                ratio: *ratio,
+                affect_rotation: append[2] & APPEND_FLAG_ROTATION != 0,
+                affect_translation: append[2] & APPEND_FLAG_TRANSLATION != 0,
+                local: append[2] & APPEND_FLAG_LOCAL != 0,
+            }),
+    );
 
     let morph = build_morph_init_from_wasm(&input)?;
     ModelArena::new_with_morphs(bones, ik_solvers, append_transforms, morph)
@@ -1369,7 +1722,6 @@ fn build_morph_init_from_wasm(input: &ModelInput<'_>) -> Result<MorphInit, Strin
         }
         return Ok(MorphInit::default());
     }
-    let mc = input.morph_count as usize;
 
     if !input.bone_morph_u32.len().is_multiple_of(2) {
         return Err("bone_morph_u32 must contain morphIndex/targetBone pairs".to_owned());
@@ -1384,101 +1736,68 @@ fn build_morph_init_from_wasm(input: &ModelInput<'_>) -> Result<MorphInit, Strin
         return Err("group_morph_ratios length must match group morph count".to_owned());
     }
 
-    let (bone_offsets, bone_spans) = if input.bone_morph_u32.is_empty() {
-        (Vec::new(), vec![MorphOffsetSpan::default(); mc])
-    } else {
-        let mut entries: Vec<(u32, u32, usize)> = input
+    build_morph_init_from_flat_iter(
+        input.morph_count,
+        input
             .bone_morph_u32
             .chunks_exact(2)
             .enumerate()
-            .map(|(i, pair)| (pair[0], pair[1], i))
-            .collect();
-        entries.sort_by_key(|a| a.0);
-        if entries.last().unwrap().0 as usize >= mc {
-            return Err("bone_morph_u32 contains morph_index >= morph_count".to_owned());
-        }
-        let mut offsets = Vec::with_capacity(entries.len());
-        let mut spans = vec![MorphOffsetSpan::default(); mc];
-        let mut i = 0;
-        while i < entries.len() {
-            let morph = entries[i].0 as usize;
-            let start = offsets.len() as u32;
-            let mut count = 0u32;
-            while i < entries.len() && entries[i].0 as usize == morph {
-                let (_, target_bone, entry_idx) = entries[i];
-                let f32_offset = entry_idx * 7;
-                offsets.push(BoneMorphOffset {
-                    target_bone: BoneIndex(target_bone),
-                    position_offset: glam::Vec3A::new(
+            .map(|(entry_index, pair)| {
+                let f32_offset = entry_index * 7;
+                FlatBoneMorphInput {
+                    morph_index: pair[0],
+                    target_bone_index: pair[1],
+                    position_offset_xyz: [
                         input.bone_morph_f32[f32_offset],
                         input.bone_morph_f32[f32_offset + 1],
                         input.bone_morph_f32[f32_offset + 2],
-                    ),
-                    rotation_offset: glam::Quat::from_xyzw(
+                    ],
+                    rotation_offset_xyzw: [
                         input.bone_morph_f32[f32_offset + 3],
                         input.bone_morph_f32[f32_offset + 4],
                         input.bone_morph_f32[f32_offset + 5],
                         input.bone_morph_f32[f32_offset + 6],
-                    ),
-                });
-                count += 1;
-                i += 1;
-            }
-            spans[morph] = MorphOffsetSpan { start, count };
-        }
-        (offsets, spans)
-    };
-
-    let (group_offsets, group_spans) = if input.group_morph_u32.is_empty() {
-        (Vec::new(), vec![MorphOffsetSpan::default(); mc])
-    } else {
-        let mut entries: Vec<(u32, u32, usize)> = input
+                    ],
+                }
+            }),
+        input
             .group_morph_u32
             .chunks_exact(2)
             .enumerate()
-            .map(|(i, pair)| (pair[0], pair[1], i))
-            .collect();
-        entries.sort_by_key(|a| a.0);
-        if entries.last().unwrap().0 as usize >= mc {
-            return Err("group_morph_u32 contains morph_index >= morph_count".to_owned());
-        }
-        let mut offsets = Vec::with_capacity(entries.len());
-        let mut spans = vec![MorphOffsetSpan::default(); mc];
-        let mut i = 0;
-        while i < entries.len() {
-            let morph = entries[i].0 as usize;
-            let start = offsets.len() as u32;
-            let mut count = 0u32;
-            while i < entries.len() && entries[i].0 as usize == morph {
-                let (_, child_morph, orig_idx) = entries[i];
-                offsets.push(GroupMorphOffset {
-                    child_morph: MorphIndex(child_morph),
-                    ratio: input.group_morph_ratios[orig_idx],
-                });
-                count += 1;
-                i += 1;
-            }
-            spans[morph] = MorphOffsetSpan { start, count };
-        }
-        (offsets, spans)
-    };
+            .map(|(entry_index, pair)| FlatGroupMorphInput {
+                morph_index: pair[0],
+                child_morph_index: pair[1],
+                ratio: input.group_morph_ratios[entry_index],
+            }),
+    )
+    .map_err(flat_morph_input_error_to_wasm_string)
+}
 
-    Ok(MorphInit {
-        morph_count: input.morph_count,
-        bone_offsets,
-        bone_spans,
-        group_offsets,
-        group_spans,
-        ..MorphInit::default()
-    })
+fn flat_morph_input_error_to_wasm_string(error: FlatModelInputError) -> String {
+    match error {
+        FlatModelInputError::MorphCountZeroWithData => {
+            "morph_count must be non-zero when morph data is provided".to_owned()
+        }
+        FlatModelInputError::BoneMorphIndexOutOfRange => {
+            "bone_morph_u32 contains morph_index >= morph_count".to_owned()
+        }
+        FlatModelInputError::GroupMorphIndexOutOfRange => {
+            "group_morph_u32 contains morph_index >= morph_count".to_owned()
+        }
+        other => other.to_string(),
+    }
 }
 
 fn copy_matrices(matrices: &[glam::Mat4]) -> Vec<f32> {
     let mut out = Vec::with_capacity(matrices.len() * 16);
+    extend_matrices(&mut out, matrices);
+    out
+}
+
+fn extend_matrices(out: &mut Vec<f32>, matrices: &[glam::Mat4]) {
     for matrix in matrices {
         out.extend_from_slice(&matrix.to_cols_array());
     }
-    out
 }
 
 fn try_copy_matrices(matrices: &[glam::Mat4], out: &mut [f32]) -> bool {
@@ -1624,6 +1943,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wrapper_version_matches_current_breaking_surface() {
+        assert_eq!(WASM_WRAPPER_VERSION, 2);
+        assert_eq!(wasm_wrapper_version(), WASM_WRAPPER_VERSION);
+    }
+
+    #[test]
     fn evaluates_rest_pose_through_wasm_wrapper() {
         let model = WasmMmdModel::new(&[-1, 0], &[1.0, 0.0, 0.0, 0.0, 2.0, 0.0]).unwrap();
         assert_eq!(model.bone_count(), 2);
@@ -1676,6 +2001,123 @@ mod tests {
         assert_eq!(value["kind"], "vmd");
         assert_eq!(value["metadata"]["format"], "vmd");
         assert!(value["cameraFrames"].as_array().unwrap().len() >= 2);
+    }
+
+    #[test]
+    fn samples_vmd_camera_array_layout() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+        let parsed = mmd_anim_format::parse_vmd_animation(bytes).unwrap();
+        let camera = mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, 22.5)
+            .expect("fixture has camera keyframes");
+        let values = camera_state_array(camera);
+
+        assert_eq!(values.len(), 9);
+        assert_near(values[0], -40.25);
+        assert_vec3_near([values[1], values[2], values[3]], [-0.25, 6.0, 1.625]);
+        assert_vec3_near([values[4], values[5], values[6]], [-0.1, -0.1, 0.75]);
+        assert_near(values[7], 47.5);
+        assert_near(values[8], 1.0);
+    }
+
+    #[test]
+    fn samples_vmd_camera_track_through_wasm_wrapper() {
+        let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+        let track = WasmVmdCameraTrack::from_vmd_bytes(bytes).unwrap();
+        assert_eq!(track.frame_count(), 2);
+    }
+
+    #[test]
+    fn samples_vmd_light_array_layout_and_track_json() {
+        let bytes = light_and_self_shadow_vmd_bytes();
+        let parsed = mmd_anim_format::parse_vmd_animation(&bytes).unwrap();
+        let light = mmd_anim_format::sample_vmd_light_frames(&parsed.light_frames, 20.0)
+            .expect("fixture has light keyframes");
+        let values = light_state_array(light);
+
+        assert_eq!(values.len(), 6);
+        assert_vec3_near([values[0], values[1], values[2]], [0.5, 0.25, 0.5]);
+        assert_vec3_near([values[3], values[4], values[5]], [0.5, -0.5, 0.0]);
+
+        let track = WasmVmdLightTrack::from_vmd_bytes(&bytes).unwrap();
+        assert_eq!(track.frame_count(), 2);
+    }
+
+    #[test]
+    fn samples_vmd_self_shadow_array_layout_and_track_json() {
+        let bytes = light_and_self_shadow_vmd_bytes();
+        let parsed = mmd_anim_format::parse_vmd_animation(&bytes).unwrap();
+        let self_shadow =
+            mmd_anim_format::sample_vmd_self_shadow_frames(&parsed.self_shadow_frames, 20.0)
+                .expect("fixture has self-shadow keyframes");
+        let values = self_shadow_state_array(self_shadow);
+
+        assert_eq!(values.len(), 2);
+        assert_near(values[0], 1.0);
+        assert_near(values[1], 40.0);
+
+        let track = WasmVmdSelfShadowTrack::from_vmd_bytes(&bytes).unwrap();
+        assert_eq!(track.frame_count(), 2);
+    }
+
+    fn light_and_self_shadow_vmd_bytes() -> Vec<u8> {
+        mmd_anim_format::export_vmd_animation(&mmd_anim_format::vmd::VmdParsedAnimation {
+            kind: "vmd",
+            metadata: mmd_anim_format::vmd::VmdParsedMetadata {
+                format: "vmd",
+                model_name: "light_shadow".to_owned(),
+                model_name_bytes: Vec::new(),
+                counts: mmd_anim_format::vmd::VmdParsedCounts {
+                    bones: 0,
+                    morphs: 0,
+                    cameras: 0,
+                    lights: 2,
+                    self_shadows: 2,
+                    properties: 0,
+                },
+                max_frame: 30,
+            },
+            bone_frames: Vec::new(),
+            morph_frames: Vec::new(),
+            camera_frames: Vec::new(),
+            light_frames: vec![
+                mmd_anim_format::vmd::VmdParsedLightFrame {
+                    frame: 10,
+                    color: [0.0, 0.0, 1.0],
+                    direction: [1.0, 0.0, 0.0],
+                },
+                mmd_anim_format::vmd::VmdParsedLightFrame {
+                    frame: 30,
+                    color: [1.0, 0.5, 0.0],
+                    direction: [0.0, -1.0, 0.0],
+                },
+            ],
+            self_shadow_frames: vec![
+                mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+                    frame: 10,
+                    mode: 1,
+                    distance: 20.0,
+                },
+                mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+                    frame: 30,
+                    mode: 2,
+                    distance: 60.0,
+                },
+            ],
+            property_frames: Vec::new(),
+        })
+    }
+
+    fn assert_near(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-4,
+            "actual={actual} expected={expected}"
+        );
+    }
+
+    fn assert_vec3_near(actual: [f32; 3], expected: [f32; 3]) {
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_near(*actual, expected);
+        }
     }
 
     #[test]
@@ -2051,6 +2493,55 @@ TextureFilename { "tex/main.png"; }
         assert_eq!(runtime.ik_enabled(), vec![0]);
         assert_eq!(runtime.morph_weights_cache, vec![0.5]);
         assert_eq!(runtime.ik_enabled_cache, vec![0]);
+    }
+
+    #[test]
+    fn evaluates_clip_frame_batch_through_wasm_wrapper_without_mutating_source() {
+        let model = WasmMmdModel::new(&[-1], &[0.0, 0.0, 0.0]).unwrap();
+        let clip = WasmMmdClip::new(
+            &[0, 0, 2],
+            &[0, 60],
+            &[
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            &[0, 0, 2],
+            &[0, 60],
+            &[0.0, 1.0],
+            &[0, 30],
+            &[1, 0],
+            1,
+        )
+        .unwrap();
+        let mut runtime = WasmMmdRuntimeInstance::with_counts(&model, 1, 1);
+        runtime.evaluate_clip_frame(&clip, 30.0);
+        let source_world_before = runtime.world_matrices();
+        let source_morph_before = runtime.morph_weights();
+
+        assert_eq!(runtime.clip_frame_batch_world_matrix_f32_len(3), 48);
+        assert_eq!(runtime.clip_frame_batch_morph_weight_f32_len(3), 3);
+        let batch = runtime
+            .evaluate_clip_frame_batch(&clip, 0.0, 30.0, 3, 0)
+            .unwrap();
+
+        assert_eq!(batch.frame_count(), 3);
+        assert_eq!(batch.bone_count(), 1);
+        assert_eq!(batch.morph_count(), 1);
+        assert_eq!(batch.world_matrix_f32_len(), 48);
+        assert_eq!(batch.morph_weight_f32_len(), 3);
+        let batch_world = batch.world_matrices();
+        assert_eq!(batch_world[12], 0.0);
+        assert_eq!(batch_world[16 + 12], 1.0);
+        assert_eq!(batch_world[32 + 12], 2.0);
+        assert_eq!(batch.morph_weights(), vec![0.0, 0.5, 1.0]);
+
+        let mut world_copy = vec![0.0; batch.world_matrix_f32_len()];
+        assert!(batch.copy_world_matrices(&mut world_copy));
+        assert_eq!(world_copy, batch_world);
+        let mut short_world_copy = vec![0.0; batch.world_matrix_f32_len() - 1];
+        assert!(!batch.copy_world_matrices(&mut short_world_copy));
+
+        assert_eq!(runtime.world_matrices(), source_world_before);
+        assert_eq!(runtime.morph_weights(), source_morph_before);
     }
 
     #[test]
@@ -2523,7 +3014,7 @@ TextureFilename { "tex/main.png"; }
         assert_eq!(geo.sdef_rw0().len(), 9);
         assert_eq!(geo.sdef_rw1().len(), 9);
         assert_eq!(geo.qdef_enabled(), vec![0u8, 0, 0]);
-        assert_eq!(geo.skinning_modes(), vec!["bdef1", "bdef1", "bdef1"]);
+        assert_eq!(geo.skinning_modes(), vec!["bdef4", "bdef4", "bdef4"]);
     }
 
     #[test]

@@ -1,0 +1,23 @@
+[project]
+name = "golden-gate"
+version = "0.1.0"
+description = "Local NumericMotion GoldenOracle regression gate for mmd-anim"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = []
+
+[project.scripts]
+golden-gate = "golden_gate.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

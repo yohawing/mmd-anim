@@ -6,7 +6,7 @@ use std::{
 };
 
 use fbxcel::{
-    low::{v7400::ArrayAttributeEncoding, FbxVersion},
+    low::{FbxVersion, v7400::ArrayAttributeEncoding},
     writer::v7400::binary::{AttributesWriter, FbxFooter, Writer},
 };
 use mmd_anim_runtime::{AnimationClip, BoneIndex, ModelArena, RuntimeInstance};
@@ -86,8 +86,13 @@ pub fn export_pmx_fbx_binary_with_runtime_bake(
     last_frame: u32,
     options: &FbxExportOptions,
 ) -> Result<Vec<u8>, FbxExportError> {
-    let animation =
-        Some(FbxAnimationData::from_runtime_bake(model, runtime_model, clip, last_frame, options));
+    let animation = Some(FbxAnimationData::from_runtime_bake(
+        model,
+        runtime_model,
+        clip,
+        last_frame,
+        options,
+    ));
     export_pmx_fbx_binary_with_animation(model, animation, options)
 }
 
@@ -330,8 +335,7 @@ impl FbxAnimationData {
                     Some(parent) => world_matrices[parent.as_usize()].inverse() * bone_world,
                     None => bone_world,
                 };
-                let (_scale, rotation, translation) =
-                    local_matrix.to_scale_rotation_translation();
+                let (_scale, rotation, translation) = local_matrix.to_scale_rotation_translation();
 
                 if translation_changed(translation, rest_translations[track.bone_index])
                     || rotation_changed(rotation)
@@ -645,9 +649,7 @@ fn evaluate_bezier(x: f64, cp: [u8; 4]) -> f64 {
     let y2 = cp[3] as f64 * scale;
     let mut t = x;
     for _ in 0..15 {
-        let bx = 3.0 * (1.0 - t) * (1.0 - t) * t * x1
-            + 3.0 * (1.0 - t) * t * t * x2
-            + t * t * t;
+        let bx = 3.0 * (1.0 - t) * (1.0 - t) * t * x1 + 3.0 * (1.0 - t) * t * t * x2 + t * t * t;
         let dx = 3.0 * (1.0 - t) * (1.0 - t) * x1
             + 6.0 * (1.0 - t) * t * (x2 - x1)
             + 3.0 * t * t * (1.0 - x2);
@@ -1311,21 +1313,52 @@ fn identity_matrix() -> [f64; 16] {
 fn bone_world_transform(bone: &PmxParsedBone, options: &FbxExportOptions) -> [f64; 16] {
     let position = converted_bone_position(bone, options);
     [
-        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, position[0], position[1],
-        position[2], 1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        position[0],
+        position[1],
+        position[2],
+        1.0,
     ]
 }
 
 fn bone_world_transform_inverse(bone: &PmxParsedBone, options: &FbxExportOptions) -> [f64; 16] {
     let position = converted_bone_position(bone, options);
     [
-        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -position[0],
-        -position[1], -position[2], 1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        -position[0],
+        -position[1],
+        -position[2],
+        1.0,
     ]
 }
 
 fn build_bone_names(bones: &[PmxParsedBone]) -> Vec<String> {
-    bones.iter().map(|bone| japanese_to_ascii(&bone.name)).collect()
+    bones
+        .iter()
+        .map(|bone| japanese_to_ascii(&bone.name))
+        .collect()
 }
 
 fn japanese_to_ascii(s: &str) -> String {

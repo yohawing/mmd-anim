@@ -8,3 +8,4 @@ pub(crate) mod oracle;
 pub(crate) mod parse;
 pub(crate) mod patch;
 pub(crate) mod rig;
+pub(crate) mod vmd_sample;

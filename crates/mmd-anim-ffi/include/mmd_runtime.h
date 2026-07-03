@@ -13,7 +13,7 @@ extern "C" {
 /*  Version                                                           */
 /* ------------------------------------------------------------------ */
 
-#define MMD_RUNTIME_ABI_VERSION 1
+#define MMD_RUNTIME_ABI_VERSION 2
 
 /* ------------------------------------------------------------------ */
 /*  Opaque handle types                                               */
@@ -22,10 +22,14 @@ extern "C" {
 typedef struct mmd_runtime_model_t    mmd_runtime_model_t;
 typedef struct mmd_runtime_instance_t mmd_runtime_instance_t;
 typedef struct mmd_runtime_clip_t     mmd_runtime_clip_t;
+typedef struct mmd_runtime_pmx_geometry_t mmd_runtime_pmx_geometry_t;
 typedef struct mmd_runtime_pmx_material_split_t mmd_runtime_pmx_material_split_t;
 typedef struct mmd_runtime_pmx_rig_spec_t mmd_runtime_pmx_rig_spec_t;
 typedef struct mmd_runtime_ik_chain_t mmd_runtime_ik_chain_t;
 typedef struct mmd_runtime_append_solver_t mmd_runtime_append_solver_t;
+typedef struct mmd_runtime_vmd_camera_track_t mmd_runtime_vmd_camera_track_t;
+typedef struct mmd_runtime_vmd_light_track_t mmd_runtime_vmd_light_track_t;
+typedef struct mmd_runtime_vmd_self_shadow_track_t mmd_runtime_vmd_self_shadow_track_t;
 
 /* ------------------------------------------------------------------ */
 /*  Flag constants                                                    */
@@ -149,12 +153,86 @@ typedef struct mmd_runtime_ffi_byte_buffer {
 
 uint32_t mmd_runtime_abi_version(void);
 
+/* Returns the most recent FFI error message for the calling thread, or NULL.
+   The returned pointer is valid only until the next FFI call on the same
+   thread. Do not store or free it. */
+const char* mmd_runtime_last_error_message(void);
+
 void mmd_runtime_byte_buffer_free(
     mmd_runtime_ffi_byte_buffer_t buffer);
 
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_vmd_json(
     const uint8_t* data,
     size_t         len);
+
+mmd_runtime_vmd_camera_track_t* mmd_runtime_vmd_camera_track_create_from_vmd_bytes(
+    const uint8_t* data,
+    size_t         len);
+
+size_t mmd_runtime_vmd_camera_track_frame_count(
+    const mmd_runtime_vmd_camera_track_t* track);
+
+bool mmd_runtime_vmd_camera_track_sample(
+    const mmd_runtime_vmd_camera_track_t* track,
+    float                                 frame,
+    float*                                out_values,
+    size_t                                out_len);
+
+bool mmd_runtime_vmd_sample_camera(
+    const uint8_t* data,
+    size_t         len,
+    float          frame,
+    float*         out_values,
+    size_t         out_len);
+
+void mmd_runtime_vmd_camera_track_free(
+    mmd_runtime_vmd_camera_track_t* track);
+
+mmd_runtime_vmd_light_track_t* mmd_runtime_vmd_light_track_create_from_vmd_bytes(
+    const uint8_t* data,
+    size_t         len);
+
+size_t mmd_runtime_vmd_light_track_frame_count(
+    const mmd_runtime_vmd_light_track_t* track);
+
+bool mmd_runtime_vmd_light_track_sample(
+    const mmd_runtime_vmd_light_track_t* track,
+    float                                frame,
+    float*                               out_values,
+    size_t                               out_len);
+
+bool mmd_runtime_vmd_sample_light(
+    const uint8_t* data,
+    size_t         len,
+    float          frame,
+    float*         out_values,
+    size_t         out_len);
+
+void mmd_runtime_vmd_light_track_free(
+    mmd_runtime_vmd_light_track_t* track);
+
+mmd_runtime_vmd_self_shadow_track_t* mmd_runtime_vmd_self_shadow_track_create_from_vmd_bytes(
+    const uint8_t* data,
+    size_t         len);
+
+size_t mmd_runtime_vmd_self_shadow_track_frame_count(
+    const mmd_runtime_vmd_self_shadow_track_t* track);
+
+bool mmd_runtime_vmd_self_shadow_track_sample(
+    const mmd_runtime_vmd_self_shadow_track_t* track,
+    float                                      frame,
+    float*                                     out_values,
+    size_t                                     out_len);
+
+bool mmd_runtime_vmd_sample_self_shadow(
+    const uint8_t* data,
+    size_t         len,
+    float          frame,
+    float*         out_values,
+    size_t         out_len);
+
+void mmd_runtime_vmd_self_shadow_track_free(
+    mmd_runtime_vmd_self_shadow_track_t* track);
 
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_non_geometry_json(
     const uint8_t* data,
@@ -163,6 +241,8 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_non_geometry_json(
 /* PMX geometry typed-buffer API.
    Each function returns one geometry array as a native-endian byte buffer.
    The caller must free each buffer with mmd_runtime_byte_buffer_free.
+   These legacy parse_pmx_* helpers reparse the whole PMX on every call; prefer
+   the mmd_runtime_pmx_geometry_* handle API below when reading multiple arrays.
    Returns an empty buffer (data == NULL, len == 0) on any error. */
 
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_positions_buffer(
@@ -238,6 +318,77 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_qdef_enabled_buffer(
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_skinning_modes_json(
     const uint8_t* data,
     size_t         len);
+
+/* PMX geometry handle API.
+   mmd_runtime_pmx_geometry_create parses PMX bytes once and returns an owned
+   opaque handle. Free it with mmd_runtime_pmx_geometry_free. Geometry buffers
+   are native-endian flat arrays and must be freed with
+   mmd_runtime_byte_buffer_free. Invalid input, invalid handles, or out-of-range
+   UV indices return null handles, zero counts, or empty buffers. */
+
+mmd_runtime_pmx_geometry_t* mmd_runtime_pmx_geometry_create(
+    const uint8_t* data,
+    size_t         len);
+
+void mmd_runtime_pmx_geometry_free(
+    mmd_runtime_pmx_geometry_t* geometry);
+
+size_t mmd_runtime_pmx_geometry_additional_uv_count(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_positions_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_normals_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_uvs_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_additional_uvs_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry,
+    size_t                            uv_index);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_indices_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_material_groups_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_skin_indices_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_skin_weights_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_edge_scale_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_enabled_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_c_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_r0_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_r1_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_rw0_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_rw1_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_qdef_enabled_buffer(
+    const mmd_runtime_pmx_geometry_t* geometry);
+
+/* Returns caller-owned JSON: {"skinningModes": ["bdef1", ...]}.
+   Free the returned buffer with mmd_runtime_byte_buffer_free. */
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_skinning_modes_json(
+    const mmd_runtime_pmx_geometry_t* geometry);
 
 /* Rig primitive API.
    Coordinates use the MMD convention: left-handed, Y-up, xyz vectors.
@@ -561,6 +712,31 @@ bool mmd_runtime_instance_evaluate_clip_frame_without_ik(
     mmd_runtime_instance_t*       instance,
     const mmd_runtime_clip_t*     clip,
     float                         frame);
+
+size_t mmd_runtime_instance_clip_frame_batch_world_matrix_f32_len(
+    const mmd_runtime_instance_t* instance,
+    size_t                        frame_count);
+
+size_t mmd_runtime_instance_clip_frame_batch_morph_weight_f32_len(
+    const mmd_runtime_instance_t* instance,
+    size_t                        frame_count);
+
+/* Evaluates a frame range into caller-owned contiguous buffers.
+   worker_count == 0 uses available host parallelism.
+   The source instance is not mutated; worker-local runtime instances are used.
+   out_world_matrices_f32 layout: [frame][bone][16] column-major f32 matrices.
+   out_morph_weights_f32 layout: [frame][morph]. */
+bool mmd_runtime_instance_evaluate_clip_frame_batch(
+    const mmd_runtime_instance_t* instance,
+    const mmd_runtime_clip_t*     clip,
+    float                         start_frame,
+    float                         frame_step,
+    size_t                        frame_count,
+    uint32_t                      worker_count,
+    float*                        out_world_matrices_f32,
+    size_t                        out_world_matrices_f32_len,
+    float*                        out_morph_weights_f32,
+    size_t                        out_morph_weights_f32_len);
 
 /* ------------------------------------------------------------------ */
 /*  Output: world matrices                                             */

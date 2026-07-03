@@ -8,7 +8,14 @@ use mmd_anim_runtime::{
     IkLinkInit, IkSolverInit, ModelArena, MorphIndex, MorphInit, MorphOffsetSpan,
 };
 
+use crate::binary::{
+    ByteReader, write_f32_le as write_f32, write_f32_slice_le as write_f32_slice,
+    write_i32_le as write_i32, write_u16_le as write_u16,
+};
 use crate::error::ImportError;
+use crate::sjis::encode_sjis;
+
+type Reader<'a> = ByteReader<'a>;
 
 mod json_f32;
 
@@ -21,6 +28,7 @@ const BONE_FLAG_APPEND_ROTATE: u16 = 0x0100;
 const BONE_FLAG_APPEND_TRANSLATE: u16 = 0x0200;
 const BONE_FLAG_FIXED_AXIS: u16 = 0x0400;
 const BONE_FLAG_LOCAL_AXIS: u16 = 0x0800;
+const BONE_FLAG_TRANSFORM_AFTER_PHYSICS: u16 = 0x1000;
 const BONE_FLAG_EXTERNAL_PARENT: u16 = 0x2000;
 const PMX_SKINNING_MODE_BDEF1: &str = "bdef1";
 const PMX_SKINNING_MODE_BDEF2: &str = "bdef2";
@@ -58,71 +66,7 @@ pub struct PmxHeader {
     pub rigidbody_index_size: u8,
 }
 
-struct Reader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.pos)
-    }
-
-    fn require(&self, n: usize) -> Result<(), ImportError> {
-        if self.remaining() >= n {
-            Ok(())
-        } else {
-            Err(ImportError::UnexpectedEof(
-                n.saturating_sub(self.remaining()),
-            ))
-        }
-    }
-
-    fn require_record_bytes(&self, count: usize, record_size: usize) -> Result<(), ImportError> {
-        let bytes = count
-            .checked_mul(record_size)
-            .ok_or(ImportError::SectionOverflow)?;
-        self.require(bytes)
-    }
-
-    fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], ImportError> {
-        self.require(n)?;
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
-        Ok(slice)
-    }
-
-    fn read_u8(&mut self) -> Result<u8, ImportError> {
-        Ok(self.read_bytes(1)?[0])
-    }
-
-    fn read_u16_le(&mut self) -> Result<u16, ImportError> {
-        let b = self.read_bytes(2)?;
-        Ok(u16::from_le_bytes([b[0], b[1]]))
-    }
-
-    fn read_i32_le(&mut self) -> Result<i32, ImportError> {
-        let b = self.read_bytes(4)?;
-        Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    fn read_f32_le(&mut self) -> Result<f32, ImportError> {
-        let b = self.read_bytes(4)?;
-        Ok(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    fn read_vec3(&mut self) -> Result<Vec3A, ImportError> {
-        Ok(Vec3A::new(
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-        ))
-    }
-
+impl<'a> ByteReader<'a> {
     fn read_vec2_array(&mut self) -> Result<[f32; 2], ImportError> {
         Ok([self.read_f32_le()?, self.read_f32_le()?])
     }
@@ -174,12 +118,6 @@ impl<'a> Reader<'a> {
             }
             _ => Err(ImportError::InvalidIndexSize(size)),
         }
-    }
-
-    fn skip(&mut self, n: usize) -> Result<(), ImportError> {
-        self.require(n)?;
-        self.pos += n;
-        Ok(())
     }
 
     fn read_string(&mut self, encoding: TextEncoding) -> Result<String, ImportError> {
@@ -781,7 +719,11 @@ pub fn read_bones(
             rest_position: position,
             inverse_bind_matrix: Mat4::from_translation((-position).into()),
             transform_order,
+            transform_after_physics: flags & BONE_FLAG_TRANSFORM_AFTER_PHYSICS != 0,
             fixed_axis,
+            // PMX fixed-axis is preserved as rig metadata. MMD-compatible pose evaluation
+            // does not project ordinary VMD/local rotations onto this axis.
+            enforce_fixed_axis: false,
         });
     }
 
@@ -1194,8 +1136,7 @@ pub fn pmx_model_to_rig_spec(model: &PmxParsedModel) -> PmxRigSpec {
 }
 
 fn shift_jis_hex(text: &str) -> String {
-    let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(text);
-    bytes_to_hex(&encoded)
+    bytes_to_hex(&encode_sjis(text))
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -3953,24 +3894,6 @@ fn write_pmx_string(out: &mut Vec<u8>, text: &str, encoding: TextEncoding) {
     }
 }
 
-fn write_f32_slice(out: &mut Vec<u8>, values: &[f32]) {
-    for &value in values {
-        write_f32(out, value);
-    }
-}
-
-fn write_f32(out: &mut Vec<u8>, value: f32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_i32(out: &mut Vec<u8>, value: i32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
 fn write_sized_index(out: &mut Vec<u8>, value: i32, size: u8) {
     match size {
         1 => out.push(value as i8 as u8),
@@ -4153,7 +4076,11 @@ fn bone_flag_bits(flags: &PmxParsedBoneFlags) -> u16 {
         } else {
             0
         }
-        | (u16::from(flags.transform_after_physics) << 12)
+        | if flags.transform_after_physics {
+            BONE_FLAG_TRANSFORM_AFTER_PHYSICS
+        } else {
+            0
+        }
         | if flags.external_parent_transform {
             BONE_FLAG_EXTERNAL_PARENT
         } else {
@@ -5484,6 +5411,7 @@ mod tests {
         assert_eq!(BONE_FLAG_APPEND_TRANSLATE, 0x0200);
         assert_eq!(BONE_FLAG_FIXED_AXIS, 0x0400);
         assert_eq!(BONE_FLAG_LOCAL_AXIS, 0x0800);
+        assert_eq!(BONE_FLAG_TRANSFORM_AFTER_PHYSICS, 0x1000);
         assert_eq!(BONE_FLAG_EXTERNAL_PARENT, 0x2000);
     }
 
@@ -6590,6 +6518,7 @@ mod tests {
 
         let result = import_pmx_model(&buf).unwrap();
         assert_eq!(result.bones[0].fixed_axis, Some(Vec3A::Y));
+        assert!(!result.bones[0].enforce_fixed_axis);
     }
 
     #[test]

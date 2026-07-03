@@ -1,16 +1,30 @@
-use std::{collections::HashMap, fs, path::Path, process::ExitCode, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Arc,
+};
 
-use glam::Vec3A;
-use mmd_anim_format::VmdClipBuildOptions;
-use mmd_anim_runtime::{BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance};
-use mmd_anim_schema::{
+use crate::schema::{
     DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
     MmdDumperOracleModel,
 };
-use serde_json::json;
+use glam::Vec3A;
+use mmd_anim_format::VmdClipBuildOptions;
+use mmd_anim_runtime::{BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance};
+use serde::Serialize;
 
 pub(crate) const GOLDEN_IK_COMPARE_USAGE: &str =
     "usage: mmd-anim golden-ik-compare <golden-ik-oracle-root> [sample-frame-offset]";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoldenImportDiagnostic {
+    level: String,
+    code: String,
+    message: String,
+}
 
 pub(crate) struct RuntimeModelImport {
     pub(crate) model: ModelArena,
@@ -18,7 +32,7 @@ pub(crate) struct RuntimeModelImport {
     pub(crate) bone_name_to_index: HashMap<Vec<u8>, BoneIndex>,
     pub(crate) morph_name_to_index: HashMap<Vec<u8>, MorphIndex>,
     pub(crate) ik_solver_bone_name_to_index: HashMap<Vec<u8>, usize>,
-    pub(crate) diagnostics: Vec<serde_json::Value>,
+    pub(crate) diagnostics: Vec<GoldenImportDiagnostic>,
 }
 
 pub(crate) fn parse_golden_ik_compare_args(
@@ -59,6 +73,183 @@ pub(crate) fn parse_golden_ik_compare_args(
     }
 
     Ok((root, offset, use_json))
+}
+
+pub(crate) fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let manifest_path = root.join("oracle-batch.json");
+    let manifest = GoldenIkBatchManifest::from_json_str(&crate::read_text_file(&manifest_path)?)?;
+    let mut parsed_cases = 0usize;
+    let mut parsed_frames = 0usize;
+    let mut parsed_bones = 0usize;
+    let mut focused_frame_hits = 0usize;
+    let mut missing = Vec::new();
+
+    for case in &manifest.cases {
+        let case_root = root.join(&case.name);
+        let fixture_path = case_root.join("fixture.json");
+        if !fixture_path.exists() {
+            missing.push(fixture_path);
+            continue;
+        }
+
+        let fixture = GoldenIkFixture::from_json_str(&crate::read_text_file(&fixture_path)?)?;
+        let oracle_path = crate::resolve_maybe_absolute(&case_root, &fixture.output);
+        if !oracle_path.exists() {
+            missing.push(oracle_path);
+            continue;
+        }
+
+        let frames = if fixture.frames.is_empty() {
+            case.frames.as_slice()
+        } else {
+            fixture.frames.as_slice()
+        };
+        let dump = MmdDumperOracleDump::from_jsonl_str(
+            &crate::read_text_file(&oracle_path)?,
+            Some(frames),
+        )?;
+        parsed_cases += 1;
+        parsed_frames += dump.frames.len();
+        parsed_bones += dump
+            .frames
+            .first()
+            .and_then(|frame| frame.models.first())
+            .map(|model| model.bones.len())
+            .unwrap_or(0);
+        for frame in &dump.frames {
+            let focused_count = frame
+                .models
+                .first()
+                .map(|model| {
+                    model
+                        .focused_ik_bones(DEFAULT_FOCUSED_IK_BONE_NAMES)
+                        .count()
+                })
+                .unwrap_or(0);
+            if focused_count == 0 {
+                return Err(format!(
+                    "{} frame={} has no focused IK bones",
+                    case.name, frame.frame
+                )
+                .into());
+            }
+            focused_frame_hits += 1;
+        }
+    }
+
+    if !missing.is_empty() {
+        for path in missing {
+            eprintln!("missing: {}", path.display());
+        }
+        return Err("one or more golden IK oracle files are missing".into());
+    }
+
+    println!(
+        "MMDDumper golden IK: cases={} selectedFrames={} firstFrameBoneTotal={} focusedFrameHits={}",
+        parsed_cases, parsed_frames, parsed_bones, focused_frame_hits
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) fn golden_parser_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let manifest_path = root.join("oracle-batch.json");
+    let manifest = GoldenIkBatchManifest::from_json_str(&crate::read_text_file(&manifest_path)?)?;
+    let mut parsed_cases = 0usize;
+    let mut skipped_unsupported = 0usize;
+    let mut missing_files = Vec::new();
+    let mut matched_bones = 0usize;
+    let mut missing_bones = 0usize;
+    let mut matched_morphs = 0usize;
+    let mut missing_morphs = 0usize;
+
+    for case in &manifest.cases {
+        let pmx_path = PathBuf::from(&case.pmx);
+        if pmx_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_none_or(|ext| !ext.eq_ignore_ascii_case("pmx"))
+        {
+            skipped_unsupported += 1;
+            continue;
+        }
+        if !pmx_path.exists() {
+            missing_files.push(pmx_path);
+            continue;
+        }
+
+        let case_root = root.join(&case.name);
+        let fixture_path = case_root.join("fixture.json");
+        if !fixture_path.exists() {
+            missing_files.push(fixture_path);
+            continue;
+        }
+        let fixture = GoldenIkFixture::from_json_str(&crate::read_text_file(&fixture_path)?)?;
+        let oracle_path = crate::resolve_maybe_absolute(&case_root, &fixture.output);
+        if !oracle_path.exists() {
+            missing_files.push(oracle_path);
+            continue;
+        }
+
+        let parsed = mmd_anim_format::parse_pmx_model(&crate::read_file(&pmx_path)?)?;
+        let bone_names = parsed
+            .skeleton
+            .bones
+            .iter()
+            .map(|bone| bone.name.as_str())
+            .collect::<HashSet<_>>();
+        let morph_names = parsed
+            .morphs
+            .iter()
+            .map(|morph| morph.name.as_str())
+            .collect::<HashSet<_>>();
+
+        let frames = if fixture.frames.is_empty() {
+            case.frames.as_slice()
+        } else {
+            fixture.frames.as_slice()
+        };
+        let dump = MmdDumperOracleDump::from_jsonl_str(
+            &crate::read_text_file(&oracle_path)?,
+            Some(frames),
+        )?;
+        parsed_cases += 1;
+
+        let Some(model) = dump.frames.first().and_then(|frame| frame.models.first()) else {
+            continue;
+        };
+        for bone in &model.bones {
+            if bone_names.contains(bone.name.as_str()) {
+                matched_bones += 1;
+            } else {
+                missing_bones += 1;
+            }
+        }
+        for morph in &model.morphs {
+            if morph_names.contains(morph.name.as_str()) {
+                matched_morphs += 1;
+            } else {
+                missing_morphs += 1;
+            }
+        }
+    }
+
+    if !missing_files.is_empty() {
+        for path in missing_files {
+            eprintln!("missing: {}", path.display());
+        }
+        return Err("one or more Golden parser files are missing".into());
+    }
+
+    println!(
+        "MMDDumper parser golden: cases={} skippedUnsupported={} matchedBones={} missingBones={} matchedMorphs={} missingMorphs={}",
+        parsed_cases,
+        skipped_unsupported,
+        matched_bones,
+        missing_bones,
+        matched_morphs,
+        missing_morphs
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Root/control bone names to watch for translation deltas that indicate
@@ -102,11 +293,42 @@ const ORACLE_LAG_DELTA_THRESHOLD: f64 = 0.001;
 /// on root/control bones. Returns zero or more diagnostic entries, each with
 /// bone name, frame, runtime/oracle translation, delta, max component error,
 /// and a short classification.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoldenRootMotionDiagnostic {
+    bone: String,
+    frame: i32,
+    runtime_translation: [f32; 3],
+    oracle_translation: [f32; 3],
+    delta: [f32; 3],
+    max_abs_error: f32,
+    classification: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoldenRootMotionOracleLagMatch {
+    case: String,
+    bone: String,
+    frame: i32,
+    previous_frame: i32,
+    #[serde(rename = "maxAbsError")]
+    max_abs_error: f32,
+    match_delta: f64,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct GoldenRootMotionOracleLag {
+    #[serde(rename = "matchCount")]
+    match_count: usize,
+    matches: Vec<GoldenRootMotionOracleLagMatch>,
+}
+
 pub(crate) fn compute_root_motion_diagnostics(
     oracle_model: &MmdDumperOracleModel,
     world_matrices: &[glam::Mat4],
     frame: i32,
-) -> Vec<serde_json::Value> {
+) -> Vec<GoldenRootMotionDiagnostic> {
     let mut diagnostics = Vec::new();
 
     for &bone_name in ROOT_MOTION_WATCH_BONES {
@@ -139,15 +361,15 @@ pub(crate) fn compute_root_motion_diagnostics(
                 _ => "control_bone_mismatch",
             };
 
-            diagnostics.push(json!({
-                "bone": bone_name,
-                "frame": frame,
-                "runtimeTranslation": [rt_t.x, rt_t.y, rt_t.z],
-                "oracleTranslation": [or_t.x, or_t.y, or_t.z],
-                "delta": [delta.x, delta.y, delta.z],
-                "maxAbsError": max_abs,
-                "classification": classification,
-            }));
+            diagnostics.push(GoldenRootMotionDiagnostic {
+                bone: bone_name.to_owned(),
+                frame,
+                runtime_translation: [rt_t.x, rt_t.y, rt_t.z],
+                oracle_translation: [or_t.x, or_t.y, or_t.z],
+                delta: [delta.x, delta.y, delta.z],
+                max_abs_error: max_abs,
+                classification,
+            });
         }
     }
 
@@ -164,68 +386,60 @@ pub(crate) fn compute_root_motion_diagnostics(
 /// and `prev.runtimeTranslation` is <= `ORACLE_LAG_DELTA_THRESHOLD`.
 pub(crate) fn compute_root_motion_oracle_lag(
     case_name: &str,
-    diagnostics: &[serde_json::Value],
-) -> serde_json::Value {
+    diagnostics: &[GoldenRootMotionDiagnostic],
+) -> GoldenRootMotionOracleLag {
     use std::collections::BTreeMap;
 
     // Filter to root_motion_mismatch only
-    let root_motion: Vec<&serde_json::Value> = diagnostics
+    let root_motion: Vec<&GoldenRootMotionDiagnostic> = diagnostics
         .iter()
-        .filter(|d| d["classification"].as_str() == Some("root_motion_mismatch"))
+        .filter(|d| d.classification == "root_motion_mismatch")
         .collect();
 
     // Group by bone name
-    let mut by_bone: BTreeMap<&str, Vec<&serde_json::Value>> = BTreeMap::new();
+    let mut by_bone: BTreeMap<&str, Vec<&GoldenRootMotionDiagnostic>> = BTreeMap::new();
     for d in &root_motion {
-        if let Some(name) = d["bone"].as_str() {
-            by_bone.entry(name).or_default().push(d);
-        }
+        by_bone.entry(d.bone.as_str()).or_default().push(d);
     }
 
-    let mut matches: Vec<serde_json::Value> = Vec::new();
+    let mut matches: Vec<GoldenRootMotionOracleLagMatch> = Vec::new();
 
     for (_bone, entries) in by_bone.iter_mut() {
         // Sort by frame ascending
-        entries.sort_by_key(|d| d["frame"].as_i64().unwrap_or(0));
+        entries.sort_by_key(|d| d.frame);
 
         for window in entries.windows(2) {
             let prev = window[0];
             let curr = window[1];
 
-            let curr_oracle = curr["oracleTranslation"].as_array();
-            let prev_runtime = prev["runtimeTranslation"].as_array();
-
-            let (co, pr) = match (curr_oracle, prev_runtime) {
-                (Some(co), Some(pr)) => (co, pr),
-                _ => continue,
-            };
-
-            if co.len() < 3 || pr.len() < 3 {
-                continue;
-            }
-
-            let dx = (co[0].as_f64().unwrap_or(0.0) - pr[0].as_f64().unwrap_or(0.0)).abs();
-            let dy = (co[1].as_f64().unwrap_or(0.0) - pr[1].as_f64().unwrap_or(0.0)).abs();
-            let dz = (co[2].as_f64().unwrap_or(0.0) - pr[2].as_f64().unwrap_or(0.0)).abs();
+            let dx = (f64::from(curr.oracle_translation[0])
+                - f64::from(prev.runtime_translation[0]))
+            .abs();
+            let dy = (f64::from(curr.oracle_translation[1])
+                - f64::from(prev.runtime_translation[1]))
+            .abs();
+            let dz = (f64::from(curr.oracle_translation[2])
+                - f64::from(prev.runtime_translation[2]))
+            .abs();
             let max_delta = dx.max(dy).max(dz);
 
             if max_delta <= ORACLE_LAG_DELTA_THRESHOLD {
-                matches.push(json!({
-                    "case": case_name,
-                    "bone": curr["bone"],
-                    "frame": curr["frame"],
-                    "previousFrame": prev["frame"],
-                    "maxAbsError": curr["maxAbsError"],
-                    "matchDelta": max_delta,
-                }));
+                matches.push(GoldenRootMotionOracleLagMatch {
+                    case: case_name.to_owned(),
+                    bone: curr.bone.clone(),
+                    frame: curr.frame,
+                    previous_frame: prev.frame,
+                    max_abs_error: curr.max_abs_error,
+                    match_delta: max_delta,
+                });
             }
         }
     }
 
-    json!({
-        "matchCount": matches.len(),
-        "matches": matches,
-    })
+    GoldenRootMotionOracleLag {
+        match_count: matches.len(),
+        matches,
+    }
 }
 
 /// Return true when any root/control diagnostic dominates the frame's
@@ -241,13 +455,13 @@ pub(crate) fn compute_root_motion_oracle_lag(
 /// Returns `false` when `frame_max_error <= 0.0`.
 fn is_frame_root_control_dominated(
     frame_max_error: f32,
-    frame_diagnostics: &[serde_json::Value],
+    frame_diagnostics: &[GoldenRootMotionDiagnostic],
 ) -> bool {
     if frame_max_error <= 0.0 {
         return false;
     }
     frame_diagnostics.iter().any(|d| {
-        let abs_err = d["maxAbsError"].as_f64().unwrap_or(0.0);
+        let abs_err = f64::from(d.max_abs_error);
         // Ratio rule: a diagnostic error >= 50% of frame max error
         // dominates regardless of classification.
         abs_err >= ROOT_CONTROL_DOMINATED_RATIO * frame_max_error as f64
@@ -255,7 +469,7 @@ fn is_frame_root_control_dominated(
             // above ROOT_MOTION_DOMINATED_ABS_THRESHOLD dominates
             // even when the ratio check fails (capture mismatch
             // propagated through hierarchy).
-            || (d["classification"].as_str() == Some("root_motion_mismatch")
+            || (d.classification == "root_motion_mismatch"
                 && abs_err >= ROOT_MOTION_DOMINATED_ABS_THRESHOLD)
     })
 }
@@ -265,6 +479,22 @@ fn is_frame_root_control_dominated(
 /// oracle (MMD) reference.  This separates end-effector convergence quality
 /// from per-bone world-matrix error: a solver can converge (small residual)
 /// while individual link poses still differ from the oracle.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoldenIkSolverResidual {
+    solver_index: usize,
+    ik_bone: String,
+    ik_bone_index: u32,
+    target_bone: String,
+    target_bone_index: u32,
+    enabled: bool,
+    runtime_residual: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oracle_residual: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    residual_delta: Option<f32>,
+}
+
 pub(crate) fn compute_ik_solver_residuals(
     ik_solvers: &[IkSolver],
     bone_names: &[String],
@@ -272,7 +502,7 @@ pub(crate) fn compute_ik_solver_residuals(
     world_matrices: &[glam::Mat4],
     oracle_model: &MmdDumperOracleModel,
     focus_bone_index: Option<usize>,
-) -> Vec<serde_json::Value> {
+) -> Vec<GoldenIkSolverResidual> {
     let mut residuals = Vec::with_capacity(ik_solvers.len());
 
     for (solver_idx, solver) in ik_solvers.iter().enumerate() {
@@ -337,23 +567,128 @@ pub(crate) fn compute_ik_solver_residuals(
         let ik_name = bone_names.get(ik_idx).map(|s| s.as_str()).unwrap_or("?");
         let tb_name = bone_names.get(tb_idx).map(|s| s.as_str()).unwrap_or("?");
 
-        let mut entry = json!({
-            "solverIndex": solver_idx,
-            "ikBone": ik_name,
-            "ikBoneIndex": solver.ik_bone.0,
-            "targetBone": tb_name,
-            "targetBoneIndex": solver.target_bone.0,
-            "enabled": ik_enabled.get(solver_idx).copied().unwrap_or(1) != 0,
-            "runtimeResidual": runtime_residual,
+        residuals.push(GoldenIkSolverResidual {
+            solver_index: solver_idx,
+            ik_bone: ik_name.to_owned(),
+            ik_bone_index: solver.ik_bone.0,
+            target_bone: tb_name.to_owned(),
+            target_bone_index: solver.target_bone.0,
+            enabled: ik_enabled.get(solver_idx).copied().unwrap_or(1) != 0,
+            runtime_residual,
+            oracle_residual,
+            residual_delta: oracle_residual.map(|or| runtime_residual - or),
         });
-        if let Some(or) = oracle_residual {
-            entry["oracleResidual"] = json!(or);
-            entry["residualDelta"] = json!(runtime_residual - or);
-        }
-        residuals.push(entry);
     }
 
     residuals
+}
+
+#[derive(Serialize)]
+struct UnsupportedGoldenCaseSummaryEntry {
+    name: String,
+    model: String,
+    extension: String,
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct UnsupportedGoldenCasePerCaseEntry {
+    name: String,
+    status: &'static str,
+    model: String,
+    reason: String,
+    #[serde(rename = "maxAbsError")]
+    max_abs_error: f32,
+    worst: &'static str,
+    #[serde(rename = "rootMotionOracleLag")]
+    root_motion_oracle_lag: GoldenRootMotionOracleLag,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoldenIkComparePerCaseEntry {
+    name: String,
+    #[serde(rename = "maxAbsError")]
+    max_abs_error: f32,
+    worst: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<GoldenRootMotionDiagnostic>,
+    #[serde(rename = "importDiagnostics", skip_serializing_if = "Vec::is_empty")]
+    import_diagnostics: Vec<GoldenImportDiagnostic>,
+    #[serde(rename = "rootMotionOracleLag")]
+    root_motion_oracle_lag: GoldenRootMotionOracleLag,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum GoldenIkCompareCaseEntry {
+    Unsupported(UnsupportedGoldenCasePerCaseEntry),
+    Compared(GoldenIkComparePerCaseEntry),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoldenIkCompareJsonReport {
+    command: &'static str,
+    root: String,
+    sample_frame_offset: f32,
+    summary: GoldenIkCompareJsonSummary,
+    #[serde(rename = "perCase")]
+    per_case: Vec<GoldenIkCompareCaseEntry>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoldenIkCompareJsonSummary {
+    cases: usize,
+    compared_cases: usize,
+    skipped_unsupported: usize,
+    skipped_unsupported_cases: Vec<UnsupportedGoldenCaseSummaryEntry>,
+    missing: usize,
+    import_errors: usize,
+    compared_frames: usize,
+    compared_bones: usize,
+    max_abs_error: f32,
+    worst: String,
+    worst_component: usize,
+    worst_component_type: &'static str,
+    worst_case_max_error: f32,
+    diagnostics_total: usize,
+    worst_diagnostic: Option<GoldenRootMotionDiagnostic>,
+    worst_likely_root_control_dominated: bool,
+    solver_focused: GoldenIkCompareSolverFocusedSummary,
+    root_motion_oracle_lag: GoldenIkCompareRootMotionOracleLagSummary,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoldenIkCompareSolverFocusedSummary {
+    compared_bones: usize,
+    skipped_bones: usize,
+    skipped_frames: usize,
+    max_abs_error: f32,
+    worst: String,
+    worst_component: usize,
+    worst_component_type: &'static str,
+    worst_case_max_error: f32,
+    worst_frame_solver_residuals: Vec<GoldenIkSolverResidual>,
+    root_motion_dominated_abs_threshold: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoldenIkCompareRootMotionOracleLagSummary {
+    total_match_count: usize,
+    worst_match: Option<GoldenRootMotionOracleLagMatch>,
+}
+
+fn golden_component_type(component: usize) -> &'static str {
+    match component {
+        12..=14 => "translation",
+        15 => "homogeneous",
+        _ => "rotation",
+    }
 }
 
 /// Build a JSON pair for an unsupported (non-.pmx) case.
@@ -363,29 +698,32 @@ pub(crate) fn compute_ik_solver_residuals(
 fn make_unsupported_case_entry(
     pmx_path: &Path,
     case_name: &str,
-) -> (serde_json::Value, serde_json::Value) {
+) -> (
+    UnsupportedGoldenCaseSummaryEntry,
+    UnsupportedGoldenCasePerCaseEntry,
+) {
     let ext = pmx_path.extension().and_then(|e| e.to_str()).unwrap_or("?");
     let model_name = pmx_path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
     let reason = format!("unsupported model format: only .pmx and .pmd are supported (got .{ext})");
 
-    let summary = json!({
-        "name": case_name,
-        "model": model_name,
-        "extension": ext,
-        "reason": reason,
-    });
-    let per_case = json!({
-        "name": case_name,
-        "status": "skipped",
-        "model": model_name,
-        "reason": reason,
-        "maxAbsError": 0.0,
-        "worst": "",
-        "rootMotionOracleLag": {
-            "matchCount": 0,
-            "matches": [],
+    let summary = UnsupportedGoldenCaseSummaryEntry {
+        name: case_name.to_owned(),
+        model: model_name.to_owned(),
+        extension: ext.to_owned(),
+        reason: reason.clone(),
+    };
+    let per_case = UnsupportedGoldenCasePerCaseEntry {
+        name: case_name.to_owned(),
+        status: "skipped",
+        model: model_name.to_owned(),
+        reason,
+        max_abs_error: 0.0,
+        worst: "",
+        root_motion_oracle_lag: GoldenRootMotionOracleLag {
+            match_count: 0,
+            matches: Vec::new(),
         },
-    });
+    };
 
     (summary, per_case)
 }
@@ -421,12 +759,10 @@ pub(crate) fn import_golden_runtime_model(
                 diagnostics: import
                     .diagnostics
                     .into_iter()
-                    .map(|diagnostic| {
-                        json!({
-                            "level": diagnostic.level,
-                            "code": diagnostic.code,
-                            "message": diagnostic.message,
-                        })
+                    .map(|diagnostic| GoldenImportDiagnostic {
+                        level: diagnostic.level,
+                        code: diagnostic.code,
+                        message: diagnostic.message,
                     })
                     .collect(),
             })
@@ -456,8 +792,8 @@ pub(crate) fn golden_ik_compare(
     let mut cases = 0usize;
     let mut compared_cases = 0usize;
     let mut skipped_unsupported = 0usize;
-    let mut skipped_unsupported_cases: Vec<serde_json::Value> = Vec::new();
-    let mut per_case_entries: Vec<serde_json::Value> = Vec::new();
+    let mut skipped_unsupported_cases: Vec<UnsupportedGoldenCaseSummaryEntry> = Vec::new();
+    let mut per_case_entries: Vec<GoldenIkCompareCaseEntry> = Vec::new();
     let mut missing = 0usize;
     let mut import_errors = 0usize;
     let mut compared_frames = 0usize;
@@ -470,8 +806,8 @@ pub(crate) fn golden_ik_compare(
     let mut worst_frame: i32 = 0;
 
     let mut per_case_errors: Vec<(String, f32, String)> = Vec::new();
-    let mut per_case_diagnostics: Vec<Vec<serde_json::Value>> = Vec::new();
-    let mut all_lag_matches: Vec<serde_json::Value> = Vec::new();
+    let mut per_case_diagnostics: Vec<Vec<GoldenRootMotionDiagnostic>> = Vec::new();
+    let mut all_lag_matches: Vec<GoldenRootMotionOracleLagMatch> = Vec::new();
 
     // Solver-focused tracking (excludes root/control-dominated frames)
     let mut solver_compared_bones: usize = 0;
@@ -481,7 +817,7 @@ pub(crate) fn golden_ik_compare(
     let mut solver_worst = String::from("none");
     let mut solver_worst_component: usize = 0;
     let mut solver_worst_case_max_error: f32 = 0.0;
-    let mut solver_worst_residuals: Vec<serde_json::Value> = Vec::new();
+    let mut solver_worst_residuals: Vec<GoldenIkSolverResidual> = Vec::new();
 
     for case in &manifest.cases {
         cases += 1;
@@ -493,7 +829,7 @@ pub(crate) fn golden_ik_compare(
             skipped_unsupported += 1;
             let (summary, per_case) = make_unsupported_case_entry(&pmx_path, &case.name);
             skipped_unsupported_cases.push(summary);
-            per_case_entries.push(per_case);
+            per_case_entries.push(GoldenIkCompareCaseEntry::Unsupported(per_case));
             continue;
         }
 
@@ -574,7 +910,7 @@ pub(crate) fn golden_ik_compare(
 
         let mut case_max_error: f32 = 0.0;
         let mut case_worst = String::new();
-        let mut case_diagnostics: Vec<serde_json::Value> = Vec::new();
+        let mut case_diagnostics: Vec<GoldenRootMotionDiagnostic> = Vec::new();
 
         for oracle_frame in &dump.frames {
             let sample_frame = oracle_frame.frame as f32 + sample_frame_offset;
@@ -681,28 +1017,19 @@ pub(crate) fn golden_ik_compare(
         per_case_diagnostics.push(case_diagnostics.clone());
 
         let case_lag = compute_root_motion_oracle_lag(&case.name, &case_diagnostics);
-        if let Some(matches) = case_lag.get("matches").and_then(|m| m.as_array()) {
-            for m in matches {
-                all_lag_matches.push(m.clone());
-            }
-        }
+        all_lag_matches.extend(case_lag.matches.iter().cloned());
 
-        {
-            let mut entry = json!({
-                "name": case.name,
-                "maxAbsError": case_max_error,
-                "worst": case_worst,
-                "status": "compared",
-            });
-            if !case_diagnostics.is_empty() {
-                entry["diagnostics"] = json!(case_diagnostics);
-            }
-            if !model_import.diagnostics.is_empty() {
-                entry["importDiagnostics"] = json!(model_import.diagnostics);
-            }
-            entry["rootMotionOracleLag"] = case_lag;
-            per_case_entries.push(entry);
-        }
+        per_case_entries.push(GoldenIkCompareCaseEntry::Compared(
+            GoldenIkComparePerCaseEntry {
+                name: case.name.clone(),
+                max_abs_error: case_max_error,
+                worst: case_worst,
+                status: "compared",
+                diagnostics: case_diagnostics,
+                import_diagnostics: model_import.diagnostics,
+                root_motion_oracle_lag: case_lag,
+            },
+        ));
         compared_cases += 1;
     }
 
@@ -712,7 +1039,7 @@ pub(crate) fn golden_ik_compare(
     // Find the diagnostic entry at the same case+frame as the worst matrix error,
     // picking the one with the largest maxAbsError if multiple match.
     let worst_diagnostic = {
-        let mut result: Option<serde_json::Value> = None;
+        let mut result: Option<GoldenRootMotionDiagnostic> = None;
         for ((name, _error, _worst_bone), case_diags) in
             per_case_errors.iter().zip(per_case_diagnostics.iter())
         {
@@ -720,16 +1047,12 @@ pub(crate) fn golden_ik_compare(
                 continue;
             }
             for diag in case_diags {
-                if diag["frame"].as_i64() != Some(worst_frame as i64) {
+                if diag.frame != worst_frame {
                     continue;
                 }
                 let larger = match &result {
                     None => true,
-                    Some(best) => {
-                        let cur = diag["maxAbsError"].as_f64().unwrap_or(0.0);
-                        let best_val = best["maxAbsError"].as_f64().unwrap_or(0.0);
-                        cur > best_val
-                    }
+                    Some(best) => diag.max_abs_error > best.max_abs_error,
                 };
                 if larger {
                     result = Some(diag.clone());
@@ -742,83 +1065,60 @@ pub(crate) fn golden_ik_compare(
 
     let worst_likely_root_control_dominated = worst_diagnostic
         .as_ref()
-        .and_then(|d| d["maxAbsError"].as_f64())
+        .map(|d| f64::from(d.max_abs_error))
         .map(|err| err >= max_abs_error as f64 * 0.5)
         .unwrap_or(false);
-
     let summary_lag_total = all_lag_matches.len();
     let summary_lag_worst = all_lag_matches
         .iter()
         .max_by(|a, b| {
-            let a_err = a["maxAbsError"].as_f64().unwrap_or(0.0);
-            let b_err = b["maxAbsError"].as_f64().unwrap_or(0.0);
-            a_err
-                .partial_cmp(&b_err)
+            a.max_abs_error
+                .partial_cmp(&b.max_abs_error)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .cloned();
 
     if use_json {
-        let worst_type = if worst_component == 12 || worst_component == 13 || worst_component == 14
-        {
-            "translation"
-        } else if worst_component == 15 {
-            "homogeneous"
-        } else {
-            "rotation"
-        };
-
-        let per_case: Vec<serde_json::Value> = per_case_entries;
-
-        let report = json!({
-            "command": "golden-ik-compare",
-            "root": root.to_string_lossy(),
-            "sampleFrameOffset": sample_frame_offset,
-            "summary": {
-                "cases": cases,
-                "comparedCases": compared_cases,
-                "skippedUnsupported": skipped_unsupported,
-                "skippedUnsupportedCases": skipped_unsupported_cases,
-                "missing": missing,
-                "importErrors": import_errors,
-                "comparedFrames": compared_frames,
-                "comparedBones": compared_bones,
-                "maxAbsError": max_abs_error,
-                "worst": worst,
-                "worstComponent": worst_component,
-                "worstComponentType": worst_type,
-                "worstCaseMaxError": worst_case_max_error,
-                "diagnosticsTotal": diagnostics_total,
-                "worstDiagnostic": worst_diagnostic,
-                "worstLikelyRootControlDominated": worst_likely_root_control_dominated,
-                "solverFocused": {
-                    "comparedBones": solver_compared_bones,
-                    "skippedBones": solver_skipped_bones,
-                    "skippedFrames": solver_skipped_frames,
-                    "maxAbsError": solver_max_abs_error,
-                    "worst": solver_worst,
-                    "worstComponent": solver_worst_component,
-                    "worstComponentType": if solver_worst_component == 12
-                        || solver_worst_component == 13
-                        || solver_worst_component == 14
-                    {
-                        "translation"
-                    } else if solver_worst_component == 15 {
-                        "homogeneous"
-                    } else {
-                        "rotation"
-                    },
-                    "worstCaseMaxError": solver_worst_case_max_error,
-                    "worstFrameSolverResiduals": solver_worst_residuals,
-                    "rootMotionDominatedAbsThreshold": ROOT_MOTION_DOMINATED_ABS_THRESHOLD,
+        let report = GoldenIkCompareJsonReport {
+            command: "golden-ik-compare",
+            root: root.to_string_lossy().into_owned(),
+            sample_frame_offset,
+            summary: GoldenIkCompareJsonSummary {
+                cases,
+                compared_cases,
+                skipped_unsupported,
+                skipped_unsupported_cases,
+                missing,
+                import_errors,
+                compared_frames,
+                compared_bones,
+                max_abs_error,
+                worst,
+                worst_component,
+                worst_component_type: golden_component_type(worst_component),
+                worst_case_max_error,
+                diagnostics_total,
+                worst_diagnostic,
+                worst_likely_root_control_dominated,
+                solver_focused: GoldenIkCompareSolverFocusedSummary {
+                    compared_bones: solver_compared_bones,
+                    skipped_bones: solver_skipped_bones,
+                    skipped_frames: solver_skipped_frames,
+                    max_abs_error: solver_max_abs_error,
+                    worst: solver_worst,
+                    worst_component: solver_worst_component,
+                    worst_component_type: golden_component_type(solver_worst_component),
+                    worst_case_max_error: solver_worst_case_max_error,
+                    worst_frame_solver_residuals: solver_worst_residuals,
+                    root_motion_dominated_abs_threshold: ROOT_MOTION_DOMINATED_ABS_THRESHOLD,
                 },
-                "rootMotionOracleLag": {
-                    "totalMatchCount": summary_lag_total,
-                    "worstMatch": summary_lag_worst,
+                root_motion_oracle_lag: GoldenIkCompareRootMotionOracleLagSummary {
+                    total_match_count: summary_lag_total,
+                    worst_match: summary_lag_worst,
                 },
             },
-            "perCase": per_case,
-        });
+            per_case: per_case_entries,
+        };
 
         println!("{}", serde_json::to_string(&report)?);
     } else {
@@ -839,8 +1139,8 @@ pub(crate) fn golden_ik_compare(
         if skipped_unsupported > 0 {
             println!("Skipped unsupported cases:");
             for case in &skipped_unsupported_cases {
-                let name = case["name"].as_str().unwrap_or("?");
-                let reason = case["reason"].as_str().unwrap_or("?");
+                let name = &case.name;
+                let reason = &case.reason;
                 println!("  {name}: {reason}");
             }
         }
@@ -1375,610 +1675,4 @@ pub(crate) fn golden_ik_diagnose(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use glam::Mat4;
-    use mmd_anim_runtime::{IkLink, IkSolver};
-    use mmd_anim_schema::{MmdDumperOracleBone, MmdDumperOracleModel};
-
-    fn make_identity_matrix(tx: f32, ty: f32, tz: f32) -> [f32; 16] {
-        let mut m = [0f32; 16];
-        m[0] = 1.0;
-        m[5] = 1.0;
-        m[10] = 1.0;
-        m[15] = 1.0;
-        m[12] = tx;
-        m[13] = ty;
-        m[14] = tz;
-        m
-    }
-
-    #[test]
-    fn golden_ik_compare_args_parses_root_only() {
-        let mut args = vec!["/some/root".to_owned()].into_iter();
-        let (root, offset, use_json) = parse_golden_ik_compare_args(&mut args).unwrap();
-        assert_eq!(root, "/some/root");
-        assert_eq!(offset, 0.0);
-        assert!(!use_json);
-    }
-
-    #[test]
-    fn golden_ik_compare_args_parses_root_and_offset() {
-        let mut args = vec!["/some/root".to_owned(), "0.5".to_owned()].into_iter();
-        let (root, offset, use_json) = parse_golden_ik_compare_args(&mut args).unwrap();
-        assert_eq!(root, "/some/root");
-        assert_eq!(offset, 0.5);
-        assert!(!use_json);
-    }
-
-    #[test]
-    fn golden_ik_compare_args_json_flag_after_root() {
-        let mut args = vec!["/some/root".to_owned(), "--json".to_owned()].into_iter();
-        let (root, offset, use_json) = parse_golden_ik_compare_args(&mut args).unwrap();
-        assert_eq!(root, "/some/root");
-        assert_eq!(offset, 0.0);
-        assert!(use_json);
-    }
-
-    #[test]
-    fn golden_ik_compare_args_json_flag_before_root() {
-        let mut args = vec!["--json".to_owned(), "/some/root".to_owned()].into_iter();
-        let (root, offset, use_json) = parse_golden_ik_compare_args(&mut args).unwrap();
-        assert_eq!(root, "/some/root");
-        assert_eq!(offset, 0.0);
-        assert!(use_json);
-    }
-
-    #[test]
-    fn golden_ik_compare_args_json_with_offset() {
-        let mut args = vec![
-            "/some/root".to_owned(),
-            "1.5".to_owned(),
-            "--json".to_owned(),
-        ]
-        .into_iter();
-        let (root, offset, use_json) = parse_golden_ik_compare_args(&mut args).unwrap();
-        assert_eq!(root, "/some/root");
-        assert_eq!(offset, 1.5);
-        assert!(use_json);
-    }
-
-    #[test]
-    fn golden_ik_compare_args_all_json_first() {
-        let mut args = vec![
-            "--json".to_owned(),
-            "/other/root".to_owned(),
-            "-0.25".to_owned(),
-        ]
-        .into_iter();
-        let (root, offset, use_json) = parse_golden_ik_compare_args(&mut args).unwrap();
-        assert_eq!(root, "/other/root");
-        assert_eq!(offset, -0.25);
-        assert!(use_json);
-    }
-
-    #[test]
-    fn golden_ik_compare_args_reject_extra_values() {
-        let mut args = vec![
-            "/some/root".to_owned(),
-            "0.5".to_owned(),
-            "extra".to_owned(),
-        ]
-        .into_iter();
-        let error = parse_golden_ik_compare_args(&mut args).unwrap_err();
-        assert!(error.contains("unexpected extra argument"));
-    }
-
-    #[test]
-    fn golden_ik_compare_args_reject_unknown_flag() {
-        let mut args = vec!["/some/root".to_owned(), "--bad".to_owned()].into_iter();
-        let error = parse_golden_ik_compare_args(&mut args).unwrap_err();
-        assert!(error.contains("unknown flag"));
-    }
-
-    #[test]
-    fn golden_ik_compare_args_reject_invalid_offset() {
-        let mut args = vec!["/some/root".to_owned(), "nope".to_owned()].into_iter();
-        let error = parse_golden_ik_compare_args(&mut args).unwrap_err();
-        assert!(error.contains("invalid sample-frame-offset"));
-    }
-
-    #[test]
-    fn root_motion_diagnostics_center_large_delta() {
-        let bone = MmdDumperOracleBone {
-            index: 0,
-            name: "センター".into(),
-            world_matrix: make_identity_matrix(0.0, 0.0, 0.0),
-        };
-        let model = MmdDumperOracleModel {
-            index: 0,
-            name: "test".into(),
-            filename: "test.pmx".into(),
-            visible: true,
-            bones: vec![bone],
-            morphs: vec![],
-        };
-        // Runtime translation = (1, 2, 3), a large delta from (0, 0, 0).
-        let world = vec![Mat4::from_cols_array(&[
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 1.0,
-        ])];
-
-        let diags = compute_root_motion_diagnostics(&model, &world, 300);
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0]["bone"], "センター");
-        assert_eq!(diags[0]["frame"], 300);
-        assert_eq!(diags[0]["classification"], "root_motion_mismatch");
-        assert!((diags[0]["maxAbsError"].as_f64().unwrap() - 3.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn root_motion_diagnostics_below_threshold() {
-        let bone = MmdDumperOracleBone {
-            index: 0,
-            name: "センター".into(),
-            world_matrix: make_identity_matrix(0.5, 0.5, 0.5),
-        };
-        let model = MmdDumperOracleModel {
-            index: 0,
-            name: "test".into(),
-            filename: "test.pmx".into(),
-            visible: true,
-            bones: vec![bone],
-            morphs: vec![],
-        };
-        // Runtime translation = (0.5005, 0.5, 0.5), below the threshold.
-        let world = vec![Mat4::from_cols_array(&[
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.5005, 0.5, 0.5, 1.0,
-        ])];
-
-        let diags = compute_root_motion_diagnostics(&model, &world, 1);
-        assert!(diags.is_empty());
-    }
-
-    #[test]
-    fn root_motion_diagnostics_mid_delta_below_new_threshold() {
-        let bone = MmdDumperOracleBone {
-            index: 0,
-            name: "センター".into(),
-            world_matrix: make_identity_matrix(0.0, 0.0, 0.0),
-        };
-        let model = MmdDumperOracleModel {
-            index: 0,
-            name: "test".into(),
-            filename: "test.pmx".into(),
-            visible: true,
-            bones: vec![bone],
-            morphs: vec![],
-        };
-        // Runtime translation = (0.05, 0, 0). This is below the current
-        // reporting threshold and should not produce a diagnostic.
-        let world = vec![Mat4::from_cols_array(&[
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.05, 0.0, 0.0, 1.0,
-        ])];
-        let diags = compute_root_motion_diagnostics(&model, &world, 1);
-        assert!(diags.is_empty());
-    }
-
-    #[test]
-    fn root_motion_diagnostics_control_bone_classification() {
-        let bone = MmdDumperOracleBone {
-            index: 0,
-            name: "左足ＩＫ".into(),
-            world_matrix: make_identity_matrix(0.0, 0.0, 0.0),
-        };
-        let model = MmdDumperOracleModel {
-            index: 0,
-            name: "test".into(),
-            filename: "test.pmx".into(),
-            visible: true,
-            bones: vec![bone],
-            morphs: vec![],
-        };
-        let world = vec![Mat4::from_cols_array(&[
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 10.0, 0.0, 1.0,
-        ])];
-
-        let diags = compute_root_motion_diagnostics(&model, &world, 42);
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0]["bone"], "左足ＩＫ");
-        assert_eq!(diags[0]["classification"], "control_bone_mismatch");
-    }
-
-    #[test]
-    fn root_motion_diagnostics_bone_not_found() {
-        let model = MmdDumperOracleModel {
-            index: 0,
-            name: "empty".into(),
-            filename: "empty.pmx".into(),
-            visible: true,
-            bones: vec![],
-            morphs: vec![],
-        };
-        let diags = compute_root_motion_diagnostics(&model, &[], 0);
-        assert!(diags.is_empty());
-    }
-
-    #[test]
-    fn root_motion_diagnostics_index_out_of_range() {
-        let bone = MmdDumperOracleBone {
-            index: 5,
-            name: "センター".into(),
-            world_matrix: make_identity_matrix(0.0, 0.0, 0.0),
-        };
-        let model = MmdDumperOracleModel {
-            index: 0,
-            name: "test".into(),
-            filename: "test.pmx".into(),
-            visible: true,
-            bones: vec![bone],
-            morphs: vec![],
-        };
-        let diags = compute_root_motion_diagnostics(&model, &[Mat4::IDENTITY], 0);
-        assert!(diags.is_empty());
-    }
-
-    #[test]
-    fn ik_solver_residuals_reports_enabled_and_delta() {
-        let solvers = vec![IkSolver {
-            ik_bone: BoneIndex(0),
-            target_bone: BoneIndex(1),
-            links: vec![IkLink {
-                bone: BoneIndex(2),
-                angle_limit: None,
-            }]
-            .into_boxed_slice(),
-            iteration_count: 1,
-            limit_angle: 0.0,
-        }];
-        let bone_names = vec!["ik".to_owned(), "target".to_owned(), "link".to_owned()];
-        let world = vec![
-            Mat4::from_translation(Vec3A::new(0.0, 0.0, 0.0).into()),
-            Mat4::from_translation(Vec3A::new(3.0, 0.0, 0.0).into()),
-            Mat4::IDENTITY,
-        ];
-        let oracle = MmdDumperOracleModel {
-            index: 0,
-            name: "test".into(),
-            filename: "test.pmx".into(),
-            visible: true,
-            bones: vec![
-                MmdDumperOracleBone {
-                    index: 0,
-                    name: "ik".into(),
-                    world_matrix: make_identity_matrix(0.0, 0.0, 0.0),
-                },
-                MmdDumperOracleBone {
-                    index: 1,
-                    name: "target".into(),
-                    world_matrix: make_identity_matrix(1.0, 0.0, 0.0),
-                },
-            ],
-            morphs: vec![],
-        };
-
-        let residuals =
-            compute_ik_solver_residuals(&solvers, &bone_names, &[0], &world, &oracle, Some(2));
-
-        assert_eq!(residuals.len(), 1);
-        assert_eq!(residuals[0]["solverIndex"], 0);
-        assert_eq!(residuals[0]["ikBone"], "ik");
-        assert_eq!(residuals[0]["targetBone"], "target");
-        assert_eq!(residuals[0]["enabled"], false);
-        assert!((residuals[0]["runtimeResidual"].as_f64().unwrap() - 3.0).abs() < 1e-6);
-        assert!((residuals[0]["oracleResidual"].as_f64().unwrap() - 1.0).abs() < 1e-6);
-        assert!((residuals[0]["residualDelta"].as_f64().unwrap() - 2.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn ik_solver_residuals_filters_unrelated_focus_bone() {
-        let solvers = vec![IkSolver {
-            ik_bone: BoneIndex(0),
-            target_bone: BoneIndex(1),
-            links: vec![IkLink {
-                bone: BoneIndex(2),
-                angle_limit: None,
-            }]
-            .into_boxed_slice(),
-            iteration_count: 1,
-            limit_angle: 0.0,
-        }];
-        let bone_names = vec!["ik".to_owned(), "target".to_owned(), "link".to_owned()];
-        let world = vec![Mat4::IDENTITY, Mat4::IDENTITY, Mat4::IDENTITY];
-        let oracle = MmdDumperOracleModel {
-            index: 0,
-            name: "test".into(),
-            filename: "test.pmx".into(),
-            visible: true,
-            bones: vec![],
-            morphs: vec![],
-        };
-
-        let residuals =
-            compute_ik_solver_residuals(&solvers, &bone_names, &[1], &world, &oracle, Some(99));
-
-        assert!(residuals.is_empty());
-    }
-
-    // is_frame_root_control_dominated tests
-
-    #[test]
-    fn is_dominated_zero_frame_error_returns_false() {
-        let diags = vec![json!({"maxAbsError": 100.0, "classification": "root_motion_mismatch"})];
-        assert!(!is_frame_root_control_dominated(0.0, &diags));
-    }
-
-    #[test]
-    fn is_dominated_negative_frame_error_returns_false() {
-        let diags = vec![json!({"maxAbsError": 100.0, "classification": "root_motion_mismatch"})];
-        assert!(!is_frame_root_control_dominated(-1.0, &diags));
-    }
-
-    #[test]
-    fn is_dominated_empty_diagnostics_returns_false() {
-        assert!(!is_frame_root_control_dominated(10.0, &[]));
-    }
-
-    #[test]
-    fn is_dominated_ratio_rule_dominates() {
-        // frame_max_error = 2.0, maxAbsError = 1.0 (>= 0.5 * 2.0)
-        // Ratio rule fires regardless of classification.
-        let diags = vec![json!({"maxAbsError": 1.0, "classification": "control_bone_mismatch"})];
-        assert!(is_frame_root_control_dominated(2.0, &diags));
-    }
-
-    #[test]
-    fn is_dominated_ratio_below_threshold_does_not_dominate() {
-        // frame_max_error = 10.0, maxAbsError = 1.0 (< 0.5 * 10.0)
-        let diags = vec![json!({"maxAbsError": 1.0, "classification": "control_bone_mismatch"})];
-        assert!(!is_frame_root_control_dominated(10.0, &diags));
-    }
-
-    #[test]
-    fn is_dominated_root_motion_abs_threshold_when_ratio_fails() {
-        // frame_max_error = 100.0, maxAbsError = 1.0
-        // Ratio check: 1.0 < 0.5 * 100.0 fails.
-        // Absolute check: root_motion_mismatch && 1.0 >= 1.0 passes.
-        let diags = vec![json!({"maxAbsError": 1.0, "classification": "root_motion_mismatch"})];
-        assert!(is_frame_root_control_dominated(100.0, &diags));
-    }
-
-    #[test]
-    fn is_dominated_control_bone_abs_alone_does_not_dominate() {
-        // frame_max_error = 100.0, maxAbsError = 1.0
-        // Ratio check: 1.0 < 0.5 * 100.0 fails.
-        // Absolute check: control_bone_mismatch is not root_motion_mismatch, so it fails.
-        let diags = vec![json!({"maxAbsError": 1.0, "classification": "control_bone_mismatch"})];
-        assert!(!is_frame_root_control_dominated(100.0, &diags));
-    }
-
-    // make_unsupported_case_entry tests
-
-    #[test]
-    fn unsupported_case_entry_x_extension() {
-        let pmx_path = Path::new("some/case/accessory.x");
-        let (summary, per_case) = make_unsupported_case_entry(pmx_path, "test-case");
-
-        assert_eq!(summary["name"], "test-case");
-        assert_eq!(summary["model"], "accessory.x");
-        assert_eq!(summary["extension"], "x");
-        assert_eq!(
-            summary["reason"],
-            "unsupported model format: only .pmx and .pmd are supported (got .x)"
-        );
-
-        assert_eq!(per_case["name"], "test-case");
-        assert_eq!(per_case["status"], "skipped");
-        assert_eq!(per_case["model"], "accessory.x");
-        assert_eq!(
-            per_case["reason"],
-            "unsupported model format: only .pmx and .pmd are supported (got .x)"
-        );
-        assert_eq!(per_case["maxAbsError"], 0.0);
-        assert_eq!(per_case["worst"], "");
-    }
-
-    #[test]
-    fn unsupported_case_entry_no_extension() {
-        let pmx_path = Path::new("some/case/model_no_ext");
-        let (summary, per_case) = make_unsupported_case_entry(pmx_path, "test-case");
-
-        assert_eq!(summary["name"], "test-case");
-        assert_eq!(summary["model"], "model_no_ext");
-        assert_eq!(summary["extension"], "?");
-        assert_eq!(
-            summary["reason"],
-            "unsupported model format: only .pmx and .pmd are supported (got .?)"
-        );
-
-        assert_eq!(per_case["name"], "test-case");
-        assert_eq!(per_case["status"], "skipped");
-        assert_eq!(per_case["model"], "model_no_ext");
-        assert_eq!(
-            per_case["reason"],
-            "unsupported model format: only .pmx and .pmd are supported (got .?)"
-        );
-        assert_eq!(per_case["maxAbsError"], 0.0);
-        assert_eq!(per_case["worst"], "");
-    }
-
-    #[test]
-    fn golden_model_supports_pmx_and_pmd_extensions() {
-        assert!(is_supported_golden_model(Path::new("model.pmx")));
-        assert!(is_supported_golden_model(Path::new("model.PMD")));
-        assert!(!is_supported_golden_model(Path::new("stage.x")));
-        assert!(!is_supported_golden_model(Path::new("model")));
-    }
-
-    // compute_root_motion_oracle_lag tests
-
-    #[test]
-    fn oracle_lag_empty_diagnostics() {
-        let result = compute_root_motion_oracle_lag("test", &[]);
-        assert_eq!(result["matchCount"].as_u64().unwrap(), 0);
-        assert!(result["matches"].as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn oracle_lag_no_root_motion_classification() {
-        let diags = vec![json!({
-            "bone": "センター",
-            "frame": 300,
-            "oracleTranslation": [10.0, 0.0, 0.0],
-            "runtimeTranslation": [20.0, 0.0, 0.0],
-            "maxAbsError": 10.0,
-            "classification": "control_bone_mismatch",
-        })];
-        let result = compute_root_motion_oracle_lag("test", &diags);
-        assert_eq!(result["matchCount"].as_u64().unwrap(), 0);
-    }
-
-    #[test]
-    fn oracle_lag_single_bone_exact_match() {
-        // Frame 300: runtime=(1.0,0,0), oracle=(12.0,0,0)
-        // Frame 600: runtime=(2.0,0,0), oracle=(1.0,0,0)
-        // oracle@600 matches runtime@300 -> lag detected
-        let diags = vec![
-            json!({
-                "bone": "センター",
-                "frame": 300,
-                "oracleTranslation": [12.0, 0.0, 0.0],
-                "runtimeTranslation": [1.0, 0.0, 0.0],
-                "maxAbsError": 11.0,
-                "classification": "root_motion_mismatch",
-            }),
-            json!({
-                "bone": "センター",
-                "frame": 600,
-                "oracleTranslation": [1.0, 0.0, 0.0],
-                "runtimeTranslation": [2.0, 0.0, 0.0],
-                "maxAbsError": 12.0,
-                "classification": "root_motion_mismatch",
-            }),
-        ];
-        let result = compute_root_motion_oracle_lag("test-case", &diags);
-        assert_eq!(result["matchCount"].as_u64().unwrap(), 1);
-        let matches = result["matches"].as_array().unwrap();
-        assert_eq!(matches[0]["case"], "test-case");
-        assert_eq!(matches[0]["bone"], "センター");
-        assert_eq!(matches[0]["frame"], 600);
-        assert_eq!(matches[0]["previousFrame"], 300);
-        assert_eq!(matches[0]["maxAbsError"], 12.0);
-        assert!((matches[0]["matchDelta"].as_f64().unwrap() - 0.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn oracle_lag_below_threshold_no_match() {
-        // oracle@600 nearly matches runtime@300 but delta > 0.001
-        let diags = vec![
-            json!({
-                "bone": "センター",
-                "frame": 300,
-                "oracleTranslation": [12.0, 0.0, 0.0],
-                "runtimeTranslation": [1.0, 0.0, 0.0],
-                "maxAbsError": 11.0,
-                "classification": "root_motion_mismatch",
-            }),
-            json!({
-                "bone": "センター",
-                "frame": 600,
-                "oracleTranslation": [1.002, 0.0, 0.0],
-                "runtimeTranslation": [2.0, 0.0, 0.0],
-                "maxAbsError": 12.0,
-                "classification": "root_motion_mismatch",
-            }),
-        ];
-        let result = compute_root_motion_oracle_lag("test", &diags);
-        assert_eq!(result["matchCount"].as_u64().unwrap(), 0);
-    }
-
-    #[test]
-    fn oracle_lag_exactly_at_threshold() {
-        // delta == 0.001 exactly -> counted as match
-        let diags = vec![
-            json!({
-                "bone": "センター",
-                "frame": 300,
-                "oracleTranslation": [12.0, 0.0, 0.0],
-                "runtimeTranslation": [1.0, 0.0, 0.0],
-                "maxAbsError": 11.0,
-                "classification": "root_motion_mismatch",
-            }),
-            json!({
-                "bone": "センター",
-                "frame": 600,
-                "oracleTranslation": [1.001, 0.0, 0.0],
-                "runtimeTranslation": [2.0, 0.0, 0.0],
-                "maxAbsError": 12.0,
-                "classification": "root_motion_mismatch",
-            }),
-        ];
-        let result = compute_root_motion_oracle_lag("test", &diags);
-        assert_eq!(result["matchCount"].as_u64().unwrap(), 1);
-    }
-
-    #[test]
-    fn oracle_lag_two_bones_independent() {
-        let diags = vec![
-            json!({
-                "bone": "センター",
-                "frame": 300,
-                "oracleTranslation": [10.0, 0.0, 0.0],
-                "runtimeTranslation": [0.0, 0.0, 0.0],
-                "maxAbsError": 10.0,
-                "classification": "root_motion_mismatch",
-            }),
-            json!({
-                "bone": "センター",
-                "frame": 600,
-                "oracleTranslation": [0.0, 0.0, 0.0],
-                "runtimeTranslation": [5.0, 0.0, 0.0],
-                "maxAbsError": 10.0,
-                "classification": "root_motion_mismatch",
-            }),
-            json!({
-                "bone": "グルーブ",
-                "frame": 300,
-                "oracleTranslation": [20.0, 0.0, 0.0],
-                "runtimeTranslation": [10.0, 0.0, 0.0],
-                "maxAbsError": 10.0,
-                "classification": "root_motion_mismatch",
-            }),
-            json!({
-                "bone": "グルーブ",
-                "frame": 600,
-                "oracleTranslation": [10.0, 0.0, 0.0],
-                "runtimeTranslation": [15.0, 0.0, 0.0],
-                "maxAbsError": 10.0,
-                "classification": "root_motion_mismatch",
-            }),
-        ];
-        let result = compute_root_motion_oracle_lag("test", &diags);
-        // Two bones, one lag match each = 2 total
-        assert_eq!(result["matchCount"].as_u64().unwrap(), 2);
-    }
-
-    #[test]
-    fn oracle_lag_no_lag_when_oracle_differs() {
-        // oracle@600 does NOT match runtime@300
-        let diags = vec![
-            json!({
-                "bone": "センター",
-                "frame": 300,
-                "oracleTranslation": [12.0, 0.0, 0.0],
-                "runtimeTranslation": [1.0, 0.0, 0.0],
-                "maxAbsError": 11.0,
-                "classification": "root_motion_mismatch",
-            }),
-            json!({
-                "bone": "センター",
-                "frame": 600,
-                "oracleTranslation": [99.0, 0.0, 0.0],
-                "runtimeTranslation": [2.0, 0.0, 0.0],
-                "maxAbsError": 97.0,
-                "classification": "root_motion_mismatch",
-            }),
-        ];
-        let result = compute_root_motion_oracle_lag("test", &diags);
-        assert_eq!(result["matchCount"].as_u64().unwrap(), 0);
-    }
-}
+mod tests;

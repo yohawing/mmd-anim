@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use encoding_rs::SHIFT_JIS;
 use glam::Vec3A;
 use mmd_anim_runtime::{
     BoneIndex, BoneInit, IkLinkInit, IkSolverInit, ModelArena, MorphIndex, MorphInit,
@@ -8,8 +7,14 @@ use mmd_anim_runtime::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::binary::{
+    ByteReader, write_f32_le as write_f32, write_u16_le as write_u16, write_u32_le as write_u32,
+};
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
+use crate::sjis::{decode_sjis_fixed_trimmed, encode_sjis, encode_sjis_prefix_fit};
+
+type Reader<'a> = ByteReader<'a>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,55 +216,25 @@ pub struct PmdRuntimeImport {
     pub diagnostics: Vec<PmdParserDiagnostic>,
 }
 
-struct Reader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.pos)
-    }
-
-    fn peek_u32_at(&self, pos: usize) -> Option<u32> {
-        let bytes = self.data.get(pos..pos + 4)?;
-        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-    }
-
+impl<'a> ByteReader<'a> {
     fn read(&mut self, n: usize) -> Result<&'a [u8], ImportError> {
-        if self.remaining() < n {
-            return Err(ImportError::UnexpectedEof(n - self.remaining()));
-        }
-        let out = &self.data[self.pos..self.pos + n];
-        self.pos += n;
-        Ok(out)
-    }
-
-    fn skip(&mut self, n: usize) -> Result<(), ImportError> {
-        self.read(n).map(|_| ())
+        self.read_bytes(n)
     }
 
     fn u8(&mut self) -> Result<u8, ImportError> {
-        Ok(self.read(1)?[0])
+        self.read_u8()
     }
 
     fn u16(&mut self) -> Result<u16, ImportError> {
-        let b = self.read(2)?;
-        Ok(u16::from_le_bytes([b[0], b[1]]))
+        self.read_u16_le()
     }
 
     fn u32(&mut self) -> Result<u32, ImportError> {
-        let b = self.read(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        self.read_u32_le()
     }
 
     fn f32(&mut self) -> Result<f32, ImportError> {
-        let b = self.read(4)?;
-        Ok(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        self.read_f32_le()
     }
 
     fn vec3(&mut self) -> Result<[f32; 3], ImportError> {
@@ -918,8 +893,8 @@ fn build_pmd_vertex_morph_offsets(
 }
 
 fn insert_sjis_name_keys<T: Copy>(map: &mut HashMap<Vec<u8>, T>, name: &str, value: T) {
-    let (encoded, _, _) = SHIFT_JIS.encode(name);
-    let normalized = normalize_vmd_name(encoded.as_ref());
+    let encoded = encode_sjis(name);
+    let normalized = normalize_vmd_name(&encoded);
     if !normalized.is_empty() {
         map.insert(normalized, value);
     }
@@ -1023,18 +998,8 @@ fn write_fixed_text(out: &mut Vec<u8>, text: &str, raw: &[u8], len: usize) {
         let copy_len = raw.len().min(len);
         bytes[..copy_len].copy_from_slice(&raw[..copy_len]);
     } else {
-        let mut cursor = 0;
-        for ch in text.chars() {
-            let mut buf = [0u8; 4];
-            let s = ch.encode_utf8(&mut buf);
-            let (encoded, _, _) = SHIFT_JIS.encode(s);
-            let encoded = encoded.as_ref();
-            if cursor + encoded.len() > len {
-                break;
-            }
-            bytes[cursor..cursor + encoded.len()].copy_from_slice(encoded);
-            cursor += encoded.len();
-        }
+        let encoded = encode_sjis_prefix_fit(text, len);
+        bytes[..encoded.len()].copy_from_slice(&encoded);
     }
     out.extend_from_slice(&bytes);
 }
@@ -1047,18 +1012,6 @@ fn write_vec3(out: &mut Vec<u8>, values: [f32; 3]) {
     for value in values {
         write_f32(out, value);
     }
-}
-
-fn write_f32(out: &mut Vec<u8>, value: f32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
 }
 
 fn should_export_pmd_english(
@@ -1089,9 +1042,7 @@ fn should_export_pmd_toon(model: &PmdParsedModel) -> bool {
 }
 
 fn decode_sjis_fixed(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let (decoded, _, _) = SHIFT_JIS.decode(&bytes[..end]);
-    decoded.trim().to_owned()
+    decode_sjis_fixed_trimmed(bytes)
 }
 
 #[cfg(test)]

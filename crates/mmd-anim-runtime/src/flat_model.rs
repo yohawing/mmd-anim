@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{BoneIndex, BoneInit, IkAngleLimit, IkLinkInit, IkSolverInit};
+use crate::{AppendTransformInit, BoneIndex, BoneInit, IkAngleLimit, IkLinkInit, IkSolverInit};
 
 pub struct FlatBoneInput<'a> {
     pub parent_indices: &'a [i32],
@@ -25,6 +25,16 @@ pub struct FlatIkSolverInput {
     pub link_count: usize,
     pub iteration_count: u32,
     pub limit_angle: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FlatAppendTransformInput {
+    pub target_bone_index: u32,
+    pub source_bone_index: u32,
+    pub ratio: f32,
+    pub affect_rotation: bool,
+    pub affect_translation: bool,
+    pub local: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +166,31 @@ pub fn build_ik_solvers_from_flat(
         .collect()
 }
 
+pub fn build_append_transforms_from_flat(
+    append_transforms: &[FlatAppendTransformInput],
+) -> Vec<AppendTransformInit> {
+    append_transforms
+        .iter()
+        .map(|append| {
+            let mut init = AppendTransformInit::new(
+                BoneIndex(append.target_bone_index),
+                BoneIndex(append.source_bone_index),
+                append.ratio,
+            );
+            if append.affect_rotation {
+                init = init.with_rotation();
+            }
+            if append.affect_translation {
+                init = init.with_translation();
+            }
+            if append.local {
+                init = init.with_local();
+            }
+            init
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +255,25 @@ mod tests {
         assert_eq!(solvers[0].target_bone, BoneIndex(2));
         assert_eq!(solvers[0].links.len(), 1);
         assert!(solvers[0].links[0].angle_limit.is_some());
+    }
+
+    #[test]
+    fn builds_append_transforms_from_flat_arrays() {
+        let append_transforms = build_append_transforms_from_flat(&[FlatAppendTransformInput {
+            target_bone_index: 2,
+            source_bone_index: 1,
+            ratio: 0.25,
+            affect_rotation: true,
+            affect_translation: false,
+            local: true,
+        }]);
+
+        assert_eq!(append_transforms.len(), 1);
+        assert_eq!(append_transforms[0].target_bone, BoneIndex(2));
+        assert_eq!(append_transforms[0].source_bone, BoneIndex(1));
+        assert_eq!(append_transforms[0].ratio, 0.25);
+        assert!(append_transforms[0].affect_rotation);
+        assert!(!append_transforms[0].affect_translation);
+        assert!(append_transforms[0].local);
     }
 }

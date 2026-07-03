@@ -9,12 +9,13 @@ use std::{ptr, slice, str, sync::Arc};
 
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    AnimationClip, AppendPrimitiveInput, AppendTransformInit, BoneAnimationBinding, BoneIndex,
-    BoneMorphOffset, FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput, GroupMorphOffset,
+    AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, BoneMorphOffset,
+    FlatAppendTransformInput, FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput, GroupMorphOffset,
     IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver,
     IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan,
     MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
-    RuntimeInstance, build_bones_from_flat, build_ik_solvers_from_flat, solve_append_transform,
+    RuntimeInstance, build_append_transforms_from_flat, build_bones_from_flat,
+    build_ik_solvers_from_flat, solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 2;
@@ -4311,24 +4312,16 @@ unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
 
     let append_transforms = append_transforms
         .iter()
-        .map(|append| {
-            let mut init = AppendTransformInit::new(
-                BoneIndex(append.target_bone_index),
-                BoneIndex(append.source_bone_index),
-                append.ratio,
-            );
-            if append.flags & APPEND_FLAG_ROTATION != 0 {
-                init = init.with_rotation();
-            }
-            if append.flags & APPEND_FLAG_TRANSLATION != 0 {
-                init = init.with_translation();
-            }
-            if append.flags & APPEND_FLAG_LOCAL != 0 {
-                init = init.with_local();
-            }
-            init
+        .map(|append| FlatAppendTransformInput {
+            target_bone_index: append.target_bone_index,
+            source_bone_index: append.source_bone_index,
+            ratio: append.ratio,
+            affect_rotation: append.flags & APPEND_FLAG_ROTATION != 0,
+            affect_translation: append.flags & APPEND_FLAG_TRANSLATION != 0,
+            local: append.flags & APPEND_FLAG_LOCAL != 0,
         })
         .collect::<Vec<_>>();
+    let append_transforms = build_append_transforms_from_flat(&append_transforms);
 
     let bone_morph_offsets =
         unsafe { checked_slice(input.bone_morph_offsets, input.bone_morph_offset_count) }?;

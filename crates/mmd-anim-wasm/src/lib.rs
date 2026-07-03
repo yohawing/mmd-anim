@@ -8,14 +8,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mmd_anim_runtime::{
-    AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneMorphOffset,
-    GroupMorphOffset, IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe,
-    MorphOffsetSpan, MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding,
-    PropertyKeyframe, RuntimeInstance,
+    AnimationClip, BoneAnimationBinding, BoneIndex, BoneMorphOffset, GroupMorphOffset,
+    IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan,
+    MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
+    RuntimeInstance,
 };
 use mmd_anim_runtime::{
-    FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput, ModelArena, build_bones_from_flat,
-    build_ik_solvers_from_flat,
+    FlatAppendTransformInput, FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput, ModelArena,
+    build_append_transforms_from_flat, build_bones_from_flat, build_ik_solvers_from_flat,
 };
 use wasm_bindgen::prelude::*;
 
@@ -1719,22 +1719,16 @@ fn build_model(input: ModelInput<'_>) -> Result<ModelArena, String> {
         .append_u32
         .chunks_exact(3)
         .zip(input.append_ratios.iter())
-        .map(|(append, ratio)| {
-            let mut init =
-                AppendTransformInit::new(BoneIndex(append[0]), BoneIndex(append[1]), *ratio);
-            let flags = append[2];
-            if flags & APPEND_FLAG_ROTATION != 0 {
-                init = init.with_rotation();
-            }
-            if flags & APPEND_FLAG_TRANSLATION != 0 {
-                init = init.with_translation();
-            }
-            if flags & APPEND_FLAG_LOCAL != 0 {
-                init = init.with_local();
-            }
-            init
+        .map(|(append, ratio)| FlatAppendTransformInput {
+            target_bone_index: append[0],
+            source_bone_index: append[1],
+            ratio: *ratio,
+            affect_rotation: append[2] & APPEND_FLAG_ROTATION != 0,
+            affect_translation: append[2] & APPEND_FLAG_TRANSLATION != 0,
+            local: append[2] & APPEND_FLAG_LOCAL != 0,
         })
         .collect::<Vec<_>>();
+    let append_transforms = build_append_transforms_from_flat(&append_transforms);
 
     let morph = build_morph_init_from_wasm(&input)?;
     ModelArena::new_with_morphs(bones, ik_solvers, append_transforms, morph)

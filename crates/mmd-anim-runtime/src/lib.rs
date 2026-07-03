@@ -19,7 +19,8 @@ pub use animation::{
 };
 pub use append_primitive::{AppendPrimitiveInput, AppendPrimitiveOutput, solve_append_transform};
 pub use flat_model::{
-    FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput, FlatModelInputError, build_bones_from_flat,
+    FlatAppendTransformInput, FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput,
+    FlatModelInputError, build_append_transforms_from_flat, build_bones_from_flat,
     build_ik_solvers_from_flat,
 };
 pub use ik_primitive::{

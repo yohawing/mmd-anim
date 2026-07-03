@@ -9,13 +9,13 @@ use std::{ptr, slice, str, sync::Arc};
 
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, BoneMorphOffset,
-    FlatAppendTransformInput, FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput, GroupMorphOffset,
-    IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver,
-    IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan,
+    AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, FlatAppendTransformInput,
+    FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput, FlatIkLinkInput, FlatIkSolverInput,
+    FlatMorphInput, IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput,
+    IkChainSolver, IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe,
     MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
     RuntimeInstance, build_append_transforms_from_flat, build_bones_from_flat,
-    build_ik_solvers_from_flat, solve_append_transform,
+    build_ik_solvers_from_flat, build_morph_init_from_flat, solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 2;
@@ -4338,91 +4338,30 @@ fn build_morph_init_from_ffi(
     bone_morph_offsets: &[MmdRuntimeFfiBoneMorphOffset],
     group_morph_offsets: &[MmdRuntimeFfiGroupMorphOffset],
 ) -> Option<MorphInit> {
-    if morph_count == 0 {
-        return if bone_morph_offsets.is_empty() && group_morph_offsets.is_empty() {
-            Some(MorphInit::default())
-        } else {
-            None
-        };
-    }
-    let mc = morph_count as usize;
+    let bone_morphs: Vec<FlatBoneMorphInput> = bone_morph_offsets
+        .iter()
+        .map(|entry| FlatBoneMorphInput {
+            morph_index: entry.morph_index,
+            target_bone_index: entry.target_bone_index,
+            position_offset_xyz: entry.position_offset_xyz,
+            rotation_offset_xyzw: entry.rotation_offset_xyzw,
+        })
+        .collect();
+    let group_morphs: Vec<FlatGroupMorphInput> = group_morph_offsets
+        .iter()
+        .map(|entry| FlatGroupMorphInput {
+            morph_index: entry.morph_index,
+            child_morph_index: entry.child_morph_index,
+            ratio: entry.ratio,
+        })
+        .collect();
 
-    let (bone_offsets, bone_spans) = if bone_morph_offsets.is_empty() {
-        (Vec::new(), vec![MorphOffsetSpan::default(); mc])
-    } else {
-        let mut sorted: Vec<_> = bone_morph_offsets.iter().collect();
-        sorted.sort_by_key(|a| a.morph_index);
-        if sorted.last().unwrap().morph_index as usize >= mc {
-            return None;
-        }
-        let mut offsets = Vec::with_capacity(bone_morph_offsets.len());
-        let mut spans = vec![MorphOffsetSpan::default(); mc];
-        let mut i = 0;
-        while i < sorted.len() {
-            let morph = sorted[i].morph_index as usize;
-            let start = offsets.len() as u32;
-            let mut count = 0u32;
-            while i < sorted.len() && sorted[i].morph_index == morph as u32 {
-                let entry = sorted[i];
-                offsets.push(BoneMorphOffset {
-                    target_bone: BoneIndex(entry.target_bone_index),
-                    position_offset: glam::Vec3A::new(
-                        entry.position_offset_xyz[0],
-                        entry.position_offset_xyz[1],
-                        entry.position_offset_xyz[2],
-                    ),
-                    rotation_offset: glam::Quat::from_xyzw(
-                        entry.rotation_offset_xyzw[0],
-                        entry.rotation_offset_xyzw[1],
-                        entry.rotation_offset_xyzw[2],
-                        entry.rotation_offset_xyzw[3],
-                    ),
-                });
-                count += 1;
-                i += 1;
-            }
-            spans[morph] = MorphOffsetSpan { start, count };
-        }
-        (offsets, spans)
-    };
-
-    let (group_offsets, group_spans) = if group_morph_offsets.is_empty() {
-        (Vec::new(), vec![MorphOffsetSpan::default(); mc])
-    } else {
-        let mut sorted: Vec<_> = group_morph_offsets.iter().collect();
-        sorted.sort_by_key(|a| a.morph_index);
-        if sorted.last().unwrap().morph_index as usize >= mc {
-            return None;
-        }
-        let mut offsets = Vec::with_capacity(group_morph_offsets.len());
-        let mut spans = vec![MorphOffsetSpan::default(); mc];
-        let mut i = 0;
-        while i < sorted.len() {
-            let morph = sorted[i].morph_index as usize;
-            let start = offsets.len() as u32;
-            let mut count = 0u32;
-            while i < sorted.len() && sorted[i].morph_index == morph as u32 {
-                let entry = sorted[i];
-                offsets.push(GroupMorphOffset {
-                    child_morph: MorphIndex(entry.child_morph_index),
-                    ratio: entry.ratio,
-                });
-                count += 1;
-                i += 1;
-            }
-            spans[morph] = MorphOffsetSpan { start, count };
-        }
-        (offsets, spans)
-    };
-
-    Some(MorphInit {
+    build_morph_init_from_flat(FlatMorphInput {
         morph_count,
-        bone_offsets,
-        bone_spans,
-        group_offsets,
-        group_spans,
-        ..MorphInit::default()
+        bone_morphs: &bone_morphs,
+        group_morphs: &group_morphs,
     })
+    .ok()
 }
 
 #[cfg(test)]

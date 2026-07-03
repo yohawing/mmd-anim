@@ -19,9 +19,10 @@ pub use animation::{
 };
 pub use append_primitive::{AppendPrimitiveInput, AppendPrimitiveOutput, solve_append_transform};
 pub use flat_model::{
-    FlatAppendTransformInput, FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput,
-    FlatModelInputError, build_append_transforms_from_flat, build_bones_from_flat,
-    build_ik_solvers_from_flat,
+    FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
+    FlatIkLinkInput, FlatIkSolverInput, FlatModelInputError, FlatMorphInput,
+    build_append_transforms_from_flat, build_bones_from_flat, build_ik_solvers_from_flat,
+    build_morph_init_from_flat,
 };
 pub use ik_primitive::{
     IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolveOutput, IkChainSolver,

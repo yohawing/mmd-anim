@@ -8,14 +8,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mmd_anim_runtime::{
-    AnimationClip, BoneAnimationBinding, BoneIndex, BoneMorphOffset, GroupMorphOffset,
-    IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphOffsetSpan,
-    MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
-    RuntimeInstance,
+    AnimationClip, BoneAnimationBinding, BoneIndex, FlatModelInputError, IkSolveOptions,
+    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack, MovableBoneKeyframe,
+    MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
 };
 use mmd_anim_runtime::{
-    FlatAppendTransformInput, FlatBoneInput, FlatIkLinkInput, FlatIkSolverInput, ModelArena,
+    FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
+    FlatIkLinkInput, FlatIkSolverInput, FlatMorphInput, ModelArena,
     build_append_transforms_from_flat, build_bones_from_flat, build_ik_solvers_from_flat,
+    build_morph_init_from_flat,
 };
 use wasm_bindgen::prelude::*;
 
@@ -1746,7 +1747,6 @@ fn build_morph_init_from_wasm(input: &ModelInput<'_>) -> Result<MorphInit, Strin
         }
         return Ok(MorphInit::default());
     }
-    let mc = input.morph_count as usize;
 
     if !input.bone_morph_u32.len().is_multiple_of(2) {
         return Err("bone_morph_u32 must contain morphIndex/targetBone pairs".to_owned());
@@ -1761,93 +1761,61 @@ fn build_morph_init_from_wasm(input: &ModelInput<'_>) -> Result<MorphInit, Strin
         return Err("group_morph_ratios length must match group morph count".to_owned());
     }
 
-    let (bone_offsets, bone_spans) = if input.bone_morph_u32.is_empty() {
-        (Vec::new(), vec![MorphOffsetSpan::default(); mc])
-    } else {
-        let mut entries: Vec<(u32, u32, usize)> = input
-            .bone_morph_u32
-            .chunks_exact(2)
-            .enumerate()
-            .map(|(i, pair)| (pair[0], pair[1], i))
-            .collect();
-        entries.sort_by_key(|a| a.0);
-        if entries.last().unwrap().0 as usize >= mc {
-            return Err("bone_morph_u32 contains morph_index >= morph_count".to_owned());
-        }
-        let mut offsets = Vec::with_capacity(entries.len());
-        let mut spans = vec![MorphOffsetSpan::default(); mc];
-        let mut i = 0;
-        while i < entries.len() {
-            let morph = entries[i].0 as usize;
-            let start = offsets.len() as u32;
-            let mut count = 0u32;
-            while i < entries.len() && entries[i].0 as usize == morph {
-                let (_, target_bone, entry_idx) = entries[i];
-                let f32_offset = entry_idx * 7;
-                offsets.push(BoneMorphOffset {
-                    target_bone: BoneIndex(target_bone),
-                    position_offset: glam::Vec3A::new(
-                        input.bone_morph_f32[f32_offset],
-                        input.bone_morph_f32[f32_offset + 1],
-                        input.bone_morph_f32[f32_offset + 2],
-                    ),
-                    rotation_offset: glam::Quat::from_xyzw(
-                        input.bone_morph_f32[f32_offset + 3],
-                        input.bone_morph_f32[f32_offset + 4],
-                        input.bone_morph_f32[f32_offset + 5],
-                        input.bone_morph_f32[f32_offset + 6],
-                    ),
-                });
-                count += 1;
-                i += 1;
+    let bone_morphs: Vec<FlatBoneMorphInput> = input
+        .bone_morph_u32
+        .chunks_exact(2)
+        .enumerate()
+        .map(|(entry_index, pair)| {
+            let f32_offset = entry_index * 7;
+            FlatBoneMorphInput {
+                morph_index: pair[0],
+                target_bone_index: pair[1],
+                position_offset_xyz: [
+                    input.bone_morph_f32[f32_offset],
+                    input.bone_morph_f32[f32_offset + 1],
+                    input.bone_morph_f32[f32_offset + 2],
+                ],
+                rotation_offset_xyzw: [
+                    input.bone_morph_f32[f32_offset + 3],
+                    input.bone_morph_f32[f32_offset + 4],
+                    input.bone_morph_f32[f32_offset + 5],
+                    input.bone_morph_f32[f32_offset + 6],
+                ],
             }
-            spans[morph] = MorphOffsetSpan { start, count };
-        }
-        (offsets, spans)
-    };
+        })
+        .collect();
+    let group_morphs: Vec<FlatGroupMorphInput> = input
+        .group_morph_u32
+        .chunks_exact(2)
+        .enumerate()
+        .map(|(entry_index, pair)| FlatGroupMorphInput {
+            morph_index: pair[0],
+            child_morph_index: pair[1],
+            ratio: input.group_morph_ratios[entry_index],
+        })
+        .collect();
 
-    let (group_offsets, group_spans) = if input.group_morph_u32.is_empty() {
-        (Vec::new(), vec![MorphOffsetSpan::default(); mc])
-    } else {
-        let mut entries: Vec<(u32, u32, usize)> = input
-            .group_morph_u32
-            .chunks_exact(2)
-            .enumerate()
-            .map(|(i, pair)| (pair[0], pair[1], i))
-            .collect();
-        entries.sort_by_key(|a| a.0);
-        if entries.last().unwrap().0 as usize >= mc {
-            return Err("group_morph_u32 contains morph_index >= morph_count".to_owned());
-        }
-        let mut offsets = Vec::with_capacity(entries.len());
-        let mut spans = vec![MorphOffsetSpan::default(); mc];
-        let mut i = 0;
-        while i < entries.len() {
-            let morph = entries[i].0 as usize;
-            let start = offsets.len() as u32;
-            let mut count = 0u32;
-            while i < entries.len() && entries[i].0 as usize == morph {
-                let (_, child_morph, orig_idx) = entries[i];
-                offsets.push(GroupMorphOffset {
-                    child_morph: MorphIndex(child_morph),
-                    ratio: input.group_morph_ratios[orig_idx],
-                });
-                count += 1;
-                i += 1;
-            }
-            spans[morph] = MorphOffsetSpan { start, count };
-        }
-        (offsets, spans)
-    };
-
-    Ok(MorphInit {
+    build_morph_init_from_flat(FlatMorphInput {
         morph_count: input.morph_count,
-        bone_offsets,
-        bone_spans,
-        group_offsets,
-        group_spans,
-        ..MorphInit::default()
+        bone_morphs: &bone_morphs,
+        group_morphs: &group_morphs,
     })
+    .map_err(flat_morph_input_error_to_wasm_string)
+}
+
+fn flat_morph_input_error_to_wasm_string(error: FlatModelInputError) -> String {
+    match error {
+        FlatModelInputError::MorphCountZeroWithData => {
+            "morph_count must be non-zero when morph data is provided".to_owned()
+        }
+        FlatModelInputError::BoneMorphIndexOutOfRange => {
+            "bone_morph_u32 contains morph_index >= morph_count".to_owned()
+        }
+        FlatModelInputError::GroupMorphIndexOutOfRange => {
+            "group_morph_u32 contains morph_index >= morph_count".to_owned()
+        }
+        other => other.to_string(),
+    }
 }
 
 fn copy_matrices(matrices: &[glam::Mat4]) -> Vec<f32> {

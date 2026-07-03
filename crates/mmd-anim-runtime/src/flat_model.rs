@@ -1,6 +1,9 @@
 use std::fmt;
 
-use crate::{AppendTransformInit, BoneIndex, BoneInit, IkAngleLimit, IkLinkInit, IkSolverInit};
+use crate::{
+    AppendTransformInit, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit,
+    IkLinkInit, IkSolverInit, MorphIndex, MorphInit, MorphOffsetSpan,
+};
 
 pub struct FlatBoneInput<'a> {
     pub parent_indices: &'a [i32],
@@ -37,6 +40,27 @@ pub struct FlatAppendTransformInput {
     pub local: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct FlatBoneMorphInput {
+    pub morph_index: u32,
+    pub target_bone_index: u32,
+    pub position_offset_xyz: [f32; 3],
+    pub rotation_offset_xyzw: [f32; 4],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FlatGroupMorphInput {
+    pub morph_index: u32,
+    pub child_morph_index: u32,
+    pub ratio: f32,
+}
+
+pub struct FlatMorphInput<'a> {
+    pub morph_count: u32,
+    pub bone_morphs: &'a [FlatBoneMorphInput],
+    pub group_morphs: &'a [FlatGroupMorphInput],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlatModelInputError {
     EmptyBoneSet,
@@ -46,6 +70,9 @@ pub enum FlatModelInputError {
     InvalidParentIndex,
     RangeOverflow,
     RangeOutOfBounds,
+    MorphCountZeroWithData,
+    BoneMorphIndexOutOfRange,
+    GroupMorphIndexOutOfRange,
 }
 
 impl fmt::Display for FlatModelInputError {
@@ -60,6 +87,11 @@ impl fmt::Display for FlatModelInputError {
             Self::InvalidParentIndex => "parent index must be -1 or non-negative",
             Self::RangeOverflow => "range overflow",
             Self::RangeOutOfBounds => "track keyframe range is out of bounds",
+            Self::MorphCountZeroWithData => {
+                "morph_count must be non-zero when morph data is provided"
+            }
+            Self::BoneMorphIndexOutOfRange => "bone morph index is out of range",
+            Self::GroupMorphIndexOutOfRange => "group morph index is out of range",
         };
         f.write_str(message)
     }
@@ -164,6 +196,112 @@ pub fn build_ik_solvers_from_flat(
             })
         })
         .collect()
+}
+
+pub fn build_morph_init_from_flat(
+    input: FlatMorphInput<'_>,
+) -> Result<MorphInit, FlatModelInputError> {
+    if input.morph_count == 0 {
+        if input.bone_morphs.is_empty() && input.group_morphs.is_empty() {
+            return Ok(MorphInit::default());
+        }
+        return Err(FlatModelInputError::MorphCountZeroWithData);
+    }
+    let morph_count = input.morph_count as usize;
+    let (bone_offsets, bone_spans) =
+        build_bone_morph_offset_tables(morph_count, input.bone_morphs)?;
+    let (group_offsets, group_spans) =
+        build_group_morph_offset_tables(morph_count, input.group_morphs)?;
+    Ok(MorphInit {
+        morph_count: input.morph_count,
+        bone_offsets,
+        bone_spans,
+        group_offsets,
+        group_spans,
+        ..MorphInit::default()
+    })
+}
+
+fn build_bone_morph_offset_tables(
+    morph_count: usize,
+    bone_morphs: &[FlatBoneMorphInput],
+) -> Result<(Vec<BoneMorphOffset>, Vec<MorphOffsetSpan>), FlatModelInputError> {
+    if bone_morphs.is_empty() {
+        return Ok((Vec::new(), vec![MorphOffsetSpan::default(); morph_count]));
+    }
+
+    let mut sorted: Vec<&FlatBoneMorphInput> = bone_morphs.iter().collect();
+    sorted.sort_by_key(|entry| entry.morph_index);
+    if sorted.last().unwrap().morph_index as usize >= morph_count {
+        return Err(FlatModelInputError::BoneMorphIndexOutOfRange);
+    }
+
+    let mut offsets = Vec::with_capacity(bone_morphs.len());
+    let mut spans = vec![MorphOffsetSpan::default(); morph_count];
+    let mut index = 0;
+    while index < sorted.len() {
+        let morph = sorted[index].morph_index as usize;
+        let start = offsets.len() as u32;
+        let mut count = 0u32;
+        while index < sorted.len() && sorted[index].morph_index as usize == morph {
+            let entry = sorted[index];
+            offsets.push(BoneMorphOffset {
+                target_bone: BoneIndex(entry.target_bone_index),
+                position_offset: glam::Vec3A::new(
+                    entry.position_offset_xyz[0],
+                    entry.position_offset_xyz[1],
+                    entry.position_offset_xyz[2],
+                ),
+                rotation_offset: glam::Quat::from_xyzw(
+                    entry.rotation_offset_xyzw[0],
+                    entry.rotation_offset_xyzw[1],
+                    entry.rotation_offset_xyzw[2],
+                    entry.rotation_offset_xyzw[3],
+                ),
+            });
+            count += 1;
+            index += 1;
+        }
+        spans[morph] = MorphOffsetSpan { start, count };
+    }
+
+    Ok((offsets, spans))
+}
+
+fn build_group_morph_offset_tables(
+    morph_count: usize,
+    group_morphs: &[FlatGroupMorphInput],
+) -> Result<(Vec<GroupMorphOffset>, Vec<MorphOffsetSpan>), FlatModelInputError> {
+    if group_morphs.is_empty() {
+        return Ok((Vec::new(), vec![MorphOffsetSpan::default(); morph_count]));
+    }
+
+    let mut sorted: Vec<&FlatGroupMorphInput> = group_morphs.iter().collect();
+    sorted.sort_by_key(|entry| entry.morph_index);
+    if sorted.last().unwrap().morph_index as usize >= morph_count {
+        return Err(FlatModelInputError::GroupMorphIndexOutOfRange);
+    }
+
+    let mut offsets = Vec::with_capacity(group_morphs.len());
+    let mut spans = vec![MorphOffsetSpan::default(); morph_count];
+    let mut index = 0;
+    while index < sorted.len() {
+        let morph = sorted[index].morph_index as usize;
+        let start = offsets.len() as u32;
+        let mut count = 0u32;
+        while index < sorted.len() && sorted[index].morph_index as usize == morph {
+            let entry = sorted[index];
+            offsets.push(GroupMorphOffset {
+                child_morph: MorphIndex(entry.child_morph_index),
+                ratio: entry.ratio,
+            });
+            count += 1;
+            index += 1;
+        }
+        spans[morph] = MorphOffsetSpan { start, count };
+    }
+
+    Ok((offsets, spans))
 }
 
 pub fn build_append_transforms_from_flat(
@@ -275,5 +413,65 @@ mod tests {
         assert!(append_transforms[0].affect_rotation);
         assert!(!append_transforms[0].affect_translation);
         assert!(append_transforms[0].local);
+    }
+
+    #[test]
+    fn builds_morph_init_from_flat_arrays() {
+        let morph = build_morph_init_from_flat(FlatMorphInput {
+            morph_count: 2,
+            bone_morphs: &[FlatBoneMorphInput {
+                morph_index: 1,
+                target_bone_index: 0,
+                position_offset_xyz: [1.0, 2.0, 3.0],
+                rotation_offset_xyzw: [0.0, 0.0, 0.0, 1.0],
+            }],
+            group_morphs: &[],
+        })
+        .unwrap();
+
+        assert_eq!(morph.morph_count, 2);
+        assert_eq!(morph.bone_offsets.len(), 1);
+        assert_eq!(morph.bone_spans.len(), 2);
+        assert_eq!(morph.bone_spans[0], MorphOffsetSpan::default());
+        assert_eq!(morph.bone_spans[1], MorphOffsetSpan { start: 0, count: 1 });
+        assert_eq!(morph.bone_offsets[0].target_bone, BoneIndex(0));
+    }
+
+    #[test]
+    fn rejects_out_of_range_bone_morph_index() {
+        let error = build_morph_init_from_flat(FlatMorphInput {
+            morph_count: 1,
+            bone_morphs: &[FlatBoneMorphInput {
+                morph_index: 1,
+                target_bone_index: 0,
+                position_offset_xyz: [0.0, 0.0, 0.0],
+                rotation_offset_xyzw: [0.0, 0.0, 0.0, 1.0],
+            }],
+            group_morphs: &[],
+        })
+        .unwrap_err();
+
+        assert_eq!(error, FlatModelInputError::BoneMorphIndexOutOfRange);
+    }
+
+    #[test]
+    fn rejects_zero_morph_count_with_data() {
+        let error = build_morph_init_from_flat(FlatMorphInput {
+            morph_count: 0,
+            bone_morphs: &[FlatBoneMorphInput {
+                morph_index: 0,
+                target_bone_index: 0,
+                position_offset_xyz: [0.0, 0.0, 0.0],
+                rotation_offset_xyzw: [0.0, 0.0, 0.0, 1.0],
+            }],
+            group_morphs: &[],
+        })
+        .unwrap_err();
+
+        assert_eq!(error, FlatModelInputError::MorphCountZeroWithData);
+        assert_eq!(
+            error.to_string(),
+            "morph_count must be non-zero when morph data is provided"
+        );
     }
 }

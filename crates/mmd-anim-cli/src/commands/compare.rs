@@ -11,6 +11,7 @@ use crate::schema::{
 };
 use mmd_anim_format::vmd::VmdBoneKeyframeRaw;
 use mmd_anim_runtime::{BoneIndex, IkSolveOptions, ModelArena, MorphIndex, RuntimeInstance};
+use serde::Serialize;
 
 use super::golden;
 
@@ -80,41 +81,43 @@ pub(crate) struct NumericCompareReport {
 impl NumericCompareReport {
     pub(crate) fn to_json(&self) -> serde_json::Value {
         let skipped_targets = self.skipped_targets_sorted();
-        let summary = serde_json::json!({
-            "cases": self.motion_stats.total_cases + self.camera_stats.compared_cases,
-            "comparedCases": self.motion_stats.compared_cases + self.camera_stats.compared_cases,
-            "missing": self.motion_stats.missing,
-            "importErrors": self.motion_stats.import_errors,
-            "comparedFrames": self.motion_stats.compared_frames + self.camera_stats.compared_frames,
-            "comparedBones": self.motion_stats.compared_bones,
-            "mismatchCount": self.motion_stats.mismatch_count + self.camera_stats.mismatch_count,
-            "maxAbsError": f64::from(self.motion_stats.max_abs_error).max(self.camera_stats.max_delta),
-            "worst": self.motion_stats.worst,
-            "worstFrame": self.motion_stats.worst_frame,
-            "worstBone": empty_string_as_null(&self.motion_stats.worst_bone),
-            "worstComponent": self.motion_stats.worst_component,
-            "skippedTargets": skipped_targets,
-            "motionCases": self.motion_stats.total_cases,
-            "motionComparedCases": self.motion_stats.compared_cases,
-            "motionSkippedUnsupported": self.motion_stats.skipped_unsupported,
-            "motionMissing": self.motion_stats.missing,
-            "motionImportErrors": self.motion_stats.import_errors,
-            "motionComparedFrames": self.motion_stats.compared_frames,
-            "motionComparedBones": self.motion_stats.compared_bones,
-            "motionMismatches": self.motion_stats.mismatch_count,
-            "motionMaxAbsError": self.motion_stats.max_abs_error,
-            "motionWorst": self.motion_stats.worst,
-            "cameraCases": self.camera_stats.compared_cases,
-            "cameraFrames": self.camera_stats.compared_frames,
-            "cameraMismatches": self.camera_stats.mismatch_count,
-            "cameraMaxDelta": self.camera_stats.max_delta,
-            "defaultEpsilon": self.default_epsilon,
-            "skippedUnsupported": self.motion_stats.skipped_unsupported,
-        });
-        serde_json::json!({
-            "summary": summary,
-            "perCase": self.per_case,
+        let summary = NumericCompareJsonSummary {
+            cases: self.motion_stats.total_cases + self.camera_stats.compared_cases,
+            compared_cases: self.motion_stats.compared_cases + self.camera_stats.compared_cases,
+            missing: self.motion_stats.missing,
+            import_errors: self.motion_stats.import_errors,
+            compared_frames: self.motion_stats.compared_frames + self.camera_stats.compared_frames,
+            compared_bones: self.motion_stats.compared_bones,
+            mismatch_count: self.motion_stats.mismatch_count + self.camera_stats.mismatch_count,
+            max_abs_error: f64::from(self.motion_stats.max_abs_error)
+                .max(self.camera_stats.max_delta),
+            worst: self.motion_stats.worst.as_str(),
+            worst_frame: self.motion_stats.worst_frame,
+            worst_bone: non_empty_str(&self.motion_stats.worst_bone),
+            worst_component: self.motion_stats.worst_component,
+            skipped_targets,
+            motion_cases: self.motion_stats.total_cases,
+            motion_compared_cases: self.motion_stats.compared_cases,
+            motion_skipped_unsupported: self.motion_stats.skipped_unsupported,
+            motion_missing: self.motion_stats.missing,
+            motion_import_errors: self.motion_stats.import_errors,
+            motion_compared_frames: self.motion_stats.compared_frames,
+            motion_compared_bones: self.motion_stats.compared_bones,
+            motion_mismatches: self.motion_stats.mismatch_count,
+            motion_max_abs_error: self.motion_stats.max_abs_error,
+            motion_worst: self.motion_stats.worst.as_str(),
+            camera_cases: self.camera_stats.compared_cases,
+            camera_frames: self.camera_stats.compared_frames,
+            camera_mismatches: self.camera_stats.mismatch_count,
+            camera_max_delta: self.camera_stats.max_delta,
+            default_epsilon: self.default_epsilon,
+            skipped_unsupported: self.motion_stats.skipped_unsupported,
+        };
+        serde_json::to_value(NumericCompareJsonReport {
+            summary,
+            per_case: &self.per_case,
         })
+        .expect("numeric compare report is serializable")
     }
 
     fn skipped_targets_sorted(&self) -> Vec<String> {
@@ -124,6 +127,52 @@ impl NumericCompareReport {
         targets.sort();
         targets
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NumericCompareJsonReport<'a> {
+    summary: NumericCompareJsonSummary<'a>,
+    #[serde(rename = "perCase")]
+    per_case: &'a [serde_json::Value],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NumericCompareJsonSummary<'a> {
+    cases: usize,
+    compared_cases: usize,
+    missing: usize,
+    import_errors: usize,
+    compared_frames: usize,
+    compared_bones: usize,
+    mismatch_count: usize,
+    max_abs_error: f64,
+    worst: &'a str,
+    worst_frame: Option<i32>,
+    worst_bone: Option<&'a str>,
+    worst_component: Option<usize>,
+    skipped_targets: Vec<String>,
+    motion_cases: usize,
+    motion_compared_cases: usize,
+    motion_skipped_unsupported: usize,
+    motion_missing: usize,
+    motion_import_errors: usize,
+    motion_compared_frames: usize,
+    motion_compared_bones: usize,
+    motion_mismatches: usize,
+    motion_max_abs_error: f32,
+    motion_worst: &'a str,
+    camera_cases: usize,
+    camera_frames: usize,
+    camera_mismatches: usize,
+    camera_max_delta: f64,
+    default_epsilon: f64,
+    skipped_unsupported: usize,
+}
+
+fn non_empty_str(value: &str) -> Option<&str> {
+    if value.is_empty() { None } else { Some(value) }
 }
 
 pub(crate) fn build_numeric_compare_report(

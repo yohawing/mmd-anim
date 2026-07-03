@@ -153,7 +153,9 @@ typedef struct mmd_runtime_ffi_byte_buffer {
 
 uint32_t mmd_runtime_abi_version(void);
 
-/* Returns the most recent FFI error message for the calling thread, or NULL. */
+/* Returns the most recent FFI error message for the calling thread, or NULL.
+   The returned pointer is valid only until the next FFI call on the same
+   thread. Do not store or free it. */
 const char* mmd_runtime_last_error_message(void);
 
 void mmd_runtime_byte_buffer_free(
@@ -239,6 +241,8 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_non_geometry_json(
 /* PMX geometry typed-buffer API.
    Each function returns one geometry array as a native-endian byte buffer.
    The caller must free each buffer with mmd_runtime_byte_buffer_free.
+   These legacy parse_pmx_* helpers reparse the whole PMX on every call; prefer
+   the mmd_runtime_pmx_geometry_* handle API below when reading multiple arrays.
    Returns an empty buffer (data == NULL, len == 0) on any error. */
 
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_pmx_positions_buffer(
@@ -381,7 +385,8 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_sdef_rw1_buffer(
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_qdef_enabled_buffer(
     const mmd_runtime_pmx_geometry_t* geometry);
 
-/* Returns handle-owned JSON: {"skinningModes": ["bdef1", ...]} */
+/* Returns caller-owned JSON: {"skinningModes": ["bdef1", ...]}.
+   Free the returned buffer with mmd_runtime_byte_buffer_free. */
 mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_skinning_modes_json(
     const mmd_runtime_pmx_geometry_t* geometry);
 

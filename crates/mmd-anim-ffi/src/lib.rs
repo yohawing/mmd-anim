@@ -227,7 +227,11 @@ const FFI_ERR_INVALID_INPUT: &str = "invalid input";
 const FFI_ERR_VMD_PARSE_FAILED: &str = "vmd parse failed";
 const FFI_ERR_PMX_PARSE_FAILED: &str = "pmx parse failed";
 const FFI_ERR_PMX_IMPORT_FAILED: &str = "pmx import failed";
+const FFI_ERR_VMD_IMPORT_FAILED: &str = "vmd import failed";
+const FFI_ERR_CLIP_CREATE_FAILED: &str = "clip create failed";
+const FFI_ERR_PMX_EXPORT_FAILED: &str = "pmx export failed";
 const FFI_ERR_JSON_ENCODE_FAILED: &str = "json encode failed";
+const FFI_ERR_WORKER_PANIC: &str = "worker panic";
 
 thread_local! {
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
@@ -249,7 +253,23 @@ fn ffi_guard<T, F>(default: T, f: F) -> T
 where
     F: FnOnce() -> T,
 {
-    clear_last_error();
+    ffi_guard_impl(default, true, f)
+}
+
+fn ffi_guard_preserve_last_error<T, F>(default: T, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    ffi_guard_impl(default, false, f)
+}
+
+fn ffi_guard_impl<T, F>(default: T, clear_before_call: bool, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    if clear_before_call {
+        clear_last_error();
+    }
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(value) => value,
         Err(_) => {
@@ -266,19 +286,6 @@ where
     ffi_guard((), f);
 }
 
-fn ffi_guard_read<T, F>(default: T, f: F) -> T
-where
-    F: FnOnce() -> T,
-{
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(value) => value,
-        Err(_) => {
-            set_last_error(FFI_PANIC_ERROR_MESSAGE);
-            default
-        }
-    }
-}
-
 fn empty_byte_buffer_failure(message: &str) -> MmdRuntimeFfiByteBuffer {
     set_last_error(message);
     empty_byte_buffer()
@@ -289,13 +296,23 @@ fn null_mut_failure<T>(message: &str) -> *mut T {
     ptr::null_mut()
 }
 
+fn null_failure<T>(message: &str) -> *const T {
+    set_last_error(message);
+    ptr::null()
+}
+
+fn false_failure(message: &str) -> bool {
+    set_last_error(message);
+    false
+}
+
 /// Returns the most recent FFI error message for the calling thread.
 ///
 /// The pointer remains valid until the next FFI call on the same thread.
 /// Returns null when no message is available.
 #[unsafe(no_mangle)]
 pub extern "C" fn mmd_runtime_last_error_message() -> *const c_char {
-    ffi_guard_read(ptr::null(), || {
+    ffi_guard_preserve_last_error(ptr::null(), || {
         LAST_ERROR.with(|cell| {
             cell.borrow()
                 .as_ref()
@@ -1595,12 +1612,12 @@ pub unsafe extern "C" fn mmd_runtime_pmx_geometry_create(
 ) -> *mut MmdRuntimePmxGeometry {
     ffi_guard(ptr::null_mut(), || {
         if data.is_null() || len == 0 {
-            return ptr::null_mut();
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
         }
         let bytes = unsafe { slice::from_raw_parts(data, len) };
         match mmd_anim_format::parse_pmx_model(bytes) {
             Ok(parsed) => Box::into_raw(Box::new(MmdRuntimePmxGeometry { parsed })),
-            Err(_) => ptr::null_mut(),
+            Err(_) => null_mut_failure(FFI_ERR_PMX_PARSE_FAILED),
         }
     })
 }
@@ -2530,37 +2547,37 @@ pub unsafe extern "C" fn mmd_runtime_export_pmx_from_parts(
             || uvs_xy.is_null()
             || vertex_count == 0
         {
-            return empty_byte_buffer();
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
         }
         if index_count > 0 && indices.is_null() {
-            return empty_byte_buffer();
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
         }
         if skin_indices.is_null() != skin_weights.is_null() {
-            return empty_byte_buffer();
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
         }
 
         let Some(positions_len) = vertex_count.checked_mul(3) else {
-            return empty_byte_buffer();
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
         };
         let Some(normals_len) = vertex_count.checked_mul(3) else {
-            return empty_byte_buffer();
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
         };
         let Some(uvs_len) = vertex_count.checked_mul(2) else {
-            return empty_byte_buffer();
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
         };
         let Some(skin_len) = vertex_count.checked_mul(4) else {
-            return empty_byte_buffer();
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
         };
 
         let metadata_bytes = unsafe { slice::from_raw_parts(metadata_json, metadata_json_len) };
         let metadata_json = match str::from_utf8(metadata_bytes) {
             Ok(json) => json,
-            Err(_) => return empty_byte_buffer(),
+            Err(_) => return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT),
         };
         let descriptor: mmd_anim_format::PmxPartsDescriptor =
             match serde_json::from_str(metadata_json) {
                 Ok(descriptor) => descriptor,
-                Err(_) => return empty_byte_buffer(),
+                Err(_) => return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT),
             };
 
         let positions_xyz = unsafe { slice::from_raw_parts(positions_xyz, positions_len) };
@@ -2597,7 +2614,7 @@ pub unsafe extern "C" fn mmd_runtime_export_pmx_from_parts(
                 edge_scale,
             }) {
                 Ok(model) => model,
-                Err(_) => return empty_byte_buffer(),
+                Err(_) => return empty_byte_buffer_failure(FFI_ERR_PMX_EXPORT_FAILED),
             };
         byte_buffer_from_vec(mmd_anim_format::export_pmx_model(&model))
     })
@@ -2921,18 +2938,18 @@ pub unsafe extern "C" fn mmd_runtime_clip_create_from_vmd_bytes_for_model(
 ) -> *mut MmdRuntimeClip {
     ffi_guard(ptr::null_mut(), || {
         let Some(model) = (unsafe { model.as_ref() }) else {
-            return ptr::null_mut();
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
         };
         if data.is_null() || len == 0 {
-            return ptr::null_mut();
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
         }
         if model.bone_name_to_index.is_empty() && model.morph_name_to_index.is_empty() {
-            return ptr::null_mut();
+            return null_mut_failure(FFI_ERR_CLIP_CREATE_FAILED);
         }
         let bytes = unsafe { slice::from_raw_parts(data, len) };
         let motion = match mmd_anim_format::import_vmd_motion(bytes) {
             Ok(m) => m,
-            Err(_) => return ptr::null_mut(),
+            Err(_) => return null_mut_failure(FFI_ERR_VMD_IMPORT_FAILED),
         };
         let solver_count = model.model.ik_count();
         let clip = mmd_anim_format::build_pair_clip(
@@ -3427,7 +3444,7 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_batch(
 
             for handle in handles {
                 if handle.join().is_err() {
-                    return false;
+                    return false_failure(FFI_ERR_WORKER_PANIC);
                 }
             }
             true
@@ -3621,7 +3638,7 @@ pub unsafe extern "C" fn mmd_runtime_instance_world_matrices(
 ) -> *const f32 {
     ffi_guard(ptr::null(), || {
         let Some(instance) = (unsafe { instance.as_ref() }) else {
-            return ptr::null();
+            return null_failure(FFI_ERR_INVALID_INPUT);
         };
         instance.cached_world_matrices.as_ptr()
     })
@@ -3643,7 +3660,7 @@ pub unsafe extern "C" fn mmd_runtime_instance_skinning_matrices(
 ) -> *const f32 {
     ffi_guard(ptr::null(), || {
         let Some(instance) = (unsafe { instance.as_ref() }) else {
-            return ptr::null();
+            return null_failure(FFI_ERR_INVALID_INPUT);
         };
         instance.cached_skinning_matrices.as_ptr()
     })
@@ -3761,7 +3778,7 @@ pub unsafe extern "C" fn mmd_runtime_instance_morph_weights(
 ) -> *const f32 {
     ffi_guard(ptr::null(), || {
         let Some(instance) = (unsafe { instance.as_ref() }) else {
-            return ptr::null();
+            return null_failure(FFI_ERR_INVALID_INPUT);
         };
         instance.runtime.morph_weights().as_ptr()
     })
@@ -3783,7 +3800,7 @@ pub unsafe extern "C" fn mmd_runtime_instance_ik_enabled(
 ) -> *const u8 {
     ffi_guard(ptr::null(), || {
         let Some(instance) = (unsafe { instance.as_ref() }) else {
-            return ptr::null();
+            return null_failure(FFI_ERR_INVALID_INPUT);
         };
         instance.runtime.ik_enabled().as_ptr()
     })

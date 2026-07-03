@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LIB_RS = ROOT / "crates/mmd-anim-ffi/src/lib.rs"
 HEADER = ROOT / "crates/mmd-anim-ffi/include/mmd_runtime.h"
 
-RUST_ATTR = "#[unsafe(no_mangle)]"
+RUST_NO_MANGLE_RE = re.compile(r"#\[\s*(?:unsafe\s*\(\s*)?no_mangle\s*\)?\s*\]")
 RUST_FN_RE = re.compile(r"fn\s+(mmd_runtime_\w+)\s*\(")
 HEADER_FN_RE = re.compile(r"\b(mmd_runtime_\w+)\s*\(")
 
@@ -20,7 +20,7 @@ def rust_exported_symbols(text: str) -> set[str]:
     lines = text.splitlines()
     symbols: set[str] = set()
     for index, line in enumerate(lines):
-        if line.strip() != RUST_ATTR:
+        if RUST_NO_MANGLE_RE.fullmatch(line.strip()) is None:
             continue
         preceding = lines[max(0, index - 3) : index]
         if any(part.strip() == "#[cfg(test)]" for part in preceding):
@@ -35,7 +35,7 @@ def rust_exported_symbols(text: str) -> set[str]:
             signature_parts.append(line.strip())
             cursor += 1
         else:
-            raise ValueError(f"missing function body after {RUST_ATTR} at line {index + 1}")
+            raise ValueError(f"missing function body after no_mangle attribute at line {index + 1}")
         signature = " ".join(part for part in signature_parts if part)
         match = RUST_FN_RE.search(signature)
         if match is None:

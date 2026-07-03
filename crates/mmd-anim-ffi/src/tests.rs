@@ -394,6 +394,10 @@ fn export_pmx_from_parts_rejects_invalid_c_abi_input() {
     };
     assert!(partial_skin.data.is_null());
     assert_eq!(partial_skin.len, 0);
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
+    );
 
     let null_metadata = unsafe {
         mmd_runtime_export_pmx_from_parts(
@@ -412,6 +416,10 @@ fn export_pmx_from_parts_rejects_invalid_c_abi_input() {
     };
     assert!(null_metadata.data.is_null());
     assert_eq!(null_metadata.len, 0);
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
+    );
 }
 
 #[test]
@@ -1806,16 +1814,28 @@ fn import_vmd_bytes_for_model_rejects_null_and_empty() {
         unsafe { mmd_runtime_clip_create_from_vmd_bytes_for_model(ptr::null(), ptr::null(), 0) }
             .is_null()
     );
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
+    );
     // Null bytes
     assert!(
         unsafe { mmd_runtime_clip_create_from_vmd_bytes_for_model(model, ptr::null(), 100) }
             .is_null()
+    );
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
     );
     // Zero length
     let dummy = 0u8;
     assert!(
         unsafe { mmd_runtime_clip_create_from_vmd_bytes_for_model(model, &dummy as *const u8, 0) }
             .is_null()
+    );
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
     );
 
     unsafe {
@@ -1838,6 +1858,10 @@ fn flat_array_model_returns_null_from_vmd_import() {
             mmd_runtime_clip_create_from_vmd_bytes_for_model(model, garbage.as_ptr(), garbage.len())
         }
         .is_null()
+    );
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_CLIP_CREATE_FAILED.as_bytes()
     );
 
     unsafe {
@@ -2884,6 +2908,10 @@ fn pmx_geometry_handle_buffers_have_correct_dimensions() {
     assert!(
         invalid.is_null(),
         "invalid PMX geometry input must return null"
+    );
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
     );
     unsafe { mmd_runtime_pmx_geometry_free(ptr::null_mut()) };
 }

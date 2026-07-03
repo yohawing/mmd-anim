@@ -1272,22 +1272,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_positions_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let buf: Vec<u8> = parsed
-                    .geometry
-                    .positions
-                    .iter()
-                    .flat_map(|v| v.to_ne_bytes())
-                    .collect();
-                byte_buffer_from_vec(buf)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.positions)
     })
 }
 
@@ -1303,22 +1288,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_normals_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let buf: Vec<u8> = parsed
-                    .geometry
-                    .normals
-                    .iter()
-                    .flat_map(|v| v.to_ne_bytes())
-                    .collect();
-                byte_buffer_from_vec(buf)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.normals)
     })
 }
 
@@ -1334,22 +1304,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_uvs_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let buf: Vec<u8> = parsed
-                    .geometry
-                    .uvs
-                    .iter()
-                    .flat_map(|v| v.to_ne_bytes())
-                    .collect();
-                byte_buffer_from_vec(buf)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.uvs)
     })
 }
 
@@ -1391,18 +1346,14 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_additional_uvs_buffer(
     uv_index: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
+        match parse_pmx_model_from_raw(data, len) {
             Ok(parsed) => {
                 let Some(values) = parsed.geometry.additional_uvs.get(uv_index) else {
                     return empty_byte_buffer();
                 };
                 byte_buffer_from_f32_slice(values)
             }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
+            Err(buffer) => buffer,
         }
     })
 }
@@ -1419,22 +1370,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_indices_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let buf: Vec<u8> = parsed
-                    .geometry
-                    .indices
-                    .iter()
-                    .flat_map(|v| v.to_ne_bytes())
-                    .collect();
-                byte_buffer_from_vec(buf)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_u32_buffer(data, len, |geometry| &geometry.indices)
     })
 }
 
@@ -1451,27 +1387,9 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_material_groups_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let groups: Vec<u32> = parsed
-                    .geometry
-                    .material_groups
-                    .iter()
-                    .flat_map(|group| {
-                        [
-                            group.start as u32,
-                            group.count as u32,
-                            group.material_index as u32,
-                        ]
-                    })
-                    .collect();
-                byte_buffer_from_u32_slice(&groups)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
+        match parse_pmx_model_from_raw(data, len) {
+            Ok(parsed) => pmx_material_groups_buffer(&parsed.geometry.material_groups),
+            Err(buffer) => buffer,
         }
     })
 }
@@ -1488,22 +1406,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_skin_indices_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let buf: Vec<u8> = parsed
-                    .geometry
-                    .skin_indices
-                    .iter()
-                    .flat_map(|v| v.to_ne_bytes())
-                    .collect();
-                byte_buffer_from_vec(buf)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_u32_buffer(data, len, |geometry| &geometry.skin_indices)
     })
 }
 
@@ -1519,22 +1422,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_skin_weights_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let buf: Vec<u8> = parsed
-                    .geometry
-                    .skin_weights
-                    .iter()
-                    .flat_map(|v| v.to_ne_bytes())
-                    .collect();
-                byte_buffer_from_vec(buf)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.skin_weights)
     })
 }
 
@@ -1550,14 +1438,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_edge_scale_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => byte_buffer_from_f32_slice(&parsed.geometry.edge_scale),
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.edge_scale)
     })
 }
 
@@ -1574,23 +1455,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_enabled_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let buf: Vec<u8> = parsed
-                    .geometry
-                    .sdef
-                    .enabled
-                    .iter()
-                    .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
-                    .collect();
-                byte_buffer_from_vec(buf)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_flags_buffer(data, len, |geometry| &geometry.sdef.enabled)
     })
 }
 
@@ -1606,23 +1471,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_c_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let buf: Vec<u8> = parsed
-                    .geometry
-                    .sdef
-                    .c
-                    .iter()
-                    .flat_map(|v| v.to_ne_bytes())
-                    .collect();
-                byte_buffer_from_vec(buf)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.sdef.c)
     })
 }
 
@@ -1638,23 +1487,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_r0_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let buf: Vec<u8> = parsed
-                    .geometry
-                    .sdef
-                    .r0
-                    .iter()
-                    .flat_map(|v| v.to_ne_bytes())
-                    .collect();
-                byte_buffer_from_vec(buf)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.sdef.r0)
     })
 }
 
@@ -1670,23 +1503,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_r1_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => {
-                let buf: Vec<u8> = parsed
-                    .geometry
-                    .sdef
-                    .r1
-                    .iter()
-                    .flat_map(|v| v.to_ne_bytes())
-                    .collect();
-                byte_buffer_from_vec(buf)
-            }
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.sdef.r1)
     })
 }
 
@@ -1702,14 +1519,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_rw0_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => byte_buffer_from_f32_slice(&parsed.geometry.sdef.rw0),
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.sdef.rw0)
     })
 }
 
@@ -1725,14 +1535,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_sdef_rw1_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => byte_buffer_from_f32_slice(&parsed.geometry.sdef.rw1),
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_buffer(data, len, |geometry| &geometry.sdef.rw1)
     })
 }
 
@@ -1749,22 +1552,7 @@ pub unsafe extern "C" fn mmd_runtime_parse_pmx_qdef_enabled_buffer(
     len: usize,
 ) -> MmdRuntimeFfiByteBuffer {
     ffi_guard(empty_byte_buffer(), || {
-        if data.is_null() || len == 0 {
-            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) };
-        match mmd_anim_format::parse_pmx_model(bytes) {
-            Ok(parsed) => byte_buffer_from_vec(
-                parsed
-                    .geometry
-                    .qdef
-                    .enabled
-                    .iter()
-                    .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
-                    .collect(),
-            ),
-            Err(_) => empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED),
-        }
+        pmx_raw_f32_flags_buffer(data, len, |geometry| &geometry.qdef.enabled)
     })
 }
 
@@ -1983,20 +1771,7 @@ pub unsafe extern "C" fn mmd_runtime_pmx_geometry_material_groups_buffer(
         let Some(geometry) = (unsafe { geometry.as_ref() }) else {
             return empty_byte_buffer();
         };
-        let groups: Vec<u32> = geometry
-            .parsed
-            .geometry
-            .material_groups
-            .iter()
-            .flat_map(|group| {
-                [
-                    group.start as u32,
-                    group.count as u32,
-                    group.material_index as u32,
-                ]
-            })
-            .collect();
-        byte_buffer_from_u32_slice(&groups)
+        pmx_material_groups_buffer(&geometry.parsed.geometry.material_groups)
     })
 }
 
@@ -2644,6 +2419,72 @@ fn pmx_geometry_f32_flags_buffer(
             .map(|&value| if value > 0.5 { 1u8 } else { 0u8 })
             .collect(),
     )
+}
+
+fn parse_pmx_model_from_raw(
+    data: *const u8,
+    len: usize,
+) -> Result<mmd_anim_format::PmxParsedModel, MmdRuntimeFfiByteBuffer> {
+    if data.is_null() || len == 0 {
+        return Err(empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT));
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    mmd_anim_format::parse_pmx_model(bytes)
+        .map_err(|_| empty_byte_buffer_failure(FFI_ERR_PMX_PARSE_FAILED))
+}
+
+fn pmx_raw_f32_buffer(
+    data: *const u8,
+    len: usize,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<f32>,
+) -> MmdRuntimeFfiByteBuffer {
+    match parse_pmx_model_from_raw(data, len) {
+        Ok(parsed) => byte_buffer_from_f32_slice(accessor(&parsed.geometry)),
+        Err(buffer) => buffer,
+    }
+}
+
+fn pmx_raw_u32_buffer(
+    data: *const u8,
+    len: usize,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<u32>,
+) -> MmdRuntimeFfiByteBuffer {
+    match parse_pmx_model_from_raw(data, len) {
+        Ok(parsed) => byte_buffer_from_u32_slice(accessor(&parsed.geometry)),
+        Err(buffer) => buffer,
+    }
+}
+
+fn pmx_raw_f32_flags_buffer(
+    data: *const u8,
+    len: usize,
+    accessor: fn(&mmd_anim_format::pmx::PmxParsedGeometry) -> &Vec<f32>,
+) -> MmdRuntimeFfiByteBuffer {
+    match parse_pmx_model_from_raw(data, len) {
+        Ok(parsed) => byte_buffer_from_vec(
+            accessor(&parsed.geometry)
+                .iter()
+                .map(|&value| if value > 0.5 { 1u8 } else { 0u8 })
+                .collect(),
+        ),
+        Err(buffer) => buffer,
+    }
+}
+
+fn pmx_material_groups_buffer(
+    material_groups: &[mmd_anim_format::pmx::PmxParsedMaterialGroup],
+) -> MmdRuntimeFfiByteBuffer {
+    let groups: Vec<u32> = material_groups
+        .iter()
+        .flat_map(|group| {
+            [
+                group.start as u32,
+                group.count as u32,
+                group.material_index as u32,
+            ]
+        })
+        .collect();
+    byte_buffer_from_u32_slice(&groups)
 }
 
 fn byte_buffer_from_f32_slice(values: &[f32]) -> MmdRuntimeFfiByteBuffer {

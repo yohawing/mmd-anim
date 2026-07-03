@@ -319,13 +319,13 @@ fn ik_solver_residuals_reports_enabled_and_delta() {
         compute_ik_solver_residuals(&solvers, &bone_names, &[0], &world, &oracle, Some(2));
 
     assert_eq!(residuals.len(), 1);
-    assert_eq!(residuals[0]["solverIndex"], 0);
-    assert_eq!(residuals[0]["ikBone"], "ik");
-    assert_eq!(residuals[0]["targetBone"], "target");
-    assert_eq!(residuals[0]["enabled"], false);
-    assert!((residuals[0]["runtimeResidual"].as_f64().unwrap() - 3.0).abs() < 1e-6);
-    assert!((residuals[0]["oracleResidual"].as_f64().unwrap() - 1.0).abs() < 1e-6);
-    assert!((residuals[0]["residualDelta"].as_f64().unwrap() - 2.0).abs() < 1e-6);
+    assert_eq!(residuals[0].solver_index, 0);
+    assert_eq!(residuals[0].ik_bone, "ik");
+    assert_eq!(residuals[0].target_bone, "target");
+    assert!(!residuals[0].enabled);
+    assert!((residuals[0].runtime_residual - 3.0).abs() < 1e-6);
+    assert!((residuals[0].oracle_residual.unwrap() - 1.0).abs() < 1e-6);
+    assert!((residuals[0].residual_delta.unwrap() - 2.0).abs() < 1e-6);
 }
 
 #[test]

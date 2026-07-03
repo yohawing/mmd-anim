@@ -466,6 +466,22 @@ fn is_frame_root_control_dominated(
 /// oracle (MMD) reference.  This separates end-effector convergence quality
 /// from per-bone world-matrix error: a solver can converge (small residual)
 /// while individual link poses still differ from the oracle.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoldenIkSolverResidual {
+    solver_index: usize,
+    ik_bone: String,
+    ik_bone_index: u32,
+    target_bone: String,
+    target_bone_index: u32,
+    enabled: bool,
+    runtime_residual: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oracle_residual: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    residual_delta: Option<f32>,
+}
+
 pub(crate) fn compute_ik_solver_residuals(
     ik_solvers: &[IkSolver],
     bone_names: &[String],
@@ -473,7 +489,7 @@ pub(crate) fn compute_ik_solver_residuals(
     world_matrices: &[glam::Mat4],
     oracle_model: &MmdDumperOracleModel,
     focus_bone_index: Option<usize>,
-) -> Vec<serde_json::Value> {
+) -> Vec<GoldenIkSolverResidual> {
     let mut residuals = Vec::with_capacity(ik_solvers.len());
 
     for (solver_idx, solver) in ik_solvers.iter().enumerate() {
@@ -538,20 +554,17 @@ pub(crate) fn compute_ik_solver_residuals(
         let ik_name = bone_names.get(ik_idx).map(|s| s.as_str()).unwrap_or("?");
         let tb_name = bone_names.get(tb_idx).map(|s| s.as_str()).unwrap_or("?");
 
-        let mut entry = json!({
-            "solverIndex": solver_idx,
-            "ikBone": ik_name,
-            "ikBoneIndex": solver.ik_bone.0,
-            "targetBone": tb_name,
-            "targetBoneIndex": solver.target_bone.0,
-            "enabled": ik_enabled.get(solver_idx).copied().unwrap_or(1) != 0,
-            "runtimeResidual": runtime_residual,
+        residuals.push(GoldenIkSolverResidual {
+            solver_index: solver_idx,
+            ik_bone: ik_name.to_owned(),
+            ik_bone_index: solver.ik_bone.0,
+            target_bone: tb_name.to_owned(),
+            target_bone_index: solver.target_bone.0,
+            enabled: ik_enabled.get(solver_idx).copied().unwrap_or(1) != 0,
+            runtime_residual,
+            oracle_residual,
+            residual_delta: oracle_residual.map(|or| runtime_residual - or),
         });
-        if let Some(or) = oracle_residual {
-            entry["oracleResidual"] = json!(or);
-            entry["residualDelta"] = json!(runtime_residual - or);
-        }
-        residuals.push(entry);
     }
 
     residuals
@@ -639,7 +652,7 @@ struct GoldenIkCompareSolverFocusedSummary {
     worst_component: usize,
     worst_component_type: &'static str,
     worst_case_max_error: f32,
-    worst_frame_solver_residuals: Vec<serde_json::Value>,
+    worst_frame_solver_residuals: Vec<GoldenIkSolverResidual>,
     root_motion_dominated_abs_threshold: f64,
 }
 
@@ -785,7 +798,7 @@ pub(crate) fn golden_ik_compare(
     let mut solver_worst = String::from("none");
     let mut solver_worst_component: usize = 0;
     let mut solver_worst_case_max_error: f32 = 0.0;
-    let mut solver_worst_residuals: Vec<serde_json::Value> = Vec::new();
+    let mut solver_worst_residuals: Vec<GoldenIkSolverResidual> = Vec::new();
 
     for case in &manifest.cases {
         cases += 1;

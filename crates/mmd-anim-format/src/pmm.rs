@@ -702,7 +702,9 @@ pub struct PmmDocumentModelSummary {
     pub path: String,
     pub asset_reference_index: Option<usize>,
     pub bone_count: usize,
+    pub bone_names: Vec<String>,
     pub morph_count: usize,
+    pub morph_names: Vec<String>,
     pub constraint_bone_count: usize,
     pub outside_parent_subject_bone_count: usize,
     pub draw_order_index: u8,
@@ -3135,12 +3137,14 @@ fn read_document_model_summary(
     let asset_reference_index = asset_reference_index_for_path(references, "model", &path);
     cursor.read_u8()?;
     let bone_count = usize_from_i32(cursor.read_i32()?)?;
+    let mut bone_names = Vec::with_capacity(bone_count);
     for _ in 0..bone_count {
-        cursor.read_variable_string()?;
+        bone_names.push(cursor.read_variable_string()?);
     }
     let morph_count = usize_from_i32(cursor.read_i32()?)?;
+    let mut morph_names = Vec::with_capacity(morph_count);
     for _ in 0..morph_count {
-        cursor.read_variable_string()?;
+        morph_names.push(cursor.read_variable_string()?);
     }
     let constraint_bone_count = usize_from_i32(cursor.read_i32()?)?;
     cursor.skip(constraint_bone_count.checked_mul(4)?)?;
@@ -3250,7 +3254,9 @@ fn read_document_model_summary(
         path,
         asset_reference_index,
         bone_count,
+        bone_names,
         morph_count,
+        morph_names,
         constraint_bone_count,
         outside_parent_subject_bone_count,
         draw_order_index,
@@ -7964,6 +7970,7 @@ mod tests {
                 "boneCount",
                 "boneKeyframeSummaries",
                 "boneKeyframes",
+                "boneNames",
                 "boneStateSummaries",
                 "constraintBoneCount",
                 "constraintStateSummaries",
@@ -7983,6 +7990,7 @@ mod tests {
                 "morphCount",
                 "morphKeyframeSummaries",
                 "morphKeyframes",
+                "morphNames",
                 "morphStateSummaries",
                 "name",
                 "offset",
@@ -8183,7 +8191,9 @@ mod tests {
             "UserFile/Model/miku.pmx"
         );
         assert_eq!(model.bone_count, 1);
+        assert_eq!(model.bone_names, vec!["center".to_owned()]);
         assert_eq!(model.morph_count, 1);
+        assert_eq!(model.morph_names, vec!["smile".to_owned()]);
         assert_eq!(model.constraint_bone_count, 1);
         assert_eq!(model.outside_parent_subject_bone_count, 1);
         assert_eq!(model.bone_keyframes, 1);

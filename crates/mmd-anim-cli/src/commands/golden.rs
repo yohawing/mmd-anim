@@ -568,6 +568,70 @@ struct UnsupportedGoldenCasePerCaseEntry<'a> {
     root_motion_oracle_lag: UnsupportedGoldenCaseRootMotionOracleLag,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoldenIkCompareJsonReport {
+    command: &'static str,
+    root: String,
+    sample_frame_offset: f32,
+    summary: GoldenIkCompareJsonSummary,
+    #[serde(rename = "perCase")]
+    per_case: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoldenIkCompareJsonSummary {
+    cases: usize,
+    compared_cases: usize,
+    skipped_unsupported: usize,
+    skipped_unsupported_cases: Vec<serde_json::Value>,
+    missing: usize,
+    import_errors: usize,
+    compared_frames: usize,
+    compared_bones: usize,
+    max_abs_error: f32,
+    worst: String,
+    worst_component: usize,
+    worst_component_type: &'static str,
+    worst_case_max_error: f32,
+    diagnostics_total: usize,
+    worst_diagnostic: Option<serde_json::Value>,
+    worst_likely_root_control_dominated: bool,
+    solver_focused: GoldenIkCompareSolverFocusedSummary,
+    root_motion_oracle_lag: GoldenIkCompareRootMotionOracleLagSummary,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoldenIkCompareSolverFocusedSummary {
+    compared_bones: usize,
+    skipped_bones: usize,
+    skipped_frames: usize,
+    max_abs_error: f32,
+    worst: String,
+    worst_component: usize,
+    worst_component_type: &'static str,
+    worst_case_max_error: f32,
+    worst_frame_solver_residuals: Vec<serde_json::Value>,
+    root_motion_dominated_abs_threshold: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoldenIkCompareRootMotionOracleLagSummary {
+    total_match_count: usize,
+    worst_match: Option<serde_json::Value>,
+}
+
+fn golden_component_type(component: usize) -> &'static str {
+    match component {
+        12..=14 => "translation",
+        15 => "homogeneous",
+        _ => "rotation",
+    }
+}
+
 /// Build a JSON pair for an unsupported (non-.pmx) case.
 ///
 /// Returns `(summary_entry, per_case_entry)` so callers can push them into
@@ -973,66 +1037,46 @@ pub(crate) fn golden_ik_compare(
         .cloned();
 
     if use_json {
-        let worst_type = if worst_component == 12 || worst_component == 13 || worst_component == 14
-        {
-            "translation"
-        } else if worst_component == 15 {
-            "homogeneous"
-        } else {
-            "rotation"
-        };
-
-        let per_case: Vec<serde_json::Value> = per_case_entries;
-
-        let report = json!({
-            "command": "golden-ik-compare",
-            "root": root.to_string_lossy(),
-            "sampleFrameOffset": sample_frame_offset,
-            "summary": {
-                "cases": cases,
-                "comparedCases": compared_cases,
-                "skippedUnsupported": skipped_unsupported,
-                "skippedUnsupportedCases": skipped_unsupported_cases,
-                "missing": missing,
-                "importErrors": import_errors,
-                "comparedFrames": compared_frames,
-                "comparedBones": compared_bones,
-                "maxAbsError": max_abs_error,
-                "worst": worst,
-                "worstComponent": worst_component,
-                "worstComponentType": worst_type,
-                "worstCaseMaxError": worst_case_max_error,
-                "diagnosticsTotal": diagnostics_total,
-                "worstDiagnostic": worst_diagnostic,
-                "worstLikelyRootControlDominated": worst_likely_root_control_dominated,
-                "solverFocused": {
-                    "comparedBones": solver_compared_bones,
-                    "skippedBones": solver_skipped_bones,
-                    "skippedFrames": solver_skipped_frames,
-                    "maxAbsError": solver_max_abs_error,
-                    "worst": solver_worst,
-                    "worstComponent": solver_worst_component,
-                    "worstComponentType": if solver_worst_component == 12
-                        || solver_worst_component == 13
-                        || solver_worst_component == 14
-                    {
-                        "translation"
-                    } else if solver_worst_component == 15 {
-                        "homogeneous"
-                    } else {
-                        "rotation"
-                    },
-                    "worstCaseMaxError": solver_worst_case_max_error,
-                    "worstFrameSolverResiduals": solver_worst_residuals,
-                    "rootMotionDominatedAbsThreshold": ROOT_MOTION_DOMINATED_ABS_THRESHOLD,
+        let report = GoldenIkCompareJsonReport {
+            command: "golden-ik-compare",
+            root: root.to_string_lossy().into_owned(),
+            sample_frame_offset,
+            summary: GoldenIkCompareJsonSummary {
+                cases,
+                compared_cases,
+                skipped_unsupported,
+                skipped_unsupported_cases,
+                missing,
+                import_errors,
+                compared_frames,
+                compared_bones,
+                max_abs_error,
+                worst,
+                worst_component,
+                worst_component_type: golden_component_type(worst_component),
+                worst_case_max_error,
+                diagnostics_total,
+                worst_diagnostic,
+                worst_likely_root_control_dominated,
+                solver_focused: GoldenIkCompareSolverFocusedSummary {
+                    compared_bones: solver_compared_bones,
+                    skipped_bones: solver_skipped_bones,
+                    skipped_frames: solver_skipped_frames,
+                    max_abs_error: solver_max_abs_error,
+                    worst: solver_worst,
+                    worst_component: solver_worst_component,
+                    worst_component_type: golden_component_type(solver_worst_component),
+                    worst_case_max_error: solver_worst_case_max_error,
+                    worst_frame_solver_residuals: solver_worst_residuals,
+                    root_motion_dominated_abs_threshold: ROOT_MOTION_DOMINATED_ABS_THRESHOLD,
                 },
-                "rootMotionOracleLag": {
-                    "totalMatchCount": summary_lag_total,
-                    "worstMatch": summary_lag_worst,
+                root_motion_oracle_lag: GoldenIkCompareRootMotionOracleLagSummary {
+                    total_match_count: summary_lag_total,
+                    worst_match: summary_lag_worst,
                 },
             },
-            "perCase": per_case,
-        });
+            per_case: per_case_entries,
+        };
 
         println!("{}", serde_json::to_string(&report)?);
     } else {

@@ -11,11 +11,11 @@ use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
     AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, FlatAppendTransformInput,
     FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput, FlatIkLinkInput, FlatIkSolverInput,
-    FlatMorphInput, IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput,
-    IkChainSolver, IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe,
-    MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
-    RuntimeInstance, build_append_transforms_from_flat, build_bones_from_flat,
-    build_ik_solvers_from_flat, build_morph_init_from_flat, solve_append_transform,
+    IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver,
+    IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack,
+    MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
+    RuntimeInstance, build_append_transforms_from_flat_iter, build_bones_from_flat,
+    build_ik_solvers_from_flat_iter, build_morph_init_from_flat_iter, solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 2;
@@ -3544,9 +3544,7 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_world_matrices(
         }
 
         let out = unsafe { slice::from_raw_parts_mut(out_f32, required_len) };
-        for (matrix_index, matrix) in matrices.iter().enumerate() {
-            out[matrix_index * 16..matrix_index * 16 + 16].copy_from_slice(&matrix.to_cols_array());
-        }
+        flatten_matrices_into_slice(out, matrices);
         true
     })
 }
@@ -3597,9 +3595,7 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_skinning_matrices(
         }
 
         let out = unsafe { slice::from_raw_parts_mut(out_f32, required_len) };
-        for (matrix_index, matrix) in matrices.iter().enumerate() {
-            out[matrix_index * 16..matrix_index * 16 + 16].copy_from_slice(&matrix.to_cols_array());
-        }
+        flatten_matrices_into_slice(out, matrices);
         true
     })
 }
@@ -4215,31 +4211,30 @@ unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
             angle_limit_max_xyz: link.angle_limit_max_xyz,
         })
         .collect::<Vec<_>>();
-    let ik_solvers = ik_solvers
-        .iter()
-        .map(|solver| FlatIkSolverInput {
+    let ik_solvers = build_ik_solvers_from_flat_iter(
+        ik_solvers.iter().map(|solver| FlatIkSolverInput {
             ik_bone_index: solver.ik_bone_index,
             target_bone_index: solver.target_bone_index,
             link_offset: solver.link_offset,
             link_count: solver.link_count,
             iteration_count: solver.iteration_count,
             limit_angle: solver.limit_angle,
-        })
-        .collect::<Vec<_>>();
-    let ik_solvers = build_ik_solvers_from_flat(&ik_solvers, &ik_links).ok()?;
+        }),
+        &ik_links,
+    )
+    .ok()?;
 
-    let append_transforms = append_transforms
-        .iter()
-        .map(|append| FlatAppendTransformInput {
-            target_bone_index: append.target_bone_index,
-            source_bone_index: append.source_bone_index,
-            ratio: append.ratio,
-            affect_rotation: append.flags & APPEND_FLAG_ROTATION != 0,
-            affect_translation: append.flags & APPEND_FLAG_TRANSLATION != 0,
-            local: append.flags & APPEND_FLAG_LOCAL != 0,
-        })
-        .collect::<Vec<_>>();
-    let append_transforms = build_append_transforms_from_flat(&append_transforms);
+    let append_transforms =
+        build_append_transforms_from_flat_iter(append_transforms.iter().map(|append| {
+            FlatAppendTransformInput {
+                target_bone_index: append.target_bone_index,
+                source_bone_index: append.source_bone_index,
+                ratio: append.ratio,
+                affect_rotation: append.flags & APPEND_FLAG_ROTATION != 0,
+                affect_translation: append.flags & APPEND_FLAG_TRANSLATION != 0,
+                local: append.flags & APPEND_FLAG_LOCAL != 0,
+            }
+        }));
 
     let bone_morph_offsets =
         unsafe { checked_slice(input.bone_morph_offsets, input.bone_morph_offset_count) }?;
@@ -4256,29 +4251,20 @@ fn build_morph_init_from_ffi(
     bone_morph_offsets: &[MmdRuntimeFfiBoneMorphOffset],
     group_morph_offsets: &[MmdRuntimeFfiGroupMorphOffset],
 ) -> Option<MorphInit> {
-    let bone_morphs: Vec<FlatBoneMorphInput> = bone_morph_offsets
-        .iter()
-        .map(|entry| FlatBoneMorphInput {
+    build_morph_init_from_flat_iter(
+        morph_count,
+        bone_morph_offsets.iter().map(|entry| FlatBoneMorphInput {
             morph_index: entry.morph_index,
             target_bone_index: entry.target_bone_index,
             position_offset_xyz: entry.position_offset_xyz,
             rotation_offset_xyzw: entry.rotation_offset_xyzw,
-        })
-        .collect();
-    let group_morphs: Vec<FlatGroupMorphInput> = group_morph_offsets
-        .iter()
-        .map(|entry| FlatGroupMorphInput {
+        }),
+        group_morph_offsets.iter().map(|entry| FlatGroupMorphInput {
             morph_index: entry.morph_index,
             child_morph_index: entry.child_morph_index,
             ratio: entry.ratio,
-        })
-        .collect();
-
-    build_morph_init_from_flat(FlatMorphInput {
-        morph_count,
-        bone_morphs: &bone_morphs,
-        group_morphs: &group_morphs,
-    })
+        }),
+    )
     .ok()
 }
 

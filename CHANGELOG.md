@@ -28,6 +28,9 @@ tooling.
 - Replaced the pre-release JSON-returning and array-returning camera sampling
   APIs with caller-owned output-buffer APIs before the `0.1.8` release tag.
   This keeps hot-path C ABI and WASM sampling allocation-free.
+- Documented intentional pre-release error-surface changes: WASM flat model
+  validation reports bone input errors before IK errors, and truncated NMD
+  payloads now surface as `UnexpectedEof` instead of `SectionOverflow`.
 
 ## 0.1.7 - 2026-06-27
 

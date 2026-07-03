@@ -180,7 +180,7 @@ pub(crate) enum NumericCompareCaseReport {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CameraNumericCompareCaseReport {
+pub(crate) struct NumericCompareCaseCore {
     name: String,
     kind: String,
     status: String,
@@ -189,7 +189,6 @@ pub(crate) struct CameraNumericCompareCaseReport {
     compared_bones: usize,
     mismatch_count: usize,
     max_abs_error: f64,
-    camera_max_delta: f64,
     worst: Option<String>,
     worst_frame: Option<i32>,
     worst_bone: Option<String>,
@@ -201,24 +200,19 @@ pub(crate) struct CameraNumericCompareCaseReport {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct CameraNumericCompareCaseReport {
+    #[serde(flatten)]
+    core: NumericCompareCaseCore,
+    camera_max_delta: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct MotionNumericCompareCaseReport {
-    name: String,
-    kind: String,
-    status: String,
-    epsilon: f32,
-    compared_frames: usize,
-    compared_bones: usize,
-    mismatch_count: usize,
-    max_abs_error: f32,
-    worst: String,
-    worst_frame: Option<i32>,
-    worst_bone: Option<String>,
-    worst_component: Option<usize>,
-    skipped_targets: Vec<String>,
-    missing_paths: Vec<String>,
+    #[serde(flatten)]
+    core: NumericCompareCaseCore,
     missing: usize,
     import_errors: usize,
-    error: Option<String>,
 }
 
 fn non_empty_str(value: &str) -> Option<&str> {
@@ -999,22 +993,24 @@ fn camera_case_report(
         "mismatch"
     };
     NumericCompareCaseReport::Camera(CameraNumericCompareCaseReport {
-        name: name.to_owned(),
-        kind: kind.to_owned(),
-        status: status.to_owned(),
-        epsilon,
-        compared_frames: stats.compared_frames,
-        compared_bones: 0,
-        mismatch_count: stats.mismatch_count,
-        max_abs_error: stats.max_delta,
+        core: NumericCompareCaseCore {
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            status: status.to_owned(),
+            epsilon,
+            compared_frames: stats.compared_frames,
+            compared_bones: 0,
+            mismatch_count: stats.mismatch_count,
+            max_abs_error: stats.max_delta,
+            worst: None,
+            worst_frame: None,
+            worst_bone: None,
+            worst_component: None,
+            skipped_targets: stats.skipped_targets_sorted(),
+            missing_paths: Vec::new(),
+            error: None,
+        },
         camera_max_delta: stats.max_delta,
-        worst: None,
-        worst_frame: None,
-        worst_bone: None,
-        worst_component: None,
-        skipped_targets: stats.skipped_targets_sorted(),
-        missing_paths: Vec::new(),
-        error: None,
     })
 }
 
@@ -1033,23 +1029,25 @@ fn motion_case_report(
         .and_then(|value| value.as_str())
         .unwrap_or("motion-numeric");
     NumericCompareCaseReport::Motion(MotionNumericCompareCaseReport {
-        name: name.to_owned(),
-        kind: kind.to_owned(),
-        status: status.to_owned(),
-        epsilon,
-        compared_frames: stats.compared_frames,
-        compared_bones: stats.compared_bones,
-        mismatch_count: stats.mismatch_count,
-        max_abs_error: stats.max_abs_error,
-        worst: stats.worst.clone(),
-        worst_frame: stats.worst_frame,
-        worst_bone: non_empty_str(&stats.worst_bone).map(str::to_owned),
-        worst_component: stats.worst_component,
-        skipped_targets: stats.skipped_targets_sorted(),
-        missing_paths,
+        core: NumericCompareCaseCore {
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            status: status.to_owned(),
+            epsilon: f64::from(epsilon),
+            compared_frames: stats.compared_frames,
+            compared_bones: stats.compared_bones,
+            mismatch_count: stats.mismatch_count,
+            max_abs_error: f64::from(stats.max_abs_error),
+            worst: Some(stats.worst.clone()),
+            worst_frame: stats.worst_frame,
+            worst_bone: non_empty_str(&stats.worst_bone).map(str::to_owned),
+            worst_component: stats.worst_component,
+            skipped_targets: stats.skipped_targets_sorted(),
+            missing_paths,
+            error,
+        },
         missing: stats.missing,
         import_errors: stats.import_errors,
-        error,
     })
 }
 

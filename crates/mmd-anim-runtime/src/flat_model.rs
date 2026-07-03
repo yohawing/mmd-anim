@@ -156,8 +156,15 @@ pub fn build_ik_solvers_from_flat(
     solvers: &[FlatIkSolverInput],
     links: &[FlatIkLinkInput],
 ) -> Result<Vec<IkSolverInit>, FlatModelInputError> {
+    build_ik_solvers_from_flat_iter(solvers.iter().copied(), links)
+}
+
+pub fn build_ik_solvers_from_flat_iter(
+    solvers: impl IntoIterator<Item = FlatIkSolverInput>,
+    links: &[FlatIkLinkInput],
+) -> Result<Vec<IkSolverInit>, FlatModelInputError> {
     solvers
-        .iter()
+        .into_iter()
         .map(|solver| {
             let link_end = solver
                 .link_offset
@@ -201,19 +208,33 @@ pub fn build_ik_solvers_from_flat(
 pub fn build_morph_init_from_flat(
     input: FlatMorphInput<'_>,
 ) -> Result<MorphInit, FlatModelInputError> {
-    if input.morph_count == 0 {
-        if input.bone_morphs.is_empty() && input.group_morphs.is_empty() {
+    build_morph_init_from_flat_iter(
+        input.morph_count,
+        input.bone_morphs.iter().copied(),
+        input.group_morphs.iter().copied(),
+    )
+}
+
+pub fn build_morph_init_from_flat_iter(
+    morph_count: u32,
+    bone_morphs: impl IntoIterator<Item = FlatBoneMorphInput>,
+    group_morphs: impl IntoIterator<Item = FlatGroupMorphInput>,
+) -> Result<MorphInit, FlatModelInputError> {
+    let bone_morphs = bone_morphs.into_iter().collect::<Vec<_>>();
+    let group_morphs = group_morphs.into_iter().collect::<Vec<_>>();
+    if morph_count == 0 {
+        if bone_morphs.is_empty() && group_morphs.is_empty() {
             return Ok(MorphInit::default());
         }
         return Err(FlatModelInputError::MorphCountZeroWithData);
     }
-    let morph_count = input.morph_count as usize;
+    let morph_count_usize = morph_count as usize;
     let (bone_offsets, bone_spans) =
-        build_bone_morph_offset_tables(morph_count, input.bone_morphs)?;
+        build_bone_morph_offset_tables(morph_count_usize, &bone_morphs)?;
     let (group_offsets, group_spans) =
-        build_group_morph_offset_tables(morph_count, input.group_morphs)?;
+        build_group_morph_offset_tables(morph_count_usize, &group_morphs)?;
     Ok(MorphInit {
-        morph_count: input.morph_count,
+        morph_count,
         bone_offsets,
         bone_spans,
         group_offsets,
@@ -307,8 +328,14 @@ fn build_group_morph_offset_tables(
 pub fn build_append_transforms_from_flat(
     append_transforms: &[FlatAppendTransformInput],
 ) -> Vec<AppendTransformInit> {
+    build_append_transforms_from_flat_iter(append_transforms.iter().copied())
+}
+
+pub fn build_append_transforms_from_flat_iter(
+    append_transforms: impl IntoIterator<Item = FlatAppendTransformInput>,
+) -> Vec<AppendTransformInit> {
     append_transforms
-        .iter()
+        .into_iter()
         .map(|append| {
             let mut init = AppendTransformInit::new(
                 BoneIndex(append.target_bone_index),

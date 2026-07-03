@@ -363,12 +363,20 @@ pub struct MorphSample {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClipSample {
-    bone_samples: Box<[BoneSample]>,
-    morph_samples: Box<[MorphSample]>,
-    ik_enabled: Option<Box<[u8]>>,
+    bone_samples: Vec<BoneSample>,
+    morph_samples: Vec<MorphSample>,
+    ik_enabled: Option<Vec<u8>>,
 }
 
 impl ClipSample {
+    pub fn with_capacity(bone_capacity: usize, morph_capacity: usize) -> Self {
+        Self {
+            bone_samples: Vec::with_capacity(bone_capacity),
+            morph_samples: Vec::with_capacity(morph_capacity),
+            ik_enabled: None,
+        }
+    }
+
     pub fn bone_samples(&self) -> &[BoneSample] {
         &self.bone_samples
     }
@@ -410,6 +418,12 @@ impl ClipFrameBounds {
     }
 }
 
+enum ClipSampleEvent<'a> {
+    Bone(BoneIndex, Vec3A, Quat),
+    Morph(MorphIndex, f32),
+    IkEnabled(&'a [u8]),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct AnimationClip {
     bone_tracks: Box<[BoneAnimationBinding]>,
@@ -446,51 +460,64 @@ impl AnimationClip {
     }
 
     pub fn sample_at(&self, frame: f32) -> ClipSample {
-        let mut bone_samples = Vec::with_capacity(self.bone_tracks.len());
-        for binding in self.bone_tracks.iter() {
-            if let Some((position, rotation)) = binding.track.sample(frame) {
-                bone_samples.push(BoneSample {
-                    bone: binding.bone,
+        let mut sample = ClipSample::with_capacity(self.bone_tracks.len(), self.morph_tracks.len());
+        self.sample_into(frame, &mut sample);
+        sample
+    }
+
+    pub fn sample_into(&self, frame: f32, sample: &mut ClipSample) {
+        sample.bone_samples.clear();
+        sample.morph_samples.clear();
+        let mut ik_enabled = sample.ik_enabled.take();
+        let mut has_ik_state = false;
+        self.visit_samples(frame, |event| match event {
+            ClipSampleEvent::Bone(bone, position, rotation) => {
+                sample.bone_samples.push(BoneSample {
+                    bone,
                     position,
                     rotation,
                 });
             }
-        }
-
-        let mut morph_samples = Vec::with_capacity(self.morph_tracks.len());
-        for binding in self.morph_tracks.iter() {
-            if let Some(weight) = binding.track.sample(frame) {
-                morph_samples.push(MorphSample {
-                    morph: binding.morph,
-                    weight,
-                });
+            ClipSampleEvent::Morph(morph, weight) => {
+                sample.morph_samples.push(MorphSample { morph, weight });
             }
-        }
-
-        let ik_enabled = self
-            .property_track
-            .as_ref()
-            .and_then(|track| track.sample(frame))
-            .map(|state| state.to_vec().into_boxed_slice());
-
-        ClipSample {
-            bone_samples: bone_samples.into_boxed_slice(),
-            morph_samples: morph_samples.into_boxed_slice(),
-            ik_enabled,
-        }
+            ClipSampleEvent::IkEnabled(state) => {
+                let buffer = ik_enabled.get_or_insert_with(Vec::new);
+                buffer.clear();
+                buffer.extend_from_slice(state);
+                has_ik_state = true;
+            }
+        });
+        sample.ik_enabled = if has_ik_state { ik_enabled } else { None };
     }
 
     pub fn apply_to_pose(&self, frame: f32, pose: &mut PoseArena) {
         pose.reset_local_pose();
+        self.visit_samples(frame, |event| match event {
+            ClipSampleEvent::Bone(bone, position, rotation) => {
+                pose.set_local_position_offset(bone, position);
+                pose.set_local_rotation(bone, rotation);
+            }
+            ClipSampleEvent::Morph(morph, weight) => {
+                pose.set_morph_weight(morph, weight);
+            }
+            ClipSampleEvent::IkEnabled(ik_enabled) => {
+                for (ik_index, enabled) in ik_enabled.iter().enumerate() {
+                    pose.set_ik_enabled(ik_index, *enabled != 0);
+                }
+            }
+        });
+    }
+
+    fn visit_samples(&self, frame: f32, mut on_event: impl FnMut(ClipSampleEvent<'_>)) {
         for binding in self.bone_tracks.iter() {
             if let Some((position, rotation)) = binding.track.sample(frame) {
-                pose.set_local_position_offset(binding.bone, position);
-                pose.set_local_rotation(binding.bone, rotation);
+                on_event(ClipSampleEvent::Bone(binding.bone, position, rotation));
             }
         }
         for binding in self.morph_tracks.iter() {
             if let Some(weight) = binding.track.sample(frame) {
-                pose.set_morph_weight(binding.morph, weight);
+                on_event(ClipSampleEvent::Morph(binding.morph, weight));
             }
         }
         if let Some(ik_enabled) = self
@@ -498,9 +525,7 @@ impl AnimationClip {
             .as_ref()
             .and_then(|track| track.sample(frame))
         {
-            for (ik_index, enabled) in ik_enabled.iter().enumerate() {
-                pose.set_ik_enabled(ik_index, *enabled != 0);
-            }
+            on_event(ClipSampleEvent::IkEnabled(ik_enabled));
         }
     }
 
@@ -875,6 +900,54 @@ mod tests {
             from_clip.morph_weight(MorphIndex(0)),
         );
         assert_eq!(from_sample.ik_enabled(), from_clip.ik_enabled());
+    }
+
+    #[test]
+    fn clip_sample_into_reuses_output_and_matches_sample_at() {
+        let clip = AnimationClip::builder()
+            .with_bone_track(BoneAnimationBinding {
+                bone: BoneIndex(0),
+                track: MovableBoneTrack::from_keyframes(vec![
+                    MovableBoneKeyframe::new(0, Vec3A::ZERO, Quat::IDENTITY),
+                    MovableBoneKeyframe::new(10, Vec3A::new(10.0, 0.0, 0.0), Quat::IDENTITY),
+                ]),
+            })
+            .with_morph_track(MorphAnimationBinding {
+                morph: MorphIndex(0),
+                track: MorphTrack::from_keyframes(vec![
+                    MorphKeyframe::new(0, 0.0),
+                    MorphKeyframe::new(10, 1.0),
+                ]),
+            })
+            .with_property_track(PropertyAnimationBinding::from_keyframes(vec![
+                PropertyKeyframe::new(0, vec![true, false]),
+                PropertyKeyframe::new(10, vec![false, true]),
+            ]))
+            .build();
+
+        let expected = clip.sample_at(5.0);
+        let mut sample = ClipSample::with_capacity(1, 1);
+        clip.sample_into(5.0, &mut sample);
+        assert_eq!(sample, expected);
+
+        let bone_capacity = sample.bone_samples.capacity();
+        let morph_capacity = sample.morph_samples.capacity();
+        let ik_capacity = sample
+            .ik_enabled
+            .as_ref()
+            .expect("property sample should include IK state")
+            .capacity();
+        clip.sample_into(0.0, &mut sample);
+        assert!(sample.bone_samples.capacity() >= bone_capacity);
+        assert!(sample.morph_samples.capacity() >= morph_capacity);
+        assert!(
+            sample
+                .ik_enabled
+                .as_ref()
+                .expect("property sample should include IK state")
+                .capacity()
+                >= ik_capacity
+        );
     }
 
     #[test]

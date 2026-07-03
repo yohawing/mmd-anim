@@ -14,9 +14,8 @@ use mmd_anim_runtime::{
 };
 use mmd_anim_runtime::{
     FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
-    FlatIkLinkInput, FlatIkSolverInput, FlatMorphInput, ModelArena,
-    build_append_transforms_from_flat, build_bones_from_flat, build_ik_solvers_from_flat,
-    build_morph_init_from_flat,
+    FlatIkLinkInput, FlatIkSolverInput, ModelArena, build_append_transforms_from_flat_iter,
+    build_bones_from_flat, build_ik_solvers_from_flat_iter, build_morph_init_from_flat_iter,
 };
 use wasm_bindgen::prelude::*;
 
@@ -1675,36 +1674,37 @@ fn build_model(input: ModelInput<'_>) -> Result<ModelArena, String> {
         })
         .collect::<Vec<_>>();
 
-    let ik_solvers = input
-        .ik_solvers_u32
-        .chunks_exact(5)
-        .zip(input.ik_solver_limit_angles.iter())
-        .map(|(solver, limit_angle)| FlatIkSolverInput {
-            ik_bone_index: solver[0],
-            target_bone_index: solver[1],
-            link_offset: solver[2] as usize,
-            link_count: solver[3] as usize,
-            iteration_count: solver[4],
-            limit_angle: *limit_angle,
-        })
-        .collect::<Vec<_>>();
-    let ik_solvers =
-        build_ik_solvers_from_flat(&ik_solvers, &ik_links).map_err(|error| error.to_string())?;
+    let ik_solvers = build_ik_solvers_from_flat_iter(
+        input
+            .ik_solvers_u32
+            .chunks_exact(5)
+            .zip(input.ik_solver_limit_angles.iter())
+            .map(|(solver, limit_angle)| FlatIkSolverInput {
+                ik_bone_index: solver[0],
+                target_bone_index: solver[1],
+                link_offset: solver[2] as usize,
+                link_count: solver[3] as usize,
+                iteration_count: solver[4],
+                limit_angle: *limit_angle,
+            }),
+        &ik_links,
+    )
+    .map_err(|error| error.to_string())?;
 
-    let append_transforms = input
-        .append_u32
-        .chunks_exact(3)
-        .zip(input.append_ratios.iter())
-        .map(|(append, ratio)| FlatAppendTransformInput {
-            target_bone_index: append[0],
-            source_bone_index: append[1],
-            ratio: *ratio,
-            affect_rotation: append[2] & APPEND_FLAG_ROTATION != 0,
-            affect_translation: append[2] & APPEND_FLAG_TRANSLATION != 0,
-            local: append[2] & APPEND_FLAG_LOCAL != 0,
-        })
-        .collect::<Vec<_>>();
-    let append_transforms = build_append_transforms_from_flat(&append_transforms);
+    let append_transforms = build_append_transforms_from_flat_iter(
+        input
+            .append_u32
+            .chunks_exact(3)
+            .zip(input.append_ratios.iter())
+            .map(|(append, ratio)| FlatAppendTransformInput {
+                target_bone_index: append[0],
+                source_bone_index: append[1],
+                ratio: *ratio,
+                affect_rotation: append[2] & APPEND_FLAG_ROTATION != 0,
+                affect_translation: append[2] & APPEND_FLAG_TRANSLATION != 0,
+                local: append[2] & APPEND_FLAG_LOCAL != 0,
+            }),
+    );
 
     let morph = build_morph_init_from_wasm(&input)?;
     ModelArena::new_with_morphs(bones, ik_solvers, append_transforms, morph)
@@ -1736,45 +1736,40 @@ fn build_morph_init_from_wasm(input: &ModelInput<'_>) -> Result<MorphInit, Strin
         return Err("group_morph_ratios length must match group morph count".to_owned());
     }
 
-    let bone_morphs: Vec<FlatBoneMorphInput> = input
-        .bone_morph_u32
-        .chunks_exact(2)
-        .enumerate()
-        .map(|(entry_index, pair)| {
-            let f32_offset = entry_index * 7;
-            FlatBoneMorphInput {
+    build_morph_init_from_flat_iter(
+        input.morph_count,
+        input
+            .bone_morph_u32
+            .chunks_exact(2)
+            .enumerate()
+            .map(|(entry_index, pair)| {
+                let f32_offset = entry_index * 7;
+                FlatBoneMorphInput {
+                    morph_index: pair[0],
+                    target_bone_index: pair[1],
+                    position_offset_xyz: [
+                        input.bone_morph_f32[f32_offset],
+                        input.bone_morph_f32[f32_offset + 1],
+                        input.bone_morph_f32[f32_offset + 2],
+                    ],
+                    rotation_offset_xyzw: [
+                        input.bone_morph_f32[f32_offset + 3],
+                        input.bone_morph_f32[f32_offset + 4],
+                        input.bone_morph_f32[f32_offset + 5],
+                        input.bone_morph_f32[f32_offset + 6],
+                    ],
+                }
+            }),
+        input
+            .group_morph_u32
+            .chunks_exact(2)
+            .enumerate()
+            .map(|(entry_index, pair)| FlatGroupMorphInput {
                 morph_index: pair[0],
-                target_bone_index: pair[1],
-                position_offset_xyz: [
-                    input.bone_morph_f32[f32_offset],
-                    input.bone_morph_f32[f32_offset + 1],
-                    input.bone_morph_f32[f32_offset + 2],
-                ],
-                rotation_offset_xyzw: [
-                    input.bone_morph_f32[f32_offset + 3],
-                    input.bone_morph_f32[f32_offset + 4],
-                    input.bone_morph_f32[f32_offset + 5],
-                    input.bone_morph_f32[f32_offset + 6],
-                ],
-            }
-        })
-        .collect();
-    let group_morphs: Vec<FlatGroupMorphInput> = input
-        .group_morph_u32
-        .chunks_exact(2)
-        .enumerate()
-        .map(|(entry_index, pair)| FlatGroupMorphInput {
-            morph_index: pair[0],
-            child_morph_index: pair[1],
-            ratio: input.group_morph_ratios[entry_index],
-        })
-        .collect();
-
-    build_morph_init_from_flat(FlatMorphInput {
-        morph_count: input.morph_count,
-        bone_morphs: &bone_morphs,
-        group_morphs: &group_morphs,
-    })
+                child_morph_index: pair[1],
+                ratio: input.group_morph_ratios[entry_index],
+            }),
+    )
     .map_err(flat_morph_input_error_to_wasm_string)
 }
 

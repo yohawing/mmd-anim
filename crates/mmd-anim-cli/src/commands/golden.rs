@@ -570,6 +570,22 @@ struct UnsupportedGoldenCasePerCaseEntry<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct GoldenIkComparePerCaseEntry {
+    name: String,
+    #[serde(rename = "maxAbsError")]
+    max_abs_error: f32,
+    worst: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<serde_json::Value>,
+    #[serde(rename = "importDiagnostics", skip_serializing_if = "Vec::is_empty")]
+    import_diagnostics: Vec<serde_json::Value>,
+    #[serde(rename = "rootMotionOracleLag")]
+    root_motion_oracle_lag: serde_json::Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GoldenIkCompareJsonReport {
     command: &'static str,
     root: String,
@@ -965,22 +981,15 @@ pub(crate) fn golden_ik_compare(
             }
         }
 
-        {
-            let mut entry = json!({
-                "name": case.name,
-                "maxAbsError": case_max_error,
-                "worst": case_worst,
-                "status": "compared",
-            });
-            if !case_diagnostics.is_empty() {
-                entry["diagnostics"] = json!(case_diagnostics);
-            }
-            if !model_import.diagnostics.is_empty() {
-                entry["importDiagnostics"] = json!(model_import.diagnostics);
-            }
-            entry["rootMotionOracleLag"] = case_lag;
-            per_case_entries.push(entry);
-        }
+        per_case_entries.push(serde_json::to_value(GoldenIkComparePerCaseEntry {
+            name: case.name.clone(),
+            max_abs_error: case_max_error,
+            worst: case_worst,
+            status: "compared",
+            diagnostics: case_diagnostics,
+            import_diagnostics: model_import.diagnostics,
+            root_motion_oracle_lag: case_lag,
+        })?);
         compared_cases += 1;
     }
 

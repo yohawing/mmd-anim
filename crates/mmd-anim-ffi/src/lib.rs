@@ -2606,6 +2606,38 @@ pub unsafe extern "C" fn mmd_runtime_export_pmx_from_parts(
     })
 }
 
+macro_rules! create_runtime_model_ffi {
+    (
+        $parent_indices:expr,
+        $rest_positions_xyz:expr,
+        $bone_count:expr
+        $(, required: [$($required:expr),* $(,)?])?
+        $(, fields: { $($field:ident: $value:expr),* $(,)? })?
+        $(,)?
+    ) => {{
+        ffi_guard(ptr::null_mut(), || {
+            if $parent_indices.is_null()
+                || $rest_positions_xyz.is_null()
+                || $bone_count == 0
+                $($(|| $required.is_null())*)?
+            {
+                return ptr::null_mut();
+            }
+
+            unsafe {
+                create_runtime_model_from_ffi_input(RawModelInput {
+                    $($($field: $value,)*)?
+                    ..RawModelInput::with_bones(
+                        $parent_indices,
+                        $rest_positions_xyz,
+                        $bone_count,
+                    )
+                })
+            }
+        })
+    }};
+}
+
 /// Creates a model from parent indices and rest-position triples.
 ///
 /// # Safety
@@ -2619,19 +2651,7 @@ pub unsafe extern "C" fn mmd_runtime_model_create(
     rest_positions_xyz: *const f32,
     bone_count: usize,
 ) -> *mut MmdRuntimeModel {
-    ffi_guard(ptr::null_mut(), || {
-        if parent_indices.is_null() || rest_positions_xyz.is_null() || bone_count == 0 {
-            return ptr::null_mut();
-        }
-
-        unsafe {
-            create_runtime_model_from_ffi_input(RawModelInput::with_bones(
-                parent_indices,
-                rest_positions_xyz,
-                bone_count,
-            ))
-        }
-    })
+    create_runtime_model_ffi!(parent_indices, rest_positions_xyz, bone_count)
 }
 
 /// Creates a model from parent indices, rest-position triples, and inverse bind matrices.
@@ -2649,22 +2669,13 @@ pub unsafe extern "C" fn mmd_runtime_model_create_with_inverse_bind(
     inverse_bind_matrices: *const f32,
     bone_count: usize,
 ) -> *mut MmdRuntimeModel {
-    ffi_guard(ptr::null_mut(), || {
-        if parent_indices.is_null()
-            || rest_positions_xyz.is_null()
-            || inverse_bind_matrices.is_null()
-            || bone_count == 0
-        {
-            return ptr::null_mut();
-        }
-
-        unsafe {
-            create_runtime_model_from_ffi_input(RawModelInput {
-                inverse_bind_matrices,
-                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
-            })
-        }
-    })
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        required: [inverse_bind_matrices],
+        fields: { inverse_bind_matrices: inverse_bind_matrices },
+    )
 }
 
 /// Creates a model from parent indices, rest-position triples, and append transforms.
@@ -2683,19 +2694,15 @@ pub unsafe extern "C" fn mmd_runtime_model_create_with_append(
     append_transforms: *const MmdRuntimeFfiAppendTransform,
     append_transform_count: usize,
 ) -> *mut MmdRuntimeModel {
-    ffi_guard(ptr::null_mut(), || {
-        if parent_indices.is_null() || rest_positions_xyz.is_null() || bone_count == 0 {
-            return ptr::null_mut();
-        }
-
-        unsafe {
-            create_runtime_model_from_ffi_input(RawModelInput {
-                append_transforms,
-                append_transform_count,
-                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
-            })
-        }
-    })
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        fields: {
+            append_transforms: append_transforms,
+            append_transform_count: append_transform_count,
+        },
+    )
 }
 
 /// Creates a model from parent indices, rest positions, inverse bind matrices,
@@ -2717,24 +2724,17 @@ pub unsafe extern "C" fn mmd_runtime_model_create_with_append_and_inverse_bind(
     append_transforms: *const MmdRuntimeFfiAppendTransform,
     append_transform_count: usize,
 ) -> *mut MmdRuntimeModel {
-    ffi_guard(ptr::null_mut(), || {
-        if parent_indices.is_null()
-            || rest_positions_xyz.is_null()
-            || inverse_bind_matrices.is_null()
-            || bone_count == 0
-        {
-            return ptr::null_mut();
-        }
-
-        unsafe {
-            create_runtime_model_from_ffi_input(RawModelInput {
-                inverse_bind_matrices,
-                append_transforms,
-                append_transform_count,
-                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
-            })
-        }
-    })
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        required: [inverse_bind_matrices],
+        fields: {
+            inverse_bind_matrices: inverse_bind_matrices,
+            append_transforms: append_transforms,
+            append_transform_count: append_transform_count,
+        },
+    )
 }
 
 /// Creates a model from all currently supported flat descriptor arrays.
@@ -2762,24 +2762,20 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full(
     append_transforms: *const MmdRuntimeFfiAppendTransform,
     append_transform_count: usize,
 ) -> *mut MmdRuntimeModel {
-    ffi_guard(ptr::null_mut(), || {
-        if parent_indices.is_null() || rest_positions_xyz.is_null() || bone_count == 0 {
-            return ptr::null_mut();
-        }
-
-        unsafe {
-            create_runtime_model_from_ffi_input(RawModelInput {
-                inverse_bind_matrices,
-                ik_solvers,
-                ik_solver_count,
-                ik_links,
-                ik_link_count,
-                append_transforms,
-                append_transform_count,
-                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
-            })
-        }
-    })
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        fields: {
+            inverse_bind_matrices: inverse_bind_matrices,
+            ik_solvers: ik_solvers,
+            ik_solver_count: ik_solver_count,
+            ik_links: ik_links,
+            ik_link_count: ik_link_count,
+            append_transforms: append_transforms,
+            append_transform_count: append_transform_count,
+        },
+    )
 }
 
 /// Creates a full model with explicit PMX-style transform order values.
@@ -2802,29 +2798,22 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full_with_transform_order(
     append_transforms: *const MmdRuntimeFfiAppendTransform,
     append_transform_count: usize,
 ) -> *mut MmdRuntimeModel {
-    ffi_guard(ptr::null_mut(), || {
-        if parent_indices.is_null()
-            || rest_positions_xyz.is_null()
-            || transform_orders.is_null()
-            || bone_count == 0
-        {
-            return ptr::null_mut();
-        }
-
-        unsafe {
-            create_runtime_model_from_ffi_input(RawModelInput {
-                inverse_bind_matrices,
-                transform_orders,
-                ik_solvers,
-                ik_solver_count,
-                ik_links,
-                ik_link_count,
-                append_transforms,
-                append_transform_count,
-                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
-            })
-        }
-    })
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        required: [transform_orders],
+        fields: {
+            inverse_bind_matrices: inverse_bind_matrices,
+            transform_orders: transform_orders,
+            ik_solvers: ik_solvers,
+            ik_solver_count: ik_solver_count,
+            ik_links: ik_links,
+            ik_link_count: ik_link_count,
+            append_transforms: append_transforms,
+            append_transform_count: append_transform_count,
+        },
+    )
 }
 
 /// Creates a full model with PMX-style transform order, IK, append transforms,
@@ -2861,30 +2850,26 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full_with_morphs(
     group_morph_offsets: *const MmdRuntimeFfiGroupMorphOffset,
     group_morph_offset_count: usize,
 ) -> *mut MmdRuntimeModel {
-    ffi_guard(ptr::null_mut(), || {
-        if parent_indices.is_null() || rest_positions_xyz.is_null() || bone_count == 0 {
-            return ptr::null_mut();
-        }
-
-        unsafe {
-            create_runtime_model_from_ffi_input(RawModelInput {
-                inverse_bind_matrices,
-                transform_orders,
-                ik_solvers,
-                ik_solver_count,
-                ik_links,
-                ik_link_count,
-                append_transforms,
-                append_transform_count,
-                morph_count,
-                bone_morph_offsets,
-                bone_morph_offset_count,
-                group_morph_offsets,
-                group_morph_offset_count,
-                ..RawModelInput::with_bones(parent_indices, rest_positions_xyz, bone_count)
-            })
-        }
-    })
+    create_runtime_model_ffi!(
+        parent_indices,
+        rest_positions_xyz,
+        bone_count,
+        fields: {
+            inverse_bind_matrices: inverse_bind_matrices,
+            transform_orders: transform_orders,
+            ik_solvers: ik_solvers,
+            ik_solver_count: ik_solver_count,
+            ik_links: ik_links,
+            ik_link_count: ik_link_count,
+            append_transforms: append_transforms,
+            append_transform_count: append_transform_count,
+            morph_count: morph_count,
+            bone_morph_offsets: bone_morph_offsets,
+            bone_morph_offset_count: bone_morph_offset_count,
+            group_morph_offsets: group_morph_offsets,
+            group_morph_offset_count: group_morph_offset_count,
+        },
+    )
 }
 
 /// Creates a model by importing a PMX binary from byte slice, keeping only

@@ -2889,6 +2889,104 @@ fn pmx_geometry_handle_buffers_have_correct_dimensions() {
 }
 
 #[test]
+fn pmx_geometry_handle_buffers_match_legacy_raw_byte_api() {
+    let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
+    let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();
+    let additional_uv_count = parsed.geometry.additional_uvs.len();
+
+    let geometry = unsafe { mmd_runtime_pmx_geometry_create(bytes.as_ptr(), bytes.len()) };
+    assert!(!geometry.is_null(), "geometry handle must not be null");
+
+    macro_rules! assert_same_buffer {
+        ($legacy_fn:ident, $handle_fn:ident) => {{
+            let legacy = ffi_buffer_to_vec(unsafe { $legacy_fn(bytes.as_ptr(), bytes.len()) });
+            let handle = ffi_buffer_to_vec(unsafe { $handle_fn(geometry) });
+            assert_eq!(handle, legacy, stringify!($handle_fn parity mismatch));
+        }};
+    }
+
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_positions_buffer,
+        mmd_runtime_pmx_geometry_positions_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_normals_buffer,
+        mmd_runtime_pmx_geometry_normals_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_uvs_buffer,
+        mmd_runtime_pmx_geometry_uvs_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_indices_buffer,
+        mmd_runtime_pmx_geometry_indices_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_material_groups_buffer,
+        mmd_runtime_pmx_geometry_material_groups_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_skin_indices_buffer,
+        mmd_runtime_pmx_geometry_skin_indices_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_skin_weights_buffer,
+        mmd_runtime_pmx_geometry_skin_weights_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_edge_scale_buffer,
+        mmd_runtime_pmx_geometry_edge_scale_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_sdef_enabled_buffer,
+        mmd_runtime_pmx_geometry_sdef_enabled_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_sdef_c_buffer,
+        mmd_runtime_pmx_geometry_sdef_c_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_sdef_r0_buffer,
+        mmd_runtime_pmx_geometry_sdef_r0_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_sdef_r1_buffer,
+        mmd_runtime_pmx_geometry_sdef_r1_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_sdef_rw0_buffer,
+        mmd_runtime_pmx_geometry_sdef_rw0_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_sdef_rw1_buffer,
+        mmd_runtime_pmx_geometry_sdef_rw1_buffer
+    );
+    assert_same_buffer!(
+        mmd_runtime_parse_pmx_qdef_enabled_buffer,
+        mmd_runtime_pmx_geometry_qdef_enabled_buffer
+    );
+
+    assert_eq!(
+        unsafe { mmd_runtime_pmx_geometry_additional_uv_count(geometry) },
+        unsafe { mmd_runtime_parse_pmx_additional_uv_count(bytes.as_ptr(), bytes.len()) }
+    );
+    for uv_index in 0..additional_uv_count {
+        let legacy = ffi_buffer_to_vec(unsafe {
+            mmd_runtime_parse_pmx_additional_uvs_buffer(bytes.as_ptr(), bytes.len(), uv_index)
+        });
+        let handle = ffi_buffer_to_vec(unsafe {
+            mmd_runtime_pmx_geometry_additional_uvs_buffer(geometry, uv_index)
+        });
+        assert_eq!(
+            handle, legacy,
+            "additional UV channel {uv_index} parity mismatch"
+        );
+    }
+
+    unsafe { mmd_runtime_pmx_geometry_free(geometry) };
+}
+
+#[test]
 fn pmx_skinning_modes_json_has_correct_shape() {
     let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx");
     let parsed = mmd_anim_format::parse_pmx_model(bytes).unwrap();

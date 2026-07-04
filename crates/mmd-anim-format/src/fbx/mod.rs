@@ -172,20 +172,20 @@ impl MeshData {
         options: &FbxExportOptions,
     ) -> Result<Self, FbxExportError> {
         let vertex_count = model.geometry.positions.len() / 3;
-        if model.geometry.positions.len() % 3 != 0 {
+        if !model.geometry.positions.len().is_multiple_of(3) {
             return Err(FbxExportError::InvalidPositionBuffer(
                 model.geometry.positions.len(),
             ));
         }
-        if model.geometry.normals.len() % 3 != 0 {
+        if !model.geometry.normals.len().is_multiple_of(3) {
             return Err(FbxExportError::InvalidNormalBuffer(
                 model.geometry.normals.len(),
             ));
         }
-        if model.geometry.uvs.len() % 2 != 0 {
+        if !model.geometry.uvs.len().is_multiple_of(2) {
             return Err(FbxExportError::InvalidUvBuffer(model.geometry.uvs.len()));
         }
-        if model.geometry.indices.len() % 3 != 0 {
+        if !model.geometry.indices.len().is_multiple_of(3) {
             return Err(FbxExportError::InvalidIndexBuffer(
                 model.geometry.indices.len(),
             ));
@@ -377,6 +377,7 @@ impl FbxAnimationData {
 
         let tracks = tracks
             .into_iter()
+            .filter(|track| track.changed_from_rest)
             .map(|track| FbxAnimationTrack {
                 bone_index: track.bone_index,
                 frame_times: frame_times.clone(),
@@ -1871,9 +1872,10 @@ where
     W: Write + Seek,
     F: FnOnce(&mut AttributesWriter<'_, W>) -> Result<(), FbxExportError>,
 {
-    let mut attrs = writer.new_node(name)?;
-    append_attrs(&mut attrs)?;
-    drop(attrs);
+    {
+        let mut attrs = writer.new_node(name)?;
+        append_attrs(&mut attrs)?;
+    }
     Ok(())
 }
 
@@ -1948,7 +1950,8 @@ fn write_arr_i32_node<W: Write + Seek>(
     values: &[i32],
 ) -> Result<(), FbxExportError> {
     begin_node(writer, name, |attrs| {
-        attrs.append_arr_i32_from_iter(None::<ArrayAttributeEncoding>, values.iter().copied())?;
+        attrs
+            .append_arr_i32_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?;
         Ok(())
     })?;
     writer.close_node()?;
@@ -1961,7 +1964,8 @@ fn write_arr_i64_node<W: Write + Seek>(
     values: &[i64],
 ) -> Result<(), FbxExportError> {
     begin_node(writer, name, |attrs| {
-        attrs.append_arr_i64_from_iter(None::<ArrayAttributeEncoding>, values.iter().copied())?;
+        attrs
+            .append_arr_i64_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?;
         Ok(())
     })?;
     writer.close_node()?;
@@ -1974,7 +1978,8 @@ fn write_arr_f32_node<W: Write + Seek>(
     values: &[f32],
 ) -> Result<(), FbxExportError> {
     begin_node(writer, name, |attrs| {
-        attrs.append_arr_f32_from_iter(None::<ArrayAttributeEncoding>, values.iter().copied())?;
+        attrs
+            .append_arr_f32_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?;
         Ok(())
     })?;
     writer.close_node()?;
@@ -1987,7 +1992,8 @@ fn write_arr_f64_node<W: Write + Seek>(
     values: &[f64],
 ) -> Result<(), FbxExportError> {
     begin_node(writer, name, |attrs| {
-        attrs.append_arr_f64_from_iter(None::<ArrayAttributeEncoding>, values.iter().copied())?;
+        attrs
+            .append_arr_f64_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?;
         Ok(())
     })?;
     writer.close_node()?;

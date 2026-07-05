@@ -76,40 +76,6 @@ Format support overview. "Loading" means parsing a file into structured data.
 | X/VAC | text X mesh, material, UV, normal, vertex color + VAC settings and raw lines | text X / VAC wrapper writing |
 | FBX | not loaded | experimental FBX 7.4 binary export for PMX mesh/skeleton/skin/bind pose and runtime-baked VMD bone animation |
 
-## FBX Export
-
-The `mmd-anim-cli` crate includes an experimental `convert-fbx` command for DCC
-smoke checks and reference exports.
-
-```powershell
-cargo run -p mmd-anim-cli -- convert-fbx model.pmx model.fbx
-cargo run -p mmd-anim-cli -- convert-fbx model.pmx model.fbx --vmd motion.vmd
-cargo run -p mmd-anim-cli -- convert-fbx model.pmx smoke.fbx --vmd motion.vmd --max-frame 120
-```
-
-With `--vmd`, bone animation is sampled through the runtime evaluator before it
-is written to FBX, so IK, append transforms, and fixed-axis constraints use the
-same evaluation path as normal playback. `--max-frame` caps the inclusive bake
-range for local smoke checks with long motions.
-
-The current exporter intentionally writes bone animation only. Morph, material
-morph, camera, light, self-shadow, physics, texture embedding, and exact SDEF
-deformation are out of scope for this first FBX path.
-
-## Crates
-
-| Crate | Role |
-|---|---|
-| `mmd-anim` | Main public crate. Provides the evaluation core and format handling through one entry point. |
-| `mmd-anim-runtime` | Format-independent evaluation core: model arena, pose, VMD evaluation, append transforms, IK, and morphs. |
-| `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
-| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for the 0.1.x line. |
-| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for the 0.1.x line. |
-| `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files, including maintainer-local oracle and numeric comparison schemas. Installable via `cargo install mmd-anim-cli`. |
-
-For normal library use, depend on `mmd-anim`. Advanced users who only need a
-lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
-
 ## Rust Usage
 
 ```toml
@@ -242,6 +208,26 @@ For development, you can also run directly from the workspace:
 ```powershell
 cargo run -p mmd-anim-cli -- --help
 ```
+
+You can export animated FBX files from PMX and VMD inputs.
+
+```powershell
+mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
+```
+
+## Crates
+
+| Crate | Role |
+|---|---|
+| `mmd-anim` | Main public crate. Provides the evaluation core and format handling through one entry point. |
+| `mmd-anim-runtime` | Format-independent evaluation core: model arena, pose, VMD evaluation, append transforms, IK, and morphs. |
+| `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
+| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for the 0.1.x line. |
+| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for the 0.1.x line. |
+| `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files, including maintainer-local oracle and numeric comparison schemas. Installable via `cargo install mmd-anim-cli`. |
+
+For normal library use, depend on `mmd-anim`. Advanced users who only need a
+lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
 
 ## Current Limitations
 

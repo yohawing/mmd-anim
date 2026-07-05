@@ -70,6 +70,15 @@ pub enum FbxExportError {
     Writer(#[from] fbxcel::writer::v7400::binary::Error),
 }
 
+/// Exports a PMX model to FBX 7.4 binary.
+///
+/// When `vmd` is provided this uses the raw VMD bone-frame path. That path does
+/// not run the runtime evaluator, so IK, append/grant transforms, fixed-axis
+/// constraints, and VMD per-axis translation Bezier curves are not represented
+/// with the same semantics as `convert-fbx`.
+///
+/// For reference exports that should match the CLI path, prefer
+/// [`export_pmx_fbx_binary_with_runtime_bake`].
 pub fn export_pmx_fbx_binary(
     model: &PmxParsedModel,
     vmd: Option<&VmdParsedAnimation>,
@@ -79,6 +88,10 @@ pub fn export_pmx_fbx_binary(
     export_pmx_fbx_binary_with_animation(model, animation, options)
 }
 
+/// Exports a PMX model to FBX 7.4 binary with runtime-baked bone animation.
+///
+/// This is the preferred path for DCC reference FBX output because it samples
+/// the same runtime evaluation surface used by `mmd-anim convert-fbx`.
 pub fn export_pmx_fbx_binary_with_runtime_bake(
     model: &PmxParsedModel,
     runtime_model: Arc<ModelArena>,
@@ -139,6 +152,10 @@ fn export_pmx_fbx_binary_with_animation(
     Ok(sink.into_inner())
 }
 
+/// Compatibility wrapper around [`export_pmx_fbx_binary`].
+///
+/// Passing `Some(vmd)` uses the raw VMD bone-frame path. Prefer
+/// [`export_fbx_with_runtime_bake`] for CLI-equivalent reference output.
 pub fn export_fbx(
     model: &PmxParsedModel,
     vmd: Option<&VmdParsedAnimation>,
@@ -147,6 +164,7 @@ pub fn export_fbx(
     export_pmx_fbx_binary(model, vmd, options)
 }
 
+/// Compatibility wrapper around [`export_pmx_fbx_binary_with_runtime_bake`].
 pub fn export_fbx_with_runtime_bake(
     model: &PmxParsedModel,
     runtime_model: Arc<ModelArena>,
@@ -2128,4 +2146,213 @@ fn write_property_color<W: Write + Seek>(
     value: [f64; 3],
 ) -> Result<(), FbxExportError> {
     write_property_vec3(writer, name, type_name, label, flags, value)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use fbxcel::{low::v7400::AttributeValue, tree::any::AnyTree};
+
+    use super::*;
+
+    fn runtime_baked_fixture_fbx() -> (PmxParsedModel, Vec<u8>) {
+        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
+        let vmd_data = include_bytes!("../../fixtures/vmd/ik_multi_bone_nondefault.vmd");
+        let model = crate::parse_pmx_model(pmx_data).expect("PMX fixture should parse");
+        let runtime_import =
+            crate::import_pmx_runtime(pmx_data).expect("PMX runtime fixture should import");
+        let runtime_motion =
+            crate::import_vmd_motion(vmd_data).expect("VMD runtime fixture should import");
+        let parsed_motion = crate::parse_vmd_animation(vmd_data).expect("VMD fixture should parse");
+        let clip = crate::build_pair_clip(
+            &runtime_motion,
+            &runtime_import.bone_name_to_index,
+            &runtime_import.morph_name_to_index,
+            &runtime_import.ik_solver_bone_name_to_index,
+            runtime_import.model.ik_count(),
+        );
+        let last_frame = parsed_motion
+            .bone_frames
+            .iter()
+            .map(|frame| frame.frame)
+            .max()
+            .unwrap_or(0);
+        let fbx = export_fbx_with_runtime_bake(
+            &model,
+            Arc::new(runtime_import.model),
+            &clip,
+            last_frame,
+            &FbxExportOptions::default(),
+        )
+        .expect("runtime-baked FBX should export");
+        (model, fbx)
+    }
+
+    fn load_tree(bytes: &[u8]) -> fbxcel::tree::v7400::Tree {
+        match AnyTree::from_seekable_reader(Cursor::new(bytes)).expect("FBX should parse") {
+            AnyTree::V7400(version, tree, footer) => {
+                assert_eq!(version, FbxVersion::V7_4);
+                assert_eq!(
+                    footer.expect("FBX footer should parse").fbx_version,
+                    FbxVersion::V7_4
+                );
+                tree
+            }
+            _ => panic!("FBX should be parsed as a v7400 tree"),
+        }
+    }
+
+    fn child_i32(node: fbxcel::tree::v7400::NodeHandle<'_>, name: &str) -> i32 {
+        node.first_child_by_name(name)
+            .and_then(|child| child.attributes().first())
+            .and_then(AttributeValue::get_i32)
+            .unwrap_or_else(|| panic!("missing i32 child node {name}"))
+    }
+
+    fn child_string<'a>(node: fbxcel::tree::v7400::NodeHandle<'a>, name: &str) -> &'a str {
+        node.first_child_by_name(name)
+            .and_then(|child| child.attributes().first())
+            .and_then(AttributeValue::get_string)
+            .unwrap_or_else(|| panic!("missing string child node {name}"))
+    }
+
+    fn object_type_count(definitions: fbxcel::tree::v7400::NodeHandle<'_>, name: &str) -> i32 {
+        definitions
+            .children_by_name("ObjectType")
+            .find(|node| {
+                node.attributes()
+                    .first()
+                    .and_then(AttributeValue::get_string)
+                    == Some(name)
+            })
+            .map(|node| child_i32(node, "Count"))
+            .unwrap_or_else(|| panic!("missing ObjectType {name}"))
+    }
+
+    fn descendants_by_name<'a>(
+        tree: &'a fbxcel::tree::v7400::Tree,
+        name: &str,
+    ) -> Vec<fbxcel::tree::v7400::NodeHandle<'a>> {
+        let mut traversal = tree.root().node_id().traverse_depth_first();
+        let mut nodes = Vec::new();
+        while let Some(node_id) = traversal.next_open_forward(tree) {
+            let node = node_id.to_handle(tree);
+            if node.name() == name {
+                nodes.push(node);
+            }
+        }
+        nodes
+    }
+
+    #[test]
+    fn runtime_bake_export_writes_parseable_fbx_structure() {
+        let (model, fbx) = runtime_baked_fixture_fbx();
+        let tree = load_tree(&fbx);
+        let root = tree.root();
+        let definitions = root
+            .first_child_by_name("Definitions")
+            .expect("Definitions node should exist");
+        let objects = root
+            .first_child_by_name("Objects")
+            .expect("Objects node should exist");
+        let connections = root
+            .first_child_by_name("Connections")
+            .expect("Connections node should exist");
+
+        assert_eq!(objects.children_by_name("Geometry").count(), 1);
+        assert_eq!(objects.children_by_name("Pose").count(), 1);
+        assert_eq!(
+            objects.children_by_name("Model").count(),
+            model.skeleton.bones.len() + 1
+        );
+        assert_eq!(
+            objects.children_by_name("NodeAttribute").count(),
+            model.skeleton.bones.len()
+        );
+        assert_eq!(
+            objects.children_by_name("Deformer").count(),
+            model.skeleton.bones.len() + 1
+        );
+
+        let animation_curves = objects.children_by_name("AnimationCurve").count();
+        assert!(
+            animation_curves > 0 && animation_curves.is_multiple_of(6),
+            "runtime bake should write six curves for each animated bone track"
+        );
+        assert_eq!(
+            objects.children_by_name("AnimationCurveNode").count(),
+            animation_curves / 3
+        );
+        assert_eq!(objects.children_by_name("AnimationStack").count(), 1);
+        assert_eq!(objects.children_by_name("AnimationLayer").count(), 1);
+
+        assert_eq!(
+            child_i32(definitions, "Count") as usize,
+            objects.children().count() + 1
+        );
+        assert_eq!(
+            object_type_count(definitions, "Model") as usize,
+            model.skeleton.bones.len() + 1
+        );
+        assert_eq!(
+            object_type_count(definitions, "AnimationCurve") as usize,
+            animation_curves
+        );
+        assert_eq!(
+            object_type_count(definitions, "AnimationCurveNode") as usize,
+            animation_curves / 3
+        );
+
+        let pose = objects
+            .first_child_by_name("Pose")
+            .expect("Bind pose should exist");
+        assert_eq!(child_string(pose, "Type"), "BindPose");
+        assert_eq!(
+            child_i32(pose, "NbPoseNodes") as usize,
+            model.skeleton.bones.len() + 1
+        );
+        assert_eq!(
+            pose.children_by_name("PoseNode").count(),
+            model.skeleton.bones.len() + 1
+        );
+
+        let connection_kinds: Vec<_> = connections
+            .children_by_name("C")
+            .filter_map(|node| {
+                node.attributes()
+                    .first()
+                    .and_then(AttributeValue::get_string)
+            })
+            .collect();
+        assert!(connection_kinds.contains(&"OO"));
+        assert!(connection_kinds.contains(&"OP"));
+    }
+
+    #[test]
+    fn runtime_bake_export_writes_monotonic_animation_keys() {
+        let (_model, fbx) = runtime_baked_fixture_fbx();
+        let tree = load_tree(&fbx);
+        let curves = descendants_by_name(&tree, "AnimationCurve");
+        assert!(!curves.is_empty());
+
+        for curve in curves {
+            let key_times = curve
+                .first_child_by_name("KeyTime")
+                .and_then(|node| node.attributes().first())
+                .and_then(AttributeValue::get_arr_i64)
+                .expect("AnimationCurve should have KeyTime values");
+            let key_values = curve
+                .first_child_by_name("KeyValueFloat")
+                .and_then(|node| node.attributes().first())
+                .and_then(AttributeValue::get_arr_f32)
+                .expect("AnimationCurve should have KeyValueFloat values");
+            assert_eq!(key_times.len(), key_values.len());
+            assert!(key_times.len() >= 2);
+            assert!(
+                key_times.windows(2).all(|window| window[0] < window[1]),
+                "FBX KeyTime values should be strictly monotonic"
+            );
+        }
+    }
 }

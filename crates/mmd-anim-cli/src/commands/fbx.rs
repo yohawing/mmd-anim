@@ -31,13 +31,13 @@ pub(crate) fn convert_pmx_to_fbx(
             runtime_import.model.ik_count(),
         );
         warn_about_ignored_vmd_tracks(&motion);
-        let natural_last_frame = fbx_bone_animation_last_frame(&motion);
-        let last_frame = capped_fbx_bone_animation_last_frame(&motion, max_frame);
+        let natural_last_frame = fbx_bone_evaluation_last_frame(&motion);
+        let last_frame = capped_fbx_bone_evaluation_last_frame(&motion, max_frame);
         if let Some(cap) = max_frame
             && cap < natural_last_frame
         {
             eprintln!(
-                "warning: convert-fbx runtime bake capped at frame {cap} (motion bone max frame {natural_last_frame})"
+                "warning: convert-fbx runtime bake capped at frame {cap} (motion bone/IK property max frame {natural_last_frame})"
             );
         }
         baked_max_frame = Some(last_frame);
@@ -69,20 +69,28 @@ pub(crate) fn convert_pmx_to_fbx(
     Ok(ExitCode::SUCCESS)
 }
 
-fn fbx_bone_animation_last_frame(motion: &mmd_anim_format::VmdParsedAnimation) -> u32 {
-    motion
+fn fbx_bone_evaluation_last_frame(motion: &mmd_anim_format::VmdParsedAnimation) -> u32 {
+    let bone_last_frame = motion
         .bone_frames
         .iter()
         .map(|frame| frame.frame)
         .max()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    let property_ik_last_frame = motion
+        .property_frames
+        .iter()
+        .filter(|frame| !frame.ik_states.is_empty())
+        .map(|frame| frame.frame)
+        .max()
+        .unwrap_or(0);
+    bone_last_frame.max(property_ik_last_frame)
 }
 
-fn capped_fbx_bone_animation_last_frame(
+fn capped_fbx_bone_evaluation_last_frame(
     motion: &mmd_anim_format::VmdParsedAnimation,
     max_frame: Option<u32>,
 ) -> u32 {
-    let last_frame = fbx_bone_animation_last_frame(motion);
+    let last_frame = fbx_bone_evaluation_last_frame(motion);
     max_frame
         .map(|frame| last_frame.min(frame))
         .unwrap_or(last_frame)
@@ -142,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn fbx_last_frame_uses_bone_frames_only() {
+    fn fbx_last_frame_uses_bone_and_ik_property_frames_only() {
         let mut motion = empty_motion();
         motion
             .bone_frames
@@ -169,8 +177,19 @@ mod tests {
                 visible: true,
                 ik_states: Vec::new(),
             });
+        motion
+            .property_frames
+            .push(mmd_anim_format::vmd::VmdParsedPropertyFrame {
+                frame: 48,
+                visible: true,
+                ik_states: vec![mmd_anim_format::vmd::VmdParsedIkState {
+                    bone_name: "IK".to_owned(),
+                    bone_name_bytes: Vec::new(),
+                    enabled: false,
+                }],
+            });
 
-        assert_eq!(fbx_bone_animation_last_frame(&motion), 12);
+        assert_eq!(fbx_bone_evaluation_last_frame(&motion), 48);
     }
 
     #[test]
@@ -187,10 +206,10 @@ mod tests {
                 interpolation: vec![0; 64],
             });
 
-        assert_eq!(capped_fbx_bone_animation_last_frame(&motion, None), 120);
-        assert_eq!(capped_fbx_bone_animation_last_frame(&motion, Some(30)), 30);
+        assert_eq!(capped_fbx_bone_evaluation_last_frame(&motion, None), 120);
+        assert_eq!(capped_fbx_bone_evaluation_last_frame(&motion, Some(30)), 30);
         assert_eq!(
-            capped_fbx_bone_animation_last_frame(&motion, Some(180)),
+            capped_fbx_bone_evaluation_last_frame(&motion, Some(180)),
             120
         );
     }

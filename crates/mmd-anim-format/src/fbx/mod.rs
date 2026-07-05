@@ -1351,28 +1351,6 @@ fn bone_world_transform(bone: &PmxParsedBone, options: &FbxExportOptions) -> [f6
     ]
 }
 
-fn bone_world_transform_inverse(bone: &PmxParsedBone, options: &FbxExportOptions) -> [f64; 16] {
-    let position = converted_bone_position(bone, options);
-    [
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        -position[0],
-        -position[1],
-        -position[2],
-        1.0,
-    ]
-}
-
 fn build_bone_names(bones: &[PmxParsedBone]) -> Vec<String> {
     bones
         .iter()
@@ -1538,11 +1516,7 @@ fn write_cluster_deformer<W: Write + Seek>(
         write_arr_i32_node(writer, "Indexes", &indices)?;
         write_arr_f64_node(writer, "Weights", &weights)?;
     }
-    write_arr_f64_node(
-        writer,
-        "Transform",
-        &bone_world_transform_inverse(bone, options),
-    )?;
+    write_arr_f64_node(writer, "Transform", &identity_matrix())?;
     write_arr_f64_node(
         writer,
         "TransformLink",
@@ -2217,6 +2191,14 @@ mod tests {
             .unwrap_or_else(|| panic!("missing string child node {name}"))
     }
 
+    fn child_arr_f64(node: fbxcel::tree::v7400::NodeHandle<'_>, name: &str) -> Vec<f64> {
+        node.first_child_by_name(name)
+            .and_then(|child| child.attributes().first())
+            .and_then(AttributeValue::get_arr_f64)
+            .map(|values| values.to_vec())
+            .unwrap_or_else(|| panic!("missing f64 array child node {name}"))
+    }
+
     fn object_type_count(definitions: fbxcel::tree::v7400::NodeHandle<'_>, name: &str) -> i32 {
         definitions
             .children_by_name("ObjectType")
@@ -2303,6 +2285,26 @@ mod tests {
             object_type_count(definitions, "AnimationCurveNode") as usize,
             animation_curves / 3
         );
+
+        let identity = identity_matrix().to_vec();
+        let clusters: Vec<_> = objects
+            .children_by_name("Deformer")
+            .filter(|node| {
+                node.attributes()
+                    .get(2)
+                    .and_then(AttributeValue::get_string)
+                    == Some("Cluster")
+            })
+            .collect();
+        assert_eq!(clusters.len(), model.skeleton.bones.len());
+        for cluster in clusters {
+            assert_eq!(
+                child_arr_f64(cluster, "Transform"),
+                identity,
+                "Cluster Transform should be mesh bind matrix"
+            );
+            assert_eq!(child_arr_f64(cluster, "TransformLink").len(), 16);
+        }
 
         let pose = objects
             .first_child_by_name("Pose")

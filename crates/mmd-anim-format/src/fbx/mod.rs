@@ -725,7 +725,7 @@ fn write_fbx_header_extension<W: Write + Seek>(
     write_i32_node(writer, "Second", 0)?;
     write_i32_node(writer, "Millisecond", 0)?;
     writer.close_node()?;
-    write_string_node(writer, "Creator", "mmd-anim fbx exporter spike")?;
+    write_string_node(writer, "Creator", "mmd-anim fbx exporter")?;
     writer.close_node()?;
     Ok(())
 }

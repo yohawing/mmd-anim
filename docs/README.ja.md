@@ -69,6 +69,27 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 | VPD | **対応** | **対応** |
 | PMM | ヘッダ、タイムライン、表示状態、参照アセット、PMMv2 の概要情報、一部 keyframe payload metadata | 部分対応: parse 済み byte の lossless round trip、限定 source-byte patch、単一モデル PMX/VMD scene の試験生成 |
 | X/VAC | テキスト X のメッシュ、材質、UV、法線、頂点色の構造化 + VAC の設定/生データ行 | テキスト X / VAC ラッパーの書き出し |
+| FBX | 読み込みなし | 試験対応: PMX mesh / skeleton / skin / bind pose と、runtime bake 済み VMD ボーンアニメーションを FBX 7.4 binary として書き出し |
+
+## FBX 書き出し
+
+`mmd-anim-cli` には、DCC smoke check と reference export 用の試験的な
+`convert-fbx` コマンドがあります。
+
+```powershell
+cargo run -p mmd-anim-cli -- convert-fbx model.pmx model.fbx
+cargo run -p mmd-anim-cli -- convert-fbx model.pmx model.fbx --vmd motion.vmd
+cargo run -p mmd-anim-cli -- convert-fbx model.pmx smoke.fbx --vmd motion.vmd --max-frame 120
+```
+
+`--vmd` 指定時は runtime evaluator でボーンアニメーションをサンプリングしてから
+FBX に書き出します。そのため IK、付与変形、fixed-axis constraint は通常再生と同じ
+評価経路を使います。`--max-frame` は、長いモーションのローカル smoke check 向けに
+inclusive な bake 範囲上限を指定するオプションです。
+
+現在の exporter はボーンアニメーションのみを書き出します。morph、material morph、
+camera、light、self-shadow、physics、texture embed、SDEF 変形の完全再現は、この初回
+FBX 経路の対象外です。
 
 ## クレート構成
 

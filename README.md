@@ -74,6 +74,27 @@ Format support overview. "Loading" means parsing a file into structured data.
 | VPD | **supported** | **supported** |
 | PMM | header, timeline, display state, referenced assets, PMMv2 summaries, and selected keyframe payload metadata | partial support: lossless parsed-byte round trip, limited source-byte patches, and experimental single-model PMX/VMD scene generation |
 | X/VAC | text X mesh, material, UV, normal, vertex color + VAC settings and raw lines | text X / VAC wrapper writing |
+| FBX | not loaded | experimental FBX 7.4 binary export for PMX mesh/skeleton/skin/bind pose and runtime-baked VMD bone animation |
+
+## FBX Export
+
+The `mmd-anim-cli` crate includes an experimental `convert-fbx` command for DCC
+smoke checks and reference exports.
+
+```powershell
+cargo run -p mmd-anim-cli -- convert-fbx model.pmx model.fbx
+cargo run -p mmd-anim-cli -- convert-fbx model.pmx model.fbx --vmd motion.vmd
+cargo run -p mmd-anim-cli -- convert-fbx model.pmx smoke.fbx --vmd motion.vmd --max-frame 120
+```
+
+With `--vmd`, bone animation is sampled through the runtime evaluator before it
+is written to FBX, so IK, append transforms, and fixed-axis constraints use the
+same evaluation path as normal playback. `--max-frame` caps the inclusive bake
+range for local smoke checks with long motions.
+
+The current exporter intentionally writes bone animation only. Morph, material
+morph, camera, light, self-shadow, physics, texture embedding, and exact SDEF
+deformation are out of scope for this first FBX path.
 
 ## Crates
 

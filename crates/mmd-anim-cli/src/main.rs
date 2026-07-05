@@ -229,6 +229,25 @@ enum Commands {
         output: PathBuf,
     },
 
+    /// Convert a PMX model to FBX 7.4 binary.
+    #[command(
+        name = "convert-fbx",
+        long_about = "Convert a PMX model to a minimal FBX 7.4 binary file.\nWith --vmd, bone motion is baked to FBX AnimationStack/AnimationLayer/AnimCurve channels.\nUse --max-frame with --vmd to cap the inclusive bake range for local smoke checks.",
+        after_help = "Examples:\n  mmd-anim convert-fbx model.pmx model.fbx\n  mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd\n  mmd-anim convert-fbx model.pmx smoke.fbx --vmd motion.vmd --max-frame 120"
+    )]
+    ConvertFbx {
+        /// Path to the input PMX model file
+        input: PathBuf,
+        /// Path to the output FBX file
+        output: PathBuf,
+        /// Optional VMD motion file to bake as FBX animation
+        #[arg(long)]
+        vmd: Option<PathBuf>,
+        /// Optional inclusive maximum frame for FBX runtime bake smoke checks
+        #[arg(long)]
+        max_frame: Option<u32>,
+    },
+
     /// Build a PMX model from a parts manifest.
     #[command(
         name = "build-pmx",
@@ -371,6 +390,12 @@ fn main() -> ExitCode {
             motion,
             output,
         }) => commands::export::export_pmm_scene(&model, &motion, &output),
+        Some(Commands::ConvertFbx {
+            input,
+            output,
+            vmd,
+            max_frame,
+        }) => commands::fbx::convert_pmx_to_fbx(&input, &output, vmd.as_deref(), max_frame),
         Some(Commands::BuildPmx { input, output }) => {
             commands::export::export_pmx_from_parts_manifest(&input, &output)
         }

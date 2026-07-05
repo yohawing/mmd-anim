@@ -38,6 +38,8 @@ crates/mmd-anim-wasm/harness/pkg-web/
 # local dev artifacts
 artifacts/
 viewer/
+.venv-fbx/
+*.fbx
 scripts/
 crates/mmd-anim-ffi/csharp-smoke/
 crates/mmd-anim-ffi/scripts/smoke-csharp.ps1

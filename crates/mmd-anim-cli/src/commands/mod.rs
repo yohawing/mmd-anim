@@ -1,6 +1,7 @@
 pub(crate) mod bench;
 pub(crate) mod compare;
 pub(crate) mod export;
+pub(crate) mod fbx;
 pub(crate) mod golden;
 pub(crate) mod import;
 pub(crate) mod oracle;

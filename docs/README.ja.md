@@ -69,20 +69,7 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 | VPD | **対応** | **対応** |
 | PMM | ヘッダ、タイムライン、表示状態、参照アセット、PMMv2 の概要情報、一部 keyframe payload metadata | 部分対応: parse 済み byte の lossless round trip、限定 source-byte patch、単一モデル PMX/VMD scene の試験生成 |
 | X/VAC | テキスト X のメッシュ、材質、UV、法線、頂点色の構造化 + VAC の設定/生データ行 | テキスト X / VAC ラッパーの書き出し |
-
-## クレート構成
-
-| Crate | 役割 |
-|---|---|
-| `mmd-anim` | 主要な公開クレート。評価コアと形式処理をまとめて使えるようにする。 |
-| `mmd-anim-runtime` | ファイル形式に依存しない評価コア。モデルアリーナ、ポーズ、VMD 評価、付与変形、IK、モーフを扱う。 |
-| `mmd-anim-format` | PMX/VMD のランタイム取り込み、形式判定、読み込み（構造化）、PMX/PMD/VMD/VPD/X/VAC の書き出しを提供する。 |
-| `mmd-anim-ffi` | ネイティブホスト向けの C ABI。ランタイム操作と PMX パーツ書き出しを公開する。0.1.x 系ではリポジトリ内専用。 |
-| `mmd-anim-wasm` | ブラウザ向けの `wasm-bindgen` ラッパー。ランタイム操作、読み込み/書き出し、PMX パーツ書き出しを公開する。0.1.x 系ではワークスペース内専用。 |
-| `mmd-anim-cli` | MMD 形式ファイルの検査・変換・診断コマンド。メンテナ向け oracle / numeric compare schema もこの crate 側に含む。`cargo install mmd-anim-cli` でインストール可能。 |
-
-通常のライブラリ利用では `mmd-anim` を依存に追加してください。低レイヤだけを直接使いたい場合は
-`mmd-anim-format` や `mmd-anim-runtime` に直接依存できます。
+| FBX | 読み込みなし | 試験対応: PMX mesh / skeleton / skin / bind pose と、runtime bake 済み VMD ボーンアニメーションを FBX 7.4 binary として書き出し |
 
 ## Rust から使う
 
@@ -207,6 +194,26 @@ mmd-anim --help
 ```powershell
 cargo run -p mmd-anim-cli -- --help
 ```
+
+PMXとVMDから、アニメーション付きFBXを書き出せます。
+
+```powershell
+mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
+```
+
+## クレート構成
+
+| Crate | 役割 |
+|---|---|
+| `mmd-anim` | 主要な公開クレート。評価コアと形式処理をまとめて使えるようにする。 |
+| `mmd-anim-runtime` | ファイル形式に依存しない評価コア。モデルアリーナ、ポーズ、VMD 評価、付与変形、IK、モーフを扱う。 |
+| `mmd-anim-format` | PMX/VMD のランタイム取り込み、形式判定、読み込み（構造化）、PMX/PMD/VMD/VPD/X/VAC の書き出しを提供する。 |
+| `mmd-anim-ffi` | ネイティブホスト向けの C ABI。ランタイム操作と PMX パーツ書き出しを公開する。0.1.x 系ではリポジトリ内専用。 |
+| `mmd-anim-wasm` | ブラウザ向けの `wasm-bindgen` ラッパー。ランタイム操作、読み込み/書き出し、PMX パーツ書き出しを公開する。0.1.x 系ではワークスペース内専用。 |
+| `mmd-anim-cli` | MMD 形式ファイルの検査・変換・診断コマンド。メンテナ向け oracle / numeric compare schema もこの crate 側に含む。`cargo install mmd-anim-cli` でインストール可能。 |
+
+通常のライブラリ利用では `mmd-anim` を依存に追加してください。低レイヤだけを直接使いたい場合は
+`mmd-anim-format` や `mmd-anim-runtime` に直接依存できます。
 
 ## 現在の制限と注意点
 

@@ -471,6 +471,53 @@ fn ik_updates_only_affected_eval_suffix_for_late_chain() {
 }
 
 #[test]
+fn ik_updates_only_affected_bones_for_root_near_chain() {
+    let unrelated_count = 96usize;
+    let chain_root = BoneIndex(0);
+    let chain_mid = BoneIndex(1);
+    let chain_tip = BoneIndex(2);
+    let controller = BoneIndex(3);
+
+    let mut bones = vec![
+        BoneInit::new(None, Vec3A::ZERO),
+        BoneInit::new(Some(chain_root), Vec3A::new(1.0, 0.0, 0.0)),
+        BoneInit::new(Some(chain_mid), Vec3A::new(1.0, 0.0, 0.0)),
+        BoneInit::new(None, Vec3A::new(1.0, 1.0, 0.0)),
+    ];
+    for i in 0..unrelated_count {
+        bones.push(BoneInit::new(None, Vec3A::new(i as f32 * 10.0, -10.0, 0.0)));
+    }
+
+    let model = Arc::new(
+        ModelArena::new_with_ik(
+            bones,
+            vec![IkSolverInit {
+                ik_bone: controller,
+                target_bone: chain_tip,
+                links: vec![IkLinkInit::new(chain_mid), IkLinkInit::new(chain_root)],
+                iteration_count: 4,
+                limit_angle: 0.0,
+            }],
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+
+    runtime.reset_world_matrix_bone_update_count();
+    runtime.evaluate_current_pose();
+
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[chain_tip.as_usize()]),
+        Vec3A::new(1.0, 1.0, 0.0),
+    );
+    assert!(
+        runtime.world_matrix_bone_update_count() < 360,
+        "IK should not recompute unrelated tail bones repeatedly; updated {} bones",
+        runtime.world_matrix_bone_update_count()
+    );
+}
+
+#[test]
 fn clamps_ik_rotation_by_solver_limit_angle() {
     let model = Arc::new(
         ModelArena::new_with_ik(

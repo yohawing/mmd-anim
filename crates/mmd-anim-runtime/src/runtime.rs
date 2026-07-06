@@ -103,6 +103,7 @@ pub struct RuntimeInstance {
     ik_scratch: IkScratch,
     morph_scratch: MorphScratch,
     ik_stats: Vec<IkSolverRuntimeStats>,
+    ik_link_change_update_bones: Vec<Option<Vec<crate::BoneIndex>>>,
     #[cfg(test)]
     world_matrix_bone_update_count: usize,
 }
@@ -124,12 +125,14 @@ impl RuntimeInstance {
         let ik_scratch = IkScratch::new(&model);
         let morph_scratch = MorphScratch::new(morph_count);
         let ik_stats = vec![IkSolverRuntimeStats::default(); model.ik_count()];
+        let ik_link_change_update_bones = vec![None; model.ik_count()];
         Self {
             model,
             pose,
             ik_scratch,
             morph_scratch,
             ik_stats,
+            ik_link_change_update_bones,
             #[cfg(test)]
             world_matrix_bone_update_count: 0,
         }

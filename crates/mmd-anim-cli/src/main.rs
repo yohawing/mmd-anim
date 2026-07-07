@@ -675,7 +675,14 @@ fn dispatch_numeric_diagnose(
         rest.push(eval_frame.to_string());
     }
 
-    let diagnose_options = commands::compare::parse_diagnose_numeric_bone_rest(rest, frame);
+    let diagnose_options = match commands::compare::parse_diagnose_numeric_bone_rest(rest, frame) {
+        Ok(options) => options,
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("{}", commands::compare::DIAGNOSE_NUMERIC_BONE_USAGE);
+            return Ok(ExitCode::from(2));
+        }
+    };
     let eval_frame = diagnose_options.eval_frame;
     let bone_names = diagnose_options.bone_names;
     if bone_names.is_empty() {

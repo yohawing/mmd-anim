@@ -1268,6 +1268,7 @@ pub(crate) fn diagnose_numeric_bones(
     Ok(ExitCode::SUCCESS)
 }
 
+#[derive(Debug)]
 pub(crate) struct DiagnoseNumericBoneOptions {
     pub(crate) eval_frame: f32,
     pub(crate) bone_names: Vec<String>,
@@ -1276,32 +1277,28 @@ pub(crate) struct DiagnoseNumericBoneOptions {
 pub(crate) fn parse_diagnose_numeric_bone_rest(
     rest: Vec<String>,
     default_eval_frame: f32,
-) -> DiagnoseNumericBoneOptions {
+) -> Result<DiagnoseNumericBoneOptions, String> {
     let mut eval_frame = default_eval_frame;
     let mut bone_names = Vec::new();
     let mut iter = rest.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--eval-frame" {
             let Some(value) = iter.next() else {
-                eprintln!("{DIAGNOSE_NUMERIC_BONE_USAGE}");
-                std::process::exit(1);
+                return Err("missing value for --eval-frame".to_owned());
             };
-            eval_frame = value.parse().unwrap_or_else(|_| {
-                eprintln!("{DIAGNOSE_NUMERIC_BONE_USAGE}");
-                std::process::exit(1);
-            });
+            eval_frame = value
+                .parse()
+                .map_err(|_| format!("invalid --eval-frame value: {value}"))?;
         } else if arg.starts_with("--") {
-            eprintln!("unknown flag: {arg}");
-            eprintln!("{DIAGNOSE_NUMERIC_BONE_USAGE}");
-            std::process::exit(1);
+            return Err(format!("unknown flag: {arg}"));
         } else {
             bone_names.push(arg);
         }
     }
-    DiagnoseNumericBoneOptions {
+    Ok(DiagnoseNumericBoneOptions {
         eval_frame,
         bone_names,
-    }
+    })
 }
 
 fn describe_active_bone_morphs(

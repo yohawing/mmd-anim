@@ -549,6 +549,54 @@ fn verify_numeric_json_rejects_diagnose_and_camera_json_stays_rejected() {
 }
 
 #[test]
+fn diagnose_numeric_bone_rest_parses_bone_names_and_eval_frame() {
+    let options = compare::parse_diagnose_numeric_bone_rest(
+        vec![
+            "センター".to_owned(),
+            "--eval-frame".to_owned(),
+            "12.5".to_owned(),
+            "左足ＩＫ".to_owned(),
+        ],
+        0.0,
+    )
+    .unwrap();
+    assert_f32_near(options.eval_frame, 12.5);
+    assert_eq!(options.bone_names, vec!["センター", "左足ＩＫ"]);
+}
+
+#[test]
+fn diagnose_numeric_bone_rest_rejects_bad_flags_as_errors() {
+    let missing_value = compare::parse_diagnose_numeric_bone_rest(
+        vec!["bone".to_owned(), "--eval-frame".to_owned()],
+        0.0,
+    )
+    .unwrap_err();
+    assert!(missing_value.contains("--eval-frame"), "{missing_value}");
+
+    let invalid_value = compare::parse_diagnose_numeric_bone_rest(
+        vec!["--eval-frame".to_owned(), "abc".to_owned()],
+        0.0,
+    )
+    .unwrap_err();
+    assert!(invalid_value.contains("abc"), "{invalid_value}");
+
+    let unknown_flag =
+        compare::parse_diagnose_numeric_bone_rest(vec!["--bogus".to_owned()], 0.0).unwrap_err();
+    assert!(unknown_flag.contains("--bogus"), "{unknown_flag}");
+}
+
+#[test]
+fn dispatch_numeric_diagnose_reports_usage_error_exit_code() {
+    let exit = dispatch_numeric_diagnose(
+        Path::new("manifest.json"),
+        vec!["case".to_owned(), "0".to_owned(), "--bogus".to_owned()],
+        None,
+    )
+    .unwrap();
+    assert_eq!(exit, ExitCode::from(2));
+}
+
+#[test]
 fn numeric_compare_failure_count_includes_motion_mismatches() {
     let camera = compare::CameraNumericCompareStats::default();
     let motion = compare::MotionNumericCompareStats {

@@ -7,7 +7,7 @@ use crate::binary::{
 };
 use crate::error::ImportError;
 use crate::pmx::PmxParsedModel;
-use crate::sjis::{decode_sjis, decode_sjis_trim_nul, encode_sjis};
+use crate::sjis::{decode_sjis, decode_sjis_trim_nul, encode_sjis, encode_sjis_prefix_fit};
 use crate::vmd::{VmdParsedAnimation, VmdParsedBoneFrame, VmdParsedMorphFrame};
 
 #[derive(Debug, Clone, Serialize)]
@@ -2268,6 +2268,9 @@ fn pmm_bone_interpolation_from_vmd(interpolation: &[u8]) -> [u8; 16] {
     ]
 }
 
+/// Max byte length MMD keeps for a bone/morph name (20-byte NUL-terminated buffer).
+const PMM_MODEL_NAME_MAX_BYTES: usize = 19;
+
 struct PmmExportModelStructure {
     fixed_tracks: u8,
     constraint_bone_indices: Vec<i32>,
@@ -2352,13 +2355,18 @@ fn write_pmm_scene(
     push_pmm_fixed_sjis(&mut out, model_path, 256);
     out.push(model_structure.fixed_tracks);
 
+    // MMD stores bone/morph names in a 20-byte NUL-terminated buffer, so it caps
+    // each name at 19 content bytes (on a char boundary) when it loads the PMX. The
+    // PMM must carry the same truncated names or MMD reports "モデル構造が異なります".
     push_i32(&mut out, bone_names.len() as i32);
     for name in bone_names {
-        push_pmm_len_prefixed_sjis(&mut out, name, &[]);
+        let fitted = encode_sjis_prefix_fit(name, PMM_MODEL_NAME_MAX_BYTES);
+        push_pmm_len_prefixed_sjis(&mut out, name, &fitted);
     }
     push_i32(&mut out, morph_names.len() as i32);
     for name in morph_names {
-        push_pmm_len_prefixed_sjis(&mut out, name, &[]);
+        let fitted = encode_sjis_prefix_fit(name, PMM_MODEL_NAME_MAX_BYTES);
+        push_pmm_len_prefixed_sjis(&mut out, name, &fitted);
     }
 
     push_i32(&mut out, constraint_count as i32);

@@ -203,7 +203,10 @@ impl BenchConfig {
 }
 
 fn create_output_file(path: &Path) -> std::io::Result<File> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent)?;
     }
     File::create(path)

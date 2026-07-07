@@ -16,3 +16,10 @@ fbx = ["mmd-anim-format/fbx"]
 [dependencies]
 mmd-anim-format.workspace = true
 mmd-anim-runtime.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[[bench]]
+name = "real_model_runtime"
+harness = false

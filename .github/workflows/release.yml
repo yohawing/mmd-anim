@@ -103,9 +103,49 @@ jobs:
           path: dist/${{ matrix.archive }}
           if-no-files-found: error
 
+  build-cli-macos-universal:
+    name: Build CLI (universal-apple-darwin)
+    needs: checks
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Build CLI (x86_64)
+        run: cargo build -p mmd-anim-cli --release --locked --target x86_64-apple-darwin
+
+      - name: Build CLI (aarch64)
+        run: cargo build -p mmd-anim-cli --release --locked --target aarch64-apple-darwin
+
+      - name: Package CLI (macOS universal)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist staging
+          lipo -create \
+            "target/x86_64-apple-darwin/release/mmd-anim" \
+            "target/aarch64-apple-darwin/release/mmd-anim" \
+            -output staging/mmd-anim
+          lipo staging/mmd-anim -verify_arch x86_64 arm64
+          tar -C staging -czf "dist/mmd-anim-${{ github.ref_name }}-universal-apple-darwin.tar.gz" mmd-anim
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-universal-apple-darwin
+          path: dist/mmd-anim-${{ github.ref_name }}-universal-apple-darwin.tar.gz
+          if-no-files-found: error
+
   release-cli:
     name: Publish CLI release assets
-    needs: build-cli
+    needs: [build-cli, build-cli-macos-universal]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

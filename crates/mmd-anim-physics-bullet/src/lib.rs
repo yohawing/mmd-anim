@@ -10,5 +10,6 @@ mod native;
 
 #[cfg(feature = "native")]
 pub use native::{
-    BulletError, BulletWorld, RigidBodyDesc, RigidBodyHandle, RigidBodyShape, Transform,
+    BulletError, BulletWorld, ConstraintHandle, RigidBodyDesc, RigidBodyHandle, RigidBodyShape,
+    SixDofSpringJointDesc, Transform,
 };

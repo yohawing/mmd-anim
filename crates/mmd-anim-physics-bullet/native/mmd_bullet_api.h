@@ -37,6 +37,19 @@ typedef struct mmd_anim_bullet_rigidbody_desc {
     uint16_t collision_mask;
 } mmd_anim_bullet_rigidbody_desc;
 
+typedef struct mmd_anim_bullet_6dof_spring_joint_desc {
+    int32_t rigidbody_index_a;
+    int32_t rigidbody_index_b;
+    float position[3];
+    float rotation_euler[3];
+    float translation_lower_limit[3];
+    float translation_upper_limit[3];
+    float rotation_lower_limit[3];
+    float rotation_upper_limit[3];
+    float spring_translation_factor[3];
+    float spring_rotation_factor[3];
+} mmd_anim_bullet_6dof_spring_joint_desc;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -72,6 +85,13 @@ mmd_anim_bullet_world_set_rigidbody_transform(
     int32_t index,
     const float position[3],
     const float rotation_xyzw[4]);
+MMD_ANIM_BULLET_API mmd_anim_bullet_status
+mmd_anim_bullet_world_add_6dof_spring_joint(
+    mmd_anim_bullet_world *world,
+    const mmd_anim_bullet_6dof_spring_joint_desc *desc,
+    int32_t *out_index);
+MMD_ANIM_BULLET_API int32_t
+mmd_anim_bullet_world_get_constraint_count(const mmd_anim_bullet_world *world);
 
 #ifdef __cplusplus
 }

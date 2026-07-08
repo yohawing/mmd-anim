@@ -22,6 +22,7 @@ struct mmd_anim_bullet_world {
     std::unique_ptr<btSequentialImpulseConstraintSolver> solver;
     std::unique_ptr<btDiscreteDynamicsWorld> dynamics_world;
     std::vector<RigidBodyEntry> rigidbodies;
+    std::vector<std::unique_ptr<btTypedConstraint>> constraints;
 };
 
 static mmd_anim_bullet_status fail(mmd_anim_bullet_status status, const char *message) {
@@ -37,6 +38,24 @@ static btTransform make_transform(const float position[3], const float euler[3])
     rotation.setEulerZYX(euler[2], euler[1], euler[0]);
     transform.setRotation(rotation);
     return transform;
+}
+
+static void set_vec3_limit(btGeneric6DofSpringConstraint &constraint, const float lower[3], const float upper[3]) {
+    constraint.setLinearLowerLimit(btVector3(lower[0], lower[1], lower[2]));
+    constraint.setLinearUpperLimit(btVector3(upper[0], upper[1], upper[2]));
+}
+
+static void set_angular_limit(btGeneric6DofSpringConstraint &constraint, const float lower[3], const float upper[3]) {
+    constraint.setAngularLowerLimit(btVector3(lower[0], lower[1], lower[2]));
+    constraint.setAngularUpperLimit(btVector3(upper[0], upper[1], upper[2]));
+}
+
+static void configure_spring_axis(btGeneric6DofSpringConstraint &constraint, int axis, float stiffness) {
+    if (stiffness > 0.0f) {
+        constraint.enableSpring(axis, true);
+        constraint.setStiffness(axis, stiffness);
+        constraint.setEquilibriumPoint(axis);
+    }
 }
 
 static btCollisionShape *make_shape(const mmd_anim_bullet_rigidbody_desc &desc) {
@@ -108,6 +127,9 @@ mmd_anim_bullet_status mmd_anim_bullet_world_reset(mmd_anim_bullet_world *world)
         if (entry.motion_state) {
             entry.motion_state->setWorldTransform(entry.initial_transform);
         }
+    }
+    for (auto &constraint : world->constraints) {
+        constraint->setEnabled(true);
     }
     world->dynamics_world->getBroadphase()->getOverlappingPairCache()->cleanProxyFromPairs(nullptr, world->dynamics_world->getDispatcher());
     g_last_error.clear();
@@ -244,6 +266,53 @@ mmd_anim_bullet_status mmd_anim_bullet_world_set_rigidbody_transform(
     }
     g_last_error.clear();
     return MMD_ANIM_BULLET_OK;
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_add_6dof_spring_joint(
+    mmd_anim_bullet_world *world,
+    const mmd_anim_bullet_6dof_spring_joint_desc *desc,
+    int32_t *out_index) {
+    if (!world || !desc || !out_index) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world, desc, or out_index is null");
+    }
+    if (desc->rigidbody_index_a < 0 || desc->rigidbody_index_b < 0 ||
+        static_cast<size_t>(desc->rigidbody_index_a) >= world->rigidbodies.size() ||
+        static_cast<size_t>(desc->rigidbody_index_b) >= world->rigidbodies.size()) {
+        return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "joint rigidbody index out of range");
+    }
+
+    try {
+        auto &body_a = *world->rigidbodies[static_cast<size_t>(desc->rigidbody_index_a)].body;
+        auto &body_b = *world->rigidbodies[static_cast<size_t>(desc->rigidbody_index_b)].body;
+        btTransform joint_transform = make_transform(desc->position, desc->rotation_euler);
+        btTransform frame_a = body_a.getWorldTransform().inverse() * joint_transform;
+        btTransform frame_b = body_b.getWorldTransform().inverse() * joint_transform;
+
+        auto constraint = std::make_unique<btGeneric6DofSpringConstraint>(body_a, body_b, frame_a, frame_b, true);
+        set_vec3_limit(*constraint, desc->translation_lower_limit, desc->translation_upper_limit);
+        set_angular_limit(*constraint, desc->rotation_lower_limit, desc->rotation_upper_limit);
+        for (int axis = 0; axis < 3; ++axis) {
+            configure_spring_axis(*constraint, axis, desc->spring_translation_factor[axis]);
+            configure_spring_axis(*constraint, axis + 3, desc->spring_rotation_factor[axis]);
+        }
+
+        world->dynamics_world->addConstraint(constraint.get(), true);
+        world->constraints.push_back(std::move(constraint));
+        *out_index = static_cast<int32_t>(world->constraints.size() - 1);
+        g_last_error.clear();
+        return MMD_ANIM_BULLET_OK;
+    } catch (const std::exception &err) {
+        return fail(MMD_ANIM_BULLET_INTERNAL_ERROR, err.what());
+    }
+}
+
+int32_t mmd_anim_bullet_world_get_constraint_count(const mmd_anim_bullet_world *world) {
+    if (!world) {
+        g_last_error = "world is null";
+        return -1;
+    }
+    g_last_error.clear();
+    return static_cast<int32_t>(world->constraints.size());
 }
 
 }

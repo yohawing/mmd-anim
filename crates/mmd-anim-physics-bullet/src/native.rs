@@ -32,6 +32,15 @@ impl RigidBodyHandle {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstraintHandle(i32);
+
+impl ConstraintHandle {
+    pub fn index(self) -> i32 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RigidBodyShape {
     Sphere { radius: f32 },
@@ -95,6 +104,56 @@ impl RigidBodyDesc {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SixDofSpringJointDesc {
+    pub rigidbody_a: RigidBodyHandle,
+    pub rigidbody_b: RigidBodyHandle,
+    pub position: [f32; 3],
+    pub rotation_euler: [f32; 3],
+    pub translation_lower_limit: [f32; 3],
+    pub translation_upper_limit: [f32; 3],
+    pub rotation_lower_limit: [f32; 3],
+    pub rotation_upper_limit: [f32; 3],
+    pub spring_translation_factor: [f32; 3],
+    pub spring_rotation_factor: [f32; 3],
+}
+
+impl SixDofSpringJointDesc {
+    pub fn locked(
+        rigidbody_a: RigidBodyHandle,
+        rigidbody_b: RigidBodyHandle,
+        position: [f32; 3],
+    ) -> Self {
+        Self {
+            rigidbody_a,
+            rigidbody_b,
+            position,
+            rotation_euler: [0.0; 3],
+            translation_lower_limit: [0.0; 3],
+            translation_upper_limit: [0.0; 3],
+            rotation_lower_limit: [0.0; 3],
+            rotation_upper_limit: [0.0; 3],
+            spring_translation_factor: [0.0; 3],
+            spring_rotation_factor: [0.0; 3],
+        }
+    }
+
+    fn to_ffi(self) -> ffi::SixDofSpringJointDesc {
+        ffi::SixDofSpringJointDesc {
+            rigidbody_index_a: self.rigidbody_a.0,
+            rigidbody_index_b: self.rigidbody_b.0,
+            position: self.position,
+            rotation_euler: self.rotation_euler,
+            translation_lower_limit: self.translation_lower_limit,
+            translation_upper_limit: self.translation_upper_limit,
+            rotation_lower_limit: self.rotation_lower_limit,
+            rotation_upper_limit: self.rotation_upper_limit,
+            spring_translation_factor: self.spring_translation_factor,
+            spring_rotation_factor: self.spring_rotation_factor,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
     pub position: [f32; 3],
     pub rotation_xyzw: [f32; 4],
@@ -133,6 +192,30 @@ impl BulletWorld {
 
     pub fn rigidbody_count(&self) -> Result<usize, BulletError> {
         let count = unsafe { ffi::mmd_anim_bullet_world_get_rigidbody_count(self.raw.as_ptr()) };
+        if count < 0 {
+            return Err(BulletError::last());
+        }
+        Ok(count as usize)
+    }
+
+    pub fn add_6dof_spring_joint(
+        &mut self,
+        desc: SixDofSpringJointDesc,
+    ) -> Result<ConstraintHandle, BulletError> {
+        let ffi_desc = desc.to_ffi();
+        let mut index = -1;
+        check(unsafe {
+            ffi::mmd_anim_bullet_world_add_6dof_spring_joint(
+                self.raw.as_ptr(),
+                &ffi_desc,
+                &mut index,
+            )
+        })?;
+        Ok(ConstraintHandle(index))
+    }
+
+    pub fn constraint_count(&self) -> Result<usize, BulletError> {
+        let count = unsafe { ffi::mmd_anim_bullet_world_get_constraint_count(self.raw.as_ptr()) };
         if count < 0 {
             return Err(BulletError::last());
         }
@@ -213,6 +296,20 @@ mod ffi {
         pub collision_mask: u16,
     }
 
+    #[repr(C)]
+    pub struct SixDofSpringJointDesc {
+        pub rigidbody_index_a: i32,
+        pub rigidbody_index_b: i32,
+        pub position: [f32; 3],
+        pub rotation_euler: [f32; 3],
+        pub translation_lower_limit: [f32; 3],
+        pub translation_upper_limit: [f32; 3],
+        pub rotation_lower_limit: [f32; 3],
+        pub rotation_upper_limit: [f32; 3],
+        pub spring_translation_factor: [f32; 3],
+        pub spring_rotation_factor: [f32; 3],
+    }
+
     unsafe extern "C" {
         pub fn mmd_anim_bullet_get_last_error() -> *const c_char;
         pub fn mmd_anim_bullet_world_create(out_world: *mut *mut World) -> i32;
@@ -241,6 +338,12 @@ mod ffi {
             position: *const f32,
             rotation_xyzw: *const f32,
         ) -> i32;
+        pub fn mmd_anim_bullet_world_add_6dof_spring_joint(
+            world: *mut World,
+            desc: *const SixDofSpringJointDesc,
+            out_index: *mut i32,
+        ) -> i32;
+        pub fn mmd_anim_bullet_world_get_constraint_count(world: *const World) -> i32;
     }
 }
 
@@ -278,5 +381,29 @@ mod tests {
         let transform = world.rigidbody_transform(body).unwrap();
 
         assert!((transform.position[1] - 10.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn locked_6dof_joint_constrains_dynamic_body() {
+        let mut world = BulletWorld::new().unwrap();
+        let anchor = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(0.5, [0.0, 10.0, 0.0], 0.0))
+            .unwrap();
+        let bob = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(0.5, [0.0, 8.0, 0.0], 1.0))
+            .unwrap();
+
+        let joint = world
+            .add_6dof_spring_joint(SixDofSpringJointDesc::locked(anchor, bob, [0.0, 9.0, 0.0]))
+            .unwrap();
+        world.step(0.5, 60).unwrap();
+        let bob_after = world.rigidbody_transform(bob).unwrap();
+
+        assert_eq!(joint.index(), 0);
+        assert_eq!(world.constraint_count().unwrap(), 1);
+        assert!(
+            bob_after.position[1] > 6.0,
+            "expected locked joint to prevent free fall: bob_after={bob_after:?}"
+        );
     }
 }

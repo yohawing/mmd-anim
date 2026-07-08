@@ -1,9 +1,16 @@
-use mmd_anim_runtime::RuntimeInstance;
+use mmd_anim_runtime::{PhysicsStepStats, RuntimeInstance};
 
 use crate::{BulletError, PmxBulletWorld, Transform};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuntimePhysicsStepReport {
+    pub kinematic_rigidbodies_fed: usize,
+    pub bones_written_back: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RuntimePhysicsClockStepReport {
+    pub tick: PhysicsStepStats,
     pub kinematic_rigidbodies_fed: usize,
     pub bones_written_back: usize,
 }
@@ -27,6 +34,12 @@ pub trait RuntimePhysicsBridgeExt {
         delta_time: f32,
         max_sub_steps: i32,
     ) -> Result<RuntimePhysicsStepReport, BulletError>;
+
+    fn step_runtime_physics_with_runtime_clock(
+        &mut self,
+        runtime: &mut RuntimeInstance,
+        delta_time: f32,
+    ) -> Result<RuntimePhysicsClockStepReport, BulletError>;
 }
 
 impl RuntimePhysicsBridgeExt for PmxBulletWorld {
@@ -71,6 +84,30 @@ impl RuntimePhysicsBridgeExt for PmxBulletWorld {
         self.world.step(delta_time, max_sub_steps)?;
         let bones_written_back = self.apply_readback_to_runtime(runtime)?;
         Ok(RuntimePhysicsStepReport {
+            kinematic_rigidbodies_fed,
+            bones_written_back,
+        })
+    }
+
+    fn step_runtime_physics_with_runtime_clock(
+        &mut self,
+        runtime: &mut RuntimeInstance,
+        delta_time: f32,
+    ) -> Result<RuntimePhysicsClockStepReport, BulletError> {
+        let tick = runtime.advance_physics_tick_clock(delta_time);
+        let kinematic_rigidbodies_fed = self.feed_runtime_kinematic_rigidbodies(runtime)?;
+
+        if tick.substeps > 0 {
+            let simulated_dt =
+                runtime.physics_tick_config().fixed_substep_seconds * tick.substeps as f32;
+            self.world.step(simulated_dt, tick.substeps as i32)?;
+        }
+
+        let bones_written_back = self.apply_readback_to_runtime(runtime)?;
+        runtime.evaluate_current_pose_after_physics();
+
+        Ok(RuntimePhysicsClockStepReport {
+            tick,
             kinematic_rigidbodies_fed,
             bones_written_back,
         })
@@ -223,6 +260,57 @@ mod tests {
         assert!(
             translation(runtime.world_matrices()[BoneIndex(1).as_usize()]).y < 8.0,
             "dynamic runtime bone should move after bridge step"
+        );
+    }
+
+    #[test]
+    fn bridge_step_uses_runtime_fixed_substep_clock() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [{"name": "physics", "position": [0.0, 8.0, 0.0]}],
+            "rigidBodies": [
+                {
+                    "name": "physicsBody",
+                    "boneIndex": 0,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 8.0, 0.0],
+                    "mass": 1.0,
+                    "mode": "dynamic"
+                }
+            ]
+        }))
+        .unwrap();
+        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+        let model = build_pmx_model_from_parts(PmxPartsInput {
+            descriptor,
+            positions_xyz: &positions_xyz,
+            normals_xyz: &normals_xyz,
+            uvs_xy: &uvs_xy,
+            indices: &indices,
+            skin_indices: &[],
+            skin_weights: &[],
+            edge_scale: &[],
+        })
+        .unwrap();
+        let mut bullet = build_bullet_world_from_pmx(&model).unwrap();
+        let runtime_model = Arc::new(
+            ModelArena::new(vec![BoneInit::new(None, Vec3A::new(0.0, 8.0, 0.0))]).unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(runtime_model);
+        runtime.evaluate_rest_pose();
+
+        let report = bullet
+            .step_runtime_physics_with_runtime_clock(&mut runtime, 1.0 / 60.0)
+            .unwrap();
+
+        assert_eq!(report.tick.substeps, 2);
+        assert_eq!(report.bones_written_back, 1);
+        assert!(
+            translation(runtime.world_matrices()[BoneIndex(0).as_usize()]).y < 8.0,
+            "runtime-clock bridge should step Bullet and write back"
         );
     }
 }

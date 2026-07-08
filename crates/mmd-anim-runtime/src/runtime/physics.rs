@@ -126,6 +126,12 @@ impl RuntimeInstance {
         dt_seconds: f32,
         options: IkSolveOptions,
     ) -> PhysicsStepStats {
+        let stats = self.advance_physics_tick_clock(dt_seconds);
+        self.evaluate_current_pose_after_physics_with_ik_options(options);
+        stats
+    }
+
+    pub fn advance_physics_tick_clock(&mut self, dt_seconds: f32) -> PhysicsStepStats {
         let input_dt_seconds = dt_seconds;
         let clamped_dt_seconds = self.clamped_physics_dt(dt_seconds);
         self.physics_accumulator_seconds += clamped_dt_seconds;
@@ -143,8 +149,6 @@ impl RuntimeInstance {
                 .physics_accumulator_seconds
                 .min(self.physics_tick_config.fixed_substep_seconds);
         }
-
-        self.evaluate_current_pose_after_physics_with_ik_options(options);
 
         PhysicsStepStats {
             input_dt_seconds,

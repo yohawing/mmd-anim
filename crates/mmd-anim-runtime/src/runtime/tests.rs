@@ -76,6 +76,42 @@ fn evaluates_current_pose_with_parent_rotation() {
 }
 
 #[test]
+fn apply_physics_world_matrices_updates_local_pose_and_descendants() {
+    let model = Arc::new(
+        ModelArena::new(vec![
+            BoneInit::new(None, Vec3A::new(1.0, 0.0, 0.0)),
+            BoneInit::new(Some(BoneIndex(0)), Vec3A::new(0.0, 2.0, 0.0)),
+            BoneInit::new(Some(BoneIndex(1)), Vec3A::new(0.0, 1.0, 0.0)),
+        ])
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+    runtime.evaluate_rest_pose();
+
+    let updated = runtime.apply_physics_world_matrices(&[
+        None,
+        Some(glam::Mat4::from_translation(
+            Vec3A::new(5.0, 6.0, 0.0).into(),
+        )),
+        None,
+    ]);
+
+    assert_eq!(updated, 1);
+    assert_vec3a_near(
+        runtime.pose().local_position_offset(BoneIndex(1)),
+        Vec3A::new(4.0, 4.0, 0.0),
+    );
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[1]),
+        Vec3A::new(5.0, 6.0, 0.0),
+    );
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[2]),
+        Vec3A::new(5.0, 7.0, 0.0),
+    );
+}
+
+#[test]
 fn fixed_axis_bone_rotation_keeps_only_axis_twist() {
     let model = Arc::new(
         ModelArena::new(vec![

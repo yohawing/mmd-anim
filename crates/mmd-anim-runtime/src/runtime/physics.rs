@@ -1,4 +1,7 @@
+use glam::{Mat4, Vec3A};
+
 use super::{IkSolveOptions, RuntimeInstance};
+use crate::BoneIndex;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PhysicsTickConfig {
@@ -60,6 +63,53 @@ impl RuntimeInstance {
 
     pub fn reset_physics_tick(&mut self) {
         self.physics_accumulator_seconds = 0.0;
+    }
+
+    pub fn apply_physics_world_matrices(
+        &mut self,
+        physics_world_matrices: &[Option<Mat4>],
+    ) -> usize {
+        let mut updated = 0;
+        let mut earliest_eval_order_position = None;
+
+        for (bone_index, physics_world_matrix) in physics_world_matrices.iter().enumerate() {
+            let Some(physics_world_matrix) = physics_world_matrix else {
+                continue;
+            };
+            if bone_index >= self.model.bone_count() {
+                continue;
+            }
+
+            let bone = BoneIndex(bone_index as u32);
+            let parent_inverse_world = self
+                .model
+                .parent_index(bone)
+                .map(|parent| self.pose.world_matrices()[parent.as_usize()].inverse())
+                .unwrap_or(Mat4::IDENTITY);
+            let local_matrix = parent_inverse_world * *physics_world_matrix;
+            let (scale, rotation, translation) = local_matrix.to_scale_rotation_translation();
+
+            self.pose.set_local_position_offset(
+                bone,
+                Vec3A::from(translation) - self.model.rest_position(bone),
+            );
+            self.pose.set_local_rotation(bone, rotation.normalize());
+            self.pose.set_local_scale(bone, Vec3A::from(scale));
+
+            let eval_order_position = self.model.eval_order_position(bone);
+            earliest_eval_order_position = Some(
+                earliest_eval_order_position.map_or(eval_order_position, |current: usize| {
+                    current.min(eval_order_position)
+                }),
+            );
+            updated += 1;
+        }
+
+        if let Some(start) = earliest_eval_order_position {
+            self.update_world_matrices_from_eval_order_position(start);
+        }
+
+        updated
     }
 
     /// Advance the physics clock independently from animation sampling.

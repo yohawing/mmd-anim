@@ -35,4 +35,6 @@ pub use model::{
     MorphIndex, MorphInit, MorphOffsetSpan, VertexMorphOffset,
 };
 pub use pose::PoseArena;
-pub use runtime::{IkSolveOptions, IkSolverRuntimeStats, RuntimeInstance};
+pub use runtime::{
+    IkSolveOptions, IkSolverRuntimeStats, PhysicsStepStats, PhysicsTickConfig, RuntimeInstance,
+};

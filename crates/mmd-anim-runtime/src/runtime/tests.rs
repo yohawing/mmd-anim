@@ -6,7 +6,7 @@ use crate::{
     AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneInit, IkAngleLimit,
     IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkLinkInit,
     IkSolveOptions, IkSolverInit, ModelArena, MovableBoneKeyframe, MovableBoneTrack,
-    RuntimeInstance,
+    PhysicsTickConfig, RuntimeInstance,
 };
 
 fn translation(matrix: glam::Mat4) -> Vec3A {
@@ -1148,6 +1148,101 @@ fn clip_frame_produces_deterministic_world_translations() {
     assert_eq!(matrices.len(), 2);
     assert_vec3a_near(translation(matrices[0]), Vec3A::new(1.0, 0.0, 0.0));
     assert_vec3a_near(translation(matrices[1]), Vec3A::new(1.0, 2.0, 2.0));
+}
+
+#[test]
+fn split_physics_tick_matches_full_clip_evaluation_without_backend() {
+    let mut after_child = BoneInit::new(Some(BoneIndex(0)), Vec3A::new(0.0, 2.0, 0.0));
+    after_child.transform_after_physics = true;
+    let model = Arc::new(
+        ModelArena::new(vec![
+            BoneInit::new(None, Vec3A::new(1.0, 0.0, 0.0)),
+            after_child,
+        ])
+        .unwrap(),
+    );
+    let clip = AnimationClip::new(vec![BoneAnimationBinding {
+        bone: BoneIndex(0),
+        track: MovableBoneTrack::from_keyframes(vec![
+            MovableBoneKeyframe::new(0, Vec3A::ZERO, Quat::IDENTITY),
+            MovableBoneKeyframe::new(10, Vec3A::new(0.0, 0.0, 4.0), Quat::IDENTITY),
+        ]),
+    }]);
+    let mut full = RuntimeInstance::new(Arc::clone(&model));
+    let mut split = RuntimeInstance::new(model);
+
+    full.evaluate_clip_frame(&clip, 5.0);
+    split.evaluate_clip_frame_before_physics(&clip, 5.0);
+    let stats = split.step_physics(0.0);
+
+    assert_eq!(stats.substeps, 0);
+    assert_vec3a_near(
+        translation(split.world_matrices()[0]),
+        translation(full.world_matrices()[0]),
+    );
+    assert_vec3a_near(
+        translation(split.world_matrices()[1]),
+        translation(full.world_matrices()[1]),
+    );
+}
+
+#[test]
+fn physics_tick_accumulates_fixed_substeps_and_clamps_large_dt() {
+    let model = Arc::new(ModelArena::new(vec![BoneInit::new(None, Vec3A::ZERO)]).unwrap());
+    let mut runtime = RuntimeInstance::new(model);
+    runtime.set_physics_tick_config(PhysicsTickConfig {
+        fixed_substep_seconds: 1.0 / 120.0,
+        max_substeps_per_tick: 4,
+    });
+
+    let first = runtime.step_physics(1.0 / 240.0);
+    assert_eq!(first.substeps, 0);
+    assert!((first.accumulator_seconds - 1.0 / 240.0).abs() < 1.0e-6);
+
+    let second = runtime.step_physics(1.0 / 240.0);
+    assert_eq!(second.substeps, 1);
+    assert!(second.accumulator_seconds.abs() < 1.0e-6);
+
+    let clamped = runtime.step_physics(1.0);
+    assert_eq!(clamped.clamped_dt_seconds, 4.0 / 120.0);
+    assert_eq!(clamped.substeps, 4);
+    assert!(runtime.physics_accumulator_seconds() <= 1.0 / 120.0);
+}
+
+#[test]
+fn split_physics_tick_preserves_after_physics_ik_options() {
+    let mut ik_bone = BoneInit::new(None, Vec3A::new(0.0, 1.0, 0.0));
+    ik_bone.transform_after_physics = true;
+    let model = Arc::new(
+        ModelArena::new_with_ik(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::new(1.0, 0.0, 0.0)),
+                ik_bone,
+            ],
+            vec![IkSolverInit {
+                ik_bone: BoneIndex(2),
+                target_bone: BoneIndex(1),
+                links: vec![IkLinkInit::new(BoneIndex(0))],
+                iteration_count: 10,
+                limit_angle: 0.0,
+            }],
+        )
+        .unwrap(),
+    );
+    let clip = AnimationClip::new(vec![]);
+    let mut runtime = RuntimeInstance::new(model);
+    let options = IkSolveOptions {
+        tolerance: 0.0,
+        max_iterations_cap: Some(1),
+    };
+
+    runtime.evaluate_clip_frame_before_physics_with_ik_options(&clip, 0.0, options);
+    runtime.reset_ik_runtime_stats();
+    runtime.step_physics_with_ik_options(0.0, options);
+
+    assert_eq!(runtime.ik_runtime_stats()[0].solver_evaluations, 1);
+    assert_eq!(runtime.ik_runtime_stats()[0].configured_iterations, 1);
 }
 
 #[test]

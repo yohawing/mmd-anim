@@ -17,6 +17,7 @@ pub(crate) struct ConvertFbxJsonReport<'a> {
     pub bones_only: bool,
     pub readable_bone_names: bool,
     pub bone_name_map: Option<&'a Path>,
+    pub physics_params: Option<&'a Path>,
     pub baked_max_frame: Option<u32>,
     pub bytes_out: usize,
     pub counts: &'a mmd_anim_format::pmx::PmxParsedCounts,
@@ -38,6 +39,7 @@ pub(crate) fn convert_fbx_json(report: ConvertFbxJsonReport<'_>) -> serde_json::
         "bonesOnly": report.bones_only,
         "readableBoneNames": report.readable_bone_names,
         "boneNameMap": report.bone_name_map.map(|path| path.display().to_string()),
+        "physicsParams": report.physics_params.map(|path| path.display().to_string()),
         "input": report.input.display().to_string(),
         "output": report.output.display().to_string(),
         "vmd": report.vmd.map(|path| path.display().to_string()),
@@ -66,6 +68,7 @@ pub(crate) struct ConvertFbxOptions {
     pub copy_diffuse_textures: bool,
     pub bones_only: bool,
     pub readable_bone_names: bool,
+    pub write_physics_params: bool,
     pub use_json: bool,
 }
 
@@ -183,6 +186,11 @@ pub(crate) fn convert_pmx_to_fbx(
     } else {
         None
     };
+    let physics_params = if convert_options.write_physics_params {
+        Some(write_physics_params_sidecar(output, input, &model)?)
+    } else {
+        None
+    };
     if convert_options.use_json {
         let report = convert_fbx_json(ConvertFbxJsonReport {
             input,
@@ -191,6 +199,7 @@ pub(crate) fn convert_pmx_to_fbx(
             bones_only: convert_options.bones_only,
             readable_bone_names: convert_options.readable_bone_names,
             bone_name_map: bone_name_map.as_deref(),
+            physics_params: physics_params.as_deref(),
             baked_max_frame,
             bytes_out: fbx.len(),
             counts: &model.metadata.counts,
@@ -230,6 +239,9 @@ pub(crate) fn convert_pmx_to_fbx(
         );
         if let Some(path) = &bone_name_map {
             println!("  boneNameMap={}", path.display());
+        }
+        if let Some(path) = &physics_params {
+            println!("  physicsParams={}", path.display());
         }
         if copied_diffuse_textures > 0 {
             println!("  copiedDiffuseTextures={copied_diffuse_textures}");
@@ -355,6 +367,142 @@ fn write_bone_name_map_sidecar(
     });
     write_file(&path, serde_json::to_string_pretty(&report)?.as_bytes())?;
     Ok(path)
+}
+
+fn write_physics_params_sidecar(
+    output: &Path,
+    input: &Path,
+    model: &mmd_anim_format::PmxParsedModel,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = output.with_extension("physics-params.json");
+    let report = build_physics_params_sidecar_json(input, model);
+    write_file(&path, serde_json::to_string_pretty(&report)?.as_bytes())?;
+    Ok(path)
+}
+
+fn build_physics_params_sidecar_json(
+    input: &Path,
+    model: &mmd_anim_format::PmxParsedModel,
+) -> serde_json::Value {
+    let rigid_bodies = model
+        .rigid_bodies
+        .iter()
+        .enumerate()
+        .map(|(index, body)| {
+            let bone = if body.bone_index >= 0 {
+                model
+                    .skeleton
+                    .bones
+                    .get(body.bone_index as usize)
+                    .map(|bone| {
+                        json!({
+                            "index": body.bone_index,
+                            "name": bone.name,
+                            "englishName": bone.english_name,
+                        })
+                    })
+            } else {
+                None
+            };
+            json!({
+                "index": index,
+                "name": body.name,
+                "englishName": body.english_name,
+                "bone": bone,
+                "collision": {
+                    "group": body.group,
+                    "mask": body.mask,
+                },
+                "shape": {
+                    "type": body.shape,
+                    "size": body.size,
+                },
+                "transform": {
+                    "position": body.position,
+                    "rotation": body.rotation,
+                },
+                "dynamics": {
+                    "mass": body.mass,
+                    "linearDamping": body.linear_damping,
+                    "angularDamping": body.angular_damping,
+                    "restitution": body.restitution,
+                    "friction": body.friction,
+                },
+                "mode": body.mode,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let joints = model
+        .joints
+        .iter()
+        .enumerate()
+        .map(|(index, joint)| {
+            json!({
+                "index": index,
+                "name": joint.name,
+                "englishName": joint.english_name,
+                "type": joint.kind,
+                "rigidBodyA": rigid_body_ref_json(model, joint.rigid_body_index_a),
+                "rigidBodyB": rigid_body_ref_json(model, joint.rigid_body_index_b),
+                "transform": {
+                    "position": joint.position,
+                    "rotation": joint.rotation,
+                },
+                "limits": {
+                    "translationLower": joint.translation_lower_limit,
+                    "translationUpper": joint.translation_upper_limit,
+                    "rotationLower": joint.rotation_lower_limit,
+                    "rotationUpper": joint.rotation_upper_limit,
+                },
+                "springs": {
+                    "translation": joint.spring_translation_factor,
+                    "rotation": joint.spring_rotation_factor,
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "schemaVersion": 1,
+        "kind": "mmdPhysicsParams",
+        "source": {
+            "format": "pmx",
+            "path": input.display().to_string(),
+            "modelName": model.metadata.name,
+            "englishModelName": model.metadata.english_name,
+        },
+        "coordinateSystem": "pmx",
+        "units": {
+            "linear": "pmx",
+            "angular": "radians",
+        },
+        "counts": {
+            "rigidBodies": model.rigid_bodies.len(),
+            "joints": model.joints.len(),
+        },
+        "rigidBodies": rigid_bodies,
+        "joints": joints,
+    })
+}
+
+fn rigid_body_ref_json(model: &mmd_anim_format::PmxParsedModel, index: i32) -> serde_json::Value {
+    if index < 0 {
+        return serde_json::Value::Null;
+    }
+    let Some(body) = model.rigid_bodies.get(index as usize) else {
+        return json!({
+            "index": index,
+            "name": null,
+            "englishName": null,
+            "missing": true,
+        });
+    };
+    json!({
+        "index": index,
+        "name": body.name,
+        "englishName": body.english_name,
+    })
 }
 
 fn fbx_bone_name_source_label(source: mmd_anim_format::fbx::FbxBoneNameSource) -> &'static str {
@@ -554,6 +702,7 @@ mod tests {
             bones_only: true,
             readable_bone_names: false,
             bone_name_map: None,
+            physics_params: None,
             baked_max_frame: Some(60),
             bytes_out: 1234,
             counts: &counts,
@@ -593,6 +742,7 @@ mod tests {
             bones_only: false,
             readable_bone_names: true,
             bone_name_map: Some(Path::new("model.bone-map.json")),
+            physics_params: None,
             baked_max_frame: None,
             bytes_out: 42,
             counts: &counts,
@@ -602,5 +752,139 @@ mod tests {
 
         assert_eq!(report["readableBoneNames"], true);
         assert_eq!(report["boneNameMap"], "model.bone-map.json");
+    }
+
+    #[test]
+    fn convert_fbx_json_reports_physics_params_sidecar() {
+        let counts = mmd_anim_format::pmx::PmxParsedCounts {
+            vertices: 0,
+            faces: 0,
+            materials: 0,
+            bones: 0,
+            morphs: 0,
+            display_frames: 0,
+            rigid_bodies: 1,
+            joints: 1,
+            soft_bodies: 0,
+        };
+        let report = convert_fbx_json(ConvertFbxJsonReport {
+            input: Path::new("model.pmx"),
+            output: Path::new("model.fbx"),
+            vmd: None,
+            bones_only: false,
+            readable_bone_names: false,
+            bone_name_map: None,
+            physics_params: Some(Path::new("model.physics-params.json")),
+            baked_max_frame: None,
+            bytes_out: 42,
+            counts: &counts,
+            exported_blend_shapes: 0,
+            copied_diffuse_textures: 0,
+        });
+
+        assert_eq!(report["physicsParams"], "model.physics-params.json");
+    }
+
+    #[test]
+    fn physics_params_sidecar_json_maps_pmx_rigid_bodies_and_joints() {
+        let descriptor = serde_json::from_value(serde_json::json!({
+            "modelName": "physics-model",
+            "englishModelName": "physics-model-en",
+            "materials": [{ "name": "mat", "faceCount": 1 }],
+            "bones": [
+                { "name": "root", "englishName": "root-en", "tailIndex": 1 },
+                { "name": "child", "englishName": "child-en", "parentIndex": 0, "position": [0.0, 1.0, 0.0] }
+            ],
+            "rigidBodies": [
+                {
+                    "name": "body",
+                    "englishName": "body-en",
+                    "boneIndex": 1,
+                    "group": 2,
+                    "mask": 3,
+                    "shape": "box",
+                    "size": [1.0, 2.0, 3.0],
+                    "position": [0.0, 1.0, 0.0],
+                    "rotation": [0.1, 0.2, 0.3],
+                    "mass": 2.0,
+                    "linearDamping": 0.4,
+                    "angularDamping": 0.5,
+                    "restitution": 0.6,
+                    "friction": 0.7,
+                    "mode": "dynamicBone"
+                }
+            ],
+            "joints": [
+                {
+                    "name": "joint",
+                    "englishName": "joint-en",
+                    "type": "generic6dofSpring",
+                    "rigidBodyIndexA": 0,
+                    "rigidBodyIndexB": -1,
+                    "position": [0.0, 1.0, 0.0],
+                    "rotation": [0.0, 0.1, 0.2],
+                    "translationLowerLimit": [-1.0, -1.0, -1.0],
+                    "translationUpperLimit": [1.0, 1.0, 1.0],
+                    "rotationLowerLimit": [-0.1, -0.2, -0.3],
+                    "rotationUpperLimit": [0.1, 0.2, 0.3],
+                    "springTranslationFactor": [0.1, 0.2, 0.3],
+                    "springRotationFactor": [0.4, 0.5, 0.6]
+                }
+            ],
+            "indexSizes": {
+                "vertex": 1,
+                "material": 1,
+                "texture": 1,
+                "bone": 1,
+                "morph": 1,
+                "rigidBody": 1
+            }
+        }))
+        .expect("parts descriptor should parse");
+        let model = mmd_anim_format::build_pmx_model_from_parts(mmd_anim_format::PmxPartsInput {
+            descriptor,
+            positions_xyz: &[
+                0.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0,
+            ],
+            normals_xyz: &[
+                0.0, 0.0, 1.0, //
+                0.0, 0.0, 1.0, //
+                0.0, 0.0, 1.0,
+            ],
+            uvs_xy: &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            indices: &[0, 1, 2],
+            skin_indices: &[0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+            skin_weights: &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            edge_scale: &[],
+        })
+        .expect("PMX parts fixture should build");
+        let report = build_physics_params_sidecar_json(Path::new("fixture.pmx"), &model);
+
+        assert_eq!(report["schemaVersion"], 1);
+        assert_eq!(report["kind"], "mmdPhysicsParams");
+        assert_eq!(report["coordinateSystem"], "pmx");
+        assert_eq!(report["counts"]["rigidBodies"], model.rigid_bodies.len());
+        assert_eq!(report["counts"]["joints"], model.joints.len());
+        assert_eq!(report["rigidBodies"][0]["name"], model.rigid_bodies[0].name);
+        assert_eq!(
+            report["rigidBodies"][0]["bone"]["index"],
+            model.rigid_bodies[0].bone_index
+        );
+        assert_eq!(
+            report["rigidBodies"][0]["shape"]["type"],
+            model.rigid_bodies[0].shape
+        );
+        assert_eq!(
+            report["rigidBodies"][0]["dynamics"]["mass"],
+            model.rigid_bodies[0].mass
+        );
+        assert_eq!(report["joints"][0]["name"], model.joints[0].name);
+        assert_eq!(
+            report["joints"][0]["rigidBodyA"]["index"],
+            model.joints[0].rigid_body_index_a
+        );
+        assert_eq!(report["joints"][0]["rigidBodyB"], serde_json::Value::Null);
     }
 }

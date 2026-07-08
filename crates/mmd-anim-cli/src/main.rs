@@ -271,7 +271,7 @@ enum Commands {
     #[command(
         name = "convert-fbx",
         long_about = "Convert a PMX model to a minimal FBX 7.4 binary file.\nWith --vmd, bone motion is baked to FBX AnimationStack/AnimationLayer/AnimCurve channels.\nUse --bones-only to export only the skeleton and optional baked bone animation.\nUse --max-frame with --vmd to cap the inclusive bake range for local smoke checks.",
-        after_help = "Examples:\n  mmd-anim convert-fbx model.pmx model.fbx\n  mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd\n  mmd-anim convert-fbx model.pmx smoke.fbx --vmd motion.vmd --max-frame 120\n  mmd-anim convert-fbx model.pmx skeleton.fbx --bones-only\n  mmd-anim convert-fbx model.pmx motion.fbx --vmd motion.vmd --bones-only --max-frame 120\n  mmd-anim convert-fbx model.pmx model.fbx --readable-bone-names\n  mmd-anim convert-fbx model.pmx model.fbx --copy-diffuse-textures --json"
+        after_help = "Examples:\n  mmd-anim convert-fbx model.pmx model.fbx\n  mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd\n  mmd-anim convert-fbx model.pmx smoke.fbx --vmd motion.vmd --max-frame 120\n  mmd-anim convert-fbx model.pmx skeleton.fbx --bones-only\n  mmd-anim convert-fbx model.pmx motion.fbx --vmd motion.vmd --bones-only --max-frame 120\n  mmd-anim convert-fbx model.pmx model.fbx --readable-bone-names\n  mmd-anim convert-fbx model.pmx model.fbx --write-physics-params\n  mmd-anim convert-fbx model.pmx model.fbx --copy-diffuse-textures --json"
     )]
     ConvertFbx {
         /// Path to the input PMX model file
@@ -293,6 +293,9 @@ enum Commands {
         /// Use readable English bone names instead of legacy UTF-8 hex encoding
         #[arg(long)]
         readable_bone_names: bool,
+        /// Write PMX rigid-body and joint parameters to <fbx-stem>.physics-params.json
+        #[arg(long)]
+        write_physics_params: bool,
         /// Output conversion report as JSON
         #[arg(long)]
         json: bool,
@@ -479,6 +482,7 @@ fn main() -> ExitCode {
             copy_diffuse_textures,
             bones_only,
             readable_bone_names,
+            write_physics_params,
             json,
         }) => commands::fbx::convert_pmx_to_fbx(
             &input,
@@ -489,6 +493,7 @@ fn main() -> ExitCode {
                 copy_diffuse_textures,
                 bones_only,
                 readable_bone_names,
+                write_physics_params,
                 use_json: json,
             },
         ),

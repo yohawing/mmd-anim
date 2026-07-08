@@ -449,6 +449,187 @@ mod tests {
     }
 
     #[test]
+    fn unity_parity_dynamic_body_rests_on_static_floor() {
+        let mut world = BulletWorld::new().unwrap();
+        let _floor = world
+            .add_rigidbody(RigidBodyDesc {
+                shape: RigidBodyShape::Box {
+                    half_extents: [20.0, 1.0, 20.0],
+                },
+                position: [0.0, 0.0, 0.0],
+                rotation_euler: [0.0; 3],
+                mass: 0.0,
+                linear_damping: 0.0,
+                angular_damping: 0.0,
+                friction: 0.5,
+                restitution: 0.0,
+                collision_group: 0,
+                collision_mask: 0xffff,
+            })
+            .unwrap();
+        let sphere = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(1.0, [0.0, 10.0, 0.0], 1.0))
+            .unwrap();
+
+        for _ in 0..180 {
+            world.step(1.0 / 60.0, 2).unwrap();
+        }
+        let sphere_y = world.rigidbody_transform(sphere).unwrap().position[1];
+        eprintln!("rust floor sphere_y {sphere_y}");
+
+        assert!(sphere_y > 1.0, "sphere fell through floor: y={sphere_y}");
+        assert!(
+            sphere_y < 9.0,
+            "sphere did not fall meaningfully: y={sphere_y}"
+        );
+    }
+
+    #[test]
+    fn unity_parity_kinematic_floor_drags_resting_dynamic_body() {
+        let mut world = BulletWorld::new().unwrap();
+        let floor = world
+            .add_rigidbody(RigidBodyDesc {
+                shape: RigidBodyShape::Box {
+                    half_extents: [50.0, 1.0, 50.0],
+                },
+                position: [0.0, -1.0, 0.0],
+                rotation_euler: [0.0; 3],
+                mass: 0.0,
+                linear_damping: 0.0,
+                angular_damping: 0.0,
+                friction: 1.0,
+                restitution: 0.0,
+                collision_group: 0,
+                collision_mask: 0xffff,
+            })
+            .unwrap();
+        let block = world
+            .add_rigidbody(RigidBodyDesc {
+                shape: RigidBodyShape::Box {
+                    half_extents: [1.0, 1.0, 1.0],
+                },
+                position: [0.0, 3.0, 0.0],
+                rotation_euler: [0.0; 3],
+                mass: 1.0,
+                linear_damping: 0.0,
+                angular_damping: 0.0,
+                friction: 1.0,
+                restitution: 0.0,
+                collision_group: 0,
+                collision_mask: 0xffff,
+            })
+            .unwrap();
+
+        for _ in 0..60 {
+            world.step(1.0 / 60.0, 2).unwrap();
+        }
+        let resting_x = world.rigidbody_transform(block).unwrap().position[0];
+
+        let mut floor_x = 0.0;
+        for _ in 0..60 {
+            floor_x += 0.25;
+            world
+                .set_rigidbody_transform(
+                    floor,
+                    Transform {
+                        position: [floor_x, -1.0, 0.0],
+                        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                    },
+                )
+                .unwrap();
+            world.step(1.0 / 60.0, 2).unwrap();
+        }
+
+        let block_after = world.rigidbody_transform(block).unwrap();
+        eprintln!(
+            "rust drag dx block_y {} {}",
+            block_after.position[0] - resting_x,
+            block_after.position[1]
+        );
+        assert!(
+            block_after.position[1] > -1.0,
+            "block fell through floor: {block_after:?}"
+        );
+        assert!(
+            block_after.position[0] - resting_x > 1.0,
+            "kinematic floor did not drag block: resting_x={resting_x}, after={block_after:?}"
+        );
+    }
+
+    #[test]
+    fn unity_parity_kinematic_anchor_drags_jointed_dynamic_body() {
+        let mut world = BulletWorld::new().unwrap();
+        let anchor = world
+            .add_rigidbody(RigidBodyDesc {
+                shape: RigidBodyShape::Box {
+                    half_extents: [0.5, 0.5, 0.5],
+                },
+                position: [0.0, 10.0, 0.0],
+                rotation_euler: [0.0; 3],
+                mass: 0.0,
+                linear_damping: 0.0,
+                angular_damping: 0.0,
+                friction: 0.5,
+                restitution: 0.0,
+                collision_group: 0,
+                collision_mask: 0xffff,
+            })
+            .unwrap();
+        let hair = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(0.5, [0.0, 8.0, 0.0], 1.0))
+            .unwrap();
+        world
+            .add_6dof_spring_joint(SixDofSpringJointDesc {
+                rigidbody_a: anchor,
+                rigidbody_b: hair,
+                position: [0.0, 9.0, 0.0],
+                rotation_euler: [0.0; 3],
+                translation_lower_limit: [0.0; 3],
+                translation_upper_limit: [0.0; 3],
+                rotation_lower_limit: [-std::f32::consts::PI; 3],
+                rotation_upper_limit: [std::f32::consts::PI; 3],
+                spring_translation_factor: [0.0; 3],
+                spring_rotation_factor: [0.0; 3],
+            })
+            .unwrap();
+
+        for _ in 0..60 {
+            world.step(1.0 / 60.0, 2).unwrap();
+        }
+        let rest_x = world.rigidbody_transform(hair).unwrap().position[0];
+
+        let mut anchor_x = 0.0;
+        for _ in 0..80 {
+            anchor_x += 0.25;
+            world
+                .set_rigidbody_transform(
+                    anchor,
+                    Transform {
+                        position: [anchor_x, 10.0, 0.0],
+                        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                    },
+                )
+                .unwrap();
+            world.step(1.0 / 60.0, 2).unwrap();
+        }
+
+        let dragged = world.rigidbody_transform(hair).unwrap();
+        eprintln!(
+            "rust anchor dx hair_y {} {}",
+            dragged.position[0] - rest_x,
+            dragged.position[1]
+        );
+        assert!(
+            dragged.position[1] > 0.0,
+            "joint did not hold dynamic body: {dragged:?}"
+        );
+        assert!(
+            dragged.position[0] - rest_x > 5.0,
+            "jointed dynamic body did not follow anchor: rest_x={rest_x}, dragged={dragged:?}"
+        );
+    }
+
+    #[test]
     fn settle_to_current_keeps_teleported_body_stable_until_stepped() {
         let mut world = BulletWorld::new().unwrap();
         let body = world

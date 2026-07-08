@@ -151,7 +151,52 @@ pub(crate) fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::er
     Ok(ExitCode::SUCCESS)
 }
 
-pub(crate) fn golden_parser_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GoldenParserSummaryMetrics {
+    pub(crate) cases: usize,
+    pub(crate) skipped_unsupported: usize,
+    pub(crate) matched_bones: usize,
+    pub(crate) missing_bones: usize,
+    pub(crate) matched_morphs: usize,
+    pub(crate) missing_morphs: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoldenParserSummaryJsonReport {
+    status: &'static str,
+    command: &'static str,
+    mode: &'static str,
+    root: String,
+    cases: usize,
+    skipped_unsupported: usize,
+    matched_bones: usize,
+    missing_bones: usize,
+    matched_morphs: usize,
+    missing_morphs: usize,
+}
+
+pub(crate) fn golden_parser_summary_json_report(
+    root: &Path,
+    metrics: GoldenParserSummaryMetrics,
+) -> GoldenParserSummaryJsonReport {
+    GoldenParserSummaryJsonReport {
+        status: "ok",
+        command: "verify",
+        mode: "parser",
+        root: root.to_string_lossy().into_owned(),
+        cases: metrics.cases,
+        skipped_unsupported: metrics.skipped_unsupported,
+        matched_bones: metrics.matched_bones,
+        missing_bones: metrics.missing_bones,
+        matched_morphs: metrics.matched_morphs,
+        missing_morphs: metrics.missing_morphs,
+    }
+}
+
+pub(crate) fn collect_golden_parser_summary(
+    root: &Path,
+) -> Result<GoldenParserSummaryMetrics, Box<dyn std::error::Error>> {
     let manifest_path = root.join("oracle-batch.json");
     let manifest = GoldenIkBatchManifest::from_json_str(&crate::read_text_file(&manifest_path)?)?;
     let mut parsed_cases = 0usize;
@@ -240,15 +285,38 @@ pub(crate) fn golden_parser_summary(root: &Path) -> Result<ExitCode, Box<dyn std
         return Err("one or more Golden parser files are missing".into());
     }
 
-    println!(
-        "MMDDumper parser golden: cases={} skippedUnsupported={} matchedBones={} missingBones={} matchedMorphs={} missingMorphs={}",
-        parsed_cases,
+    Ok(GoldenParserSummaryMetrics {
+        cases: parsed_cases,
         skipped_unsupported,
         matched_bones,
         missing_bones,
         matched_morphs,
-        missing_morphs
-    );
+        missing_morphs,
+    })
+}
+
+pub(crate) fn golden_parser_summary(
+    root: &Path,
+    use_json: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let metrics = collect_golden_parser_summary(root)?;
+
+    if use_json {
+        println!(
+            "{}",
+            serde_json::to_string(&golden_parser_summary_json_report(root, metrics))?
+        );
+    } else {
+        println!(
+            "MMDDumper parser golden: cases={} skippedUnsupported={} matchedBones={} missingBones={} matchedMorphs={} missingMorphs={}",
+            metrics.cases,
+            metrics.skipped_unsupported,
+            metrics.matched_bones,
+            metrics.missing_bones,
+            metrics.matched_morphs,
+            metrics.missing_morphs
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 

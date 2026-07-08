@@ -1,10 +1,14 @@
 use std::{path::Path, process::ExitCode};
 
-use crate::{diagnostics_suffix, read_file, unsupported_format_error, write_file};
+use crate::{
+    diagnostics_suffix, parse_failure_error, read_file, unsupported_format_error, write_file,
+};
 
 pub(crate) fn parse_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data = read_file(path)?;
-    let parsed = mmd_anim_format::parse_pmx_model(&data)?;
+    let parsed = mmd_anim_format::parse_pmx_model(&data).map_err(|error| {
+        parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmx, error)
+    })?;
     println!(
         "PMX parser: vertices={} faces={} materials={} bones={} morphs={} displayFrames={} rigidBodies={} joints={} softBodies={}{}",
         parsed.metadata.counts.vertices,
@@ -26,7 +30,9 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
     match mmd_anim_format::detect_mmd_format(&data, path.file_name().and_then(|v| v.to_str())) {
         mmd_anim_format::MmdFormatKind::Pmx => parse_pmx_summary(path),
         mmd_anim_format::MmdFormatKind::Pmd => {
-            let parsed = mmd_anim_format::parse_pmd_model(&data)?;
+            let parsed = mmd_anim_format::parse_pmd_model(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmd, error)
+            })?;
             println!(
                 "PMD parser: vertices={} faces={} materials={} bones={} ik={} morphs={} displayFrames={} rigidBodies={} joints={}",
                 parsed.metadata.counts.vertices,
@@ -42,7 +48,9 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             Ok(ExitCode::SUCCESS)
         }
         mmd_anim_format::MmdFormatKind::Vmd => {
-            let parsed = mmd_anim_format::parse_vmd_animation(&data)?;
+            let parsed = mmd_anim_format::parse_vmd_animation(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Vmd, error)
+            })?;
             println!(
                 "VMD parser: boneFrames={} morphFrames={} cameraFrames={} lightFrames={} selfShadowFrames={} propertyFrames={} maxFrame={}",
                 parsed.metadata.counts.bones,
@@ -56,7 +64,9 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             Ok(ExitCode::SUCCESS)
         }
         mmd_anim_format::MmdFormatKind::Vpd => {
-            let parsed = mmd_anim_format::parse_vpd_pose(&data)?;
+            let parsed = mmd_anim_format::parse_vpd_pose(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Vpd, error)
+            })?;
             println!(
                 "VPD parser: bones={}{}",
                 parsed.bone_count,
@@ -65,7 +75,9 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             Ok(ExitCode::SUCCESS)
         }
         mmd_anim_format::MmdFormatKind::Pmm => {
-            let parsed = mmd_anim_format::parse_pmm_manifest(&data)?;
+            let parsed = mmd_anim_format::parse_pmm_manifest(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmm, error)
+            })?;
             let model_slot_flag_counts = parsed
                 .display_state
                 .model_slot_flag_counts
@@ -279,11 +291,12 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             );
             Ok(ExitCode::SUCCESS)
         }
-        mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac => {
+        kind @ (mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac) => {
             let parsed = mmd_anim_format::parse_accessory_manifest(
                 &data,
                 path.file_name().and_then(|v| v.to_str()),
-            )?;
+            )
+            .map_err(|error| parse_failure_error("inspect", path, kind, error))?;
             println!(
                 "{} parser: byteLength={} meshes={} materials={} textures={}{}",
                 parsed.format.to_uppercase(),
@@ -296,7 +309,9 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             Ok(ExitCode::SUCCESS)
         }
         mmd_anim_format::MmdFormatKind::Nmd => {
-            let parsed = mmd_anim_format::parse_nmd_manifest(&data)?;
+            let parsed = mmd_anim_format::parse_nmd_manifest(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Nmd, error)
+            })?;
             println!(
                 "NMD parser: byteLength={} annotations={} globalTracks={} bundles={{accessory:{}, bone:{}, camera:{}, light:{}, model:{}, morph:{}, selfShadow:{}, unknown:{}}}{}",
                 parsed.byte_length,
@@ -314,7 +329,11 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             );
             Ok(ExitCode::SUCCESS)
         }
-        mmd_anim_format::MmdFormatKind::Unknown => Err(unsupported_format_error(path)),
+        mmd_anim_format::MmdFormatKind::Unknown => Err(unsupported_format_error(
+            "inspect",
+            path,
+            mmd_anim_format::MmdFormatKind::Unknown,
+        )),
     }
 }
 
@@ -345,30 +364,51 @@ fn parse_format_json_value(path: &Path) -> Result<serde_json::Value, Box<dyn std
         path.file_name().and_then(|v| v.to_str()),
     ) {
         mmd_anim_format::MmdFormatKind::Pmx => {
-            serde_json::to_value(mmd_anim_format::parse_pmx_model(&data)?)?
+            serde_json::to_value(mmd_anim_format::parse_pmx_model(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmx, error)
+            })?)?
         }
         mmd_anim_format::MmdFormatKind::Pmd => {
-            serde_json::to_value(mmd_anim_format::parse_pmd_model(&data)?)?
+            serde_json::to_value(mmd_anim_format::parse_pmd_model(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmd, error)
+            })?)?
         }
-        mmd_anim_format::MmdFormatKind::Vmd => {
-            serde_json::to_value(mmd_anim_format::parse_vmd_animation(&data)?)?
-        }
+        mmd_anim_format::MmdFormatKind::Vmd => serde_json::to_value(
+            mmd_anim_format::parse_vmd_animation(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Vmd, error)
+            })?,
+        )?,
         mmd_anim_format::MmdFormatKind::Vpd => {
-            serde_json::to_value(mmd_anim_format::parse_vpd_pose(&data)?)?
+            serde_json::to_value(mmd_anim_format::parse_vpd_pose(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Vpd, error)
+            })?)?
         }
         mmd_anim_format::MmdFormatKind::Pmm => {
-            serde_json::to_value(mmd_anim_format::parse_pmm_manifest(&data)?)?
+            serde_json::to_value(mmd_anim_format::parse_pmm_manifest(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmm, error)
+            })?)?
         }
-        mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac => {
-            serde_json::to_value(mmd_anim_format::parse_accessory_manifest(
-                &data,
-                path.file_name().and_then(|v| v.to_str()),
-            )?)?
+        kind @ (mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac) => {
+            serde_json::to_value(
+                mmd_anim_format::parse_accessory_manifest(
+                    &data,
+                    path.file_name().and_then(|v| v.to_str()),
+                )
+                .map_err(|error| parse_failure_error("inspect", path, kind, error))?,
+            )?
         }
         mmd_anim_format::MmdFormatKind::Nmd => {
-            serde_json::to_value(mmd_anim_format::parse_nmd_manifest(&data)?)?
+            serde_json::to_value(mmd_anim_format::parse_nmd_manifest(&data).map_err(|error| {
+                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Nmd, error)
+            })?)?
         }
-        mmd_anim_format::MmdFormatKind::Unknown => return Err(unsupported_format_error(path)),
+        mmd_anim_format::MmdFormatKind::Unknown => {
+            return Err(unsupported_format_error(
+                "inspect",
+                path,
+                mmd_anim_format::MmdFormatKind::Unknown,
+            ));
+        }
     };
     Ok(value)
 }

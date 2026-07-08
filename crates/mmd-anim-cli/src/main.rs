@@ -13,10 +13,35 @@ mod schema;
 mod support;
 
 pub(crate) use support::{
-    copy_world_matrices_to_f32, diagnostics_suffix, f32_checksum, format_cli_error, io_error_label,
-    read_file, read_text_file, resolve_maybe_absolute, translation_checksum,
-    unsupported_format_error, write_file,
+    copy_world_matrices_to_f32, diagnostics_suffix, f32_checksum, format_cli_error,
+    import_failure_error, io_error_label, parse_failure_error, read_file, read_text_file,
+    resolve_maybe_absolute, translation_checksum, unsupported_format_error,
+    unsupported_format_operation_error, unsupported_format_usage_message, write_file,
 };
+
+// ---------------------------------------------------------------------------
+// Build metadata / version text
+// ---------------------------------------------------------------------------
+
+fn extended_version_body() -> &'static str {
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        "\nrustc: ",
+        env!("MMD_ANIM_CLI_RUSTC_VERSION"),
+        "\ntarget: ",
+        env!("MMD_ANIM_CLI_BUILD_TARGET"),
+        "\ngit: ",
+        env!("MMD_ANIM_CLI_GIT_COMMIT"),
+    )
+}
+
+pub(crate) fn extended_version_text() -> String {
+    format!("mmd-anim {}", extended_version_body())
+}
+
+fn extended_version() -> &'static str {
+    extended_version_body()
+}
 
 // ---------------------------------------------------------------------------
 // Clap CLI definition
@@ -25,7 +50,8 @@ pub(crate) use support::{
 #[derive(Parser)]
 #[command(
     name = "mmd-anim",
-    version,
+    version = extended_version(),
+    long_version = extended_version(),
     about = "CLI diagnostics and roundtrip tools for mmd-anim\n\nExit codes: 0 = success, 1 = runtime error, 2 = usage error",
     after_help = "Quick start:\n  mmd-anim inspect model.pmx              Show model summary\n  mmd-anim import model.pmx motion.vmd    Import and inspect pair\n  mmd-anim roundtrip model.pmx            Verify parse-export stability",
     arg_required_else_help = true
@@ -59,7 +85,7 @@ enum Commands {
     /// Import model and optional motion into runtime structures.
     #[command(
         long_about = "Run the runtime importer for a model, or a model/motion pair.\nUse this when checking runtime names, clip build stats, a single evaluated frame, or batch frame JSON for host comparisons.\n--frame-range uses inclusive START:END:STEP in MMD frame units.\n\nSupported formats: .pmx + .vmd, .pmd + .vmd",
-        after_help = "Examples:\n  mmd-anim import model.pmx\n  mmd-anim import model.pmx motion.vmd --clip\n  mmd-anim import model.pmx motion.vmd --frame 120\n  mmd-anim import model.pmx motion.vmd --frames 0,30,60 --json\n  mmd-anim import model.pmx motion.vmd --frame-range 0:120:5 --json\n    (unit: MMD coordinate)"
+        after_help = "Examples:\n  mmd-anim import model.pmx\n  mmd-anim import model.pmx motion.vmd --clip\n  mmd-anim import model.pmx motion.vmd --frame 120\n  mmd-anim import model.pmx motion.vmd --frame 120 --verbose\n  mmd-anim import model.pmx motion.vmd --frames 0,30,60 --json\n  mmd-anim import model.pmx motion.vmd --frames 0,30,60 --json --verbose\n  mmd-anim import model.pmx motion.vmd --frame-range 0:120:5 --json\n  mmd-anim import model.pmx motion.vmd --frame-range 0:120:5 --json --verbose\n    (unit: MMD coordinate)"
     )]
     Import {
         /// Path to the PMX/PMD model file
@@ -81,6 +107,9 @@ enum Commands {
         /// Evaluate an inclusive frame range for a model/motion pair: START:END:STEP
         #[arg(long, value_name = "START:END:STEP")]
         frame_range: Option<String>,
+        /// Print intermediate runtime diagnostics to stderr
+        #[arg(long)]
+        verbose: bool,
     },
 
     /// Verify parse/export/re-parse stability.
@@ -117,8 +146,8 @@ enum Commands {
 
     /// Benchmark runtime evaluation.
     #[command(
-        long_about = "Benchmark a PMX/VMD pair by default, or synthetic runtime data with --synthetic.\nUse this for local performance checks around import, clip build, and evaluation.\n\nPair mode: <model.pmx> <motion.vmd> [start-frame] [frame-count] [step]\n  Flags: --no-ik, --ik-tolerance <value>, --ik-max-iterations-cap <count>\n\nSynthetic mode: --synthetic [models] [bones] [frames] [--json]\n  Defaults: models=1, bones=32, frames=1000\n\nSupported formats: .pmx + .vmd",
-        after_help = "Examples:\n  mmd-anim bench model.pmx motion.vmd\n  mmd-anim bench model.pmx motion.vmd 0 240 1 --no-ik\n  mmd-anim bench --synthetic\n  mmd-anim bench --synthetic 4 64 2000\n  mmd-anim bench --synthetic 4 64 2000 --json"
+        long_about = "Benchmark a PMX/VMD pair by default, or synthetic runtime data with --synthetic.\nUse this for local performance checks around import, clip build, evaluation, and host-facing matrix/morph copies.\n\nPair mode: <model.pmx> <motion.vmd> [start-frame] [frame-count] [step]\n  Flags: --instances <count>, --no-ik, --ik-tolerance <value>, --ik-max-iterations-cap <count>, [--json]\n  Defaults: instances=1, start-frame=0, frame-count=1000, step=1\n\nSynthetic mode: --synthetic [models] [bones] [frames] [--json]\n  Defaults: models=1, bones=32, frames=1000\n\nSupported formats: .pmx + .vmd",
+        after_help = "Examples:\n  mmd-anim bench model.pmx motion.vmd\n  mmd-anim bench model.pmx motion.vmd --instances 1\n  mmd-anim bench model.pmx motion.vmd --instances 10\n  mmd-anim bench model.pmx motion.vmd --instances 30 --json\n  mmd-anim bench model.pmx motion.vmd 0 240 1 --no-ik\n  mmd-anim bench model.pmx motion.vmd 0 240 1 --json\n  mmd-anim bench --synthetic\n  mmd-anim bench --synthetic 4 64 2000\n  mmd-anim bench --synthetic 4 64 2000 --json"
     )]
     Bench {
         /// Path to the PMX model file
@@ -140,7 +169,7 @@ enum Commands {
     /// Verify oracle, golden, parser, or numeric comparison data.
     #[command(
         long_about = "Run comparison and oracle diagnostics from a manifest, oracle file, or golden root.\nWhen --mode is omitted, verify reads the target as an oracle JSONL summary file.\nMode inputs:\n  numeric: manifest JSON for numeric model/motion/oracle cases\n  camera: manifest JSON for camera comparison cases\n  ik: golden root directory containing IK fixture/oracle data\n  parser: golden root directory containing parser golden data\n  omitted: oracle JSONL summary file\nUse this for numeric, camera, IK, parser, and focused diagnosis workflows.",
-        after_help = "Examples:\n  mmd-anim verify oracle.jsonl\n  mmd-anim verify manifest.json --mode numeric\n  mmd-anim verify manifest.json --mode numeric --json\n  mmd-anim verify camera-manifest.json --mode camera\n  mmd-anim verify golden-root --mode ik\n  mmd-anim verify golden-root --mode ik --compare\n  mmd-anim verify golden-root --mode parser\n  mmd-anim verify manifest.json --mode numeric --diagnose case-a 120 左足ＩＫ"
+        after_help = "Examples:\n  mmd-anim verify oracle.jsonl\n  mmd-anim verify oracle.jsonl --json\n  mmd-anim verify manifest.json --mode numeric\n  mmd-anim verify manifest.json --mode numeric --json\n  mmd-anim verify camera-manifest.json --mode camera\n  mmd-anim verify camera-manifest.json --mode camera --json\n  mmd-anim verify golden-root --mode ik\n  mmd-anim verify golden-root --mode ik --compare\n  mmd-anim verify golden-root --mode parser\n  mmd-anim verify golden-root --mode parser --json\n  mmd-anim verify manifest.json --mode numeric --diagnose case-a 120 左足ＩＫ"
     )]
     Verify {
         /// Path to a manifest, oracle JSONL file, or golden root directory
@@ -168,11 +197,14 @@ enum Commands {
     /// Patch PMM fields in place to a new output file.
     #[command(
         long_about = "Rewrite selected PMM document fields while preserving the rest of the file.\nUse --model-path when a PMM document model slot points at the wrong model path.\nUse --frame-range when the scene timeline current frame, begin/end frame, or range enabled flags need correction.\nThe flag structure is intentionally stable: --model-path takes <idx> <path> <out>, and --frame-range takes <out> plus one or more frame-range options.",
-        after_help = "Examples:\n  mmd-anim patch scene.pmm --model-path 0 model.pmx out.pmm\n  mmd-anim patch scene.pmm --frame-range out.pmm --current-frame 120\n  mmd-anim patch scene.pmm --frame-range out.pmm --begin-frame 0 --end-frame 240\n  mmd-anim patch scene.pmm --frame-range out.pmm --begin-frame-enabled true --end-frame-enabled true"
+        after_help = "Examples:\n  mmd-anim patch scene.pmm --model-path 0 model.pmx out.pmm\n  mmd-anim patch scene.pmm --frame-range out.pmm --current-frame 120\n  mmd-anim patch scene.pmm --frame-range out.pmm --begin-frame 0 --end-frame 240\n  mmd-anim patch scene.pmm --frame-range out.pmm --begin-frame-enabled true --end-frame-enabled true\n  mmd-anim patch scene.pmm --model-path 0 model.pmx out.pmm --json"
     )]
     Patch {
         /// Path to the input PMM file
         pmm: PathBuf,
+        /// Output patch report as JSON
+        #[arg(long)]
+        json: bool,
         /// Patch a document model path: <idx> <path> <out>
         #[arg(long, num_args = 3, value_names = ["IDX", "PATH", "OUT"])]
         model_path: Option<Vec<String>>,
@@ -202,7 +234,7 @@ enum Commands {
     /// Export an asset to another binary file.
     #[command(
         long_about = "Write an MMD asset to an output path, optionally starting from JSON.\nWith --from-json, the input must be UTF-8 JSON text and the output extension selects the binary format.\nThe JSON shape is the raw parsed DTO emitted by `mmd-anim inspect <asset> --json`, for example PmxParsedModel for .pmx, PmdParsedModel for .pmd, or VmdParsedAnimation for .vmd. For new VMD generation, use the raw VmdParsedAnimation DTO shape directly.\nUse this for parser/exporter smoke checks and JSON-to-binary conversion.\n\nSupported formats: .pmx, .pmd, .vmd",
-        after_help = "Examples:\n  mmd-anim export input.vmd output.vmd\n  mmd-anim export input.json output.vmd --from-json\n  mmd-anim export motion-dto.json motion.vmd --from-json"
+        after_help = "Examples:\n  mmd-anim export input.vmd output.vmd\n  mmd-anim export input.json output.vmd --from-json\n  mmd-anim export motion-dto.json motion.vmd --from-json\n  mmd-anim export input.vmd output.vmd --json"
     )]
     Export {
         /// Path to the input asset or JSON file
@@ -212,13 +244,16 @@ enum Commands {
         /// Treat input as JSON and export binary format
         #[arg(long)]
         from_json: bool,
+        /// Output export report as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Build a PMM scene from a model and motion.
     #[command(
         name = "build-pmm",
         long_about = "Create a PMM scene from a PMX model and VMD motion.\nUse this when preparing MMD GUI-compatible scenes from runtime fixtures.\n\nSupported formats: .pmx + .vmd → .pmm",
-        after_help = "Examples:\n  mmd-anim build-pmm model.pmx motion.vmd scene.pmm\n  mmd-anim build-pmm ./model.pmx ./motion.vmd ./out/scene.pmm"
+        after_help = "Examples:\n  mmd-anim build-pmm model.pmx motion.vmd scene.pmm\n  mmd-anim build-pmm ./model.pmx ./motion.vmd ./out/scene.pmm\n  mmd-anim build-pmm model.pmx motion.vmd scene.pmm --json"
     )]
     BuildPmm {
         /// Path to the PMX model file
@@ -227,13 +262,16 @@ enum Commands {
         motion: PathBuf,
         /// Path to the output PMM file
         output: PathBuf,
+        /// Output build report as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Convert a PMX model to FBX 7.4 binary.
     #[command(
         name = "convert-fbx",
-        long_about = "Convert a PMX model to a minimal FBX 7.4 binary file.\nWith --vmd, bone motion is baked to FBX AnimationStack/AnimationLayer/AnimCurve channels.\nUse --max-frame with --vmd to cap the inclusive bake range for local smoke checks.",
-        after_help = "Examples:\n  mmd-anim convert-fbx model.pmx model.fbx\n  mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd\n  mmd-anim convert-fbx model.pmx smoke.fbx --vmd motion.vmd --max-frame 120"
+        long_about = "Convert a PMX model to a minimal FBX 7.4 binary file.\nWith --vmd, bone motion is baked to FBX AnimationStack/AnimationLayer/AnimCurve channels.\nUse --bones-only to export only the skeleton and optional baked bone animation.\nUse --max-frame with --vmd to cap the inclusive bake range for local smoke checks.",
+        after_help = "Examples:\n  mmd-anim convert-fbx model.pmx model.fbx\n  mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd\n  mmd-anim convert-fbx model.pmx smoke.fbx --vmd motion.vmd --max-frame 120\n  mmd-anim convert-fbx model.pmx skeleton.fbx --bones-only\n  mmd-anim convert-fbx model.pmx motion.fbx --vmd motion.vmd --bones-only --max-frame 120\n  mmd-anim convert-fbx model.pmx model.fbx --readable-bone-names\n  mmd-anim convert-fbx model.pmx model.fbx --copy-diffuse-textures --json"
     )]
     ConvertFbx {
         /// Path to the input PMX model file
@@ -246,19 +284,34 @@ enum Commands {
         /// Optional inclusive maximum frame for FBX runtime bake smoke checks
         #[arg(long)]
         max_frame: Option<u32>,
+        /// Copy PMX diffuse textures next to the FBX and rewrite FBX texture paths
+        #[arg(long)]
+        copy_diffuse_textures: bool,
+        /// Export skeleton and optional baked bone animation without mesh/material/skin data
+        #[arg(long)]
+        bones_only: bool,
+        /// Use readable English bone names instead of legacy UTF-8 hex encoding
+        #[arg(long)]
+        readable_bone_names: bool,
+        /// Output conversion report as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Build a PMX model from a parts manifest.
     #[command(
         name = "build-pmx",
         long_about = "Create a PMX model from a parts manifest JSON.\nThe input is not the parsed PmxParsedModel DTO used by export --from-json; it is a PmxPartsDescriptor plus flat positionsXyz, normalsXyz, uvsXy, indices, and optional skin/edge arrays.\n\nSupported formats: .json → .pmx",
-        after_help = "Examples:\n  mmd-anim build-pmx parts.json model.pmx\n  mmd-anim build-pmx ./fixtures/parts.json ./out/model.pmx"
+        after_help = "Examples:\n  mmd-anim build-pmx parts.json model.pmx\n  mmd-anim build-pmx ./fixtures/parts.json ./out/model.pmx\n  mmd-anim build-pmx parts.json model.pmx --json"
     )]
     BuildPmx {
         /// Path to the PMX parts manifest JSON file
         input: PathBuf,
         /// Path to the output PMX file
         output: PathBuf,
+        /// Output build report as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Sample a VMD camera, light, or self-shadow track at one frame.
@@ -280,6 +333,17 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Generate shell completion scripts to stdout.
+    #[command(
+        long_about = "Write a shell completion script for bash, zsh, fish, or PowerShell to stdout.\nRedirect the output into your shell's completion directory or eval it during shell startup.",
+        after_help = "Examples:\n  mmd-anim completion bash\n  mmd-anim completion zsh > ~/.zfunc/_mmd-anim\n  mmd-anim completion fish | source /dev/stdin\n  mmd-anim completion powershell | Out-String | Invoke-Expression"
+    )]
+    Completion {
+        /// Target shell for completion script generation
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -288,6 +352,15 @@ enum VerifyMode {
     Camera,
     Ik,
     Parser,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    #[value(name = "powershell")]
+    PowerShell,
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +372,7 @@ fn main() -> ExitCode {
 
     let result: Result<ExitCode, Box<dyn std::error::Error>> = match cli.command {
         None => {
-            println!("mmd-anim {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", extended_version_text());
             Ok(ExitCode::SUCCESS)
         }
 
@@ -317,14 +390,18 @@ fn main() -> ExitCode {
             frame,
             frames,
             frame_range,
+            verbose,
         }) => dispatch_import(
             &model,
             motion.as_deref(),
-            json,
-            clip,
-            frame,
-            frames,
-            frame_range,
+            ImportDispatchOptions {
+                use_json: json,
+                show_clip: clip,
+                frame,
+                frames,
+                frame_range,
+                verbose,
+            },
         ),
         Some(Commands::Roundtrip {
             asset,
@@ -359,6 +436,7 @@ fn main() -> ExitCode {
         ),
         Some(Commands::Patch {
             pmm,
+            json,
             model_path,
             frame_range,
             current_frame,
@@ -369,6 +447,7 @@ fn main() -> ExitCode {
             end_frame_enabled,
         }) => dispatch_patch(
             &pmm,
+            json,
             model_path,
             frame_range,
             PmmFrameRangeArgs {
@@ -384,27 +463,47 @@ fn main() -> ExitCode {
             input,
             output,
             from_json,
-        }) => dispatch_export(&input, &output, from_json),
+            json,
+        }) => dispatch_export(&input, &output, from_json, json),
         Some(Commands::BuildPmm {
             model,
             motion,
             output,
-        }) => commands::export::export_pmm_scene(&model, &motion, &output),
+            json,
+        }) => commands::export::export_pmm_scene(&model, &motion, &output, json),
         Some(Commands::ConvertFbx {
             input,
             output,
             vmd,
             max_frame,
-        }) => commands::fbx::convert_pmx_to_fbx(&input, &output, vmd.as_deref(), max_frame),
-        Some(Commands::BuildPmx { input, output }) => {
-            commands::export::export_pmx_from_parts_manifest(&input, &output)
-        }
+            copy_diffuse_textures,
+            bones_only,
+            readable_bone_names,
+            json,
+        }) => commands::fbx::convert_pmx_to_fbx(
+            &input,
+            &output,
+            vmd.as_deref(),
+            commands::fbx::ConvertFbxOptions {
+                max_frame,
+                copy_diffuse_textures,
+                bones_only,
+                readable_bone_names,
+                use_json: json,
+            },
+        ),
+        Some(Commands::BuildPmx {
+            input,
+            output,
+            json,
+        }) => commands::export::export_pmx_from_parts_manifest(&input, &output, json),
         Some(Commands::VmdSample {
             motion,
             kind,
             frame,
             json,
         }) => dispatch_vmd_sample(&motion, kind, frame, json),
+        Some(Commands::Completion { shell }) => dispatch_completion(shell),
     };
 
     match result {
@@ -447,6 +546,23 @@ fn dispatch_inspect(
     }
 }
 
+fn dispatch_completion(shell: CompletionShell) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use std::io;
+
+    use clap::CommandFactory;
+    use clap_complete::{Shell, generate};
+
+    let shell = match shell {
+        CompletionShell::Bash => Shell::Bash,
+        CompletionShell::Zsh => Shell::Zsh,
+        CompletionShell::Fish => Shell::Fish,
+        CompletionShell::PowerShell => Shell::PowerShell,
+    };
+    let mut cmd = Cli::command();
+    generate(shell, &mut cmd, "mmd-anim", &mut io::stdout());
+    Ok(ExitCode::SUCCESS)
+}
+
 fn dispatch_vmd_sample(
     motion: &Path,
     kind: commands::vmd_sample::VmdSampleKind,
@@ -459,16 +575,53 @@ fn dispatch_vmd_sample(
     commands::vmd_sample::vmd_sample(motion, kind, frame, json)
 }
 
-fn dispatch_import(
-    model: &Path,
-    motion: Option<&Path>,
+#[derive(Debug)]
+struct ImportDispatchOptions {
     use_json: bool,
     show_clip: bool,
     frame: Option<f32>,
     frames: Option<String>,
     frame_range: Option<String>,
+    verbose: bool,
+}
+
+fn dispatch_import(
+    model: &Path,
+    motion: Option<&Path>,
+    options: ImportDispatchOptions,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let ImportDispatchOptions {
+        use_json,
+        show_clip,
+        frame,
+        frames,
+        frame_range,
+        verbose,
+    } = options;
     let batch_requested = frames.is_some() || frame_range.is_some();
+    if verbose {
+        if show_clip {
+            return usage_error("import --verbose cannot be combined with --clip");
+        }
+        if motion.is_none() {
+            return usage_error("import --verbose requires a model/motion pair");
+        }
+        if batch_requested {
+            if !use_json {
+                return usage_error(
+                    "import --verbose with --frames or --frame-range requires --json",
+                );
+            }
+        } else if frame.is_some() {
+            if use_json {
+                return usage_error(
+                    "import --verbose cannot be combined with --json without --frames or --frame-range",
+                );
+            }
+        } else {
+            return usage_error("import --verbose requires --frame, --frames, or --frame-range");
+        }
+    }
     if use_json && !batch_requested {
         return usage_error("import --json is only supported with --frames or --frame-range");
     }
@@ -494,20 +647,20 @@ fn dispatch_import(
                 Ok(frame_spec) => frame_spec,
                 Err(error) => return usage_error(error),
             };
-            return commands::import::import_pair_frames_json(model, motion, frame_spec);
+            return commands::import::import_pair_frames_json(model, motion, frame_spec, verbose);
         }
         if let Some(frame_range) = frame_range {
             let frame_spec = match commands::import::parse_import_frame_range(&frame_range) {
                 Ok(frame_spec) => frame_spec,
                 Err(error) => return usage_error(error),
             };
-            return commands::import::import_pair_frames_json(model, motion, frame_spec);
+            return commands::import::import_pair_frames_json(model, motion, frame_spec, verbose);
         }
         if show_clip {
             return commands::import::import_pair_clip_summary(model, motion);
         }
         if let Some(frame) = frame {
-            return commands::import::import_pair_frame_summary(model, motion, frame);
+            return commands::import::import_pair_frame_summary(model, motion, frame, verbose);
         }
         return commands::import::import_pair_summary(model, motion);
     }
@@ -521,9 +674,11 @@ fn dispatch_import(
         mmd_anim_format::MmdFormatKind::Pmx => commands::import::import_pmx_summary(model),
         mmd_anim_format::MmdFormatKind::Pmd => commands::import::import_pmd_summary(model),
         mmd_anim_format::MmdFormatKind::Vmd => commands::import::import_vmd_summary(model),
-        _ => usage_error(format!(
-            "unsupported or unrecognized file format: {}; import requires a PMX, PMD, or VMD input when no motion is provided",
-            model.display()
+        kind => usage_error(unsupported_format_usage_message(
+            "import",
+            model,
+            kind,
+            "import requires a PMX, PMD, or VMD input when no motion is provided",
         )),
     }
 }
@@ -557,8 +712,11 @@ fn dispatch_bench(
         }
         raw.extend(extra_args);
         let mut iter = raw.into_iter();
-        commands::bench::parse_bench_synthetic_args(&mut iter)
-            .and_then(commands::bench::bench_synthetic)
+        let cfg = match commands::bench::parse_bench_synthetic_args(&mut iter) {
+            Ok(cfg) => cfg,
+            Err(error) => return usage_error(error.to_string()),
+        };
+        commands::bench::bench_synthetic(cfg)
     } else {
         let Some(model) = model else {
             return usage_error("bench requires <model> <motion> unless --synthetic is set");
@@ -572,7 +730,11 @@ fn dispatch_bench(
         ];
         raw.extend(extra_args);
         let mut iter = raw.into_iter();
-        commands::bench::parse_bench_pair_args(&mut iter).and_then(commands::bench::bench_pair)
+        let cfg = match commands::bench::parse_bench_pair_args(&mut iter) {
+            Ok(cfg) => cfg,
+            Err(error) => return usage_error(error.to_string()),
+        };
+        commands::bench::bench_pair(cfg)
     }
 }
 
@@ -586,15 +748,10 @@ fn dispatch_verify(
     sample_frame_offset: Option<f32>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let Some(mode) = mode else {
-        if diagnose.is_some()
-            || compare
-            || use_json
-            || eval_frame.is_some()
-            || sample_frame_offset.is_some()
-        {
+        if diagnose.is_some() || compare || eval_frame.is_some() || sample_frame_offset.is_some() {
             return usage_error("verify without --mode only supports oracle summary files");
         }
-        return commands::oracle::oracle_summary(&target.to_string_lossy());
+        return commands::oracle::oracle_summary(&target.to_string_lossy(), use_json);
     };
 
     match mode {
@@ -622,11 +779,19 @@ fn dispatch_verify(
             commands::compare::compare_numeric_manifest(target)
         }
         VerifyMode::Camera => {
-            if compare || use_json {
-                return usage_error("verify --mode camera does not support --compare or --json");
+            if compare {
+                return usage_error("verify --mode camera does not support --compare");
             }
             if sample_frame_offset.is_some() {
                 return usage_error("verify --mode camera does not support --sample-frame-offset");
+            }
+            if use_json {
+                if diagnose.is_some() || eval_frame.is_some() {
+                    return usage_error(
+                        "verify --mode camera --json cannot be combined with --diagnose or --eval-frame",
+                    );
+                }
+                return commands::compare::compare_numeric_manifest_json(target);
             }
             if let Some(parts) = diagnose {
                 return dispatch_numeric_diagnose(target, parts, eval_frame);
@@ -642,7 +807,6 @@ fn dispatch_verify(
         VerifyMode::Parser => {
             if diagnose.is_some()
                 || compare
-                || use_json
                 || eval_frame.is_some()
                 || sample_frame_offset.is_some()
             {
@@ -650,7 +814,7 @@ fn dispatch_verify(
                     "verify --mode parser only supports parser golden summary for the target root",
                 );
             }
-            commands::golden::golden_parser_summary(target)
+            commands::golden::golden_parser_summary(target, use_json)
         }
     }
 }
@@ -801,6 +965,7 @@ impl PmmFrameRangeArgs {
 
 fn dispatch_patch(
     input: &Path,
+    use_json: bool,
     model_path: Option<Vec<String>>,
     frame_range: Option<PathBuf>,
     frame_args: PmmFrameRangeArgs,
@@ -818,6 +983,7 @@ fn dispatch_patch(
                 &index,
                 &path,
                 &PathBuf::from(output),
+                use_json,
             )
         }
         (None, Some(output)) => {
@@ -828,6 +994,7 @@ fn dispatch_patch(
                 input,
                 &output,
                 &frame_args.to_option_args(),
+                use_json,
             )
         }
         (Some(_), Some(_)) => {
@@ -841,11 +1008,12 @@ fn dispatch_export(
     input: &Path,
     output: &Path,
     from_json: bool,
+    use_json: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     if from_json {
-        commands::export::export_json_format(input, output)
+        commands::export::export_json_format(input, output, use_json)
     } else {
-        commands::export::export_format(input, output)
+        commands::export::export_format(input, output, use_json)
     }
 }
 

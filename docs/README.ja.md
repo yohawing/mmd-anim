@@ -69,7 +69,7 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 | VPD | **対応** | **対応** |
 | PMM | ヘッダ、タイムライン、表示状態、参照アセット、PMMv2 の概要情報、一部 keyframe payload metadata | 部分対応: parse 済み byte の lossless round trip、限定 source-byte patch、単一モデル PMX/VMD scene の試験生成 |
 | X/VAC | テキスト X のメッシュ、材質、UV、法線、頂点色の構造化 + VAC の設定/生データ行 | テキスト X / VAC ラッパーの書き出し |
-| FBX | 読み込みなし | 試験対応: PMX mesh / skeleton / skin / bind pose と、runtime bake 済み VMD ボーンアニメーションを FBX 7.4 binary として書き出し |
+| FBX | 読み込みなし | 試験対応: PMX mesh / skeleton / skin / bind pose、vertex morph blendshape、runtime bake 済み VMD ボーン + vertex morph animation、bones-only skeleton / motion 出力を FBX 7.4 binary として書き出し |
 
 ## Rust から使う
 
@@ -199,7 +199,29 @@ PMXとVMDから、アニメーション付きFBXを書き出せます。
 
 ```powershell
 mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
+mmd-anim convert-fbx model.pmx model.fbx --copy-diffuse-textures
+mmd-anim convert-fbx model.pmx motion.fbx --vmd motion.vmd --bones-only
+mmd-anim convert-fbx model.pmx model.fbx --readable-bone-names
 ```
+
+`--vmd` 指定時の `convert-fbx` は、ボーンと vertex morph weight を runtime bake
+経路で出力します。IK、付与変形、fixed-axis constraint は FBX animation curve
+へ書く前にサンプルされます。camera、light、self-shadow、visibility、physics、
+非 vertex morph track は FBX track としては出力しません。
+
+`--bones-only` を指定すると、mesh、material、skin cluster、bind pose、texture、
+blendshape を出さず、FBX skeleton と任意の runtime bake 済み bone animation だけを
+書き出します。
+
+既定の bone 名は互換性のため legacy UTF-8 hex です。`--readable-bone-names` を指定すると、
+PMX 英語名、標準 MMD 辞書、sanitize 済み ASCII fallback を使う readable policy に切り替わります。
+この指定時は、PMX bone index、元の名前、FBX 名、名前 source を記録した
+`<fbx-stem>.bone-map.json` も横に出力します。
+
+既定では PMX の diffuse texture path をそのまま FBX に書きます。
+`--copy-diffuse-textures` を指定すると、参照された diffuse texture を FBX 横の
+`*-textures` ディレクトリへコピーし、FBX 内の path をその相対 path に差し替えます。
+sphere / toon / material morph texture は対象外です。
 
 ## クレート構成
 

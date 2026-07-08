@@ -74,7 +74,7 @@ Format support overview. "Loading" means parsing a file into structured data.
 | VPD | **supported** | **supported** |
 | PMM | header, timeline, display state, referenced assets, PMMv2 summaries, and selected keyframe payload metadata | partial support: lossless parsed-byte round trip, limited source-byte patches, and experimental single-model PMX/VMD scene generation |
 | X/VAC | text X mesh, material, UV, normal, vertex color + VAC settings and raw lines | text X / VAC wrapper writing |
-| FBX | not loaded | experimental FBX 7.4 binary export for PMX mesh/skeleton/skin/bind pose and runtime-baked VMD bone animation |
+| FBX | not loaded | experimental FBX 7.4 binary export for PMX mesh/skeleton/skin/bind pose, vertex morph blendshapes, runtime-baked VMD bone + vertex morph animation, and bones-only skeleton/motion output |
 
 ## Rust Usage
 
@@ -213,7 +213,30 @@ You can export animated FBX files from PMX and VMD inputs.
 
 ```powershell
 mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
+mmd-anim convert-fbx model.pmx model.fbx --copy-diffuse-textures
+mmd-anim convert-fbx model.pmx motion.fbx --vmd motion.vmd --bones-only
+mmd-anim convert-fbx model.pmx model.fbx --readable-bone-names
 ```
+
+With `--vmd`, `convert-fbx` uses runtime-baked output for bones and vertex
+morph weights, so IK, append transforms, and fixed-axis constraints are sampled
+before writing FBX animation curves. Camera, light, self-shadow, visibility,
+physics, and non-vertex morph tracks are not exported as FBX tracks.
+
+Use `--bones-only` to write only the FBX skeleton and optional runtime-baked
+bone animation, without mesh, materials, skin clusters, bind pose, textures, or
+blendshapes.
+
+By default, bone names keep the legacy UTF-8 hex encoding for compatibility.
+Use `--readable-bone-names` to opt into English PMX names, a standard MMD bone
+dictionary, and sanitized ASCII fallbacks instead.
+When enabled, the CLI also writes `<fbx-stem>.bone-map.json` with PMX bone
+indices, source names, FBX names, and name source labels.
+
+By default, PMX diffuse texture paths are written to FBX as-is. With
+`--copy-diffuse-textures`, referenced diffuse textures are copied next to the
+FBX into a managed `*-textures` directory and FBX paths are rewritten to those
+relative files. Sphere, toon, and material-morph textures are not exported.
 
 ## Crates
 

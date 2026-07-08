@@ -9,6 +9,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "CLI diagnostics and roundtrip tools for mmd-anim"
+build = "build.rs"
 
 [[bin]]
 name = "mmd-anim"
@@ -18,6 +19,7 @@ doc = false
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 glam.workspace = true
 mmd-anim-runtime.workspace = true
 mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.9", features = ["fbx"] }

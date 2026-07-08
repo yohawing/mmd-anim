@@ -9,6 +9,8 @@ pub const NATIVE_FEATURE_ENABLED: bool = cfg!(feature = "native");
 mod native;
 #[cfg(all(feature = "native", feature = "pmx-format"))]
 mod pmx;
+#[cfg(all(feature = "native", feature = "pmx-format", feature = "runtime"))]
+mod runtime;
 
 #[cfg(feature = "native")]
 pub use native::{
@@ -20,3 +22,5 @@ pub use pmx::{
     PmxBulletBuildReport, PmxBulletWorld, PmxRigidBodyBinding, PmxRigidBodyMode,
     build_bullet_world_from_pmx,
 };
+#[cfg(all(feature = "native", feature = "pmx-format", feature = "runtime"))]
+pub use runtime::RuntimePhysicsBridgeExt;

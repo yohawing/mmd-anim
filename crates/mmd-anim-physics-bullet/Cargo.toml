@@ -14,10 +14,12 @@ description = "Optional Bullet physics backend for mmd-anim"
 default = []
 native = []
 pmx-format = ["dep:mmd-anim-format"]
+runtime = ["dep:mmd-anim-runtime"]
 
 [dependencies]
 glam.workspace = true
 mmd-anim-format = { workspace = true, optional = true }
+mmd-anim-runtime = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [build-dependencies]

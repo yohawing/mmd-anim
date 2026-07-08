@@ -399,6 +399,7 @@ dependencies = [
  "cc",
  "glam",
  "mmd-anim-format",
+ "mmd-anim-runtime",
  "serde_json",
  "thiserror",
 ]

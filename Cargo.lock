@@ -397,6 +397,8 @@ name = "mmd-anim-physics-bullet"
 version = "0.1.9"
 dependencies = [
  "cc",
+ "mmd-anim-format",
+ "serde_json",
  "thiserror",
 ]
 

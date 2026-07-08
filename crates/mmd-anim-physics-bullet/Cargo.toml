@@ -13,9 +13,14 @@ description = "Optional Bullet physics backend for mmd-anim"
 [features]
 default = []
 native = []
+pmx-format = ["dep:mmd-anim-format"]
 
 [dependencies]
+mmd-anim-format = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [build-dependencies]
 cc = "1.2"
+
+[dev-dependencies]
+serde_json.workspace = true

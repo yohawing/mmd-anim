@@ -1,6 +1,7 @@
 use std::ffi::CStr;
 use std::ptr::{self, NonNull};
 
+use glam::{Mat4, Quat, Vec3};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -157,6 +158,41 @@ impl SixDofSpringJointDesc {
 pub struct Transform {
     pub position: [f32; 3],
     pub rotation_xyzw: [f32; 4],
+}
+
+impl Transform {
+    pub const IDENTITY: Self = Self {
+        position: [0.0; 3],
+        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+    };
+
+    pub fn from_translation(position: [f32; 3]) -> Self {
+        Self {
+            position,
+            rotation_xyzw: Self::IDENTITY.rotation_xyzw,
+        }
+    }
+
+    pub fn to_mat4(self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(
+            Vec3::ONE,
+            Quat::from_xyzw(
+                self.rotation_xyzw[0],
+                self.rotation_xyzw[1],
+                self.rotation_xyzw[2],
+                self.rotation_xyzw[3],
+            ),
+            Vec3::from_array(self.position),
+        )
+    }
+
+    pub fn from_mat4(matrix: Mat4) -> Self {
+        let (_scale, rotation, translation) = matrix.to_scale_rotation_translation();
+        Self {
+            position: translation.to_array(),
+            rotation_xyzw: rotation.to_array(),
+        }
+    }
 }
 
 pub struct BulletWorld {

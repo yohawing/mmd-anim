@@ -16,6 +16,7 @@ native = []
 pmx-format = ["dep:mmd-anim-format"]
 
 [dependencies]
+glam.workspace = true
 mmd-anim-format = { workspace = true, optional = true }
 thiserror.workspace = true
 

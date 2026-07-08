@@ -1,3 +1,4 @@
+use glam::{EulerRot, Mat4, Quat, Vec3};
 use mmd_anim_format::{
     PmxParsedModel,
     pmx::{PmxParsedJoint, PmxParsedRigidBody},
@@ -57,7 +58,9 @@ impl PmxBulletWorld {
             let Some(transform) = bone_world_transforms.get(bone_index).copied() else {
                 continue;
             };
-            self.world.set_rigidbody_transform(handle, transform)?;
+            let body_world = transform.to_mat4() * binding.body_from_bone.to_mat4();
+            self.world
+                .set_rigidbody_transform(handle, Transform::from_mat4(body_world))?;
             fed += 1;
         }
         Ok(fed)
@@ -83,7 +86,10 @@ impl PmxBulletWorld {
             let Some(slot) = bone_transforms.get_mut(bone_index) else {
                 continue;
             };
-            *slot = Some(self.world.rigidbody_transform(handle)?);
+            let body_world = self.world.rigidbody_transform(handle)?.to_mat4();
+            *slot = Some(Transform::from_mat4(
+                body_world * binding.bone_from_body.to_mat4(),
+            ));
         }
         Ok(bone_transforms)
     }
@@ -107,10 +113,12 @@ impl PmxRigidBodyMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PmxRigidBodyBinding {
     pub bone_index: Option<usize>,
     pub mode: PmxRigidBodyMode,
+    pub body_from_bone: Transform,
+    pub bone_from_body: Transform,
 }
 
 pub fn build_bullet_world_from_pmx(
@@ -132,6 +140,8 @@ pub fn build_bullet_world_from_pmx(
                 None
             },
             mode: rigidbody_mode_from_pmx(body.mode.as_str()),
+            body_from_bone: body_from_bone_transform(model, body),
+            bone_from_body: bone_from_body_transform(model, body),
         });
         report.rigidbodies_added += 1;
     }
@@ -162,6 +172,49 @@ fn rigidbody_mode_from_pmx(mode: &str) -> PmxRigidBodyMode {
         "dynamicBone" => PmxRigidBodyMode::DynamicBone,
         _ => PmxRigidBodyMode::Unknown,
     }
+}
+
+fn body_from_bone_transform(model: &PmxParsedModel, body: &PmxParsedRigidBody) -> Transform {
+    let body_bind = rigidbody_bind_transform(body);
+    let Some(bone_index) = valid_bone_index(model, body.bone_index) else {
+        return Transform::from_mat4(body_bind);
+    };
+    let bone_bind = bone_bind_transform(model, bone_index);
+    Transform::from_mat4(bone_bind.inverse() * body_bind)
+}
+
+fn bone_from_body_transform(model: &PmxParsedModel, body: &PmxParsedRigidBody) -> Transform {
+    let body_bind = rigidbody_bind_transform(body);
+    let Some(bone_index) = valid_bone_index(model, body.bone_index) else {
+        return Transform::from_mat4(body_bind.inverse());
+    };
+    let bone_bind = bone_bind_transform(model, bone_index);
+    Transform::from_mat4(body_bind.inverse() * bone_bind)
+}
+
+fn valid_bone_index(model: &PmxParsedModel, bone_index: i32) -> Option<usize> {
+    if bone_index < 0 {
+        return None;
+    }
+    let bone_index = bone_index as usize;
+    (bone_index < model.skeleton.bones.len()).then_some(bone_index)
+}
+
+fn rigidbody_bind_transform(body: &PmxParsedRigidBody) -> Mat4 {
+    Mat4::from_scale_rotation_translation(
+        Vec3::ONE,
+        Quat::from_euler(
+            EulerRot::ZYX,
+            body.rotation[2],
+            body.rotation[1],
+            body.rotation[0],
+        ),
+        Vec3::from_array(body.position),
+    )
+}
+
+fn bone_bind_transform(model: &PmxParsedModel, bone_index: usize) -> Mat4 {
+    Mat4::from_translation(Vec3::from_array(model.skeleton.bones[bone_index].position))
 }
 
 fn rigidbody_desc_from_pmx(
@@ -376,6 +429,52 @@ mod tests {
             physics_bone.position[1] < 8.0,
             "dynamic body should write back simulated transform: {physics_bone:?}"
         );
+    }
+
+    #[test]
+    fn feed_and_readback_apply_rigidbody_bone_offset() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [{"name": "root", "position": [0.0, 10.0, 0.0]}],
+            "rigidBodies": [
+                {
+                    "name": "offsetBody",
+                    "boneIndex": 0,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 9.0, 0.0],
+                    "mode": "static"
+                }
+            ]
+        }))
+        .unwrap();
+        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+        let model = build_pmx_model_from_parts(PmxPartsInput {
+            descriptor,
+            positions_xyz: &positions_xyz,
+            normals_xyz: &normals_xyz,
+            uvs_xy: &uvs_xy,
+            indices: &indices,
+            skin_indices: &[],
+            skin_weights: &[],
+            edge_scale: &[],
+        })
+        .unwrap();
+
+        let mut built = build_bullet_world_from_pmx(&model).unwrap();
+        built
+            .feed_kinematic_rigidbodies(&[Transform::from_translation([0.0, 20.0, 0.0])])
+            .unwrap();
+        let body = built
+            .world
+            .rigidbody_transform(built.rigidbody_handles[0])
+            .unwrap();
+
+        assert!((built.rigidbody_bindings[0].body_from_bone.position[1] + 1.0).abs() < 1.0e-4);
+        assert!((body.position[1] - 19.0).abs() < 1.0e-4);
+        assert!((built.rigidbody_bindings[0].bone_from_body.position[1] - 1.0).abs() < 1.0e-4);
     }
 
     #[test]

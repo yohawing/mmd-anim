@@ -62,6 +62,31 @@ impl PmxBulletWorld {
         }
         Ok(fed)
     }
+
+    pub fn readback_bone_world_transforms(
+        &self,
+        bone_count: usize,
+    ) -> Result<Vec<Option<Transform>>, BulletError> {
+        let mut bone_transforms = vec![None; bone_count];
+        for (handle, binding) in self
+            .rigidbody_handles
+            .iter()
+            .copied()
+            .zip(self.rigidbody_bindings.iter())
+        {
+            if !binding.mode.writes_back_to_bone() {
+                continue;
+            }
+            let Some(bone_index) = binding.bone_index else {
+                continue;
+            };
+            let Some(slot) = bone_transforms.get_mut(bone_index) else {
+                continue;
+            };
+            *slot = Some(self.world.rigidbody_transform(handle)?);
+        }
+        Ok(bone_transforms)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,6 +265,7 @@ mod tests {
                     "mode": "static"
                 },
                 {
+                    "boneIndex": 0,
                     "name": "bob",
                     "shape": "sphere",
                     "size": [0.5, 0.0, 0.0],
@@ -304,6 +330,51 @@ mod tests {
         assert!(
             bob.position[1] > 6.0,
             "bob should remain constrained: {bob:?}"
+        );
+    }
+
+    #[test]
+    fn readback_returns_dynamic_body_transform_for_bound_bone() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [{"name": "root"}, {"name": "physics"}],
+            "rigidBodies": [
+                {
+                    "name": "physicsBody",
+                    "boneIndex": 1,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 8.0, 0.0],
+                    "mass": 1.0,
+                    "mode": "dynamic"
+                }
+            ]
+        }))
+        .unwrap();
+        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+        let model = build_pmx_model_from_parts(PmxPartsInput {
+            descriptor,
+            positions_xyz: &positions_xyz,
+            normals_xyz: &normals_xyz,
+            uvs_xy: &uvs_xy,
+            indices: &indices,
+            skin_indices: &[],
+            skin_weights: &[],
+            edge_scale: &[],
+        })
+        .unwrap();
+
+        let mut built = build_bullet_world_from_pmx(&model).unwrap();
+        built.world.step(1.0 / 30.0, 10).unwrap();
+        let readback = built.readback_bone_world_transforms(2).unwrap();
+
+        assert!(readback[0].is_none());
+        let physics_bone = readback[1].unwrap();
+        assert!(
+            physics_bone.position[1] < 8.0,
+            "dynamic body should write back simulated transform: {physics_bone:?}"
         );
     }
 

@@ -188,6 +188,12 @@ impl RuntimeInstance {
         let update_bone_count = self.ik_link_change_update_bones[ik_index]
             .as_ref()
             .map_or(0, Vec::len);
+        #[cfg(test)]
+        let previous_category = self.world_matrix_bone_update_category;
+        #[cfg(test)]
+        self.set_world_matrix_bone_update_category(
+            super::WorldMatrixBoneUpdateCategory::IkLinkChange,
+        );
         for update_index in 0..update_bone_count {
             let bone = self.ik_link_change_update_bones[ik_index]
                 .as_ref()
@@ -195,6 +201,8 @@ impl RuntimeInstance {
             self.update_append_transform_for_bone(bone);
             self.update_world_matrix_for_bone(bone);
         }
+        #[cfg(test)]
+        self.set_world_matrix_bone_update_category(previous_category);
     }
 
     fn compute_ik_link_change_update_bones(&self, ik_index: usize) -> Vec<crate::BoneIndex> {
@@ -256,6 +264,9 @@ impl RuntimeInstance {
             return true;
         }
         if self.bone_is_ancestor_of(bone, ik_bone) || self.bone_is_ancestor_of(bone, target_bone) {
+            return true;
+        }
+        if self.bone_is_ancestor_of(target_bone, bone) {
             return true;
         }
         links.iter().any(|link| {

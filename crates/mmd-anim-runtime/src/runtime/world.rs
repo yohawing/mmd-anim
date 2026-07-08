@@ -5,6 +5,9 @@ use crate::{
     ik_primitive::constrain_rotation_to_axis,
 };
 
+#[cfg(test)]
+use super::WorldMatrixBoneUpdateCategory;
+
 use super::RuntimeInstance;
 
 impl RuntimeInstance {
@@ -23,19 +26,35 @@ impl RuntimeInstance {
     ) {
         let start_position =
             self.expand_update_start_for_append_dependencies(start_position, phase);
-        for bone in &self.model.eval_order()[start_position..] {
-            if !self.bone_matches_phase(*bone, phase) {
-                continue;
+        match phase {
+            None => {
+                for bone in &self.model.eval_order()[start_position..] {
+                    self.pose.reset_append_transform(*bone);
+                }
+                for position in start_position..self.model.eval_order().len() {
+                    let bone = self.model.eval_order()[position];
+                    self.update_append_transform_for_bone(bone);
+                    self.update_world_matrix_for_bone(bone);
+                }
             }
-            self.pose.reset_append_transform(*bone);
-        }
-        for position in start_position..self.model.eval_order().len() {
-            let bone = self.model.eval_order()[position];
-            if !self.bone_matches_phase(bone, phase) {
-                continue;
+            Some(after_physics) => {
+                let phase_bone_count = self.model.eval_order_for_phase(after_physics).len();
+                for phase_index in 0..phase_bone_count {
+                    let bone = self.model.eval_order_for_phase(after_physics)[phase_index];
+                    if self.model.eval_order_position(bone) < start_position {
+                        continue;
+                    }
+                    self.pose.reset_append_transform(bone);
+                }
+                for phase_index in 0..phase_bone_count {
+                    let bone = self.model.eval_order_for_phase(after_physics)[phase_index];
+                    if self.model.eval_order_position(bone) < start_position {
+                        continue;
+                    }
+                    self.update_append_transform_for_bone(bone);
+                    self.update_world_matrix_for_bone(bone);
+                }
             }
-            self.update_append_transform_for_bone(bone);
-            self.update_world_matrix_for_bone(bone);
         }
     }
 
@@ -54,12 +73,23 @@ impl RuntimeInstance {
         start_position: usize,
         phase: Option<bool>,
     ) {
-        for position in start_position..self.model.eval_order().len() {
-            let bone = self.model.eval_order()[position];
-            if !self.bone_matches_phase(bone, phase) {
-                continue;
+        match phase {
+            None => {
+                for position in start_position..self.model.eval_order().len() {
+                    let bone = self.model.eval_order()[position];
+                    self.update_world_matrix_for_bone(bone);
+                }
             }
-            self.update_world_matrix_for_bone(bone);
+            Some(after_physics) => {
+                let phase_bone_count = self.model.eval_order_for_phase(after_physics).len();
+                for phase_index in 0..phase_bone_count {
+                    let bone = self.model.eval_order_for_phase(after_physics)[phase_index];
+                    if self.model.eval_order_position(bone) < start_position {
+                        continue;
+                    }
+                    self.update_world_matrix_for_bone(bone);
+                }
+            }
         }
     }
 
@@ -69,45 +99,79 @@ impl RuntimeInstance {
     }
 
     pub(super) fn update_append_transform_for_bone(&mut self, bone: crate::BoneIndex) {
+        let mut visiting = Vec::new();
+        self.update_append_transform_for_bone_inner(bone, &mut visiting);
+    }
+
+    fn update_append_transform_for_bone_inner(
+        &mut self,
+        bone: crate::BoneIndex,
+        visiting: &mut Vec<crate::BoneIndex>,
+    ) {
         let Some(append_index) = self.model.append_transform_index(bone) else {
             return;
         };
+        if visiting.contains(&bone) {
+            return;
+        }
+        visiting.push(bone);
         let append = self.model.append_transform(append_index);
-        let use_source_append = !append.local
-            && self
-                .model
-                .append_transform_index(append.source_bone)
-                .is_some();
+        let source_bone = append.source_bone;
+        let ratio = append.ratio;
+        let affect_rotation = append.affect_rotation;
+        let affect_translation = append.affect_translation;
+        let use_source_append =
+            !append.local && self.model.append_transform_index(source_bone).is_some();
+        if use_source_append {
+            self.update_append_transform_for_bone_inner(source_bone, visiting);
+        }
         let mut source_rotation = if use_source_append {
-            self.pose.append_rotation(append.source_bone)
+            self.pose.append_rotation(source_bone)
         } else {
-            self.pose.local_rotation(append.source_bone)
+            self.pose.local_rotation(source_bone)
         };
-        if use_source_append && self.model.is_ik_link_bone(append.source_bone) {
-            source_rotation =
-                (self.pose.ik_rotation(append.source_bone) * source_rotation).normalize();
+        if use_source_append && self.model.is_ik_link_bone(source_bone) {
+            source_rotation = (self.pose.ik_rotation(source_bone) * source_rotation).normalize();
         }
         let source_position_offset = if use_source_append {
-            self.pose.append_position_offset(append.source_bone)
+            self.pose.append_position_offset(source_bone)
         } else {
-            self.pose.local_position_offset(append.source_bone)
+            self.pose.local_position_offset(source_bone)
         };
         let append_output = solve_append_transform(AppendPrimitiveInput {
             source_position_offset,
             source_rotation,
-            ratio: append.ratio,
-            affect_rotation: append.affect_rotation,
-            affect_translation: append.affect_translation,
+            ratio,
+            affect_rotation,
+            affect_translation,
         });
         self.pose.set_append_rotation(bone, append_output.rotation);
         self.pose
             .set_append_position_offset(bone, append_output.position_offset);
+        visiting.pop();
     }
 
     pub(super) fn update_world_matrix_for_bone(&mut self, bone: crate::BoneIndex) {
         #[cfg(test)]
         {
             self.world_matrix_bone_update_count += 1;
+            match self.world_matrix_bone_update_category {
+                WorldMatrixBoneUpdateCategory::LeadingBookend => {
+                    self.world_matrix_bone_update_leading_bookend_count += 1;
+                }
+                WorldMatrixBoneUpdateCategory::PhaseLoop => {
+                    self.world_matrix_bone_update_phase_loop_count += 1;
+                }
+                WorldMatrixBoneUpdateCategory::TrailingBookend => {
+                    self.world_matrix_bone_update_trailing_bookend_count += 1;
+                }
+                WorldMatrixBoneUpdateCategory::IkLinkChange => {
+                    self.world_matrix_bone_update_ik_link_change_count += 1;
+                }
+                WorldMatrixBoneUpdateCategory::Other => {
+                    self.world_matrix_bone_update_other_count += 1;
+                }
+            }
         }
         let mut local_position =
             self.model.rest_position(bone) + self.pose.local_position_offset(bone);
@@ -175,13 +239,52 @@ impl RuntimeInstance {
     }
 
     #[cfg(test)]
+    pub(super) fn set_world_matrix_bone_update_category(
+        &mut self,
+        category: WorldMatrixBoneUpdateCategory,
+    ) {
+        self.world_matrix_bone_update_category = category;
+    }
+
+    #[cfg(test)]
     pub(super) fn reset_world_matrix_bone_update_count(&mut self) {
         self.world_matrix_bone_update_count = 0;
+        self.world_matrix_bone_update_leading_bookend_count = 0;
+        self.world_matrix_bone_update_phase_loop_count = 0;
+        self.world_matrix_bone_update_trailing_bookend_count = 0;
+        self.world_matrix_bone_update_ik_link_change_count = 0;
+        self.world_matrix_bone_update_other_count = 0;
+        self.world_matrix_bone_update_category = WorldMatrixBoneUpdateCategory::Other;
     }
 
     #[cfg(test)]
     pub(super) fn world_matrix_bone_update_count(&self) -> usize {
         self.world_matrix_bone_update_count
+    }
+
+    #[cfg(test)]
+    pub(super) fn world_matrix_bone_update_leading_bookend_count(&self) -> usize {
+        self.world_matrix_bone_update_leading_bookend_count
+    }
+
+    #[cfg(test)]
+    pub(super) fn world_matrix_bone_update_phase_loop_count(&self) -> usize {
+        self.world_matrix_bone_update_phase_loop_count
+    }
+
+    #[cfg(test)]
+    pub(super) fn world_matrix_bone_update_trailing_bookend_count(&self) -> usize {
+        self.world_matrix_bone_update_trailing_bookend_count
+    }
+
+    #[cfg(test)]
+    pub(super) fn world_matrix_bone_update_ik_link_change_count(&self) -> usize {
+        self.world_matrix_bone_update_ik_link_change_count
+    }
+
+    #[cfg(test)]
+    pub(super) fn world_matrix_bone_update_other_count(&self) -> usize {
+        self.world_matrix_bone_update_other_count
     }
 
     #[inline]

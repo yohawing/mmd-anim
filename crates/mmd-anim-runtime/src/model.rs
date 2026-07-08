@@ -225,7 +225,11 @@ pub struct ModelArena {
     transform_after_physics_flags: Box<[u8]>,
     ik_link_flags: Box<[u8]>,
     eval_order: Box<[BoneIndex]>,
+    eval_order_before_physics: Box<[BoneIndex]>,
+    eval_order_after_physics: Box<[BoneIndex]>,
     eval_order_positions: Box<[usize]>,
+    ik_bone_solver_spans: Box<[MorphOffsetSpan]>,
+    ik_bone_solver_indices: Box<[u32]>,
     ik_solvers: Box<[IkSolver]>,
     append_transforms: Box<[AppendTransform]>,
     append_transform_indices: Box<[i32]>,
@@ -310,8 +314,14 @@ impl ModelArena {
         }
 
         let eval_order = build_eval_order(&parent_indices, &transform_orders)?;
+        let eval_order_before_physics =
+            build_eval_order_for_phase(&eval_order, &transform_after_physics_flags, false);
+        let eval_order_after_physics =
+            build_eval_order_for_phase(&eval_order, &transform_after_physics_flags, true);
         let eval_order_positions = build_eval_order_positions(&eval_order, bone_count);
         let (ik_solvers, ik_link_flags) = build_ik_solvers(ik_solvers, bone_count)?;
+        let (ik_bone_solver_spans, ik_bone_solver_indices) =
+            build_ik_bone_solver_lookup(&ik_solvers, bone_count);
         let (append_transforms, append_transform_indices) =
             build_append_transforms(append_transforms, bone_count)?;
         validate_morph_init(&morph, bone_count)?;
@@ -327,7 +337,11 @@ impl ModelArena {
             transform_after_physics_flags: transform_after_physics_flags.into_boxed_slice(),
             ik_link_flags,
             eval_order,
+            eval_order_before_physics,
+            eval_order_after_physics,
             eval_order_positions,
+            ik_bone_solver_spans,
+            ik_bone_solver_indices,
             ik_solvers,
             append_transforms,
             append_transform_indices,
@@ -413,6 +427,15 @@ impl ModelArena {
     }
 
     #[inline]
+    pub(crate) fn eval_order_for_phase(&self, after_physics: bool) -> &[BoneIndex] {
+        if after_physics {
+            &self.eval_order_after_physics
+        } else {
+            &self.eval_order_before_physics
+        }
+    }
+
+    #[inline]
     pub(crate) fn eval_order_position(&self, bone: BoneIndex) -> usize {
         self.eval_order_positions[bone.as_usize()]
     }
@@ -425,6 +448,17 @@ impl ModelArena {
     #[inline]
     pub fn ik_solvers(&self) -> &[IkSolver] {
         &self.ik_solvers
+    }
+
+    #[inline]
+    pub(crate) fn ik_solver_count_for_bone(&self, bone: BoneIndex) -> usize {
+        self.ik_bone_solver_spans[bone.as_usize()].count as usize
+    }
+
+    #[inline]
+    pub(crate) fn ik_solver_index_for_bone(&self, bone: BoneIndex, local_index: usize) -> usize {
+        let span = &self.ik_bone_solver_spans[bone.as_usize()];
+        self.ik_bone_solver_indices[span.start as usize + local_index] as usize
     }
 
     #[inline]
@@ -544,6 +578,36 @@ fn build_ik_solvers(
     Ok((solvers.into_boxed_slice(), ik_link_flags.into_boxed_slice()))
 }
 
+type IkBoneSolverLookup = (Box<[MorphOffsetSpan]>, Box<[u32]>);
+
+fn build_ik_bone_solver_lookup(ik_solvers: &[IkSolver], bone_count: usize) -> IkBoneSolverLookup {
+    let mut counts = vec![0u32; bone_count];
+    for solver in ik_solvers {
+        counts[solver.ik_bone.as_usize()] += 1;
+    }
+
+    let mut spans = Vec::with_capacity(bone_count);
+    let mut next_offset = 0u32;
+    for count in counts {
+        spans.push(MorphOffsetSpan {
+            start: next_offset,
+            count,
+        });
+        next_offset += count;
+    }
+
+    let mut indices = vec![0u32; ik_solvers.len()];
+    let mut write_positions: Vec<u32> = spans.iter().map(|span| span.start).collect();
+    for (solver_index, solver) in ik_solvers.iter().enumerate() {
+        let bone = solver.ik_bone.as_usize();
+        let write_index = write_positions[bone] as usize;
+        indices[write_index] = solver_index as u32;
+        write_positions[bone] += 1;
+    }
+
+    (spans.into_boxed_slice(), indices.into_boxed_slice())
+}
+
 fn validate_ik_bone(
     solver: usize,
     role: &'static str,
@@ -626,6 +690,21 @@ fn build_eval_order(
     }
 
     Ok(order.into_boxed_slice())
+}
+
+fn build_eval_order_for_phase(
+    eval_order: &[BoneIndex],
+    transform_after_physics_flags: &[u8],
+    after_physics: bool,
+) -> Box<[BoneIndex]> {
+    eval_order
+        .iter()
+        .copied()
+        .filter(|bone| {
+            let bone_after_physics = transform_after_physics_flags[bone.as_usize()] != 0;
+            bone_after_physics == after_physics
+        })
+        .collect()
 }
 
 fn build_eval_order_positions(eval_order: &[BoneIndex], bone_count: usize) -> Box<[usize]> {
@@ -799,6 +878,61 @@ mod tests {
     }
 
     #[test]
+    fn eval_order_for_phase_preserves_relative_order_within_each_phase() {
+        let mut root = BoneInit::new(None, Vec3A::ZERO);
+        root.transform_order = 0;
+        let mut pre_child = BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO);
+        pre_child.transform_order = 2;
+        let mut after_parent = BoneInit::new(None, Vec3A::ZERO);
+        after_parent.transform_order = 1;
+        after_parent.transform_after_physics = true;
+        let mut after_child = BoneInit::new(Some(BoneIndex(2)), Vec3A::ZERO);
+        after_child.transform_order = 3;
+        after_child.transform_after_physics = true;
+        let mut pre_sibling = BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO);
+        pre_sibling.transform_order = 4;
+
+        let model = ModelArena::new(vec![
+            root,
+            pre_child,
+            after_parent,
+            after_child,
+            pre_sibling,
+        ])
+        .unwrap();
+
+        let expected_before_physics: Vec<_> = model
+            .eval_order()
+            .iter()
+            .copied()
+            .filter(|bone| !model.transform_after_physics(*bone))
+            .collect();
+        let expected_after_physics: Vec<_> = model
+            .eval_order()
+            .iter()
+            .copied()
+            .filter(|bone| model.transform_after_physics(*bone))
+            .collect();
+
+        assert_eq!(
+            model.eval_order_for_phase(false),
+            expected_before_physics.as_slice()
+        );
+        assert_eq!(
+            model.eval_order_for_phase(true),
+            expected_after_physics.as_slice()
+        );
+        assert_eq!(
+            model.eval_order_for_phase(false),
+            &[BoneIndex(0), BoneIndex(1), BoneIndex(4)]
+        );
+        assert_eq!(
+            model.eval_order_for_phase(true),
+            &[BoneIndex(2), BoneIndex(3)]
+        );
+    }
+
+    #[test]
     fn parent_is_ordered_before_child_even_if_input_order_is_not_transform_order() {
         let mut root = BoneInit::new(None, Vec3A::ZERO);
         root.transform_order = 10;
@@ -838,6 +972,46 @@ mod tests {
         assert_eq!(model.ik_solvers()[0].links[0].bone, BoneIndex(0));
         assert_eq!(model.ik_solvers()[0].iteration_count, 4);
         assert_eq!(model.ik_solvers()[0].limit_angle, 0.5);
+    }
+
+    #[test]
+    fn ik_bone_solver_lookup_maps_multiple_bones_and_preserves_registration_order() {
+        let model = ModelArena::new_with_ik(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(1)), Vec3A::ZERO),
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(None, Vec3A::ZERO),
+            ],
+            vec![
+                IkSolverInit::new(
+                    BoneIndex(2),
+                    BoneIndex(1),
+                    vec![IkLinkInit::new(BoneIndex(0))],
+                ),
+                IkSolverInit::new(
+                    BoneIndex(4),
+                    BoneIndex(3),
+                    vec![IkLinkInit::new(BoneIndex(0))],
+                ),
+                IkSolverInit::new(
+                    BoneIndex(2),
+                    BoneIndex(1),
+                    vec![IkLinkInit::new(BoneIndex(0))],
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(model.ik_solver_count_for_bone(BoneIndex(0)), 0);
+        assert_eq!(model.ik_solver_count_for_bone(BoneIndex(1)), 0);
+        assert_eq!(model.ik_solver_count_for_bone(BoneIndex(2)), 2);
+        assert_eq!(model.ik_solver_count_for_bone(BoneIndex(3)), 0);
+        assert_eq!(model.ik_solver_count_for_bone(BoneIndex(4)), 1);
+        assert_eq!(model.ik_solver_index_for_bone(BoneIndex(2), 0), 0);
+        assert_eq!(model.ik_solver_index_for_bone(BoneIndex(2), 1), 2);
+        assert_eq!(model.ik_solver_index_for_bone(BoneIndex(4), 0), 1);
     }
 
     #[test]

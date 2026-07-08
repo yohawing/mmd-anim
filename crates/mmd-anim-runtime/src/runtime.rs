@@ -96,6 +96,17 @@ impl Default for IkSolveOptions {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum WorldMatrixBoneUpdateCategory {
+    LeadingBookend,
+    PhaseLoop,
+    TrailingBookend,
+    IkLinkChange,
+    #[default]
+    Other,
+}
+
 #[derive(Debug)]
 pub struct RuntimeInstance {
     model: Arc<ModelArena>,
@@ -106,6 +117,18 @@ pub struct RuntimeInstance {
     ik_link_change_update_bones: Vec<Option<Vec<crate::BoneIndex>>>,
     #[cfg(test)]
     world_matrix_bone_update_count: usize,
+    #[cfg(test)]
+    world_matrix_bone_update_category: WorldMatrixBoneUpdateCategory,
+    #[cfg(test)]
+    world_matrix_bone_update_leading_bookend_count: usize,
+    #[cfg(test)]
+    world_matrix_bone_update_phase_loop_count: usize,
+    #[cfg(test)]
+    world_matrix_bone_update_trailing_bookend_count: usize,
+    #[cfg(test)]
+    world_matrix_bone_update_ik_link_change_count: usize,
+    #[cfg(test)]
+    world_matrix_bone_update_other_count: usize,
 }
 
 impl RuntimeInstance {
@@ -135,6 +158,18 @@ impl RuntimeInstance {
             ik_link_change_update_bones,
             #[cfg(test)]
             world_matrix_bone_update_count: 0,
+            #[cfg(test)]
+            world_matrix_bone_update_category: WorldMatrixBoneUpdateCategory::default(),
+            #[cfg(test)]
+            world_matrix_bone_update_leading_bookend_count: 0,
+            #[cfg(test)]
+            world_matrix_bone_update_phase_loop_count: 0,
+            #[cfg(test)]
+            world_matrix_bone_update_trailing_bookend_count: 0,
+            #[cfg(test)]
+            world_matrix_bone_update_ik_link_change_count: 0,
+            #[cfg(test)]
+            world_matrix_bone_update_other_count: 0,
         }
     }
 
@@ -173,29 +208,61 @@ impl RuntimeInstance {
 
     fn evaluate_current_pose_ordered(&mut self, options: IkSolveOptions) {
         self.pose.reset_append_transforms();
+        #[cfg(test)]
+        self.set_world_matrix_bone_update_category(WorldMatrixBoneUpdateCategory::LeadingBookend);
         self.update_world_matrices_using_current_append_from_eval_order_position(0);
 
+        let mut earliest_after_physics_eval_order_position: Option<usize> = None;
         for after_physics in [false, true] {
-            for position in 0..self.model.eval_order().len() {
-                let bone = self.model.eval_order()[position];
-                if self.model.transform_after_physics(bone) != after_physics {
-                    continue;
+            let phase_bone_count = self.model.eval_order_for_phase(after_physics).len();
+            for phase_index in 0..phase_bone_count {
+                let bone = self.model.eval_order_for_phase(after_physics)[phase_index];
+                if after_physics {
+                    let position = self.model.eval_order_position(bone);
+                    earliest_after_physics_eval_order_position = Some(
+                        earliest_after_physics_eval_order_position
+                            .map_or(position, |earliest| earliest.min(position)),
+                    );
                 }
-
                 if self.model.append_transform_index(bone).is_some() {
                     self.pose.reset_append_transform(bone);
                     self.update_append_transform_for_bone(bone);
                 }
+                #[cfg(test)]
+                self.set_world_matrix_bone_update_category(
+                    WorldMatrixBoneUpdateCategory::PhaseLoop,
+                );
                 self.update_world_matrix_for_bone(bone);
 
-                for ik_index in 0..self.model.ik_count() {
-                    if self.model.ik_solvers()[ik_index].ik_bone == bone {
-                        self.solve_ik_solver(ik_index, options, after_physics);
-                    }
+                let ik_solver_count = self.model.ik_solver_count_for_bone(bone);
+                for local_index in 0..ik_solver_count {
+                    let ik_index = self.model.ik_solver_index_for_bone(bone, local_index);
+                    self.solve_ik_solver(ik_index, options, after_physics);
                 }
             }
         }
-        self.update_world_matrices_using_current_append_from_eval_order_position(0);
+
+        let mut trailing_refresh_start = earliest_after_physics_eval_order_position;
+        for append in self.model.append_transforms() {
+            let source_position = self.model.eval_order_position(append.source_bone);
+            let target_position = self.model.eval_order_position(append.target_bone);
+            if target_position < source_position {
+                trailing_refresh_start = Some(
+                    trailing_refresh_start
+                        .map_or(target_position, |start| start.min(target_position)),
+                );
+            }
+        }
+
+        if let Some(start_position) = trailing_refresh_start {
+            let start_position =
+                self.expand_update_start_for_append_dependencies(start_position, None);
+            #[cfg(test)]
+            self.set_world_matrix_bone_update_category(
+                WorldMatrixBoneUpdateCategory::TrailingBookend,
+            );
+            self.update_world_matrices_from_eval_order_position(start_position);
+        }
     }
 
     pub fn evaluate_rest_pose(&mut self) {
@@ -239,6 +306,16 @@ impl RuntimeInstance {
 
     pub fn ik_runtime_stats(&self) -> &[IkSolverRuntimeStats] {
         &self.ik_stats
+    }
+
+    #[inline]
+    pub fn append_position_offset(&self, bone: crate::BoneIndex) -> glam::Vec3A {
+        self.pose.append_position_offset(bone)
+    }
+
+    #[inline]
+    pub fn append_rotation(&self, bone: crate::BoneIndex) -> glam::Quat {
+        self.pose.append_rotation(bone)
     }
 
     #[inline]

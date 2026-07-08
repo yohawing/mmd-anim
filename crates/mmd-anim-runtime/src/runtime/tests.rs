@@ -149,6 +149,39 @@ fn evaluates_clip_frame_into_world_matrices() {
 }
 
 #[test]
+fn append_output_accessors_reflect_pose_state() {
+    let model = Arc::new(
+        ModelArena::new_full(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(None, Vec3A::ZERO),
+            ],
+            Vec::new(),
+            vec![AppendTransformInit::new(BoneIndex(1), BoneIndex(0), 0.5).with_translation()],
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+
+    runtime
+        .pose_mut()
+        .set_local_position_offset(BoneIndex(0), Vec3A::new(2.0, 0.0, 0.0));
+    runtime.evaluate_current_pose();
+
+    assert_vec3a_near(
+        runtime.append_position_offset(BoneIndex(1)),
+        Vec3A::new(1.0, 0.0, 0.0),
+    );
+    assert!(
+        runtime
+            .append_rotation(BoneIndex(1))
+            .dot(Quat::IDENTITY)
+            .abs()
+            > 1.0 - f32::EPSILON
+    );
+}
+
+#[test]
 fn applies_append_rotation_before_world_matrix_output() {
     let model = Arc::new(
         ModelArena::new_full(
@@ -425,6 +458,84 @@ fn evaluates_all_solvers_attached_to_same_ik_bone() {
 }
 
 #[test]
+fn evaluates_ik_solvers_through_bone_lookup_for_distinct_ik_bones() {
+    let model = Arc::new(
+        ModelArena::new_with_ik(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::new(1.0, 0.0, 0.0)),
+                BoneInit::new(None, Vec3A::new(0.0, 1.0, 0.0)),
+                BoneInit::new(None, Vec3A::new(10.0, 0.0, 0.0)),
+                BoneInit::new(Some(BoneIndex(3)), Vec3A::new(1.0, 0.0, 0.0)),
+                BoneInit::new(None, Vec3A::new(10.0, 1.0, 0.0)),
+            ],
+            vec![
+                IkSolverInit {
+                    ik_bone: BoneIndex(2),
+                    target_bone: BoneIndex(1),
+                    links: vec![IkLinkInit::new(BoneIndex(0))],
+                    iteration_count: 1,
+                    limit_angle: 0.0,
+                },
+                IkSolverInit {
+                    ik_bone: BoneIndex(5),
+                    target_bone: BoneIndex(4),
+                    links: vec![IkLinkInit::new(BoneIndex(3))],
+                    iteration_count: 1,
+                    limit_angle: 0.0,
+                },
+            ],
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+
+    runtime.evaluate_current_pose();
+
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[1]),
+        Vec3A::new(0.0, 1.0, 0.0),
+    );
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[4]),
+        Vec3A::new(10.0, 1.0, 0.0),
+    );
+    assert_eq!(runtime.ik_runtime_stats()[0].solver_evaluations, 1);
+    assert_eq!(runtime.ik_runtime_stats()[1].solver_evaluations, 1);
+}
+
+#[test]
+fn ik_target_descendant_recomputes_after_scoped_ik_update() {
+    let model = Arc::new(
+        ModelArena::new_with_ik(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::X),
+                BoneInit::new(Some(BoneIndex(1)), Vec3A::X),
+                BoneInit::new(None, Vec3A::Y),
+            ],
+            vec![IkSolverInit {
+                ik_bone: BoneIndex(3),
+                target_bone: BoneIndex(1),
+                links: vec![IkLinkInit::new(BoneIndex(0))],
+                iteration_count: 1,
+                limit_angle: 0.0,
+            }],
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+
+    runtime.evaluate_current_pose();
+
+    assert_vec3a_near(translation(runtime.world_matrices()[1]), Vec3A::Y);
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[2]),
+        Vec3A::new(0.0, 2.0, 0.0),
+    );
+}
+
+#[test]
 fn ik_updates_only_affected_eval_suffix_for_late_chain() {
     let unrelated_count = 96usize;
     let chain_root = BoneIndex(unrelated_count as u32);
@@ -514,6 +625,437 @@ fn ik_updates_only_affected_bones_for_root_near_chain() {
         runtime.world_matrix_bone_update_count() < 360,
         "IK should not recompute unrelated tail bones repeatedly; updated {} bones",
         runtime.world_matrix_bone_update_count()
+    );
+}
+
+#[test]
+fn phase_scoped_world_matrix_update_visits_only_matching_phase_bones() {
+    let before_count = 96usize;
+    let mut bones = Vec::new();
+    for i in 0..before_count {
+        bones.push(BoneInit::new(None, Vec3A::new(i as f32, 0.0, 0.0)));
+    }
+    let mut after_a = BoneInit::new(None, Vec3A::new(0.0, 1.0, 0.0));
+    after_a.transform_after_physics = true;
+    let mut after_b = BoneInit::new(
+        Some(BoneIndex(before_count as u32)),
+        Vec3A::new(1.0, 0.0, 0.0),
+    );
+    after_b.transform_after_physics = true;
+    let mut after_c = BoneInit::new(None, Vec3A::new(0.0, 0.0, 1.0));
+    after_c.transform_after_physics = true;
+    bones.extend([after_a, after_b, after_c]);
+    let after_count = 3usize;
+    let total_count = before_count + after_count;
+
+    let model = Arc::new(ModelArena::new(bones).unwrap());
+    let mut runtime = RuntimeInstance::new(model);
+
+    runtime.reset_world_matrix_bone_update_count();
+    runtime.update_world_matrices_using_current_append_from_eval_order_position_for_phase(
+        0,
+        Some(false),
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_count(),
+        before_count,
+        "before-physics phase update should touch only before-physics bones"
+    );
+
+    runtime.reset_world_matrix_bone_update_count();
+    runtime.update_world_matrices_using_current_append_from_eval_order_position_for_phase(
+        0,
+        Some(true),
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_count(),
+        after_count,
+        "after-physics phase update should touch only after-physics bones"
+    );
+
+    runtime.reset_world_matrix_bone_update_count();
+    runtime.update_world_matrices_using_current_append_from_eval_order_position_for_phase(0, None);
+    assert_eq!(
+        runtime.world_matrix_bone_update_count(),
+        total_count,
+        "unscoped phase update should touch all eval-order bones"
+    );
+}
+
+#[test]
+fn categorized_world_matrix_bone_update_counts_for_simple_no_ik_pose() {
+    let bone_count = 3usize;
+    let model = Arc::new(
+        ModelArena::new(vec![
+            BoneInit::new(None, Vec3A::ZERO),
+            BoneInit::new(Some(BoneIndex(0)), Vec3A::new(1.0, 0.0, 0.0)),
+            BoneInit::new(Some(BoneIndex(1)), Vec3A::new(1.0, 0.0, 0.0)),
+        ])
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+
+    runtime.reset_world_matrix_bone_update_count();
+    runtime.evaluate_current_pose();
+
+    assert_eq!(
+        runtime.world_matrix_bone_update_leading_bookend_count(),
+        bone_count,
+        "leading bookend should update each eval-order bone once"
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_phase_loop_count(),
+        bone_count,
+        "before-physics phase loop should update each before-physics bone once"
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_trailing_bookend_count(),
+        0,
+        "all-before-physics no-IK pose should skip trailing bookend"
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_ik_link_change_count(),
+        0,
+        "no-IK model should not perform IK link-change world updates"
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_other_count(),
+        0,
+        "ordered pose evaluation should not leave unclassified world updates"
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_count(),
+        runtime.world_matrix_bone_update_leading_bookend_count()
+            + runtime.world_matrix_bone_update_phase_loop_count()
+            + runtime.world_matrix_bone_update_trailing_bookend_count()
+            + runtime.world_matrix_bone_update_ik_link_change_count()
+            + runtime.world_matrix_bone_update_other_count(),
+        "total world update count should equal categorized sum"
+    );
+}
+
+#[test]
+fn all_pre_physics_transitive_append_recomputes_trailing_suffix() {
+    let mut target = BoneInit::new(None, Vec3A::ZERO);
+    target.transform_order = 0;
+    let mut child = BoneInit::new(Some(BoneIndex(0)), Vec3A::X);
+    child.transform_order = 1;
+    let mut driver = BoneInit::new(None, Vec3A::ZERO);
+    driver.transform_order = 2;
+    let mut source = BoneInit::new(None, Vec3A::ZERO);
+    source.transform_order = 3;
+
+    let model = Arc::new(
+        ModelArena::new_full(
+            vec![target, child, driver, source],
+            Vec::new(),
+            vec![
+                AppendTransformInit::new(BoneIndex(3), BoneIndex(2), 1.0).with_rotation(),
+                AppendTransformInit::new(BoneIndex(0), BoneIndex(3), 1.0).with_rotation(),
+            ],
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+    runtime.pose_mut().set_local_rotation(
+        BoneIndex(2),
+        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+    );
+
+    runtime.reset_world_matrix_bone_update_count();
+    runtime.evaluate_current_pose();
+
+    assert_vec3a_near(translation(runtime.world_matrices()[1]), Vec3A::Y);
+    assert_eq!(
+        runtime.world_matrix_bone_update_trailing_bookend_count(),
+        4,
+        "out-of-order transitive append dependencies need one trailing suffix refresh"
+    );
+}
+
+#[test]
+fn categorized_world_matrix_bone_update_counts_split_ik_link_changes() {
+    let bone_count = 3usize;
+    let model = Arc::new(
+        ModelArena::new_with_ik(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::new(1.0, 0.0, 0.0)),
+                BoneInit::new(None, Vec3A::new(0.0, 1.0, 0.0)),
+            ],
+            vec![IkSolverInit {
+                ik_bone: BoneIndex(2),
+                target_bone: BoneIndex(1),
+                links: vec![IkLinkInit::new(BoneIndex(0))],
+                iteration_count: 1,
+                limit_angle: 0.0,
+            }],
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+
+    runtime.reset_world_matrix_bone_update_count();
+    runtime.evaluate_current_pose();
+
+    assert_eq!(
+        runtime.world_matrix_bone_update_leading_bookend_count(),
+        bone_count
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_phase_loop_count(),
+        bone_count
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_trailing_bookend_count(),
+        0,
+        "all-before-physics IK pose should rely on link-change scoped updates"
+    );
+    assert!(
+        runtime.world_matrix_bone_update_ik_link_change_count() > 0,
+        "IK solve should account scoped link-change world updates separately"
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_other_count(),
+        0,
+        "ordered pose evaluation should not leave unclassified world updates"
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_count(),
+        runtime.world_matrix_bone_update_leading_bookend_count()
+            + runtime.world_matrix_bone_update_phase_loop_count()
+            + runtime.world_matrix_bone_update_trailing_bookend_count()
+            + runtime.world_matrix_bone_update_ik_link_change_count()
+            + runtime.world_matrix_bone_update_other_count(),
+        "total world update count should equal the category sum"
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorldMatrixBoneUpdateCategorySnapshot {
+    leading_bookend: usize,
+    phase_loop: usize,
+    trailing_bookend: usize,
+    ik_link_change: usize,
+    other: usize,
+}
+
+impl WorldMatrixBoneUpdateCategorySnapshot {
+    fn from_runtime(runtime: &RuntimeInstance) -> Self {
+        Self {
+            leading_bookend: runtime.world_matrix_bone_update_leading_bookend_count(),
+            phase_loop: runtime.world_matrix_bone_update_phase_loop_count(),
+            trailing_bookend: runtime.world_matrix_bone_update_trailing_bookend_count(),
+            ik_link_change: runtime.world_matrix_bone_update_ik_link_change_count(),
+            other: runtime.world_matrix_bone_update_other_count(),
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.leading_bookend
+            + self.phase_loop
+            + self.trailing_bookend
+            + self.ik_link_change
+            + self.other
+    }
+
+    fn bookend(&self) -> usize {
+        self.leading_bookend + self.trailing_bookend
+    }
+
+    fn assert_matches_total(&self, total: usize) {
+        assert_eq!(
+            total,
+            self.total(),
+            "total world update count should equal categorized sum: snapshot={self:?}"
+        );
+        assert_eq!(
+            self.other, 0,
+            "ordered pose evaluation should not leave unclassified updates"
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PerfWorldUpdateOptimizationBranch {
+    TrailingSuffixShrinking,
+    IkLinkChangeScope,
+    ApplyPoseTrackSampling,
+}
+
+fn perf_world_update_optimization_branch(
+    snapshot: &WorldMatrixBoneUpdateCategorySnapshot,
+) -> PerfWorldUpdateOptimizationBranch {
+    let bookend = snapshot.bookend();
+    let ik = snapshot.ik_link_change;
+    if ik > bookend {
+        PerfWorldUpdateOptimizationBranch::IkLinkChangeScope
+    } else if bookend > ik {
+        PerfWorldUpdateOptimizationBranch::TrailingSuffixShrinking
+    } else {
+        PerfWorldUpdateOptimizationBranch::ApplyPoseTrackSampling
+    }
+}
+
+fn build_late_chain_multi_link_ik_model(
+    unrelated_prefix_count: usize,
+    chain_bone_count: usize,
+    iteration_count: u32,
+) -> Arc<ModelArena> {
+    assert!(chain_bone_count >= 2);
+
+    let mut bones = Vec::new();
+    for i in 0..unrelated_prefix_count {
+        bones.push(BoneInit::new(None, Vec3A::new(i as f32 * 10.0, -10.0, 0.0)));
+    }
+
+    let chain_root = BoneIndex(unrelated_prefix_count as u32);
+    bones.push(BoneInit::new(None, Vec3A::ZERO));
+
+    let mut chain_indices = vec![chain_root];
+    let mut parent = chain_root;
+    for offset in 1..chain_bone_count {
+        let bone = BoneIndex(unrelated_prefix_count as u32 + offset as u32);
+        bones.push(BoneInit::new(Some(parent), Vec3A::new(1.0, 0.0, 0.0)));
+        chain_indices.push(bone);
+        parent = bone;
+    }
+    let chain_tip = *chain_indices.last().expect("chain tip");
+    let controller = BoneIndex(unrelated_prefix_count as u32 + chain_bone_count as u32);
+    bones.push(BoneInit::new(None, Vec3A::new(1.0, 1.0, 0.0)));
+
+    let links = chain_indices
+        .iter()
+        .rev()
+        .skip(1)
+        .map(|&bone| IkLinkInit::new(bone))
+        .collect();
+
+    Arc::new(
+        ModelArena::new_with_ik(
+            bones,
+            vec![IkSolverInit {
+                ik_bone: controller,
+                target_bone: chain_tip,
+                links,
+                iteration_count,
+                limit_angle: 0.0,
+            }],
+        )
+        .unwrap(),
+    )
+}
+
+fn build_root_near_multi_link_ik_model(
+    unrelated_tail_count: usize,
+    chain_bone_count: usize,
+    iteration_count: u32,
+) -> Arc<ModelArena> {
+    assert!(chain_bone_count >= 2);
+
+    let chain_root = BoneIndex(0);
+    let mut bones = vec![BoneInit::new(None, Vec3A::ZERO)];
+    let mut chain_indices = vec![chain_root];
+    let mut parent = chain_root;
+    for offset in 1..chain_bone_count {
+        let bone = BoneIndex(offset as u32);
+        bones.push(BoneInit::new(Some(parent), Vec3A::new(1.0, 0.0, 0.0)));
+        chain_indices.push(bone);
+        parent = bone;
+    }
+    let chain_tip = *chain_indices.last().expect("chain tip");
+    let controller = BoneIndex(chain_bone_count as u32);
+    bones.push(BoneInit::new(None, Vec3A::new(1.0, 1.0, 0.0)));
+
+    for i in 0..unrelated_tail_count {
+        bones.push(BoneInit::new(
+            None,
+            Vec3A::new((i + chain_bone_count + 1) as f32 * 10.0, -10.0, 0.0),
+        ));
+    }
+
+    let links = chain_indices
+        .iter()
+        .rev()
+        .skip(1)
+        .map(|&bone| IkLinkInit::new(bone))
+        .collect();
+
+    Arc::new(
+        ModelArena::new_with_ik(
+            bones,
+            vec![IkSolverInit {
+                ik_bone: controller,
+                target_bone: chain_tip,
+                links,
+                iteration_count,
+                limit_angle: 0.0,
+            }],
+        )
+        .unwrap(),
+    )
+}
+
+fn evaluate_pose_category_snapshot(
+    runtime: &mut RuntimeInstance,
+) -> WorldMatrixBoneUpdateCategorySnapshot {
+    runtime.reset_world_matrix_bone_update_count();
+    runtime.evaluate_current_pose();
+    let snapshot = WorldMatrixBoneUpdateCategorySnapshot::from_runtime(runtime);
+    snapshot.assert_matches_total(runtime.world_matrix_bone_update_count());
+    snapshot
+}
+
+#[test]
+fn categorized_world_matrix_bone_update_counts_decide_trailing_suffix_for_suffix_scoped_ik() {
+    // Mirrors the 4b real-asset profile: many prefix bones with extremity IK solvers
+    // that only refresh a short eval-order suffix per link step.
+    let bone_count = 449usize;
+    let unrelated_prefix_count = bone_count - 4;
+    let snapshot = evaluate_pose_category_snapshot(&mut RuntimeInstance::new(
+        build_late_chain_multi_link_ik_model(unrelated_prefix_count, 3, 20),
+    ));
+
+    assert_eq!(snapshot.leading_bookend, bone_count);
+    assert_eq!(snapshot.trailing_bookend, 0);
+    assert_eq!(snapshot.phase_loop, bone_count);
+    assert_eq!(snapshot.bookend(), bone_count);
+    assert_eq!(snapshot.ik_link_change, 28);
+    assert!(
+        snapshot.bookend() > snapshot.ik_link_change,
+        "suffix-scoped IK should leave leading bookend dominant: snapshot={snapshot:?}"
+    );
+    assert_eq!(
+        perf_world_update_optimization_branch(&snapshot),
+        PerfWorldUpdateOptimizationBranch::TrailingSuffixShrinking,
+        "real-asset proxy should branch to trailing suffix shrinking: snapshot={snapshot:?}"
+    );
+}
+
+#[test]
+fn categorized_world_matrix_bone_update_counts_decide_ik_scope_for_broad_link_change_updates() {
+    // Synthetic control case: a long root-near chain multiplies per-link-step refreshes
+    // across the whole chain scope on every iteration.
+    let chain_bone_count = 12usize;
+    let unrelated_tail_count = 8usize;
+    let bone_count = chain_bone_count + 1 + unrelated_tail_count;
+    let snapshot = evaluate_pose_category_snapshot(&mut RuntimeInstance::new(
+        build_root_near_multi_link_ik_model(unrelated_tail_count, chain_bone_count, 16),
+    ));
+
+    assert_eq!(snapshot.leading_bookend, bone_count);
+    assert_eq!(snapshot.trailing_bookend, 0);
+    assert_eq!(snapshot.phase_loop, bone_count);
+    assert_eq!(snapshot.bookend(), bone_count);
+    assert_eq!(snapshot.ik_link_change, 468);
+    assert!(
+        snapshot.ik_link_change > snapshot.bookend(),
+        "long-chain IK should dominate leading bookend updates: snapshot={snapshot:?}"
+    );
+    assert_eq!(
+        perf_world_update_optimization_branch(&snapshot),
+        PerfWorldUpdateOptimizationBranch::IkLinkChangeScope,
+        "long-chain IK should branch to IK link-change scope work: snapshot={snapshot:?}"
     );
 }
 
@@ -1637,11 +2179,22 @@ fn pre_physics_child_recomputes_after_after_physics_append_parent() {
         Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
     );
 
+    runtime.reset_world_matrix_bone_update_count();
     runtime.evaluate_current_pose();
 
     assert_vec3a_near(
         translation(runtime.world_matrices()[2]),
         Vec3A::new(0.0, 1.0, 0.0),
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_trailing_bookend_count(),
+        2,
+        "cross-phase append should refresh a trailing suffix, not the full eval-order bookend"
+    );
+    assert_eq!(
+        runtime.world_matrix_bone_update_leading_bookend_count(),
+        3,
+        "leading bookend should still refresh the full eval-order prefix"
     );
 }
 

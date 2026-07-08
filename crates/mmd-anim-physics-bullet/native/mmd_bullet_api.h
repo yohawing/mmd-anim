@@ -64,6 +64,8 @@ mmd_anim_bullet_world_destroy(mmd_anim_bullet_world *world);
 MMD_ANIM_BULLET_API mmd_anim_bullet_status
 mmd_anim_bullet_world_reset(mmd_anim_bullet_world *world);
 MMD_ANIM_BULLET_API mmd_anim_bullet_status
+mmd_anim_bullet_world_settle_to_current(mmd_anim_bullet_world *world);
+MMD_ANIM_BULLET_API mmd_anim_bullet_status
 mmd_anim_bullet_world_step(mmd_anim_bullet_world *world, float delta_time, int32_t max_sub_steps);
 
 MMD_ANIM_BULLET_API mmd_anim_bullet_status

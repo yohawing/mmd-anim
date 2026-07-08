@@ -5,7 +5,8 @@ use mmd_anim_format::{
 use thiserror::Error;
 
 use crate::{
-    BulletError, BulletWorld, RigidBodyDesc, RigidBodyHandle, RigidBodyShape, SixDofSpringJointDesc,
+    BulletError, BulletWorld, RigidBodyDesc, RigidBodyHandle, RigidBodyShape,
+    SixDofSpringJointDesc, Transform,
 };
 
 #[derive(Debug, Error)]
@@ -27,7 +28,64 @@ pub struct PmxBulletBuildReport {
 pub struct PmxBulletWorld {
     pub world: BulletWorld,
     pub rigidbody_handles: Vec<RigidBodyHandle>,
+    pub rigidbody_bindings: Vec<PmxRigidBodyBinding>,
     pub report: PmxBulletBuildReport,
+}
+
+impl PmxBulletWorld {
+    pub fn settle_to_current(&mut self) -> Result<(), BulletError> {
+        self.world.settle_to_current()
+    }
+
+    pub fn feed_kinematic_rigidbodies(
+        &mut self,
+        bone_world_transforms: &[Transform],
+    ) -> Result<usize, BulletError> {
+        let mut fed = 0;
+        for (handle, binding) in self
+            .rigidbody_handles
+            .iter()
+            .copied()
+            .zip(self.rigidbody_bindings.iter())
+        {
+            if !binding.mode.follows_bone_before_step() {
+                continue;
+            }
+            let Some(bone_index) = binding.bone_index else {
+                continue;
+            };
+            let Some(transform) = bone_world_transforms.get(bone_index).copied() else {
+                continue;
+            };
+            self.world.set_rigidbody_transform(handle, transform)?;
+            fed += 1;
+        }
+        Ok(fed)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PmxRigidBodyMode {
+    Static,
+    Dynamic,
+    DynamicBone,
+    Unknown,
+}
+
+impl PmxRigidBodyMode {
+    pub fn follows_bone_before_step(self) -> bool {
+        matches!(self, Self::Static | Self::DynamicBone)
+    }
+
+    pub fn writes_back_to_bone(self) -> bool {
+        matches!(self, Self::Dynamic | Self::DynamicBone)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PmxRigidBodyBinding {
+    pub bone_index: Option<usize>,
+    pub mode: PmxRigidBodyMode,
 }
 
 pub fn build_bullet_world_from_pmx(
@@ -35,12 +93,21 @@ pub fn build_bullet_world_from_pmx(
 ) -> Result<PmxBulletWorld, PmxBulletBuildError> {
     let mut world = BulletWorld::new()?;
     let mut rigidbody_handles = Vec::with_capacity(model.rigid_bodies.len());
+    let mut rigidbody_bindings = Vec::with_capacity(model.rigid_bodies.len());
     let mut report = PmxBulletBuildReport::default();
 
     for (index, body) in model.rigid_bodies.iter().enumerate() {
         let desc = rigidbody_desc_from_pmx(index, body)?;
         let handle = world.add_rigidbody(desc)?;
         rigidbody_handles.push(handle);
+        rigidbody_bindings.push(PmxRigidBodyBinding {
+            bone_index: if body.bone_index >= 0 {
+                Some(body.bone_index as usize)
+            } else {
+                None
+            },
+            mode: rigidbody_mode_from_pmx(body.mode.as_str()),
+        });
         report.rigidbodies_added += 1;
     }
 
@@ -58,8 +125,18 @@ pub fn build_bullet_world_from_pmx(
     Ok(PmxBulletWorld {
         world,
         rigidbody_handles,
+        rigidbody_bindings,
         report,
     })
+}
+
+fn rigidbody_mode_from_pmx(mode: &str) -> PmxRigidBodyMode {
+    match mode {
+        "static" => PmxRigidBodyMode::Static,
+        "dynamic" => PmxRigidBodyMode::Dynamic,
+        "dynamicBone" => PmxRigidBodyMode::DynamicBone,
+        _ => PmxRigidBodyMode::Unknown,
+    }
 }
 
 fn rigidbody_desc_from_pmx(
@@ -152,9 +229,11 @@ mod tests {
     #[test]
     fn builds_bullet_world_from_pmx_physics_metadata() {
         let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [{"name": "root"}],
             "rigidBodies": [
                 {
                     "name": "anchor",
+                    "boneIndex": 0,
                     "shape": "sphere",
                     "size": [0.5, 0.0, 0.0],
                     "position": [0.0, 10.0, 0.0],
@@ -197,6 +276,13 @@ mod tests {
         .unwrap();
 
         let mut built = build_bullet_world_from_pmx(&model).unwrap();
+        let fed = built
+            .feed_kinematic_rigidbodies(&[Transform {
+                position: [0.0, 10.0, 0.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            }])
+            .unwrap();
+        built.settle_to_current().unwrap();
         built.world.step(0.5, 60).unwrap();
         let bob = built
             .world
@@ -212,6 +298,9 @@ mod tests {
                 joints_skipped_unsupported_type: 0,
             }
         );
+        assert_eq!(built.rigidbody_bindings[0].mode, PmxRigidBodyMode::Static);
+        assert_eq!(built.rigidbody_bindings[0].bone_index, Some(0));
+        assert_eq!(fed, 1);
         assert!(
             bob.position[1] > 6.0,
             "bob should remain constrained: {bob:?}"

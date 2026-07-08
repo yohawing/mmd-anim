@@ -16,4 +16,7 @@ pub use native::{
     SixDofSpringJointDesc, Transform,
 };
 #[cfg(all(feature = "native", feature = "pmx-format"))]
-pub use pmx::{PmxBulletBuildReport, PmxBulletWorld, build_bullet_world_from_pmx};
+pub use pmx::{
+    PmxBulletBuildReport, PmxBulletWorld, PmxRigidBodyBinding, PmxRigidBodyMode,
+    build_bullet_world_from_pmx,
+};

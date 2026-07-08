@@ -147,6 +147,34 @@ mmd_anim_bullet_status mmd_anim_bullet_world_reset(mmd_anim_bullet_world *world)
     return MMD_ANIM_BULLET_OK;
 }
 
+mmd_anim_bullet_status mmd_anim_bullet_world_settle_to_current(mmd_anim_bullet_world *world) {
+    if (!world) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world is null");
+    }
+
+    world->dynamics_world->clearForces();
+    btOverlappingPairCache *pair_cache = world->dynamics_world->getPairCache();
+    btDispatcher *dispatcher = world->dynamics_world->getDispatcher();
+
+    for (auto &entry : world->rigidbodies) {
+        btRigidBody *body = entry.body.get();
+        body->setInterpolationWorldTransform(body->getWorldTransform());
+        body->setLinearVelocity(btVector3(0.0f, 0.0f, 0.0f));
+        body->setAngularVelocity(btVector3(0.0f, 0.0f, 0.0f));
+        body->setInterpolationLinearVelocity(btVector3(0.0f, 0.0f, 0.0f));
+        body->setInterpolationAngularVelocity(btVector3(0.0f, 0.0f, 0.0f));
+        body->clearForces();
+        body->activate(true);
+
+        if (pair_cache && dispatcher && body->getBroadphaseHandle()) {
+            pair_cache->cleanProxyFromPairs(body->getBroadphaseHandle(), dispatcher);
+        }
+    }
+
+    g_last_error.clear();
+    return MMD_ANIM_BULLET_OK;
+}
+
 mmd_anim_bullet_status mmd_anim_bullet_world_step(mmd_anim_bullet_world *world, float delta_time, int32_t max_sub_steps) {
     if (!world) {
         return fail(MMD_ANIM_BULLET_NULL_POINTER, "world is null");
@@ -268,10 +296,6 @@ mmd_anim_bullet_status mmd_anim_bullet_world_set_rigidbody_transform(
 
     auto &entry = world->rigidbodies[static_cast<size_t>(index)];
     entry.body->setWorldTransform(transform);
-    entry.body->setInterpolationWorldTransform(transform);
-    entry.body->setLinearVelocity(btVector3(0.0f, 0.0f, 0.0f));
-    entry.body->setAngularVelocity(btVector3(0.0f, 0.0f, 0.0f));
-    entry.body->clearForces();
     if (entry.motion_state) {
         entry.motion_state->setWorldTransform(transform);
     }

@@ -175,6 +175,10 @@ impl BulletWorld {
         check(unsafe { ffi::mmd_anim_bullet_world_reset(self.raw.as_ptr()) })
     }
 
+    pub fn settle_to_current(&mut self) -> Result<(), BulletError> {
+        check(unsafe { ffi::mmd_anim_bullet_world_settle_to_current(self.raw.as_ptr()) })
+    }
+
     pub fn step(&mut self, delta_time: f32, max_sub_steps: i32) -> Result<(), BulletError> {
         check(unsafe {
             ffi::mmd_anim_bullet_world_step(self.raw.as_ptr(), delta_time, max_sub_steps)
@@ -315,6 +319,7 @@ mod ffi {
         pub fn mmd_anim_bullet_world_create(out_world: *mut *mut World) -> i32;
         pub fn mmd_anim_bullet_world_destroy(world: *mut World);
         pub fn mmd_anim_bullet_world_reset(world: *mut World) -> i32;
+        pub fn mmd_anim_bullet_world_settle_to_current(world: *mut World) -> i32;
         pub fn mmd_anim_bullet_world_step(
             world: *mut World,
             delta_time: f32,
@@ -405,5 +410,27 @@ mod tests {
             bob_after.position[1] > 6.0,
             "expected locked joint to prevent free fall: bob_after={bob_after:?}"
         );
+    }
+
+    #[test]
+    fn settle_to_current_keeps_teleported_body_stable_until_stepped() {
+        let mut world = BulletWorld::new().unwrap();
+        let body = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(1.0, [0.0, 10.0, 0.0], 1.0))
+            .unwrap();
+
+        world
+            .set_rigidbody_transform(
+                body,
+                Transform {
+                    position: [0.0, 20.0, 0.0],
+                    rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                },
+            )
+            .unwrap();
+        world.settle_to_current().unwrap();
+        let settled = world.rigidbody_transform(body).unwrap();
+
+        assert!((settled.position[1] - 20.0).abs() < 1.0e-4);
     }
 }

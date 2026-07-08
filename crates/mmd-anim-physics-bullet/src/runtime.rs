@@ -2,7 +2,15 @@ use mmd_anim_runtime::RuntimeInstance;
 
 use crate::{BulletError, PmxBulletWorld, Transform};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuntimePhysicsStepReport {
+    pub kinematic_rigidbodies_fed: usize,
+    pub bones_written_back: usize,
+}
+
 pub trait RuntimePhysicsBridgeExt {
+    fn seed_runtime_physics(&mut self, runtime: &RuntimeInstance) -> Result<usize, BulletError>;
+
     fn feed_runtime_kinematic_rigidbodies(
         &mut self,
         runtime: &RuntimeInstance,
@@ -12,9 +20,22 @@ pub trait RuntimePhysicsBridgeExt {
         &self,
         runtime: &mut RuntimeInstance,
     ) -> Result<usize, BulletError>;
+
+    fn step_runtime_physics(
+        &mut self,
+        runtime: &mut RuntimeInstance,
+        delta_time: f32,
+        max_sub_steps: i32,
+    ) -> Result<RuntimePhysicsStepReport, BulletError>;
 }
 
 impl RuntimePhysicsBridgeExt for PmxBulletWorld {
+    fn seed_runtime_physics(&mut self, runtime: &RuntimeInstance) -> Result<usize, BulletError> {
+        let fed = self.feed_runtime_kinematic_rigidbodies(runtime)?;
+        self.settle_to_current()?;
+        Ok(fed)
+    }
+
     fn feed_runtime_kinematic_rigidbodies(
         &mut self,
         runtime: &RuntimeInstance,
@@ -38,6 +59,21 @@ impl RuntimePhysicsBridgeExt for PmxBulletWorld {
             .map(|transform| transform.map(Transform::to_mat4))
             .collect::<Vec<_>>();
         Ok(runtime.apply_physics_world_matrices(&physics_world_matrices))
+    }
+
+    fn step_runtime_physics(
+        &mut self,
+        runtime: &mut RuntimeInstance,
+        delta_time: f32,
+        max_sub_steps: i32,
+    ) -> Result<RuntimePhysicsStepReport, BulletError> {
+        let kinematic_rigidbodies_fed = self.feed_runtime_kinematic_rigidbodies(runtime)?;
+        self.world.step(delta_time, max_sub_steps)?;
+        let bones_written_back = self.apply_readback_to_runtime(runtime)?;
+        Ok(RuntimePhysicsStepReport {
+            kinematic_rigidbodies_fed,
+            bones_written_back,
+        })
     }
 }
 
@@ -106,6 +142,87 @@ mod tests {
         assert!(
             translation(runtime.world_matrices()[BoneIndex(0).as_usize()]).y < 8.0,
             "runtime bone should receive simulated Bullet readback"
+        );
+    }
+
+    #[test]
+    fn bridge_step_runs_feed_bullet_step_and_readback() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [
+                {"name": "anchor", "position": [0.0, 10.0, 0.0]},
+                {"name": "physics", "position": [0.0, 8.0, 0.0]}
+            ],
+            "rigidBodies": [
+                {
+                    "name": "anchorBody",
+                    "boneIndex": 0,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 10.0, 0.0],
+                    "mode": "static"
+                },
+                {
+                    "name": "physicsBody",
+                    "boneIndex": 1,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 8.0, 0.0],
+                    "mass": 1.0,
+                    "mode": "dynamic"
+                }
+            ],
+            "joints": [
+                {
+                    "name": "joint",
+                    "type": "generic6dofSpring",
+                    "rigidBodyIndexA": 0,
+                    "rigidBodyIndexB": 1,
+                    "position": [0.0, 9.0, 0.0]
+                }
+            ]
+        }))
+        .unwrap();
+        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+        let model = build_pmx_model_from_parts(PmxPartsInput {
+            descriptor,
+            positions_xyz: &positions_xyz,
+            normals_xyz: &normals_xyz,
+            uvs_xy: &uvs_xy,
+            indices: &indices,
+            skin_indices: &[],
+            skin_weights: &[],
+            edge_scale: &[],
+        })
+        .unwrap();
+        let mut bullet = build_bullet_world_from_pmx(&model).unwrap();
+        let runtime_model = Arc::new(
+            ModelArena::new(vec![
+                BoneInit::new(None, Vec3A::new(0.0, 10.0, 0.0)),
+                BoneInit::new(None, Vec3A::new(0.0, 8.0, 0.0)),
+            ])
+            .unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(runtime_model);
+        runtime.evaluate_rest_pose();
+
+        assert_eq!(bullet.seed_runtime_physics(&runtime).unwrap(), 1);
+        let report = bullet
+            .step_runtime_physics(&mut runtime, 1.0 / 30.0, 10)
+            .unwrap();
+
+        assert_eq!(
+            report,
+            RuntimePhysicsStepReport {
+                kinematic_rigidbodies_fed: 1,
+                bones_written_back: 1,
+            }
+        );
+        assert!(
+            translation(runtime.world_matrices()[BoneIndex(1).as_usize()]).y < 8.0,
+            "dynamic runtime bone should move after bridge step"
         );
     }
 }

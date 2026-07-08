@@ -16,6 +16,11 @@ pub struct RuntimePhysicsClockStepReport {
 }
 
 pub trait RuntimePhysicsBridgeExt {
+    fn reset_runtime_physics(
+        &mut self,
+        runtime: &mut RuntimeInstance,
+    ) -> Result<usize, BulletError>;
+
     fn seed_runtime_physics(&mut self, runtime: &RuntimeInstance) -> Result<usize, BulletError>;
 
     fn feed_runtime_kinematic_rigidbodies(
@@ -43,6 +48,15 @@ pub trait RuntimePhysicsBridgeExt {
 }
 
 impl RuntimePhysicsBridgeExt for PmxBulletWorld {
+    fn reset_runtime_physics(
+        &mut self,
+        runtime: &mut RuntimeInstance,
+    ) -> Result<usize, BulletError> {
+        runtime.reset_physics_tick();
+        self.world.reset()?;
+        self.seed_runtime_physics(runtime)
+    }
+
     fn seed_runtime_physics(&mut self, runtime: &RuntimeInstance) -> Result<usize, BulletError> {
         let fed = self.feed_runtime_kinematic_rigidbodies(runtime)?;
         self.settle_to_current()?;
@@ -312,5 +326,56 @@ mod tests {
             translation(runtime.world_matrices()[BoneIndex(0).as_usize()]).y < 8.0,
             "runtime-clock bridge should step Bullet and write back"
         );
+    }
+
+    #[test]
+    fn bridge_reset_reseeds_bullet_world_from_runtime_pose() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [{"name": "anchor", "position": [0.0, 10.0, 0.0]}],
+            "rigidBodies": [
+                {
+                    "name": "anchorBody",
+                    "boneIndex": 0,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 10.0, 0.0],
+                    "mode": "static"
+                }
+            ]
+        }))
+        .unwrap();
+        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+        let model = build_pmx_model_from_parts(PmxPartsInput {
+            descriptor,
+            positions_xyz: &positions_xyz,
+            normals_xyz: &normals_xyz,
+            uvs_xy: &uvs_xy,
+            indices: &indices,
+            skin_indices: &[],
+            skin_weights: &[],
+            edge_scale: &[],
+        })
+        .unwrap();
+        let mut bullet = build_bullet_world_from_pmx(&model).unwrap();
+        let runtime_model = Arc::new(
+            ModelArena::new(vec![BoneInit::new(None, Vec3A::new(0.0, 10.0, 0.0))]).unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(runtime_model);
+        runtime.evaluate_rest_pose();
+        runtime
+            .pose_mut()
+            .set_local_position_offset(BoneIndex(0), Vec3A::new(0.0, 5.0, 0.0));
+        runtime.evaluate_current_pose();
+
+        assert_eq!(bullet.reset_runtime_physics(&mut runtime).unwrap(), 1);
+        let body = bullet
+            .world
+            .rigidbody_transform(bullet.rigidbody_handles[0])
+            .unwrap();
+
+        assert!((body.position[1] - 15.0).abs() < 1.0e-4);
     }
 }

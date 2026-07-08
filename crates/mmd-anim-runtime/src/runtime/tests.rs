@@ -5,7 +5,7 @@ use glam::{Quat, Vec3A};
 use crate::{
     AnimationClip, AppendTransformInit, BoneAnimationBinding, BoneIndex, BoneInit, IkAngleLimit,
     IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkLinkInit,
-    IkSolveOptions, IkSolverInit, ModelArena, MovableBoneKeyframe, MovableBoneTrack,
+    IkSolveOptions, IkSolverInit, ModelArena, MovableBoneKeyframe, MovableBoneTrack, PhysicsMode,
     PhysicsTickConfig, RuntimeInstance,
 };
 
@@ -1243,6 +1243,25 @@ fn physics_tick_accumulates_fixed_substeps_and_clamps_large_dt() {
     assert_eq!(clamped.clamped_dt_seconds, 4.0 / 120.0);
     assert_eq!(clamped.substeps, 4);
     assert!(runtime.physics_accumulator_seconds() <= 1.0 / 120.0);
+}
+
+#[test]
+fn physics_mode_defaults_off_and_resets_tick_when_disabled() {
+    let model = Arc::new(ModelArena::new(vec![BoneInit::new(None, Vec3A::ZERO)]).unwrap());
+    let mut runtime = RuntimeInstance::new(model);
+
+    assert_eq!(runtime.physics_mode(), PhysicsMode::Off);
+    assert!(!runtime.physics_mode().steps_backend());
+
+    runtime.set_physics_mode(PhysicsMode::Live);
+    let stats = runtime.advance_physics_tick_clock(1.0 / 240.0);
+    assert_eq!(stats.substeps, 0);
+    assert!(runtime.physics_accumulator_seconds() > 0.0);
+
+    runtime.set_physics_mode(PhysicsMode::Off);
+
+    assert_eq!(runtime.physics_mode(), PhysicsMode::Off);
+    assert_eq!(runtime.physics_accumulator_seconds(), 0.0);
 }
 
 #[test]

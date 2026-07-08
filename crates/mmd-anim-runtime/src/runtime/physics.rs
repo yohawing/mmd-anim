@@ -3,6 +3,20 @@ use glam::{Mat4, Vec3A};
 use super::{IkSolveOptions, RuntimeInstance};
 use crate::BoneIndex;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PhysicsMode {
+    #[default]
+    Off,
+    Trace,
+    Live,
+}
+
+impl PhysicsMode {
+    pub fn steps_backend(self) -> bool {
+        matches!(self, Self::Trace | Self::Live)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PhysicsTickConfig {
     pub fixed_substep_seconds: f32,
@@ -44,6 +58,18 @@ pub struct PhysicsStepStats {
 }
 
 impl RuntimeInstance {
+    #[inline]
+    pub fn physics_mode(&self) -> PhysicsMode {
+        self.physics_mode
+    }
+
+    pub fn set_physics_mode(&mut self, mode: PhysicsMode) {
+        if mode == PhysicsMode::Off {
+            self.reset_physics_tick();
+        }
+        self.physics_mode = mode;
+    }
+
     #[inline]
     pub fn physics_tick_config(&self) -> PhysicsTickConfig {
         self.physics_tick_config

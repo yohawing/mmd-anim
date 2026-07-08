@@ -108,6 +108,10 @@ impl RuntimePhysicsBridgeExt for PmxBulletWorld {
         runtime: &mut RuntimeInstance,
         delta_time: f32,
     ) -> Result<RuntimePhysicsClockStepReport, BulletError> {
+        if !runtime.physics_mode().steps_backend() {
+            return Ok(RuntimePhysicsClockStepReport::default());
+        }
+
         let tick = runtime.advance_physics_tick_clock(delta_time);
         let kinematic_rigidbodies_fed = self.feed_runtime_kinematic_rigidbodies(runtime)?;
 
@@ -134,7 +138,7 @@ mod tests {
 
     use glam::Vec3A;
     use mmd_anim_format::{PmxPartsDescriptor, PmxPartsInput, build_pmx_model_from_parts};
-    use mmd_anim_runtime::{BoneIndex, BoneInit, ModelArena, RuntimeInstance};
+    use mmd_anim_runtime::{BoneIndex, BoneInit, ModelArena, PhysicsMode, RuntimeInstance};
     use serde_json::json;
 
     use super::*;
@@ -182,6 +186,7 @@ mod tests {
         );
         let mut runtime = RuntimeInstance::new(runtime_model);
         runtime.evaluate_rest_pose();
+        runtime.set_physics_mode(PhysicsMode::Live);
 
         assert_eq!(
             bullet.feed_runtime_kinematic_rigidbodies(&runtime).unwrap(),
@@ -258,6 +263,7 @@ mod tests {
         );
         let mut runtime = RuntimeInstance::new(runtime_model);
         runtime.evaluate_rest_pose();
+        runtime.set_physics_mode(PhysicsMode::Live);
 
         assert_eq!(bullet.seed_runtime_physics(&runtime).unwrap(), 1);
         let report = bullet
@@ -315,6 +321,7 @@ mod tests {
         );
         let mut runtime = RuntimeInstance::new(runtime_model);
         runtime.evaluate_rest_pose();
+        runtime.set_physics_mode(PhysicsMode::Live);
 
         let report = bullet
             .step_runtime_physics_with_runtime_clock(&mut runtime, 1.0 / 60.0)
@@ -326,6 +333,55 @@ mod tests {
             translation(runtime.world_matrices()[BoneIndex(0).as_usize()]).y < 8.0,
             "runtime-clock bridge should step Bullet and write back"
         );
+    }
+
+    #[test]
+    fn bridge_runtime_clock_respects_off_mode() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [{"name": "physics", "position": [0.0, 8.0, 0.0]}],
+            "rigidBodies": [
+                {
+                    "name": "physicsBody",
+                    "boneIndex": 0,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 8.0, 0.0],
+                    "mass": 1.0,
+                    "mode": "dynamic"
+                }
+            ]
+        }))
+        .unwrap();
+        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+        let model = build_pmx_model_from_parts(PmxPartsInput {
+            descriptor,
+            positions_xyz: &positions_xyz,
+            normals_xyz: &normals_xyz,
+            uvs_xy: &uvs_xy,
+            indices: &indices,
+            skin_indices: &[],
+            skin_weights: &[],
+            edge_scale: &[],
+        })
+        .unwrap();
+        let mut bullet = build_bullet_world_from_pmx(&model).unwrap();
+        let runtime_model = Arc::new(
+            ModelArena::new(vec![BoneInit::new(None, Vec3A::new(0.0, 8.0, 0.0))]).unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(runtime_model);
+        runtime.evaluate_rest_pose();
+
+        let report = bullet
+            .step_runtime_physics_with_runtime_clock(&mut runtime, 1.0 / 60.0)
+            .unwrap();
+
+        assert_eq!(runtime.physics_mode(), PhysicsMode::Off);
+        assert_eq!(report, RuntimePhysicsClockStepReport::default());
+        assert_eq!(runtime.physics_accumulator_seconds(), 0.0);
+        assert_eq!(translation(runtime.world_matrices()[0]).y, 8.0);
     }
 
     #[test]

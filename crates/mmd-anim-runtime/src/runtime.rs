@@ -88,7 +88,7 @@ pub struct IkSolveOptions {
     pub max_iterations_cap: Option<u32>,
 }
 
-pub use physics::{PhysicsStepStats, PhysicsTickConfig};
+pub use physics::{PhysicsMode, PhysicsStepStats, PhysicsTickConfig};
 
 impl Default for IkSolveOptions {
     fn default() -> Self {
@@ -114,6 +114,7 @@ pub(super) enum WorldMatrixBoneUpdateCategory {
 pub struct RuntimeInstance {
     model: Arc<ModelArena>,
     pose: PoseArena,
+    physics_mode: PhysicsMode,
     physics_tick_config: PhysicsTickConfig,
     physics_accumulator_seconds: f32,
     ik_scratch: IkScratch,
@@ -157,6 +158,7 @@ impl RuntimeInstance {
         Self {
             model,
             pose,
+            physics_mode: PhysicsMode::default(),
             physics_tick_config: PhysicsTickConfig::default(),
             physics_accumulator_seconds: 0.0,
             ik_scratch,

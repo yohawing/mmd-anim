@@ -1,0 +1,21 @@
+[package]
+name = "mmd-anim-physics-bullet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Optional Bullet physics backend for mmd-anim"
+
+[features]
+default = []
+native = []
+
+[dependencies]
+thiserror.workspace = true
+
+[build-dependencies]
+cc = "1.2"

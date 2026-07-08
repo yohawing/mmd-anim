@@ -1,0 +1,249 @@
+#include "mmd_bullet_api.h"
+
+#include <btBulletDynamicsCommon.h>
+
+#include <memory>
+#include <string>
+#include <vector>
+
+thread_local std::string g_last_error;
+
+struct RigidBodyEntry {
+    std::unique_ptr<btCollisionShape> shape;
+    std::unique_ptr<btDefaultMotionState> motion_state;
+    std::unique_ptr<btRigidBody> body;
+    btTransform initial_transform;
+};
+
+struct mmd_anim_bullet_world {
+    std::unique_ptr<btDefaultCollisionConfiguration> collision_configuration;
+    std::unique_ptr<btCollisionDispatcher> dispatcher;
+    std::unique_ptr<btDbvtBroadphase> broadphase;
+    std::unique_ptr<btSequentialImpulseConstraintSolver> solver;
+    std::unique_ptr<btDiscreteDynamicsWorld> dynamics_world;
+    std::vector<RigidBodyEntry> rigidbodies;
+};
+
+static mmd_anim_bullet_status fail(mmd_anim_bullet_status status, const char *message) {
+    g_last_error = message;
+    return status;
+}
+
+static btTransform make_transform(const float position[3], const float euler[3]) {
+    btTransform transform;
+    transform.setIdentity();
+    transform.setOrigin(btVector3(position[0], position[1], position[2]));
+    btQuaternion rotation;
+    rotation.setEulerZYX(euler[2], euler[1], euler[0]);
+    transform.setRotation(rotation);
+    return transform;
+}
+
+static btCollisionShape *make_shape(const mmd_anim_bullet_rigidbody_desc &desc) {
+    switch (desc.shape_type) {
+    case MMD_ANIM_BULLET_SHAPE_SPHERE:
+        return new btSphereShape(btMax(desc.shape_size[0], 0.0001f));
+    case MMD_ANIM_BULLET_SHAPE_BOX:
+        return new btBoxShape(btVector3(
+            btMax(desc.shape_size[0], 0.0001f),
+            btMax(desc.shape_size[1], 0.0001f),
+            btMax(desc.shape_size[2], 0.0001f)));
+    case MMD_ANIM_BULLET_SHAPE_CAPSULE:
+        return new btCapsuleShape(btMax(desc.shape_size[0], 0.0001f), btMax(desc.shape_size[1], 0.0001f));
+    default:
+        return nullptr;
+    }
+}
+
+extern "C" {
+
+uint32_t mmd_anim_bullet_get_version(void) {
+    return 1;
+}
+
+const char *mmd_anim_bullet_get_last_error(void) {
+    return g_last_error.c_str();
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_create(mmd_anim_bullet_world **out_world) {
+    if (!out_world) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "out_world is null");
+    }
+
+    try {
+        auto world = std::make_unique<mmd_anim_bullet_world>();
+        world->collision_configuration = std::make_unique<btDefaultCollisionConfiguration>();
+        world->dispatcher = std::make_unique<btCollisionDispatcher>(world->collision_configuration.get());
+        world->broadphase = std::make_unique<btDbvtBroadphase>();
+        world->solver = std::make_unique<btSequentialImpulseConstraintSolver>();
+        world->dynamics_world = std::make_unique<btDiscreteDynamicsWorld>(
+            world->dispatcher.get(),
+            world->broadphase.get(),
+            world->solver.get(),
+            world->collision_configuration.get());
+        world->dynamics_world->setGravity(btVector3(0.0f, -98.0f, 0.0f));
+        *out_world = world.release();
+        g_last_error.clear();
+        return MMD_ANIM_BULLET_OK;
+    } catch (const std::exception &err) {
+        return fail(MMD_ANIM_BULLET_INTERNAL_ERROR, err.what());
+    }
+}
+
+void mmd_anim_bullet_world_destroy(mmd_anim_bullet_world *world) {
+    delete world;
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_reset(mmd_anim_bullet_world *world) {
+    if (!world) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world is null");
+    }
+
+    for (auto &entry : world->rigidbodies) {
+        entry.body->setWorldTransform(entry.initial_transform);
+        entry.body->setInterpolationWorldTransform(entry.initial_transform);
+        entry.body->setLinearVelocity(btVector3(0.0f, 0.0f, 0.0f));
+        entry.body->setAngularVelocity(btVector3(0.0f, 0.0f, 0.0f));
+        entry.body->clearForces();
+        if (entry.motion_state) {
+            entry.motion_state->setWorldTransform(entry.initial_transform);
+        }
+    }
+    world->dynamics_world->getBroadphase()->getOverlappingPairCache()->cleanProxyFromPairs(nullptr, world->dynamics_world->getDispatcher());
+    g_last_error.clear();
+    return MMD_ANIM_BULLET_OK;
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_step(mmd_anim_bullet_world *world, float delta_time, int32_t max_sub_steps) {
+    if (!world) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world is null");
+    }
+    if (delta_time < 0.0f || max_sub_steps < 0) {
+        return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "delta_time and max_sub_steps must be non-negative");
+    }
+
+    world->dynamics_world->stepSimulation(delta_time, max_sub_steps, 1.0f / 120.0f);
+    g_last_error.clear();
+    return MMD_ANIM_BULLET_OK;
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_add_rigidbody(
+    mmd_anim_bullet_world *world,
+    const mmd_anim_bullet_rigidbody_desc *desc,
+    int32_t *out_index) {
+    if (!world || !desc || !out_index) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world, desc, or out_index is null");
+    }
+
+    try {
+        std::unique_ptr<btCollisionShape> shape(make_shape(*desc));
+        if (!shape) {
+            return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "unknown shape type");
+        }
+
+        btTransform initial_transform = make_transform(desc->position, desc->rotation_euler);
+        btVector3 inertia(0.0f, 0.0f, 0.0f);
+        const btScalar mass = btMax(desc->mass, 0.0f);
+        if (mass > 0.0f) {
+            shape->calculateLocalInertia(mass, inertia);
+        }
+
+        auto motion_state = std::make_unique<btDefaultMotionState>(initial_transform);
+        btRigidBody::btRigidBodyConstructionInfo info(mass, motion_state.get(), shape.get(), inertia);
+        info.m_linearDamping = btMax(desc->linear_damping, 0.0f);
+        info.m_angularDamping = btMax(desc->angular_damping, 0.0f);
+        info.m_friction = btMax(desc->friction, 0.0f);
+        info.m_restitution = btMax(desc->restitution, 0.0f);
+
+        auto body = std::make_unique<btRigidBody>(info);
+        if (mass == 0.0f) {
+            body->setCollisionFlags(body->getCollisionFlags() | btCollisionObject::CF_KINEMATIC_OBJECT);
+        }
+        body->setActivationState(DISABLE_DEACTIVATION);
+
+        const short group = static_cast<short>(1u << btMin<uint16_t>(desc->collision_group, 15));
+        const short mask = static_cast<short>(desc->collision_mask == 0 ? 0xffff : desc->collision_mask);
+        world->dynamics_world->addRigidBody(body.get(), group, mask);
+
+        RigidBodyEntry entry;
+        entry.shape = std::move(shape);
+        entry.motion_state = std::move(motion_state);
+        entry.body = std::move(body);
+        entry.initial_transform = initial_transform;
+        world->rigidbodies.push_back(std::move(entry));
+        *out_index = static_cast<int32_t>(world->rigidbodies.size() - 1);
+        g_last_error.clear();
+        return MMD_ANIM_BULLET_OK;
+    } catch (const std::exception &err) {
+        return fail(MMD_ANIM_BULLET_INTERNAL_ERROR, err.what());
+    }
+}
+
+int32_t mmd_anim_bullet_world_get_rigidbody_count(const mmd_anim_bullet_world *world) {
+    if (!world) {
+        g_last_error = "world is null";
+        return -1;
+    }
+    g_last_error.clear();
+    return static_cast<int32_t>(world->rigidbodies.size());
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_get_rigidbody_transform(
+    const mmd_anim_bullet_world *world,
+    int32_t index,
+    float out_position[3],
+    float out_rotation_xyzw[4]) {
+    if (!world || !out_position || !out_rotation_xyzw) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world or output buffer is null");
+    }
+    if (index < 0 || static_cast<size_t>(index) >= world->rigidbodies.size()) {
+        return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "rigidbody index out of range");
+    }
+
+    btTransform transform;
+    const auto &entry = world->rigidbodies[static_cast<size_t>(index)];
+    entry.body->getMotionState()->getWorldTransform(transform);
+    const btVector3 origin = transform.getOrigin();
+    const btQuaternion rotation = transform.getRotation();
+    out_position[0] = origin.x();
+    out_position[1] = origin.y();
+    out_position[2] = origin.z();
+    out_rotation_xyzw[0] = rotation.x();
+    out_rotation_xyzw[1] = rotation.y();
+    out_rotation_xyzw[2] = rotation.z();
+    out_rotation_xyzw[3] = rotation.w();
+    g_last_error.clear();
+    return MMD_ANIM_BULLET_OK;
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_set_rigidbody_transform(
+    mmd_anim_bullet_world *world,
+    int32_t index,
+    const float position[3],
+    const float rotation_xyzw[4]) {
+    if (!world || !position || !rotation_xyzw) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world or input buffer is null");
+    }
+    if (index < 0 || static_cast<size_t>(index) >= world->rigidbodies.size()) {
+        return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "rigidbody index out of range");
+    }
+
+    btTransform transform;
+    transform.setIdentity();
+    transform.setOrigin(btVector3(position[0], position[1], position[2]));
+    transform.setRotation(btQuaternion(rotation_xyzw[0], rotation_xyzw[1], rotation_xyzw[2], rotation_xyzw[3]));
+
+    auto &entry = world->rigidbodies[static_cast<size_t>(index)];
+    entry.body->setWorldTransform(transform);
+    entry.body->setInterpolationWorldTransform(transform);
+    entry.body->setLinearVelocity(btVector3(0.0f, 0.0f, 0.0f));
+    entry.body->setAngularVelocity(btVector3(0.0f, 0.0f, 0.0f));
+    entry.body->clearForces();
+    if (entry.motion_state) {
+        entry.motion_state->setWorldTransform(transform);
+    }
+    g_last_error.clear();
+    return MMD_ANIM_BULLET_OK;
+}
+
+}

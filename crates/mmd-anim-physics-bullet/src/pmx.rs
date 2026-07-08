@@ -217,4 +217,20 @@ mod tests {
             "bob should remain constrained: {bob:?}"
         );
     }
+
+    #[test]
+    #[ignore = "set MMD_ANIM_REAL_PMX to a local PMX file for manual physics smoke"]
+    fn builds_bullet_world_from_real_pmx() {
+        let path = std::env::var("MMD_ANIM_REAL_PMX").expect("MMD_ANIM_REAL_PMX must be set");
+        let data = std::fs::read(&path).unwrap();
+        let model = mmd_anim_format::parse_pmx_model(&data).unwrap();
+        let mut built = build_bullet_world_from_pmx(&model).unwrap();
+        built.world.step(1.0 / 30.0, 10).unwrap();
+
+        assert_eq!(built.report.rigidbodies_added, model.rigid_bodies.len());
+        assert_eq!(
+            built.world.rigidbody_count().unwrap(),
+            model.rigid_bodies.len()
+        );
+    }
 }

@@ -110,6 +110,17 @@ mmd_anim_bullet_status mmd_anim_bullet_world_create(mmd_anim_bullet_world **out_
 }
 
 void mmd_anim_bullet_world_destroy(mmd_anim_bullet_world *world) {
+    if (!world) {
+        return;
+    }
+    if (world->dynamics_world) {
+        for (auto it = world->constraints.rbegin(); it != world->constraints.rend(); ++it) {
+            world->dynamics_world->removeConstraint(it->get());
+        }
+        for (auto it = world->rigidbodies.rbegin(); it != world->rigidbodies.rend(); ++it) {
+            world->dynamics_world->removeRigidBody(it->body.get());
+        }
+    }
     delete world;
 }
 

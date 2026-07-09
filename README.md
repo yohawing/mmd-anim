@@ -49,6 +49,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
+Maintainers with local GoldenOracle physics baselines should also run the local
+physics release gate before cutting a release:
+
+```powershell
+.\scripts\local-physics-release-gate.ps1
+```
+
+The physics gate uses ignored `tools/golden-gate/physics-*.local.json` configs
+and local `.ai/` baselines. It never updates baselines; use
+`tools/golden-gate` directly when accepting a new baseline.
+
 ## Used By
 
 `mmd-anim` is developed as the shared animation backend for MMD-related projects.

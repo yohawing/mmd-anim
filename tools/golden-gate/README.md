@@ -16,6 +16,20 @@ uv run golden-gate gate --config golden-gate.local.json
 uv run pytest -q
 ```
 
+For local release gating of physics regressions, run the repository wrapper from
+the repo root:
+
+```powershell
+.\scripts\local-physics-release-gate.ps1
+```
+
+The wrapper discovers ignored `physics-*.local.json` configs in this directory,
+builds `mmd-anim-cli` with `physics-bullet-native`, and runs `golden-gate gate`
+for each config. Use `-List` to inspect the configured cases without running
+them, `-SkipBuild` when the binary is already current, or `-Config <file>` to run
+a subset. Missing local configs are a hard failure by default so a release gate
+cannot silently skip local GoldenOracle assets.
+
 Example local config:
 
 ```json

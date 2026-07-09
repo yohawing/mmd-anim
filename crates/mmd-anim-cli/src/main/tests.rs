@@ -1603,6 +1603,23 @@ fn verify_numeric_json_rejects_diagnose() {
 }
 
 #[test]
+fn verify_numeric_json_rejects_physics_penetration_without_diagnose() {
+    let target = Path::new("manifest.json");
+    let numeric = dispatch_verify(
+        target,
+        Some(VerifyMode::Numeric),
+        None,
+        true,
+        false,
+        true,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(numeric, ExitCode::from(2));
+}
+
+#[test]
 fn verify_camera_json_uses_numeric_compare_report() {
     let temp = unique_test_dir("verify-camera-json");
     fs::create_dir_all(&temp).unwrap();

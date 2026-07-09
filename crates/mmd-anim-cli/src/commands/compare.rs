@@ -2090,7 +2090,7 @@ fn rigidbody_collision_allowed(
 ) -> bool {
     let lhs_group = rigidbody_group_bit(lhs.group);
     let rhs_group = rigidbody_group_bit(rhs.group);
-    lhs.mask & rhs_group != 0 && rhs.mask & lhs_group != 0
+    lhs.mask & rhs_group == 0 && rhs.mask & lhs_group == 0
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -2425,6 +2425,39 @@ fn segment_segment_distance(p1: glam::Vec3, q1: glam::Vec3, p2: glam::Vec3, q2: 
 #[cfg(all(test, feature = "physics-bullet-native"))]
 mod physics_penetration_geometry_tests {
     use super::*;
+
+    fn rigidbody_with_collision(group: u8, mask: u16) -> mmd_anim_format::pmx::PmxParsedRigidBody {
+        mmd_anim_format::pmx::PmxParsedRigidBody {
+            name: String::new(),
+            english_name: String::new(),
+            bone_index: -1,
+            group,
+            mask,
+            shape: "sphere".to_owned(),
+            size: [1.0, 0.0, 0.0],
+            position: [0.0; 3],
+            rotation: [0.0; 3],
+            mass: 1.0,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            restitution: 0.0,
+            friction: 0.5,
+            mode: "dynamic".to_owned(),
+        }
+    }
+
+    #[test]
+    fn rigidbody_collision_allowed_treats_pmx_mask_as_non_collision_groups() {
+        let lhs = rigidbody_with_collision(1, 0);
+        let rhs = rigidbody_with_collision(2, 0);
+        assert!(rigidbody_collision_allowed(&lhs, &rhs));
+
+        let lhs_blocks_rhs = rigidbody_with_collision(1, 1 << 2);
+        assert!(!rigidbody_collision_allowed(&lhs_blocks_rhs, &rhs));
+
+        let rhs_blocks_lhs = rigidbody_with_collision(2, 1 << 1);
+        assert!(!rigidbody_collision_allowed(&lhs, &rhs_blocks_lhs));
+    }
 
     #[test]
     fn obb_obb_sat_gap_reports_positive_separation() {

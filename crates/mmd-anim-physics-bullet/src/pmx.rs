@@ -287,7 +287,8 @@ fn rigidbody_desc_from_pmx(
         friction: body.friction,
         restitution: body.restitution,
         collision_group: body.group as u16,
-        collision_mask: !body.mask,
+        // PMX stores the mask as a collide-with group bitmask; saba passes it to Bullet unchanged.
+        collision_mask: body.mask,
     })
 }
 
@@ -559,7 +560,7 @@ mod tests {
 
     #[test]
     fn pmx_collision_mask_controls_bullet_contacts() {
-        fn has_contact(dynamic_non_collision_mask: u16) -> bool {
+        fn has_contact(dynamic_collision_mask: u16) -> bool {
             let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
                 "bones": [{"name": "root"}],
                 "rigidBodies": [
@@ -570,7 +571,7 @@ mod tests {
                         "size": [5.0, 1.0, 5.0],
                         "position": [0.0, -1.0, 0.0],
                         "group": 1,
-                        "mask": 0,
+                        "mask": 0xffff,
                         "mode": "static"
                     },
                     {
@@ -580,7 +581,7 @@ mod tests {
                         "size": [0.5, 0.0, 0.0],
                         "position": [0.0, 0.25, 0.0],
                         "group": 1,
-                        "mask": dynamic_non_collision_mask,
+                        "mask": dynamic_collision_mask,
                         "mass": 1.0,
                         "mode": "dynamic"
                     }
@@ -598,8 +599,8 @@ mod tests {
             })
         }
 
-        assert!(has_contact(0));
-        assert!(!has_contact(1 << 1));
+        assert!(!has_contact(0));
+        assert!(has_contact(1 << 1));
     }
 
     #[test]

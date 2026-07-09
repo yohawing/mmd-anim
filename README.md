@@ -238,9 +238,10 @@ Use `--write-physics-params` to write `<fbx-stem>.physics-params.json` with
 PMX rigid-body and joint parameters as schema version 1 JSON. This is a
 sidecar for future physics bake and DCC parameter-editing workflows; it does
 not enable physics simulation in the exported FBX. PMX rigid-body
-`collision.mask` is the source non-collision group mask; the sidecar also
-writes `collision.nonCollisionMask` and `collision.bulletCollisionMask` to make
-that conversion explicit.
+`collision.mask` is the collide-with group mask passed to Bullet. The sidecar
+also writes `collision.collisionMask` / `collision.bulletCollisionMask` as
+explicit aliases and `collision.nonCollisionMask` as the complementary mask for
+tools that need a blocked-group view.
 
 By default, PMX diffuse texture paths are written to FBX as-is. With
 `--copy-diffuse-textures`, referenced diffuse textures are copied next to the

@@ -242,8 +242,8 @@ mmd_anim_bullet_status mmd_anim_bullet_world_add_rigidbody(
         }
         body->setActivationState(DISABLE_DEACTIVATION);
 
-        const short group = static_cast<short>(1u << btMin<uint16_t>(desc->collision_group, 15));
-        const short mask = static_cast<short>(desc->collision_mask);
+        const int group = 1 << btMin<uint16_t>(desc->collision_group, 15);
+        const int mask = static_cast<int>(desc->collision_mask);
         world->dynamics_world->addRigidBody(body.get(), group, mask);
 
         RigidBodyEntry entry;

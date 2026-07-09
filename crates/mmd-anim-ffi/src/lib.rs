@@ -13,12 +13,14 @@ use mmd_anim_runtime::{
     FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput, FlatIkLinkInput, FlatIkSolverInput,
     IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver,
     IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack,
-    MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
-    RuntimeInstance, build_append_transforms_from_flat_iter, build_bones_from_flat,
-    build_ik_solvers_from_flat_iter, build_morph_init_from_flat_iter, solve_append_transform,
+    MovableBoneKeyframe, MovableBoneTrack, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
+    PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
+    build_append_transforms_from_flat_iter, build_bones_from_flat, build_ik_solvers_from_flat_iter,
+    build_morph_init_from_flat_iter, solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 2;
+const FEATURE_SPLIT_PHYSICS_EVALUATION: u32 = 1 << 0;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -217,6 +219,40 @@ pub struct MmdRuntimeFfiByteBuffer {
     pub len: usize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MmdRuntimeStatus {
+    Ok = 0,
+    InvalidInput = 1,
+    Unsupported = 2,
+    BufferTooSmall = 3,
+    Error = 4,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MmdRuntimeFfiPhysicsMode {
+    Off = 0,
+    Trace = 1,
+    Live = 2,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MmdRuntimeFfiPhysicsTickConfig {
+    pub fixed_substep_seconds: f32,
+    pub max_substeps_per_tick: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MmdRuntimeFfiPhysicsStepStats {
+    pub input_dt_seconds: f32,
+    pub clamped_dt_seconds: f32,
+    pub substeps: u32,
+    pub accumulator_seconds: f32,
+}
+
 const APPEND_FLAG_ROTATION: u32 = 1;
 const APPEND_FLAG_TRANSLATION: u32 = 1 << 1;
 const APPEND_FLAG_LOCAL: u32 = 1 << 2;
@@ -306,6 +342,11 @@ fn false_failure(message: &str) -> bool {
     false
 }
 
+fn status_failure(status: MmdRuntimeStatus, message: &str) -> MmdRuntimeStatus {
+    set_last_error(message);
+    status
+}
+
 /// Returns the most recent FFI error message for the calling thread.
 ///
 /// The pointer remains valid until the next FFI call on the same thread.
@@ -333,6 +374,13 @@ pub extern "C" fn mmd_runtime_test_trigger_panic_guard() -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn mmd_runtime_abi_version() -> u32 {
     ffi_guard(ABI_VERSION, || ABI_VERSION)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mmd_runtime_feature_flags() -> u32 {
+    ffi_guard(FEATURE_SPLIT_PHYSICS_EVALUATION, || {
+        FEATURE_SPLIT_PHYSICS_EVALUATION
+    })
 }
 
 fn empty_byte_buffer() -> MmdRuntimeFfiByteBuffer {
@@ -3213,6 +3261,404 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_with_ik_option
         );
         instance.refresh_matrix_caches();
         true
+    })
+}
+
+fn physics_mode_to_ffi(mode: PhysicsMode) -> MmdRuntimeFfiPhysicsMode {
+    match mode {
+        PhysicsMode::Off => MmdRuntimeFfiPhysicsMode::Off,
+        PhysicsMode::Trace => MmdRuntimeFfiPhysicsMode::Trace,
+        PhysicsMode::Live => MmdRuntimeFfiPhysicsMode::Live,
+    }
+}
+
+fn physics_mode_from_ffi(mode: u32) -> Option<PhysicsMode> {
+    match mode {
+        0 => Some(PhysicsMode::Off),
+        1 => Some(PhysicsMode::Trace),
+        2 => Some(PhysicsMode::Live),
+        _ => None,
+    }
+}
+
+fn physics_tick_config_to_ffi(config: PhysicsTickConfig) -> MmdRuntimeFfiPhysicsTickConfig {
+    MmdRuntimeFfiPhysicsTickConfig {
+        fixed_substep_seconds: config.fixed_substep_seconds,
+        max_substeps_per_tick: config.max_substeps_per_tick,
+    }
+}
+
+fn physics_step_stats_to_ffi(stats: PhysicsStepStats) -> MmdRuntimeFfiPhysicsStepStats {
+    MmdRuntimeFfiPhysicsStepStats {
+        input_dt_seconds: stats.input_dt_seconds,
+        clamped_dt_seconds: stats.clamped_dt_seconds,
+        substeps: stats.substeps,
+        accumulator_seconds: stats.accumulator_seconds,
+    }
+}
+
+/// Returns the current split-physics evaluation mode.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by an instance create
+/// function. `out_mode` must be valid for writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_get_physics_mode(
+    instance: *const MmdRuntimeInstance,
+    out_mode: *mut MmdRuntimeFfiPhysicsMode,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if out_mode.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        unsafe {
+            *out_mode = physics_mode_to_ffi(instance.runtime.physics_mode());
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Sets the split-physics evaluation mode.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by an instance create
+/// function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_set_physics_mode(
+    instance: *mut MmdRuntimeInstance,
+    mode: u32,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(mode) = physics_mode_from_ffi(mode) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        instance.runtime.set_physics_mode(mode);
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Returns the current fixed-step physics clock config.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by an instance create
+/// function. `out_config` must be valid for writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_get_physics_tick_config(
+    instance: *const MmdRuntimeInstance,
+    out_config: *mut MmdRuntimeFfiPhysicsTickConfig,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if out_config.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let Some(instance) = (unsafe { instance.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        unsafe {
+            *out_config = physics_tick_config_to_ffi(instance.runtime.physics_tick_config());
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Sets the fixed-step physics clock config.
+///
+/// Invalid values are sanitized the same way the Rust runtime does.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by an instance create
+/// function. `config` must point to a readable config struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_set_physics_tick_config(
+    instance: *mut MmdRuntimeInstance,
+    config: *const MmdRuntimeFfiPhysicsTickConfig,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if config.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let config = unsafe { *config };
+        instance.runtime.set_physics_tick_config(PhysicsTickConfig {
+            fixed_substep_seconds: config.fixed_substep_seconds,
+            max_substeps_per_tick: config.max_substeps_per_tick,
+        });
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Resets the split-physics fixed-step accumulator.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by an instance create
+/// function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_reset_physics_tick(
+    instance: *mut MmdRuntimeInstance,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        instance.runtime.reset_physics_tick();
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Evaluates a clip frame through the pre-physics phase.
+///
+/// # Safety
+///
+/// `instance` and `clip` must be null or valid pointers returned by their
+/// respective create functions.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_before_physics(
+    instance: *mut MmdRuntimeInstance,
+    clip: *const MmdRuntimeClip,
+    frame: f32,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        instance
+            .runtime
+            .evaluate_clip_frame_before_physics(&clip.clip, frame);
+        instance.refresh_matrix_caches();
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Evaluates a clip frame through the pre-physics phase with IK options.
+///
+/// # Safety
+///
+/// `instance` and `clip` must be null or valid pointers returned by their
+/// respective create functions.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_before_physics_with_ik_options(
+    instance: *mut MmdRuntimeInstance,
+    clip: *const MmdRuntimeClip,
+    frame: f32,
+    ik_tolerance: f32,
+    ik_max_iterations_cap: u32,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        instance
+            .runtime
+            .evaluate_clip_frame_before_physics_with_ik_options(
+                &clip.clip,
+                frame,
+                IkSolveOptions {
+                    tolerance: ik_tolerance,
+                    max_iterations_cap: if ik_max_iterations_cap == 0 {
+                        None
+                    } else {
+                        Some(ik_max_iterations_cap)
+                    },
+                },
+            );
+        instance.refresh_matrix_caches();
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Evaluates the current pose through the pre-physics phase.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by an instance create
+/// function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_evaluate_current_pose_before_physics(
+    instance: *mut MmdRuntimeInstance,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        instance.runtime.evaluate_current_pose_before_physics();
+        instance.refresh_matrix_caches();
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Evaluates the current pose through the post-physics phase.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by an instance create
+/// function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_evaluate_current_pose_after_physics(
+    instance: *mut MmdRuntimeInstance,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        instance.runtime.evaluate_current_pose_after_physics();
+        instance.refresh_matrix_caches();
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Evaluates the current pose through the post-physics phase with IK options.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by an instance create
+/// function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_evaluate_current_pose_after_physics_with_ik_options(
+    instance: *mut MmdRuntimeInstance,
+    ik_tolerance: f32,
+    ik_max_iterations_cap: u32,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        instance
+            .runtime
+            .evaluate_current_pose_after_physics_with_ik_options(IkSolveOptions {
+                tolerance: ik_tolerance,
+                max_iterations_cap: if ik_max_iterations_cap == 0 {
+                    None
+                } else {
+                    Some(ik_max_iterations_cap)
+                },
+            });
+        instance.refresh_matrix_caches();
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Advances the split-physics fixed-step clock without a physics backend.
+///
+/// # Safety
+///
+/// `instance` must be null or a valid pointer returned by an instance create
+/// function. `out_stats` must be valid for writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_advance_physics_tick_clock(
+    instance: *mut MmdRuntimeInstance,
+    dt_seconds: f32,
+    out_stats: *mut MmdRuntimeFfiPhysicsStepStats,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if out_stats.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let stats = instance.runtime.advance_physics_tick_clock(dt_seconds);
+        unsafe {
+            *out_stats = physics_step_stats_to_ffi(stats);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Applies external physics world matrices to the current pose.
+///
+/// # Safety
+///
+/// `physics_world_matrices_f32` must point to `bone_count * 16` readable f32
+/// values. If `physics_world_matrix_mask_u8` is null, every matrix is applied;
+/// otherwise it must point to `bone_count` readable u8 values and non-zero
+/// entries select applied bones. `out_updated_bone_count` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_apply_physics_world_matrices(
+    instance: *mut MmdRuntimeInstance,
+    physics_world_matrices_f32: *const f32,
+    physics_world_matrices_f32_len: usize,
+    physics_world_matrix_mask_u8: *const u8,
+    physics_world_matrix_mask_u8_len: usize,
+    out_updated_bone_count: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let bone_count = instance.runtime.model().bone_count();
+        let Some(required_matrix_len) = bone_count.checked_mul(16) else {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, FFI_ERR_INVALID_INPUT);
+        };
+        if physics_world_matrices_f32.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if physics_world_matrices_f32_len < required_matrix_len {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, FFI_ERR_INVALID_INPUT);
+        }
+        if !physics_world_matrix_mask_u8.is_null() && physics_world_matrix_mask_u8_len < bone_count
+        {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, FFI_ERR_INVALID_INPUT);
+        }
+
+        let matrix_values =
+            unsafe { slice::from_raw_parts(physics_world_matrices_f32, required_matrix_len) };
+        let mask = if physics_world_matrix_mask_u8.is_null() {
+            None
+        } else {
+            Some(unsafe { slice::from_raw_parts(physics_world_matrix_mask_u8, bone_count) })
+        };
+
+        let mut physics_world_matrices = Vec::with_capacity(bone_count);
+        for bone_index in 0..bone_count {
+            let apply = mask.is_none_or(|mask| mask[bone_index] != 0);
+            if apply {
+                let start = bone_index * 16;
+                let raw = <[f32; 16]>::try_from(&matrix_values[start..start + 16])
+                    .expect("slice length checked");
+                if !all_finite(&raw) {
+                    return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+                }
+                physics_world_matrices.push(Some(glam::Mat4::from_cols_array(&raw)));
+            } else {
+                physics_world_matrices.push(None);
+            }
+        }
+
+        let updated = instance
+            .runtime
+            .apply_physics_world_matrices(&physics_world_matrices);
+        instance.refresh_matrix_caches();
+        if !out_updated_bone_count.is_null() {
+            unsafe {
+                *out_updated_bone_count = updated;
+            }
+        }
+        MmdRuntimeStatus::Ok
     })
 }
 

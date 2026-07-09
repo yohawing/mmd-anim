@@ -669,6 +669,287 @@ fn evaluates_clip_frame_through_c_abi() {
 }
 
 #[test]
+fn split_physics_feature_flags_and_mode_config_work_through_c_abi() {
+    assert_eq!(
+        mmd_runtime_feature_flags() & FEATURE_SPLIT_PHYSICS_EVALUATION,
+        FEATURE_SPLIT_PHYSICS_EVALUATION
+    );
+
+    let parents = [-1];
+    let rest_positions = [0.0, 0.0, 0.0];
+    let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
+    assert!(!model.is_null());
+    let instance = unsafe { mmd_runtime_instance_create(model, 0) };
+    assert!(!instance.is_null());
+
+    let mut mode = MmdRuntimeFfiPhysicsMode::Live;
+    assert_eq!(
+        unsafe { mmd_runtime_instance_get_physics_mode(instance, &mut mode) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(mode, MmdRuntimeFfiPhysicsMode::Off);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_set_physics_mode(instance, MmdRuntimeFfiPhysicsMode::Trace as u32)
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_instance_get_physics_mode(instance, &mut mode) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(mode, MmdRuntimeFfiPhysicsMode::Trace);
+
+    let config = MmdRuntimeFfiPhysicsTickConfig {
+        fixed_substep_seconds: 0.25,
+        max_substeps_per_tick: 2,
+    };
+    assert_eq!(
+        unsafe { mmd_runtime_instance_set_physics_tick_config(instance, &config) },
+        MmdRuntimeStatus::Ok
+    );
+    let mut roundtrip = MmdRuntimeFfiPhysicsTickConfig {
+        fixed_substep_seconds: 0.0,
+        max_substeps_per_tick: 0,
+    };
+    assert_eq!(
+        unsafe { mmd_runtime_instance_get_physics_tick_config(instance, &mut roundtrip) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(roundtrip, config);
+
+    let mut stats = MmdRuntimeFfiPhysicsStepStats {
+        input_dt_seconds: 0.0,
+        clamped_dt_seconds: 0.0,
+        substeps: 0,
+        accumulator_seconds: 0.0,
+    };
+    assert_eq!(
+        unsafe { mmd_runtime_instance_advance_physics_tick_clock(instance, 1.0, &mut stats) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(stats.input_dt_seconds, 1.0);
+    assert_eq!(stats.clamped_dt_seconds, 0.5);
+    assert_eq!(stats.substeps, 2);
+    assert_near(stats.accumulator_seconds, 0.0, 1.0e-6);
+    assert_eq!(
+        unsafe { mmd_runtime_instance_reset_physics_tick(instance) },
+        MmdRuntimeStatus::Ok
+    );
+
+    assert_eq!(
+        unsafe { mmd_runtime_instance_get_physics_mode(ptr::null(), &mut mode) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_instance_set_physics_mode(instance, 99) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_instance_get_physics_tick_config(instance, ptr::null_mut()) },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    unsafe {
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[test]
+fn split_physics_clip_evaluation_matches_full_evaluation_without_external_physics() {
+    let parents = [-1];
+    let rest_positions = [0.0, 0.0, 0.0];
+    let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
+    assert!(!model.is_null());
+    let full = unsafe { mmd_runtime_instance_create(model, 0) };
+    let split = unsafe { mmd_runtime_instance_create(model, 0) };
+    assert!(!full.is_null());
+    assert!(!split.is_null());
+
+    let bone_tracks = [MmdRuntimeFfiBoneTrack {
+        bone_index: 0,
+        keyframe_offset: 0,
+        keyframe_count: 2,
+    }];
+    let bone_keyframes = [
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 0,
+            position_xyz: [0.0, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        },
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 60,
+            position_xyz: [2.0, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        },
+    ];
+    let clip = unsafe {
+        mmd_runtime_clip_create(
+            bone_tracks.as_ptr(),
+            bone_tracks.len(),
+            bone_keyframes.as_ptr(),
+            bone_keyframes.len(),
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+        )
+    };
+    assert!(!clip.is_null());
+
+    assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(full, clip, 30.0) });
+    assert_eq!(
+        unsafe { mmd_runtime_instance_evaluate_clip_frame_before_physics(split, clip, 30.0) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_evaluate_current_pose_after_physics_with_ik_options(split, 0.0, 4)
+        },
+        MmdRuntimeStatus::Ok
+    );
+
+    let mut full_world = [0.0f32; 16];
+    let mut split_world = [0.0f32; 16];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(full, full_world.as_mut_ptr(), full_world.len())
+    });
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(split, split_world.as_mut_ptr(), split_world.len())
+    });
+    assert_slice_near(&split_world, &full_world, 1.0e-6);
+
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_evaluate_clip_frame_before_physics_with_ik_options(
+                split,
+                clip,
+                30.0,
+                f32::NAN,
+                0,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_evaluate_current_pose_after_physics_with_ik_options(
+                split,
+                f32::NAN,
+                0,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    unsafe {
+        mmd_runtime_clip_free(clip);
+        mmd_runtime_instance_free(split);
+        mmd_runtime_instance_free(full);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[test]
+fn apply_physics_world_matrices_updates_selected_bones_and_caches() {
+    let parents = [-1, 0];
+    let rest_positions = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 2) };
+    assert!(!model.is_null());
+    let instance = unsafe { mmd_runtime_instance_create(model, 0) };
+    assert!(!instance.is_null());
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+
+    let root = glam::Mat4::IDENTITY.to_cols_array();
+    let child = glam::Mat4::from_translation(glam::Vec3::new(0.0, 5.0, 0.0)).to_cols_array();
+    let mut physics_world = [0.0f32; 32];
+    physics_world[0..16].copy_from_slice(&root);
+    physics_world[16..32].copy_from_slice(&child);
+    let mask = [0u8, 1u8];
+    let mut updated = 0usize;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_apply_physics_world_matrices(
+                instance,
+                physics_world.as_ptr(),
+                physics_world.len(),
+                mask.as_ptr(),
+                mask.len(),
+                &mut updated,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(updated, 1);
+
+    let mut matrices = [0.0f32; 32];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, matrices.as_mut_ptr(), matrices.len())
+    });
+    assert_near(matrices[16 + 13], 5.0, 1.0e-5);
+    let direct = unsafe { mmd_runtime_instance_world_matrices(instance) };
+    assert!(!direct.is_null());
+    let direct = unsafe { slice::from_raw_parts(direct, 32) };
+    assert_near(direct[16 + 13], 5.0, 1.0e-5);
+
+    physics_world[0] = f32::NAN;
+    let moved_child = glam::Mat4::from_translation(glam::Vec3::new(0.0, 6.0, 0.0)).to_cols_array();
+    physics_world[16..32].copy_from_slice(&moved_child);
+    updated = 0;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_apply_physics_world_matrices(
+                instance,
+                physics_world.as_ptr(),
+                physics_world.len(),
+                mask.as_ptr(),
+                mask.len(),
+                &mut updated,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(updated, 1);
+
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_apply_physics_world_matrices(
+                instance,
+                physics_world.as_ptr(),
+                physics_world.len() - 1,
+                mask.as_ptr(),
+                mask.len(),
+                ptr::null_mut(),
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_apply_physics_world_matrices(
+                instance,
+                physics_world.as_ptr(),
+                physics_world.len(),
+                mask.as_ptr(),
+                mask.len() - 1,
+                ptr::null_mut(),
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+
+    unsafe {
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[test]
 fn evaluates_clip_frame_batch_through_c_abi_without_mutating_source_instance() {
     let parents = [-1];
     let rest_positions = [1.0, 0.0, 0.0];

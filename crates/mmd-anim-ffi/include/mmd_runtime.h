@@ -46,6 +46,27 @@ typedef struct mmd_runtime_vmd_self_shadow_track_t mmd_runtime_vmd_self_shadow_t
 /* Rig primitive bone flags (bitmask) */
 #define MMD_RUNTIME_RIG_BONE_FIXED_AXIS (1u << 0)
 
+/* Runtime feature flags (bitmask) */
+#define MMD_RUNTIME_FEATURE_SPLIT_PHYSICS_EVALUATION (1u << 0)
+
+/* ------------------------------------------------------------------ */
+/*  Status and mode enums                                             */
+/* ------------------------------------------------------------------ */
+
+typedef enum mmd_runtime_status {
+    MMD_RUNTIME_STATUS_OK = 0,
+    MMD_RUNTIME_STATUS_INVALID_INPUT = 1,
+    MMD_RUNTIME_STATUS_UNSUPPORTED = 2,
+    MMD_RUNTIME_STATUS_BUFFER_TOO_SMALL = 3,
+    MMD_RUNTIME_STATUS_ERROR = 4
+} mmd_runtime_status_t;
+
+typedef enum mmd_runtime_physics_mode {
+    MMD_RUNTIME_PHYSICS_MODE_OFF = 0,
+    MMD_RUNTIME_PHYSICS_MODE_TRACE = 1,
+    MMD_RUNTIME_PHYSICS_MODE_LIVE = 2
+} mmd_runtime_physics_mode_t;
+
 /* ------------------------------------------------------------------ */
 /*  Descriptor structs                                                */
 /* ------------------------------------------------------------------ */
@@ -147,11 +168,25 @@ typedef struct mmd_runtime_ffi_byte_buffer {
     size_t   len;
 } mmd_runtime_ffi_byte_buffer_t;
 
+typedef struct mmd_runtime_ffi_physics_tick_config {
+    float    fixed_substep_seconds;
+    uint32_t max_substeps_per_tick;
+} mmd_runtime_ffi_physics_tick_config_t;
+
+typedef struct mmd_runtime_ffi_physics_step_stats {
+    float    input_dt_seconds;
+    float    clamped_dt_seconds;
+    uint32_t substeps;
+    float    accumulator_seconds;
+} mmd_runtime_ffi_physics_step_stats_t;
+
 /* ------------------------------------------------------------------ */
 /*  Model lifecycle                                                   */
 /* ------------------------------------------------------------------ */
 
 uint32_t mmd_runtime_abi_version(void);
+
+uint32_t mmd_runtime_feature_flags(void);
 
 /* Returns the most recent FFI error message for the calling thread, or NULL.
    The returned pointer is valid only until the next FFI call on the same
@@ -707,6 +742,61 @@ bool mmd_runtime_instance_evaluate_clip_frame_with_ik_options(
     float                         frame,
     float                         ik_tolerance,
     uint32_t                      ik_max_iterations_cap);
+
+mmd_runtime_status_t mmd_runtime_instance_get_physics_mode(
+    const mmd_runtime_instance_t* instance,
+    mmd_runtime_physics_mode_t*   out_mode);
+
+mmd_runtime_status_t mmd_runtime_instance_set_physics_mode(
+    mmd_runtime_instance_t*      instance,
+    mmd_runtime_physics_mode_t   mode);
+
+mmd_runtime_status_t mmd_runtime_instance_get_physics_tick_config(
+    const mmd_runtime_instance_t*              instance,
+    mmd_runtime_ffi_physics_tick_config_t*     out_config);
+
+mmd_runtime_status_t mmd_runtime_instance_set_physics_tick_config(
+    mmd_runtime_instance_t*                    instance,
+    const mmd_runtime_ffi_physics_tick_config_t* config);
+
+mmd_runtime_status_t mmd_runtime_instance_reset_physics_tick(
+    mmd_runtime_instance_t* instance);
+
+mmd_runtime_status_t mmd_runtime_instance_evaluate_clip_frame_before_physics(
+    mmd_runtime_instance_t*   instance,
+    const mmd_runtime_clip_t* clip,
+    float                     frame);
+
+mmd_runtime_status_t mmd_runtime_instance_evaluate_clip_frame_before_physics_with_ik_options(
+    mmd_runtime_instance_t*   instance,
+    const mmd_runtime_clip_t* clip,
+    float                     frame,
+    float                     ik_tolerance,
+    uint32_t                  ik_max_iterations_cap);
+
+mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_before_physics(
+    mmd_runtime_instance_t* instance);
+
+mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_after_physics(
+    mmd_runtime_instance_t* instance);
+
+mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_after_physics_with_ik_options(
+    mmd_runtime_instance_t* instance,
+    float                   ik_tolerance,
+    uint32_t                ik_max_iterations_cap);
+
+mmd_runtime_status_t mmd_runtime_instance_advance_physics_tick_clock(
+    mmd_runtime_instance_t*                   instance,
+    float                                     dt_seconds,
+    mmd_runtime_ffi_physics_step_stats_t*     out_stats);
+
+mmd_runtime_status_t mmd_runtime_instance_apply_physics_world_matrices(
+    mmd_runtime_instance_t* instance,
+    const float*            physics_world_matrices_f32,
+    size_t                  physics_world_matrices_f32_len,
+    const uint8_t*          physics_world_matrix_mask_u8,
+    size_t                  physics_world_matrix_mask_u8_len,
+    size_t*                 out_updated_bone_count);
 
 bool mmd_runtime_instance_evaluate_clip_frame_without_ik(
     mmd_runtime_instance_t*       instance,

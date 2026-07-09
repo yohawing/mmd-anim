@@ -103,6 +103,11 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="required physicsBackend for physics cases; disabled when omitted or empty",
     )
+    parser.add_argument("--max-allowed-penetration-depth", type=float, default=None)
+    parser.add_argument("--max-allowed-bullet-penetration-depth", type=float, default=None)
+    parser.add_argument("--max-allowed-penetrating-pair-count", type=int, default=None)
+    parser.add_argument("--max-allowed-severe-pair-count", type=int, default=None)
+    parser.add_argument("--max-allowed-penetrating-contact-count", type=int, default=None)
 
 
 if __name__ == "__main__":

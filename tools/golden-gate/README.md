@@ -48,7 +48,12 @@ Example local config:
   "options": {
     "allow_count_changes": false,
     "allow_skipped_target_changes": false,
-    "required_physics_backend": null
+    "required_physics_backend": null,
+    "max_allowed_penetration_depth": null,
+    "max_allowed_bullet_penetration_depth": null,
+    "max_allowed_penetrating_pair_count": null,
+    "max_allowed_severe_pair_count": null,
+    "max_allowed_penetrating_contact_count": null
   }
 }
 ```
@@ -64,7 +69,12 @@ The same comparison layer also accepts `verify --mode numeric --diagnose ...
 diagnostic reports it compares `summary.maxPenetrationDepth`,
 `summary.maxBulletPenetrationDepth`, `summary.penetratingPairCount`,
 `summary.severePairCount`, and `summary.penetratingContactCount` with the
-penetration-specific tolerances above.
+penetration-specific tolerances above. If an absolute safety limit is needed,
+set the matching `max_allowed_*` option; those limits are enforced against the
+current report regardless of the baseline. A useful first contact gate is
+`max_allowed_bullet_penetration_depth: 0.0` and
+`max_allowed_penetrating_contact_count: 0`, while shape-proxy pair counts can
+remain baseline-not-worse until expected adjacent-body overlaps are classified.
 
 To make `golden-gate baseline` / `golden-gate gate` produce a penetration
 diagnostic report directly, opt in with `physics_penetration` and identify the
@@ -81,7 +91,11 @@ diagnostic case/frame:
   "diagnose_case": "rem-tail",
   "diagnose_frame": "119",
   "diagnose_bone": "左Tail_19",
-  "diagnose_eval_frame": null
+  "diagnose_eval_frame": null,
+  "options": {
+    "max_allowed_bullet_penetration_depth": 0.0,
+    "max_allowed_penetrating_contact_count": 0
+  }
 }
 ```
 

@@ -37,6 +37,11 @@ _GOLDEN_GATE_ENV_VARS = (
     "MMD_ANIM_GOLDEN_ALLOW_COUNT_CHANGES",
     "MMD_ANIM_GOLDEN_ALLOW_SKIPPED_TARGET_CHANGES",
     "MMD_ANIM_GOLDEN_REQUIRED_PHYSICS_BACKEND",
+    "MMD_ANIM_GOLDEN_MAX_ALLOWED_PENETRATION_DEPTH",
+    "MMD_ANIM_GOLDEN_MAX_ALLOWED_BULLET_PENETRATION_DEPTH",
+    "MMD_ANIM_GOLDEN_MAX_ALLOWED_PENETRATING_PAIR_COUNT",
+    "MMD_ANIM_GOLDEN_MAX_ALLOWED_SEVERE_PAIR_COUNT",
+    "MMD_ANIM_GOLDEN_MAX_ALLOWED_PENETRATING_CONTACT_COUNT",
 )
 
 
@@ -76,6 +81,11 @@ def args(**overrides):
         "allow_count_changes": None,
         "allow_skipped_target_changes": None,
         "required_physics_backend": None,
+        "max_allowed_penetration_depth": None,
+        "max_allowed_bullet_penetration_depth": None,
+        "max_allowed_penetrating_pair_count": None,
+        "max_allowed_severe_pair_count": None,
+        "max_allowed_penetrating_contact_count": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -110,6 +120,11 @@ def test_config_reads_local_json_relative_paths(tmp_path: Path):
                 "options": {
                     "allow_count_changes": True,
                     "required_physics_backend": "bullet-native",
+                    "max_allowed_penetration_depth": 0.2,
+                    "max_allowed_bullet_penetration_depth": 0.0,
+                    "max_allowed_penetrating_pair_count": 5,
+                    "max_allowed_severe_pair_count": 2,
+                    "max_allowed_penetrating_contact_count": 0,
                 },
             },
             indent=2,
@@ -140,6 +155,11 @@ def test_config_reads_local_json_relative_paths(tmp_path: Path):
     assert config.tolerances.mismatch_count_tolerance == 2
     assert config.options.allow_count_changes is True
     assert config.options.required_physics_backend == "bullet-native"
+    assert config.options.max_allowed_penetration_depth == 0.2
+    assert config.options.max_allowed_bullet_penetration_depth == 0.0
+    assert config.options.max_allowed_penetrating_pair_count == 5
+    assert config.options.max_allowed_severe_pair_count == 2
+    assert config.options.max_allowed_penetrating_contact_count == 0
 
 
 def test_cli_overrides_env_and_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

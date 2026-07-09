@@ -89,7 +89,7 @@ def compare_reports(
     current_summary = _object_at(current, "summary")
     if _is_penetration_report(baseline) or _is_penetration_report(current):
         _compare_penetration_identity(baseline, current, failures)
-        _compare_penetration_summary(baseline_summary, current_summary, tolerances, failures)
+        _compare_penetration_summary(baseline_summary, current_summary, tolerances, options, failures)
     _compare_summary(baseline_summary, current_summary, _has_physics_cases(current), tolerances, options, failures)
     _compare_cases(
         _case_map(baseline),
@@ -126,6 +126,7 @@ def _compare_penetration_summary(
     baseline: dict[str, Any],
     current: dict[str, Any],
     tolerances: Tolerances,
+    options: GateOptions,
     failures: list[RegressionFailure],
 ) -> None:
     _require_numeric_fields(current, "summary", PENETRATION_SUMMARY_FIELDS, failures)
@@ -172,6 +173,46 @@ def _compare_penetration_summary(
         "penetratingContactCount",
         PENETRATION_SUMMARY_FIELDS["penetratingContactCount"],
         tolerances.penetrating_contact_count_tolerance,
+        failures,
+    )
+    _compare_not_above_limit(
+        current,
+        "summary",
+        "maxPenetrationDepth",
+        PENETRATION_SUMMARY_FIELDS["maxPenetrationDepth"],
+        options.max_allowed_penetration_depth,
+        failures,
+    )
+    _compare_not_above_limit(
+        current,
+        "summary",
+        "maxBulletPenetrationDepth",
+        PENETRATION_SUMMARY_FIELDS["maxBulletPenetrationDepth"],
+        options.max_allowed_bullet_penetration_depth,
+        failures,
+    )
+    _compare_not_above_limit(
+        current,
+        "summary",
+        "penetratingPairCount",
+        PENETRATION_SUMMARY_FIELDS["penetratingPairCount"],
+        options.max_allowed_penetrating_pair_count,
+        failures,
+    )
+    _compare_not_above_limit(
+        current,
+        "summary",
+        "severePairCount",
+        PENETRATION_SUMMARY_FIELDS["severePairCount"],
+        options.max_allowed_severe_pair_count,
+        failures,
+    )
+    _compare_not_above_limit(
+        current,
+        "summary",
+        "penetratingContactCount",
+        PENETRATION_SUMMARY_FIELDS["penetratingContactCount"],
+        options.max_allowed_penetrating_contact_count,
         failures,
     )
 
@@ -591,6 +632,30 @@ def _compare_equal(
                 current=current_value,
                 tolerance=None,
                 message=f"{prefix}.{field} changed: current {current_value} != baseline {baseline_value}",
+            )
+        )
+
+
+def _compare_not_above_limit(
+    current: dict[str, Any],
+    prefix: str,
+    field: str,
+    aliases: Iterable[str],
+    limit: float | int | None,
+    failures: list[RegressionFailure],
+) -> None:
+    if limit is None:
+        return
+    current_value = _number(current, field, aliases)
+    if current_value > limit:
+        failures.append(
+            RegressionFailure(
+                path=f"{prefix}.{field}",
+                check="maxAllowed",
+                baseline=None,
+                current=current_value,
+                tolerance=limit,
+                message=f"{prefix}.{field} exceeded limit: current {current_value} > limit {limit}",
             )
         )
 

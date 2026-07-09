@@ -33,6 +33,11 @@ class GateOptions:
     allow_count_changes: bool = False
     allow_skipped_target_changes: bool = False
     required_physics_backend: str | None = None
+    max_allowed_penetration_depth: float | None = None
+    max_allowed_bullet_penetration_depth: float | None = None
+    max_allowed_penetrating_pair_count: int | None = None
+    max_allowed_severe_pair_count: int | None = None
+    max_allowed_penetrating_contact_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -247,6 +252,41 @@ def resolve_config(args: Any) -> GoldenGateConfig:
             raw_config,
             None,
         ),
+        max_allowed_penetration_depth=_optional_float_value(
+            "max_allowed_penetration_depth",
+            getattr(args, "max_allowed_penetration_depth", None),
+            "MMD_ANIM_GOLDEN_MAX_ALLOWED_PENETRATION_DEPTH",
+            raw_config,
+            None,
+        ),
+        max_allowed_bullet_penetration_depth=_optional_float_value(
+            "max_allowed_bullet_penetration_depth",
+            getattr(args, "max_allowed_bullet_penetration_depth", None),
+            "MMD_ANIM_GOLDEN_MAX_ALLOWED_BULLET_PENETRATION_DEPTH",
+            raw_config,
+            None,
+        ),
+        max_allowed_penetrating_pair_count=_optional_int_value(
+            "max_allowed_penetrating_pair_count",
+            getattr(args, "max_allowed_penetrating_pair_count", None),
+            "MMD_ANIM_GOLDEN_MAX_ALLOWED_PENETRATING_PAIR_COUNT",
+            raw_config,
+            None,
+        ),
+        max_allowed_severe_pair_count=_optional_int_value(
+            "max_allowed_severe_pair_count",
+            getattr(args, "max_allowed_severe_pair_count", None),
+            "MMD_ANIM_GOLDEN_MAX_ALLOWED_SEVERE_PAIR_COUNT",
+            raw_config,
+            None,
+        ),
+        max_allowed_penetrating_contact_count=_optional_int_value(
+            "max_allowed_penetrating_contact_count",
+            getattr(args, "max_allowed_penetrating_contact_count", None),
+            "MMD_ANIM_GOLDEN_MAX_ALLOWED_PENETRATING_CONTACT_COUNT",
+            raw_config,
+            None,
+        ),
     )
 
     return GoldenGateConfig(
@@ -308,7 +348,16 @@ def _choose(key: str, cli_value: Any, env_name: str, raw_config: dict[str, Any])
         return raw_config[key]
     if key.endswith("_tolerance"):
         return raw_config.get("tolerances", {}).get(key)
-    if key in {"allow_count_changes", "allow_skipped_target_changes", "required_physics_backend"}:
+    if key in {
+        "allow_count_changes",
+        "allow_skipped_target_changes",
+        "required_physics_backend",
+        "max_allowed_penetration_depth",
+        "max_allowed_bullet_penetration_depth",
+        "max_allowed_penetrating_pair_count",
+        "max_allowed_severe_pair_count",
+        "max_allowed_penetrating_contact_count",
+    }:
         return raw_config.get("options", {}).get(key)
     return None
 
@@ -403,3 +452,41 @@ def _optional_scalar_string_value(
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ConfigError(f"{key} must be a string or number")
     return str(value)
+
+
+def _optional_float_value(
+    key: str,
+    cli_value: Any,
+    env_name: str,
+    raw_config: dict[str, Any],
+    default: float | None,
+) -> float | None:
+    value = _choose(key, cli_value, env_name, raw_config)
+    if value in (None, ""):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"{key} must be a number") from error
+    if parsed < 0:
+        raise ConfigError(f"{key} must be non-negative")
+    return parsed
+
+
+def _optional_int_value(
+    key: str,
+    cli_value: Any,
+    env_name: str,
+    raw_config: dict[str, Any],
+    default: int | None,
+) -> int | None:
+    value = _choose(key, cli_value, env_name, raw_config)
+    if value in (None, ""):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"{key} must be an integer") from error
+    if parsed < 0:
+        raise ConfigError(f"{key} must be non-negative")
+    return parsed

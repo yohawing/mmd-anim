@@ -172,6 +172,58 @@ def test_physics_penetration_report_rejects_mismatched_identity():
     assert "oracleFrame" in _failure_paths(failures)
 
 
+def test_physics_penetration_absolute_limits_fail_independent_of_baseline():
+    baseline = _physics_penetration_report(
+        {
+            "maxBulletPenetrationDepth": 0.2,
+            "penetratingContactCount": 4,
+        }
+    )
+    current = _physics_penetration_report(
+        {
+            "maxBulletPenetrationDepth": 0.1,
+            "penetratingContactCount": 2,
+        }
+    )
+
+    failures = compare_reports(
+        baseline,
+        current,
+        _penetration_tolerances(),
+        GateOptions(
+            max_allowed_bullet_penetration_depth=0.0,
+            max_allowed_penetrating_contact_count=0,
+        ),
+    )
+
+    assert "summary.maxBulletPenetrationDepth" in _failure_paths(failures)
+    assert "summary.penetratingContactCount" in _failure_paths(failures)
+
+
+def test_physics_penetration_contact_zero_limit_can_ignore_shape_proxy_overlap():
+    shape_proxy_overlap = {
+        "maxPenetrationDepth": 0.74,
+        "penetratingPairCount": 2,
+        "severePairCount": 2,
+        "maxBulletPenetrationDepth": 0.0,
+        "penetratingContactCount": 0,
+    }
+    baseline = _physics_penetration_report(shape_proxy_overlap)
+    current = _physics_penetration_report(shape_proxy_overlap)
+
+    failures = compare_reports(
+        baseline,
+        current,
+        _penetration_tolerances(),
+        GateOptions(
+            max_allowed_bullet_penetration_depth=0.0,
+            max_allowed_penetrating_contact_count=0,
+        ),
+    )
+
+    assert failures == []
+
+
 def test_physics_penetration_report_requires_stable_summary_metrics():
     baseline = _physics_penetration_report()
     current = _physics_penetration_report()

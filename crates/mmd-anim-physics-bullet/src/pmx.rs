@@ -406,6 +406,53 @@ mod tests {
     }
 
     #[test]
+    fn pmx_joint_mapping_preserves_limits_and_spring_factors() {
+        let mut world = BulletWorld::new().unwrap();
+        let body_a = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(0.5, [0.0, 10.0, 0.0], 0.0))
+            .unwrap();
+        let body_b = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(0.5, [0.0, 8.0, 0.0], 1.0))
+            .unwrap();
+        let joint = PmxParsedJoint {
+            name: "joint".to_owned(),
+            english_name: "joint".to_owned(),
+            kind: "generic6dofSpring".to_owned(),
+            rigid_body_index_a: 0,
+            rigid_body_index_b: 1,
+            position: [1.0, 2.0, 3.0],
+            rotation: [0.1, 0.2, 0.3],
+            translation_lower_limit: [-0.1, -0.2, -0.3],
+            translation_upper_limit: [0.4, 0.5, 0.6],
+            rotation_lower_limit: [-0.7, -0.8, -0.9],
+            rotation_upper_limit: [1.0, 1.1, 1.2],
+            spring_translation_factor: [10.0, 20.0, 30.0],
+            spring_rotation_factor: [40.0, 50.0, 60.0],
+        };
+
+        let desc = match joint_desc_from_pmx(&joint, &[body_a, body_b]) {
+            JointMapping::Mapped(desc) => desc,
+            JointMapping::InvalidBody | JointMapping::UnsupportedType => {
+                panic!("expected generic6dofSpring joint to map")
+            }
+        };
+
+        assert_eq!(desc.rigidbody_a, body_a);
+        assert_eq!(desc.rigidbody_b, body_b);
+        assert_eq!(desc.position, joint.position);
+        assert_eq!(desc.rotation_euler, joint.rotation);
+        assert_eq!(desc.translation_lower_limit, joint.translation_lower_limit);
+        assert_eq!(desc.translation_upper_limit, joint.translation_upper_limit);
+        assert_eq!(desc.rotation_lower_limit, joint.rotation_lower_limit);
+        assert_eq!(desc.rotation_upper_limit, joint.rotation_upper_limit);
+        assert_eq!(
+            desc.spring_translation_factor,
+            joint.spring_translation_factor
+        );
+        assert_eq!(desc.spring_rotation_factor, joint.spring_rotation_factor);
+    }
+
+    #[test]
     fn readback_returns_dynamic_body_transform_for_bound_bone() {
         let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
             "bones": [{"name": "root"}, {"name": "physics"}],

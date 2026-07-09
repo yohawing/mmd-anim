@@ -27,16 +27,27 @@ Example local config:
   "mmd_anim_bin": null,
   "tolerances": {
     "max_abs_error_tolerance": 0.0,
+    "translation_max_error_tolerance": 0.0,
+    "translation_rms_error_tolerance": 0.0,
+    "rotation_max_angle_rad_tolerance": 0.0,
+    "rotation_rms_angle_rad_tolerance": 0.0,
     "mismatch_count_tolerance": 0,
     "missing_tolerance": 0,
     "import_error_tolerance": 0
   },
   "options": {
     "allow_count_changes": false,
-    "allow_skipped_target_changes": false
+    "allow_skipped_target_changes": false,
+    "required_physics_backend": null
   }
 }
 ```
+
+For `physics-coarse` cases, the gate also compares translation / rotation max
+and RMS metrics in both `summary` and `perCase`. For physics quality gates that
+must use the native Bullet path, set `required_physics_backend` to
+`"bullet-native"` and run with an `mmd_anim_bin` built with
+`physics-bullet-native`, or another runner path that emits that backend.
 
 If `mmd_anim_bin` or `MMD_ANIM_BIN` is set, the binary is used directly. Without
 it, the runner uses:

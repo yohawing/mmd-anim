@@ -129,6 +129,15 @@ def test_legacy_motion_prefixed_fields_are_supported():
     assert compare_reports(baseline, current, Tolerances(max_abs_error_tolerance=0.01)) == []
 
 
+def test_physics_metrics_are_ignored_for_non_physics_cases():
+    current = report(
+        {"motionTranslationRmsError": 10.0},
+        [{"physicsBackend": "none", "translationRmsError": 10.0}],
+    )
+
+    assert compare_reports(report(), current) == []
+
+
 def test_status_worsening_fails():
     failures = compare_reports(report(cases=[{"status": "ok"}]), report(cases=[{"status": "missing"}]))
 

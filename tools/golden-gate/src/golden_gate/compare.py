@@ -27,6 +27,21 @@ STATUS_RANK = {
 
 SUMMARY_NUMERIC_FIELDS = {
     "maxAbsError": ("motionMaxAbsError",),
+    "translationMaxError": ("motionTranslationMaxError", "translationMax"),
+    "translationRmsError": ("motionTranslationRmsError", "translationRms"),
+    "rotationMaxAngleRad": ("motionRotationMaxAngleRad", "rotationMaxRad"),
+    "rotationRmsAngleRad": ("motionRotationRmsAngleRad", "rotationRmsRad"),
+    "mismatchCount": ("motionMismatchCount", "motionMismatches"),
+    "missing": ("motionMissing",),
+    "importErrors": ("motionImportErrors",),
+}
+
+CASE_NUMERIC_FIELDS = {
+    "maxAbsError": ("motionMaxAbsError",),
+    "translationMaxError": ("motionTranslationMaxError", "translationMax"),
+    "translationRmsError": ("motionTranslationRmsError", "translationRms"),
+    "rotationMaxAngleRad": ("motionRotationMaxAngleRad", "rotationMaxRad"),
+    "rotationRmsAngleRad": ("motionRotationRmsAngleRad", "rotationRmsRad"),
     "mismatchCount": ("motionMismatchCount", "motionMismatches"),
     "missing": ("motionMissing",),
     "importErrors": ("motionImportErrors",),
@@ -55,7 +70,7 @@ def compare_reports(
 
     baseline_summary = _object_at(baseline, "summary")
     current_summary = _object_at(current, "summary")
-    _compare_summary(baseline_summary, current_summary, tolerances, options, failures)
+    _compare_summary(baseline_summary, current_summary, _has_physics_cases(current), tolerances, options, failures)
     _compare_cases(
         _case_map(baseline),
         _case_map(current),
@@ -69,10 +84,23 @@ def compare_reports(
 def _compare_summary(
     baseline: dict[str, Any],
     current: dict[str, Any],
+    has_physics_cases: bool,
     tolerances: Tolerances,
     options: GateOptions,
     failures: list[RegressionFailure],
 ) -> None:
+    if has_physics_cases:
+        _require_numeric_fields(
+            current,
+            "summary",
+            {
+                "translationMaxError": SUMMARY_NUMERIC_FIELDS["translationMaxError"],
+                "translationRmsError": SUMMARY_NUMERIC_FIELDS["translationRmsError"],
+                "rotationMaxAngleRad": SUMMARY_NUMERIC_FIELDS["rotationMaxAngleRad"],
+                "rotationRmsAngleRad": SUMMARY_NUMERIC_FIELDS["rotationRmsAngleRad"],
+            },
+            failures,
+        )
     _compare_not_greater(
         baseline,
         current,
@@ -82,6 +110,43 @@ def _compare_summary(
         tolerances.max_abs_error_tolerance,
         failures,
     )
+    if has_physics_cases:
+        _compare_not_greater(
+            baseline,
+            current,
+            "summary",
+            "translationMaxError",
+            SUMMARY_NUMERIC_FIELDS["translationMaxError"],
+            tolerances.translation_max_error_tolerance,
+            failures,
+        )
+        _compare_not_greater(
+            baseline,
+            current,
+            "summary",
+            "translationRmsError",
+            SUMMARY_NUMERIC_FIELDS["translationRmsError"],
+            tolerances.translation_rms_error_tolerance,
+            failures,
+        )
+        _compare_not_greater(
+            baseline,
+            current,
+            "summary",
+            "rotationMaxAngleRad",
+            SUMMARY_NUMERIC_FIELDS["rotationMaxAngleRad"],
+            tolerances.rotation_max_angle_rad_tolerance,
+            failures,
+        )
+        _compare_not_greater(
+            baseline,
+            current,
+            "summary",
+            "rotationRmsAngleRad",
+            SUMMARY_NUMERIC_FIELDS["rotationRmsAngleRad"],
+            tolerances.rotation_rms_angle_rad_tolerance,
+            failures,
+        )
     _compare_not_greater(
         baseline,
         current,
@@ -140,9 +205,11 @@ def _compare_cases(
                 )
             )
         for name in sorted(current_names - baseline_names):
+            current = current_cases[name]
+            prefix = f"perCase.{name}"
             failures.append(
                 RegressionFailure(
-                    path=f"perCase.{name}",
+                    path=prefix,
                     check="casePresence",
                     baseline="missing",
                     current="present",
@@ -151,26 +218,93 @@ def _compare_cases(
                 )
             )
 
+    for name in sorted(current_names - baseline_names):
+        current = current_cases[name]
+        prefix = f"perCase.{name}"
+        if _is_physics_case(current):
+            _require_numeric_fields(
+                current,
+                prefix,
+                {
+                    "translationMaxError": CASE_NUMERIC_FIELDS["translationMaxError"],
+                    "translationRmsError": CASE_NUMERIC_FIELDS["translationRmsError"],
+                    "rotationMaxAngleRad": CASE_NUMERIC_FIELDS["rotationMaxAngleRad"],
+                    "rotationRmsAngleRad": CASE_NUMERIC_FIELDS["rotationRmsAngleRad"],
+                },
+                failures,
+            )
+        _compare_required_physics_backend({}, current, prefix, options, failures)
+
     for name in sorted(baseline_names & current_names):
         baseline = baseline_cases[name]
         current = current_cases[name]
         prefix = f"perCase.{name}"
+        is_physics_case = _is_physics_case(baseline) or _is_physics_case(current)
         _compare_status(baseline, current, prefix, failures)
+        if is_physics_case:
+            _require_numeric_fields(
+                current,
+                prefix,
+                {
+                    "translationMaxError": CASE_NUMERIC_FIELDS["translationMaxError"],
+                    "translationRmsError": CASE_NUMERIC_FIELDS["translationRmsError"],
+                    "rotationMaxAngleRad": CASE_NUMERIC_FIELDS["rotationMaxAngleRad"],
+                    "rotationRmsAngleRad": CASE_NUMERIC_FIELDS["rotationRmsAngleRad"],
+                },
+                failures,
+            )
         _compare_not_greater(
             baseline,
             current,
             prefix,
             "maxAbsError",
-            SUMMARY_NUMERIC_FIELDS["maxAbsError"],
+            CASE_NUMERIC_FIELDS["maxAbsError"],
             tolerances.max_abs_error_tolerance,
             failures,
         )
+        if is_physics_case:
+            _compare_not_greater(
+                baseline,
+                current,
+                prefix,
+                "translationMaxError",
+                CASE_NUMERIC_FIELDS["translationMaxError"],
+                tolerances.translation_max_error_tolerance,
+                failures,
+            )
+            _compare_not_greater(
+                baseline,
+                current,
+                prefix,
+                "translationRmsError",
+                CASE_NUMERIC_FIELDS["translationRmsError"],
+                tolerances.translation_rms_error_tolerance,
+                failures,
+            )
+            _compare_not_greater(
+                baseline,
+                current,
+                prefix,
+                "rotationMaxAngleRad",
+                CASE_NUMERIC_FIELDS["rotationMaxAngleRad"],
+                tolerances.rotation_max_angle_rad_tolerance,
+                failures,
+            )
+            _compare_not_greater(
+                baseline,
+                current,
+                prefix,
+                "rotationRmsAngleRad",
+                CASE_NUMERIC_FIELDS["rotationRmsAngleRad"],
+                tolerances.rotation_rms_angle_rad_tolerance,
+                failures,
+            )
         _compare_not_greater(
             baseline,
             current,
             prefix,
             "mismatchCount",
-            SUMMARY_NUMERIC_FIELDS["mismatchCount"],
+            CASE_NUMERIC_FIELDS["mismatchCount"],
             tolerances.mismatch_count_tolerance,
             failures,
         )
@@ -179,7 +313,7 @@ def _compare_cases(
             current,
             prefix,
             "missing",
-            SUMMARY_NUMERIC_FIELDS["missing"],
+            CASE_NUMERIC_FIELDS["missing"],
             tolerances.missing_tolerance,
             failures,
         )
@@ -188,10 +322,11 @@ def _compare_cases(
             current,
             prefix,
             "importErrors",
-            SUMMARY_NUMERIC_FIELDS["importErrors"],
+            CASE_NUMERIC_FIELDS["importErrors"],
             tolerances.import_error_tolerance,
             failures,
         )
+        _compare_required_physics_backend(baseline, current, prefix, options, failures)
         for field, aliases in COVERAGE_FIELDS.items():
             _compare_not_lower(baseline, current, prefix, field, aliases, failures)
         if not options.allow_skipped_target_changes:
@@ -217,6 +352,66 @@ def _compare_status(
                 current=current_status,
                 tolerance=None,
                 message=f"status worsened from {baseline_status} to {current_status}",
+            )
+        )
+
+
+def _compare_required_physics_backend(
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+    prefix: str,
+    options: GateOptions,
+    failures: list[RegressionFailure],
+) -> None:
+    expected = options.required_physics_backend
+    if expected is None or not (_is_physics_case(baseline) or _is_physics_case(current)):
+        return
+    current_backend = current.get("physicsBackend")
+    if current_backend != expected:
+        failures.append(
+            RegressionFailure(
+                path=f"{prefix}.physicsBackend",
+                check="requiredPhysicsBackend",
+                baseline=expected,
+                current=current_backend,
+                tolerance=None,
+                message=f"{prefix}.physicsBackend must be {expected!r}, got {current_backend!r}",
+            )
+        )
+
+
+def _is_physics_case(source: dict[str, Any]) -> bool:
+    kind = source.get("kind")
+    if isinstance(kind, str) and "physics" in kind.lower():
+        return True
+    backend = source.get("physicsBackend")
+    return isinstance(backend, str) and backend.strip().lower() not in {"", "none"}
+
+
+def _has_physics_cases(report_or_summary: dict[str, Any]) -> bool:
+    cases = report_or_summary.get("perCase")
+    if not isinstance(cases, list):
+        return False
+    return any(isinstance(case, dict) and _is_physics_case(case) for case in cases)
+
+
+def _require_numeric_fields(
+    source: dict[str, Any],
+    prefix: str,
+    fields: dict[str, Iterable[str]],
+    failures: list[RegressionFailure],
+) -> None:
+    for field, aliases in fields.items():
+        if _has_number(source, field, aliases):
+            continue
+        failures.append(
+            RegressionFailure(
+                path=f"{prefix}.{field}",
+                check="requiredMetric",
+                baseline="present",
+                current="missing",
+                tolerance=None,
+                message=f"{prefix}.{field} is required for physics numeric cases",
             )
         )
 
@@ -348,6 +543,16 @@ def _number(source: dict[str, Any], field: str, aliases: Iterable[str]) -> float
         if isinstance(value, (int, float)):
             return float(value)
     return 0.0
+
+
+def _has_number(source: dict[str, Any], field: str, aliases: Iterable[str]) -> bool:
+    for key in (field, *aliases):
+        value = source.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return True
+    return False
 
 
 def _string_list(source: dict[str, Any], field: str, aliases: Iterable[str]) -> list[str]:

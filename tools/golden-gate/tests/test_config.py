@@ -17,11 +17,16 @@ _GOLDEN_GATE_ENV_VARS = (
     "MMD_ANIM_GOLDEN_REPO_ROOT",
     "MMD_ANIM_BIN",
     "MMD_ANIM_GOLDEN_MAX_ABS_ERROR_TOLERANCE",
+    "MMD_ANIM_GOLDEN_TRANSLATION_MAX_ERROR_TOLERANCE",
+    "MMD_ANIM_GOLDEN_TRANSLATION_RMS_ERROR_TOLERANCE",
+    "MMD_ANIM_GOLDEN_ROTATION_MAX_ANGLE_RAD_TOLERANCE",
+    "MMD_ANIM_GOLDEN_ROTATION_RMS_ANGLE_RAD_TOLERANCE",
     "MMD_ANIM_GOLDEN_MISMATCH_COUNT_TOLERANCE",
     "MMD_ANIM_GOLDEN_MISSING_TOLERANCE",
     "MMD_ANIM_GOLDEN_IMPORT_ERROR_TOLERANCE",
     "MMD_ANIM_GOLDEN_ALLOW_COUNT_CHANGES",
     "MMD_ANIM_GOLDEN_ALLOW_SKIPPED_TARGET_CHANGES",
+    "MMD_ANIM_GOLDEN_REQUIRED_PHYSICS_BACKEND",
 )
 
 
@@ -41,11 +46,16 @@ def args(**overrides):
         "report_dir": None,
         "mmd_anim_bin": None,
         "max_abs_error_tolerance": None,
+        "translation_max_error_tolerance": None,
+        "translation_rms_error_tolerance": None,
+        "rotation_max_angle_rad_tolerance": None,
+        "rotation_rms_angle_rad_tolerance": None,
         "mismatch_count_tolerance": None,
         "missing_tolerance": None,
         "import_error_tolerance": None,
         "allow_count_changes": None,
         "allow_skipped_target_changes": None,
+        "required_physics_backend": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -61,10 +71,15 @@ def test_config_reads_local_json_relative_paths(tmp_path: Path):
                 "report_dir": "reports",
                 "tolerances": {
                     "max_abs_error_tolerance": 0.25,
+                    "translation_max_error_tolerance": 0.5,
+                    "translation_rms_error_tolerance": 0.05,
+                    "rotation_max_angle_rad_tolerance": 0.4,
+                    "rotation_rms_angle_rad_tolerance": 0.04,
                     "mismatch_count_tolerance": 2,
                 },
                 "options": {
                     "allow_count_changes": True,
+                    "required_physics_backend": "bullet-native",
                 },
             },
             indent=2,
@@ -78,8 +93,13 @@ def test_config_reads_local_json_relative_paths(tmp_path: Path):
     assert config.baseline == (tmp_path / "reports" / "baseline.json").resolve()
     assert config.report_dir == (tmp_path / "reports").resolve()
     assert config.tolerances.max_abs_error_tolerance == 0.25
+    assert config.tolerances.translation_max_error_tolerance == 0.5
+    assert config.tolerances.translation_rms_error_tolerance == 0.05
+    assert config.tolerances.rotation_max_angle_rad_tolerance == 0.4
+    assert config.tolerances.rotation_rms_angle_rad_tolerance == 0.04
     assert config.tolerances.mismatch_count_tolerance == 2
     assert config.options.allow_count_changes is True
+    assert config.options.required_physics_backend == "bullet-native"
 
 
 def test_cli_overrides_env_and_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -106,6 +126,14 @@ def test_env_overrides_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config = resolve_config(args(config=str(config_path)))
 
     assert config.manifest == tmp_path / "from-env.json"
+
+
+def test_empty_backend_env_disables_required_physics_backend(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MMD_ANIM_GOLDEN_REQUIRED_PHYSICS_BACKEND", "")
+
+    config = resolve_config(args())
+
+    assert config.options.required_physics_backend is None
 
 
 def test_missing_required_paths_are_reported():

@@ -14,6 +14,10 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class Tolerances:
     max_abs_error_tolerance: float = 0.0
+    translation_max_error_tolerance: float = 0.0
+    translation_rms_error_tolerance: float = 0.0
+    rotation_max_angle_rad_tolerance: float = 0.0
+    rotation_rms_angle_rad_tolerance: float = 0.0
     mismatch_count_tolerance: int = 0
     missing_tolerance: int = 0
     import_error_tolerance: int = 0
@@ -23,6 +27,7 @@ class Tolerances:
 class GateOptions:
     allow_count_changes: bool = False
     allow_skipped_target_changes: bool = False
+    required_physics_backend: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,34 @@ def resolve_config(args: Any) -> GoldenGateConfig:
             raw_config,
             0.0,
         ),
+        translation_max_error_tolerance=_float_value(
+            "translation_max_error_tolerance",
+            getattr(args, "translation_max_error_tolerance", None),
+            "MMD_ANIM_GOLDEN_TRANSLATION_MAX_ERROR_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        translation_rms_error_tolerance=_float_value(
+            "translation_rms_error_tolerance",
+            getattr(args, "translation_rms_error_tolerance", None),
+            "MMD_ANIM_GOLDEN_TRANSLATION_RMS_ERROR_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        rotation_max_angle_rad_tolerance=_float_value(
+            "rotation_max_angle_rad_tolerance",
+            getattr(args, "rotation_max_angle_rad_tolerance", None),
+            "MMD_ANIM_GOLDEN_ROTATION_MAX_ANGLE_RAD_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        rotation_rms_angle_rad_tolerance=_float_value(
+            "rotation_rms_angle_rad_tolerance",
+            getattr(args, "rotation_rms_angle_rad_tolerance", None),
+            "MMD_ANIM_GOLDEN_ROTATION_RMS_ANGLE_RAD_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
         mismatch_count_tolerance=_int_value(
             "mismatch_count_tolerance",
             getattr(args, "mismatch_count_tolerance", None),
@@ -119,6 +152,13 @@ def resolve_config(args: Any) -> GoldenGateConfig:
             "MMD_ANIM_GOLDEN_ALLOW_SKIPPED_TARGET_CHANGES",
             raw_config,
             False,
+        ),
+        required_physics_backend=_optional_string_value(
+            "required_physics_backend",
+            getattr(args, "required_physics_backend", None),
+            "MMD_ANIM_GOLDEN_REQUIRED_PHYSICS_BACKEND",
+            raw_config,
+            None,
         ),
     )
 
@@ -176,7 +216,7 @@ def _choose(key: str, cli_value: Any, env_name: str, raw_config: dict[str, Any])
         return raw_config[key]
     if key.endswith("_tolerance"):
         return raw_config.get("tolerances", {}).get(key)
-    if key in {"allow_count_changes", "allow_skipped_target_changes"}:
+    if key in {"allow_count_changes", "allow_skipped_target_changes", "required_physics_backend"}:
         return raw_config.get("options", {}).get(key)
     return None
 
@@ -230,3 +270,27 @@ def _bool_value(key: str, cli_value: Any, env_name: str, raw_config: dict[str, A
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ConfigError(f"{key} must be a boolean")
+
+
+def _optional_string_value(
+    key: str,
+    cli_value: Any,
+    env_name: str,
+    raw_config: dict[str, Any],
+    default: str | None,
+) -> str | None:
+    if cli_value is not None:
+        value = cli_value
+    elif env_name in os.environ:
+        value = os.environ.get(env_name)
+    elif key in raw_config:
+        value = raw_config[key]
+    else:
+        value = raw_config.get("options", {}).get(key)
+    if value is None:
+        return default
+    if value == "":
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"{key} must be a string")
+    return value

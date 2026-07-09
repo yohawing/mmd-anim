@@ -376,6 +376,7 @@ version = "0.1.9"
 dependencies = [
  "glam",
  "mmd-anim-format",
+ "mmd-anim-physics-bullet",
  "mmd-anim-runtime",
  "serde_json",
 ]

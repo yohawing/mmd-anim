@@ -30,6 +30,7 @@ typedef struct mmd_runtime_append_solver_t mmd_runtime_append_solver_t;
 typedef struct mmd_runtime_vmd_camera_track_t mmd_runtime_vmd_camera_track_t;
 typedef struct mmd_runtime_vmd_light_track_t mmd_runtime_vmd_light_track_t;
 typedef struct mmd_runtime_vmd_self_shadow_track_t mmd_runtime_vmd_self_shadow_track_t;
+typedef struct mmd_runtime_physics_world_t mmd_runtime_physics_world_t;
 
 /* ------------------------------------------------------------------ */
 /*  Flag constants                                                    */
@@ -48,6 +49,7 @@ typedef struct mmd_runtime_vmd_self_shadow_track_t mmd_runtime_vmd_self_shadow_t
 
 /* Runtime feature flags (bitmask) */
 #define MMD_RUNTIME_FEATURE_SPLIT_PHYSICS_EVALUATION (1u << 0)
+#define MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE    (1u << 1)
 
 /* ------------------------------------------------------------------ */
 /*  Status and mode enums                                             */
@@ -66,6 +68,24 @@ typedef enum mmd_runtime_physics_mode {
     MMD_RUNTIME_PHYSICS_MODE_TRACE = 1,
     MMD_RUNTIME_PHYSICS_MODE_LIVE = 2
 } mmd_runtime_physics_mode_t;
+
+typedef enum mmd_runtime_physics_rigidbody_shape {
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_SHAPE_SPHERE = 0,
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_SHAPE_BOX = 1,
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_SHAPE_CAPSULE = 2
+} mmd_runtime_physics_rigidbody_shape_t;
+
+typedef enum mmd_runtime_physics_rigidbody_mode {
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_MODE_STATIC = 0,
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_MODE_DYNAMIC = 1,
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_MODE_DYNAMIC_BONE = 2,
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_MODE_UNKNOWN = 3
+} mmd_runtime_physics_rigidbody_mode_t;
+
+typedef enum mmd_runtime_physics_joint_kind {
+    MMD_RUNTIME_PHYSICS_JOINT_KIND_GENERIC_6DOF_SPRING = 0,
+    MMD_RUNTIME_PHYSICS_JOINT_KIND_UNSUPPORTED = 1
+} mmd_runtime_physics_joint_kind_t;
 
 /* ------------------------------------------------------------------ */
 /*  Descriptor structs                                                */
@@ -179,6 +199,46 @@ typedef struct mmd_runtime_ffi_physics_step_stats {
     uint32_t substeps;
     float    accumulator_seconds;
 } mmd_runtime_ffi_physics_step_stats_t;
+
+typedef struct mmd_runtime_ffi_physics_rigidbody_desc {
+    uint32_t shape;
+    float    shape_size[3];
+    float    position_xyz[3];
+    float    rotation_euler_xyz[3];
+    float    mass;
+    float    linear_damping;
+    float    angular_damping;
+    float    friction;
+    float    restitution;
+    uint16_t collision_group;
+    uint16_t collision_mask;
+    int32_t  bone_index;
+    uint32_t mode;
+    float    body_from_bone_position_xyz[3];
+    float    body_from_bone_rotation_xyzw[4];
+    float    bone_from_body_position_xyz[3];
+    float    bone_from_body_rotation_xyzw[4];
+} mmd_runtime_ffi_physics_rigidbody_desc_t;
+
+typedef struct mmd_runtime_ffi_physics_joint_desc {
+    uint32_t kind;
+    size_t   rigidbody_a;
+    size_t   rigidbody_b;
+    float    position_xyz[3];
+    float    rotation_euler_xyz[3];
+    float    translation_lower_limit_xyz[3];
+    float    translation_upper_limit_xyz[3];
+    float    rotation_lower_limit_xyz[3];
+    float    rotation_upper_limit_xyz[3];
+    float    spring_translation_factor_xyz[3];
+    float    spring_rotation_factor_xyz[3];
+} mmd_runtime_ffi_physics_joint_desc_t;
+
+typedef struct mmd_runtime_ffi_physics_world_step_report {
+    mmd_runtime_ffi_physics_step_stats_t tick;
+    size_t kinematic_rigidbodies_fed;
+    size_t bones_written_back;
+} mmd_runtime_ffi_physics_world_step_report_t;
 
 /* ------------------------------------------------------------------ */
 /*  Model lifecycle                                                   */
@@ -797,6 +857,41 @@ mmd_runtime_status_t mmd_runtime_instance_apply_physics_world_matrices(
     const uint8_t*          physics_world_matrix_mask_u8,
     size_t                  physics_world_matrix_mask_u8_len,
     size_t*                 out_updated_bone_count);
+
+mmd_runtime_status_t mmd_runtime_physics_world_create(
+    const mmd_runtime_ffi_physics_rigidbody_desc_t* rigidbodies,
+    size_t                                          rigidbody_count,
+    const mmd_runtime_ffi_physics_joint_desc_t*     joints,
+    size_t                                          joint_count,
+    mmd_runtime_physics_world_t**                   out_world);
+
+mmd_runtime_status_t mmd_runtime_physics_world_create_from_pmx_bytes(
+    const uint8_t*                  pmx_data,
+    size_t                          pmx_len,
+    mmd_runtime_physics_world_t**   out_world);
+
+void mmd_runtime_physics_world_free(
+    mmd_runtime_physics_world_t* world);
+
+mmd_runtime_status_t mmd_runtime_physics_world_reset(
+    mmd_runtime_physics_world_t* world,
+    mmd_runtime_instance_t*      instance,
+    size_t*                      out_seeded_rigidbody_count);
+
+mmd_runtime_status_t mmd_runtime_physics_world_step_runtime(
+    mmd_runtime_physics_world_t*                      world,
+    mmd_runtime_instance_t*                           instance,
+    float                                             dt_seconds,
+    mmd_runtime_ffi_physics_world_step_report_t*      out_report);
+
+mmd_runtime_status_t mmd_runtime_physics_world_rigidbody_count(
+    const mmd_runtime_physics_world_t* world,
+    size_t*                            out_rigidbody_count);
+
+mmd_runtime_status_t mmd_runtime_physics_world_copy_rigidbody_states(
+    const mmd_runtime_physics_world_t* world,
+    float*                             out_transforms_f32,
+    size_t                             out_transforms_f32_len);
 
 bool mmd_runtime_instance_evaluate_clip_frame_without_ik(
     mmd_runtime_instance_t*       instance,

@@ -19,4 +19,9 @@ crate-type = ["cdylib", "rlib"]
 glam.workspace = true
 mmd-anim-runtime.workspace = true
 mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.9" }
+mmd-anim-physics-bullet = { path = "../mmd-anim-physics-bullet", version = "0.1.9", optional = true, features = ["native", "runtime", "pmx-format"] }
 serde_json.workspace = true
+
+[features]
+default = []
+physics-bullet-native = ["dep:mmd-anim-physics-bullet"]

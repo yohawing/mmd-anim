@@ -756,6 +756,274 @@ fn split_physics_feature_flags_and_mode_config_work_through_c_abi() {
     }
 }
 
+#[cfg(not(feature = "physics-bullet-native"))]
+#[test]
+fn physics_world_abi_exports_unsupported_stubs_when_feature_is_off() {
+    assert_eq!(
+        mmd_runtime_feature_flags() & FEATURE_PHYSICS_BULLET_NATIVE,
+        0
+    );
+
+    let mut world = ptr::null_mut();
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_create(ptr::null(), 0, ptr::null(), 0, &mut world) },
+        MmdRuntimeStatus::Unsupported
+    );
+    assert!(world.is_null());
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_create_from_pmx_bytes(ptr::null(), 0, &mut world) },
+        MmdRuntimeStatus::Unsupported
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_reset(ptr::null_mut(), ptr::null_mut(), ptr::null_mut())
+        },
+        MmdRuntimeStatus::Unsupported
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_step_runtime(
+                ptr::null_mut(),
+                ptr::null_mut(),
+                1.0 / 60.0,
+                ptr::null_mut(),
+            )
+        },
+        MmdRuntimeStatus::Unsupported
+    );
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn dynamic_physics_body_desc() -> MmdRuntimeFfiPhysicsRigidBodyDesc {
+    MmdRuntimeFfiPhysicsRigidBodyDesc {
+        shape: MmdRuntimeFfiPhysicsRigidBodyShape::Sphere as u32,
+        shape_size: [0.5, 0.0, 0.0],
+        position_xyz: [0.0, 8.0, 0.0],
+        rotation_euler_xyz: [0.0; 3],
+        mass: 1.0,
+        linear_damping: 0.0,
+        angular_damping: 0.0,
+        friction: 0.5,
+        restitution: 0.0,
+        collision_group: 0,
+        collision_mask: 0xffff,
+        bone_index: 0,
+        mode: MmdRuntimeFfiPhysicsRigidBodyMode::Dynamic as u32,
+        body_from_bone_position_xyz: [0.0; 3],
+        body_from_bone_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        bone_from_body_position_xyz: [0.0; 3],
+        bone_from_body_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn static_physics_body_desc_with_nonzero_input_mass() -> MmdRuntimeFfiPhysicsRigidBodyDesc {
+    MmdRuntimeFfiPhysicsRigidBodyDesc {
+        shape: MmdRuntimeFfiPhysicsRigidBodyShape::Sphere as u32,
+        shape_size: [0.5, 0.0, 0.0],
+        position_xyz: [0.0, 10.0, 0.0],
+        rotation_euler_xyz: [0.0; 3],
+        mass: 1.0,
+        linear_damping: 0.0,
+        angular_damping: 0.0,
+        friction: 0.5,
+        restitution: 0.0,
+        collision_group: 0,
+        collision_mask: 0xffff,
+        bone_index: 0,
+        mode: MmdRuntimeFfiPhysicsRigidBodyMode::Static as u32,
+        body_from_bone_position_xyz: [0.0; 3],
+        body_from_bone_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        bone_from_body_position_xyz: [0.0; 3],
+        bone_from_body_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_world_descriptor_abi_steps_runtime_and_reports_state() {
+    assert_eq!(
+        mmd_runtime_feature_flags() & FEATURE_PHYSICS_BULLET_NATIVE,
+        FEATURE_PHYSICS_BULLET_NATIVE
+    );
+
+    let parents = [-1];
+    let rest_positions = [0.0, 8.0, 0.0];
+    let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
+    assert!(!model.is_null());
+    let instance = unsafe { mmd_runtime_instance_create(model, 0) };
+    assert!(!instance.is_null());
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_set_physics_mode(instance, MmdRuntimeFfiPhysicsMode::Live as u32)
+        },
+        MmdRuntimeStatus::Ok
+    );
+
+    let bodies = [dynamic_physics_body_desc()];
+    let mut world = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create(
+                bodies.as_ptr(),
+                bodies.len(),
+                ptr::null(),
+                0,
+                &mut world,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(!world.is_null());
+
+    let mut count = 0usize;
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_rigidbody_count(world, &mut count) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(count, 1);
+
+    let mut seeded = 0usize;
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_reset(world, instance, &mut seeded) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(seeded, 1);
+
+    let mut report = MmdRuntimeFfiPhysicsWorldStepReport {
+        tick: MmdRuntimeFfiPhysicsStepStats {
+            input_dt_seconds: 0.0,
+            clamped_dt_seconds: 0.0,
+            substeps: 0,
+            accumulator_seconds: 0.0,
+        },
+        kinematic_rigidbodies_fed: 0,
+        bones_written_back: 0,
+    };
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_step_runtime(world, instance, 1.0 / 60.0, &mut report) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(report.tick.substeps, 2);
+    assert_eq!(report.bones_written_back, 1);
+
+    let mut states = [0.0f32; 7];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_copy_rigidbody_states(
+                world,
+                states.as_mut_ptr(),
+                states.len(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(states[1] < 8.0, "dynamic body should fall: {states:?}");
+
+    let mut matrices = [0.0f32; 16];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, matrices.as_mut_ptr(), matrices.len())
+    });
+    assert!(matrices[13] < 8.0, "runtime bone should receive readback");
+
+    unsafe {
+        mmd_runtime_physics_world_free(world);
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_world_descriptor_abi_static_mode_forces_zero_mass() {
+    let parents = [-1];
+    let rest_positions = [0.0, 10.0, 0.0];
+    let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
+    assert!(!model.is_null());
+    let instance = unsafe { mmd_runtime_instance_create(model, 0) };
+    assert!(!instance.is_null());
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_set_physics_mode(instance, MmdRuntimeFfiPhysicsMode::Live as u32)
+        },
+        MmdRuntimeStatus::Ok
+    );
+
+    let bodies = [static_physics_body_desc_with_nonzero_input_mass()];
+    let mut world = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create(
+                bodies.as_ptr(),
+                bodies.len(),
+                ptr::null(),
+                0,
+                &mut world,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(!world.is_null());
+
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_reset(world, instance, ptr::null_mut()) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_step_runtime(world, instance, 1.0 / 60.0, ptr::null_mut())
+        },
+        MmdRuntimeStatus::Ok
+    );
+    let mut states = [0.0f32; 7];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_copy_rigidbody_states(
+                world,
+                states.as_mut_ptr(),
+                states.len(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_near(states[1], 10.0, 1.0e-4);
+
+    unsafe {
+        mmd_runtime_physics_world_free(world);
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_world_descriptor_abi_rejects_invalid_inputs() {
+    let mut world = ptr::null_mut();
+    let mut body = dynamic_physics_body_desc();
+    body.shape = 99;
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_create(&body, 1, ptr::null(), 0, &mut world) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert!(world.is_null());
+
+    body = dynamic_physics_body_desc();
+    body.position_xyz[0] = f32::NAN;
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_create(&body, 1, ptr::null(), 0, &mut world) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert!(world.is_null());
+
+    body = dynamic_physics_body_desc();
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_create(&body, 1, ptr::null(), 0, ptr::null_mut()) },
+        MmdRuntimeStatus::InvalidInput
+    );
+}
+
 #[test]
 fn split_physics_clip_evaluation_matches_full_evaluation_without_external_physics() {
     let parents = [-1];

@@ -56,6 +56,9 @@ def summarize_report(report: dict[str, Any]) -> str:
         "maxBulletPenetrationDepth",
     ]
     parts = [f"{field}={summary.get(field)}" for field in fields if field in summary]
+    rigid_bodies = report.get("rigidBodies")
+    if isinstance(rigid_bodies, list):
+        parts.append(f"rigidBodies={len(rigid_bodies)}")
     return " ".join(parts) if parts else "summary empty"
 
 

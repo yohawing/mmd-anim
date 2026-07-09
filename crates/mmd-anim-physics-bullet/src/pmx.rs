@@ -287,7 +287,7 @@ fn rigidbody_desc_from_pmx(
         friction: body.friction,
         restitution: body.restitution,
         collision_group: body.group as u16,
-        collision_mask: body.mask,
+        collision_mask: !body.mask,
     })
 }
 
@@ -508,6 +508,51 @@ mod tests {
         assert!((skipped_body.position[1] - 5.0).abs() < 1.0e-4);
         assert_eq!(included, 1);
         assert!((included_body.position[1] - 20.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn pmx_collision_mask_controls_bullet_contacts() {
+        fn has_contact(dynamic_non_collision_mask: u16) -> bool {
+            let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+                "bones": [{"name": "root"}],
+                "rigidBodies": [
+                    {
+                        "name": "floor",
+                        "boneIndex": 0,
+                        "shape": "box",
+                        "size": [5.0, 1.0, 5.0],
+                        "position": [0.0, -1.0, 0.0],
+                        "group": 1,
+                        "mask": 0,
+                        "mode": "static"
+                    },
+                    {
+                        "name": "ball",
+                        "boneIndex": 0,
+                        "shape": "sphere",
+                        "size": [0.5, 0.0, 0.0],
+                        "position": [0.0, 0.25, 0.0],
+                        "group": 1,
+                        "mask": dynamic_non_collision_mask,
+                        "mass": 1.0,
+                        "mode": "dynamic"
+                    }
+                ]
+            }))
+            .unwrap();
+            let model = crate::test_support::build_test_pmx_model(descriptor);
+            let mut built = build_bullet_world_from_pmx(&model).unwrap();
+            for _ in 0..10 {
+                built.world.step(1.0 / 60.0, 2).unwrap();
+            }
+            built.world.contact_points().unwrap().iter().any(|contact| {
+                contact.rigidbody_a == built.rigidbody_handles[1]
+                    || contact.rigidbody_b == built.rigidbody_handles[1]
+            })
+        }
+
+        assert!(has_contact(0));
+        assert!(!has_contact(1 << 1));
     }
 
     #[test]

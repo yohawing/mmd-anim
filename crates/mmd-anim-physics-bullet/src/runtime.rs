@@ -171,7 +171,7 @@ impl RuntimePhysicsBridgeExt for PmxBulletWorld {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pmx-format"))]
 mod tests {
     use std::sync::Arc;
 

@@ -7,9 +7,9 @@ pub const NATIVE_FEATURE_ENABLED: bool = cfg!(feature = "native");
 
 #[cfg(feature = "native")]
 mod native;
-#[cfg(all(feature = "native", feature = "pmx-format"))]
+#[cfg(feature = "native")]
 mod pmx;
-#[cfg(all(feature = "native", feature = "pmx-format", feature = "runtime"))]
+#[cfg(all(feature = "native", feature = "runtime"))]
 mod runtime;
 #[cfg(all(test, feature = "native", feature = "pmx-format"))]
 mod test_support;
@@ -20,9 +20,11 @@ pub use native::{
     RigidBodyShape, SixDofSpringJointDesc, Transform,
 };
 #[cfg(all(feature = "native", feature = "pmx-format"))]
+pub use pmx::build_bullet_world_from_pmx;
+#[cfg(feature = "native")]
 pub use pmx::{
-    PmxBulletBuildReport, PmxBulletWorld, PmxRigidBodyBinding, PmxRigidBodyMode,
-    build_bullet_world_from_pmx,
+    PhysicsJointDescriptor, PhysicsJointKind, PhysicsRigidBodyDescriptor, PmxBulletBuildReport,
+    PmxBulletWorld, PmxRigidBodyBinding, PmxRigidBodyMode, build_bullet_world_from_descriptors,
 };
-#[cfg(all(feature = "native", feature = "pmx-format", feature = "runtime"))]
+#[cfg(all(feature = "native", feature = "runtime"))]
 pub use runtime::RuntimePhysicsBridgeExt;

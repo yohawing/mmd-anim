@@ -1,13 +1,16 @@
+#[cfg(feature = "pmx-format")]
 use glam::{EulerRot, Mat4, Quat, Vec3};
+#[cfg(feature = "pmx-format")]
 use mmd_anim_format::{
     PmxParsedModel,
     pmx::{PmxParsedJoint, PmxParsedRigidBody},
 };
 use thiserror::Error;
 
+#[cfg(any(test, feature = "pmx-format"))]
+use crate::RigidBodyShape;
 use crate::{
-    BulletError, BulletWorld, RigidBodyDesc, RigidBodyHandle, RigidBodyShape,
-    SixDofSpringJointDesc, Transform,
+    BulletError, BulletWorld, RigidBodyDesc, RigidBodyHandle, SixDofSpringJointDesc, Transform,
 };
 
 #[derive(Debug, Error)]
@@ -154,33 +157,69 @@ pub struct PmxRigidBodyBinding {
     pub bone_from_body: Transform,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhysicsRigidBodyDescriptor {
+    pub rigidbody: RigidBodyDesc,
+    pub binding: PmxRigidBodyBinding,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhysicsJointKind {
+    Generic6DofSpring,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhysicsJointDescriptor {
+    pub kind: PhysicsJointKind,
+    pub rigidbody_a: usize,
+    pub rigidbody_b: usize,
+    pub position: [f32; 3],
+    pub rotation_euler: [f32; 3],
+    pub translation_lower_limit: [f32; 3],
+    pub translation_upper_limit: [f32; 3],
+    pub rotation_lower_limit: [f32; 3],
+    pub rotation_upper_limit: [f32; 3],
+    pub spring_translation_factor: [f32; 3],
+    pub spring_rotation_factor: [f32; 3],
+}
+
+#[cfg(feature = "pmx-format")]
 pub fn build_bullet_world_from_pmx(
     model: &PmxParsedModel,
 ) -> Result<PmxBulletWorld, PmxBulletBuildError> {
+    let rigidbodies = model
+        .rigid_bodies
+        .iter()
+        .enumerate()
+        .map(|(index, body)| rigidbody_descriptor_from_pmx(model, index, body))
+        .collect::<Result<Vec<_>, _>>()?;
+    let joints = model
+        .joints
+        .iter()
+        .map(joint_descriptor_from_pmx)
+        .collect::<Vec<_>>();
+    build_bullet_world_from_descriptors(&rigidbodies, &joints)
+}
+
+pub fn build_bullet_world_from_descriptors(
+    rigidbodies: &[PhysicsRigidBodyDescriptor],
+    joints: &[PhysicsJointDescriptor],
+) -> Result<PmxBulletWorld, PmxBulletBuildError> {
     let mut world = BulletWorld::new()?;
-    let mut rigidbody_handles = Vec::with_capacity(model.rigid_bodies.len());
-    let mut rigidbody_bindings = Vec::with_capacity(model.rigid_bodies.len());
+    let mut rigidbody_handles = Vec::with_capacity(rigidbodies.len());
+    let mut rigidbody_bindings = Vec::with_capacity(rigidbodies.len());
     let mut report = PmxBulletBuildReport::default();
 
-    for (index, body) in model.rigid_bodies.iter().enumerate() {
-        let desc = rigidbody_desc_from_pmx(index, body)?;
-        let handle = world.add_rigidbody(desc)?;
+    for descriptor in rigidbodies {
+        let handle = world.add_rigidbody(descriptor.rigidbody)?;
         rigidbody_handles.push(handle);
-        rigidbody_bindings.push(PmxRigidBodyBinding {
-            bone_index: if body.bone_index >= 0 {
-                Some(body.bone_index as usize)
-            } else {
-                None
-            },
-            mode: rigidbody_mode_from_pmx(body.mode.as_str()),
-            body_from_bone: body_from_bone_transform(model, body),
-            bone_from_body: bone_from_body_transform(model, body),
-        });
+        rigidbody_bindings.push(descriptor.binding);
         report.rigidbodies_added += 1;
     }
 
-    for joint in &model.joints {
-        match joint_desc_from_pmx(joint, &rigidbody_handles) {
+    for joint in joints {
+        match joint_desc_from_descriptor(joint, &rigidbody_handles) {
             JointMapping::Mapped(desc) => {
                 world.add_6dof_spring_joint(desc)?;
                 report.joints_added += 1;
@@ -198,6 +237,7 @@ pub fn build_bullet_world_from_pmx(
     })
 }
 
+#[cfg(feature = "pmx-format")]
 fn rigidbody_mode_from_pmx(mode: &str) -> PmxRigidBodyMode {
     match mode {
         "static" => PmxRigidBodyMode::Static,
@@ -207,6 +247,7 @@ fn rigidbody_mode_from_pmx(mode: &str) -> PmxRigidBodyMode {
     }
 }
 
+#[cfg(feature = "pmx-format")]
 fn body_from_bone_transform(model: &PmxParsedModel, body: &PmxParsedRigidBody) -> Transform {
     let body_bind = rigidbody_bind_transform(body);
     let Some(bone_index) = valid_bone_index(model, body.bone_index) else {
@@ -216,6 +257,7 @@ fn body_from_bone_transform(model: &PmxParsedModel, body: &PmxParsedRigidBody) -
     Transform::from_mat4(bone_bind.inverse() * body_bind)
 }
 
+#[cfg(feature = "pmx-format")]
 fn bone_from_body_transform(model: &PmxParsedModel, body: &PmxParsedRigidBody) -> Transform {
     let body_bind = rigidbody_bind_transform(body);
     let Some(bone_index) = valid_bone_index(model, body.bone_index) else {
@@ -225,6 +267,7 @@ fn bone_from_body_transform(model: &PmxParsedModel, body: &PmxParsedRigidBody) -
     Transform::from_mat4(body_bind.inverse() * bone_bind)
 }
 
+#[cfg(feature = "pmx-format")]
 fn valid_bone_index(model: &PmxParsedModel, bone_index: i32) -> Option<usize> {
     if bone_index < 0 {
         return None;
@@ -233,6 +276,7 @@ fn valid_bone_index(model: &PmxParsedModel, bone_index: i32) -> Option<usize> {
     (bone_index < model.skeleton.bones.len()).then_some(bone_index)
 }
 
+#[cfg(feature = "pmx-format")]
 fn rigidbody_bind_transform(body: &PmxParsedRigidBody) -> Mat4 {
     Mat4::from_scale_rotation_translation(
         Vec3::ONE,
@@ -246,10 +290,33 @@ fn rigidbody_bind_transform(body: &PmxParsedRigidBody) -> Mat4 {
     )
 }
 
+#[cfg(feature = "pmx-format")]
 fn bone_bind_transform(model: &PmxParsedModel, bone_index: usize) -> Mat4 {
     Mat4::from_translation(Vec3::from_array(model.skeleton.bones[bone_index].position))
 }
 
+#[cfg(feature = "pmx-format")]
+fn rigidbody_descriptor_from_pmx(
+    model: &PmxParsedModel,
+    index: usize,
+    body: &PmxParsedRigidBody,
+) -> Result<PhysicsRigidBodyDescriptor, PmxBulletBuildError> {
+    Ok(PhysicsRigidBodyDescriptor {
+        rigidbody: rigidbody_desc_from_pmx(index, body)?,
+        binding: PmxRigidBodyBinding {
+            bone_index: if body.bone_index >= 0 {
+                Some(body.bone_index as usize)
+            } else {
+                None
+            },
+            mode: rigidbody_mode_from_pmx(body.mode.as_str()),
+            body_from_bone: body_from_bone_transform(model, body),
+            bone_from_body: bone_from_body_transform(model, body),
+        },
+    })
+}
+
+#[cfg(feature = "pmx-format")]
 fn rigidbody_desc_from_pmx(
     index: usize,
     body: &PmxParsedRigidBody,
@@ -292,25 +359,25 @@ fn rigidbody_desc_from_pmx(
     })
 }
 
-enum JointMapping {
-    Mapped(SixDofSpringJointDesc),
-    InvalidBody,
-    UnsupportedType,
-}
-
-fn joint_desc_from_pmx(joint: &PmxParsedJoint, bodies: &[RigidBodyHandle]) -> JointMapping {
-    if joint.kind != "generic6dofSpring" {
-        return JointMapping::UnsupportedType;
-    }
-
-    let Some(&rigidbody_a) = body_handle(bodies, joint.rigid_body_index_a) else {
-        return JointMapping::InvalidBody;
-    };
-    let Some(&rigidbody_b) = body_handle(bodies, joint.rigid_body_index_b) else {
-        return JointMapping::InvalidBody;
+#[cfg(feature = "pmx-format")]
+fn joint_descriptor_from_pmx(joint: &PmxParsedJoint) -> PhysicsJointDescriptor {
+    let invalid_body = usize::MAX;
+    let (rigidbody_a, rigidbody_b) = if joint.rigid_body_index_a < 0 || joint.rigid_body_index_b < 0
+    {
+        (invalid_body, invalid_body)
+    } else {
+        (
+            joint.rigid_body_index_a as usize,
+            joint.rigid_body_index_b as usize,
+        )
     };
 
-    JointMapping::Mapped(SixDofSpringJointDesc {
+    PhysicsJointDescriptor {
+        kind: if joint.kind == "generic6dofSpring" {
+            PhysicsJointKind::Generic6DofSpring
+        } else {
+            PhysicsJointKind::Unsupported
+        },
         rigidbody_a,
         rigidbody_b,
         position: joint.position,
@@ -321,17 +388,112 @@ fn joint_desc_from_pmx(joint: &PmxParsedJoint, bodies: &[RigidBodyHandle]) -> Jo
         rotation_upper_limit: joint.rotation_upper_limit,
         spring_translation_factor: joint.spring_translation_factor,
         spring_rotation_factor: joint.spring_rotation_factor,
+    }
+}
+
+enum JointMapping {
+    Mapped(SixDofSpringJointDesc),
+    InvalidBody,
+    UnsupportedType,
+}
+
+fn joint_desc_from_descriptor(
+    joint: &PhysicsJointDescriptor,
+    bodies: &[RigidBodyHandle],
+) -> JointMapping {
+    if joint.kind != PhysicsJointKind::Generic6DofSpring {
+        return JointMapping::UnsupportedType;
+    }
+
+    let Some(&rigidbody_a) = bodies.get(joint.rigidbody_a) else {
+        return JointMapping::InvalidBody;
+    };
+    let Some(&rigidbody_b) = bodies.get(joint.rigidbody_b) else {
+        return JointMapping::InvalidBody;
+    };
+
+    JointMapping::Mapped(SixDofSpringJointDesc {
+        rigidbody_a,
+        rigidbody_b,
+        position: joint.position,
+        rotation_euler: joint.rotation_euler,
+        translation_lower_limit: joint.translation_lower_limit,
+        translation_upper_limit: joint.translation_upper_limit,
+        rotation_lower_limit: joint.rotation_lower_limit,
+        rotation_upper_limit: joint.rotation_upper_limit,
+        spring_translation_factor: joint.spring_translation_factor,
+        spring_rotation_factor: joint.spring_rotation_factor,
     })
 }
 
-fn body_handle(bodies: &[RigidBodyHandle], index: i32) -> Option<&RigidBodyHandle> {
-    if index < 0 {
-        return None;
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn builds_bullet_world_from_typed_descriptors_without_pmx_input() {
+        let rigidbodies = [
+            PhysicsRigidBodyDescriptor {
+                rigidbody: RigidBodyDesc {
+                    shape: RigidBodyShape::Sphere { radius: 0.5 },
+                    position: [0.0, 10.0, 0.0],
+                    rotation_euler: [0.0; 3],
+                    mass: 0.0,
+                    linear_damping: 0.0,
+                    angular_damping: 0.0,
+                    friction: 0.5,
+                    restitution: 0.0,
+                    collision_group: 0,
+                    collision_mask: 0xffff,
+                },
+                binding: PmxRigidBodyBinding {
+                    bone_index: Some(0),
+                    mode: PmxRigidBodyMode::Static,
+                    body_from_bone: Transform::IDENTITY,
+                    bone_from_body: Transform::IDENTITY,
+                },
+            },
+            PhysicsRigidBodyDescriptor {
+                rigidbody: RigidBodyDesc::dynamic_sphere(0.5, [0.0, 8.0, 0.0], 1.0),
+                binding: PmxRigidBodyBinding {
+                    bone_index: Some(1),
+                    mode: PmxRigidBodyMode::Dynamic,
+                    body_from_bone: Transform::IDENTITY,
+                    bone_from_body: Transform::IDENTITY,
+                },
+            },
+        ];
+        let joints = [PhysicsJointDescriptor {
+            kind: PhysicsJointKind::Generic6DofSpring,
+            rigidbody_a: 0,
+            rigidbody_b: 1,
+            position: [0.0, 9.0, 0.0],
+            rotation_euler: [0.0; 3],
+            translation_lower_limit: [0.0; 3],
+            translation_upper_limit: [0.0; 3],
+            rotation_lower_limit: [0.0; 3],
+            rotation_upper_limit: [0.0; 3],
+            spring_translation_factor: [0.0; 3],
+            spring_rotation_factor: [0.0; 3],
+        }];
+
+        let built = build_bullet_world_from_descriptors(&rigidbodies, &joints).unwrap();
+
+        assert_eq!(
+            built.report,
+            PmxBulletBuildReport {
+                rigidbodies_added: 2,
+                joints_added: 1,
+                joints_skipped_invalid_body: 0,
+                joints_skipped_unsupported_type: 0,
+            }
+        );
+        assert_eq!(built.rigidbody_bindings[1].mode, PmxRigidBodyMode::Dynamic);
+        assert_eq!(built.world.rigidbody_count().unwrap(), 2);
     }
-    bodies.get(index as usize)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pmx-format"))]
 mod tests {
     use mmd_anim_format::PmxPartsDescriptor;
     use serde_json::json;
@@ -431,7 +593,8 @@ mod tests {
             spring_rotation_factor: [40.0, 50.0, 60.0],
         };
 
-        let desc = match joint_desc_from_pmx(&joint, &[body_a, body_b]) {
+        let descriptor = joint_descriptor_from_pmx(&joint);
+        let desc = match joint_desc_from_descriptor(&descriptor, &[body_a, body_b]) {
             JointMapping::Mapped(desc) => desc,
             JointMapping::InvalidBody | JointMapping::UnsupportedType => {
                 panic!("expected generic6dofSpring joint to map")
@@ -451,6 +614,64 @@ mod tests {
             joint.spring_translation_factor
         );
         assert_eq!(desc.spring_rotation_factor, joint.spring_rotation_factor);
+    }
+
+    #[test]
+    fn descriptor_builder_matches_pmx_builder_for_physics_metadata() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [{"name": "root", "position": [0.0, 10.0, 0.0]}],
+            "rigidBodies": [
+                {
+                    "name": "anchor",
+                    "boneIndex": 0,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 10.0, 0.0],
+                    "mode": "static"
+                },
+                {
+                    "name": "bob",
+                    "boneIndex": 0,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 8.0, 0.0],
+                    "mass": 1.0,
+                    "mode": "dynamic"
+                }
+            ],
+            "joints": [
+                {
+                    "name": "joint",
+                    "type": "generic6dofSpring",
+                    "rigidBodyIndexA": 0,
+                    "rigidBodyIndexB": 1,
+                    "position": [0.0, 9.0, 0.0]
+                }
+            ]
+        }))
+        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
+        let from_pmx = build_bullet_world_from_pmx(&model).unwrap();
+        let rigidbodies = model
+            .rigid_bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| rigidbody_descriptor_from_pmx(&model, index, body).unwrap())
+            .collect::<Vec<_>>();
+        let joints = model
+            .joints
+            .iter()
+            .map(joint_descriptor_from_pmx)
+            .collect::<Vec<_>>();
+        let from_descriptors = build_bullet_world_from_descriptors(&rigidbodies, &joints).unwrap();
+
+        assert_eq!(from_descriptors.report, from_pmx.report);
+        assert_eq!(
+            from_descriptors.rigidbody_bindings,
+            from_pmx.rigidbody_bindings
+        );
+        assert_eq!(from_descriptors.rigidbody_handles.len(), 2);
+        assert_eq!(from_descriptors.world.rigidbody_count().unwrap(), 2);
     }
 
     #[test]

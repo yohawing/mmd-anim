@@ -2460,6 +2460,68 @@ mod physics_penetration_geometry_tests {
     }
 
     #[test]
+    fn physics_penetration_json_report_uses_stable_camel_case_fields() {
+        let report = PhysicsPenetrationDiagnosticReport {
+            case_name: "case-a".to_owned(),
+            oracle_frame: 119.0,
+            eval_frame: 119.0,
+            model: "model.pmx".to_owned(),
+            motion: "motion.vmd".to_owned(),
+            metric: "shape-proxy+bullet-contacts",
+            summary: PhysicsPenetrationDiagnosticSummary {
+                pair_count: 1,
+                penetrating_pair_count: 0,
+                severe_pair_count: 0,
+                bullet_contact_count: 1,
+                penetrating_contact_count: 0,
+                min_signed_distance: Some(0.25),
+                max_penetration_depth: 0.0,
+                min_bullet_contact_distance: Some(0.125),
+                max_bullet_penetration_depth: 0.0,
+            },
+            pairs: vec![PhysicsPenetrationPair {
+                lhs_index: 1,
+                lhs_name: "lhs".to_owned(),
+                lhs_mode: "dynamic".to_owned(),
+                rhs_index: 2,
+                rhs_name: "rhs".to_owned(),
+                rhs_mode: "static".to_owned(),
+                center_distance: 3.0,
+                lhs_radius: 1.0,
+                rhs_radius: 1.0,
+                approx_gap: 1.0,
+                metric: "sphere-sphere",
+            }],
+            contacts: vec![PhysicsContactDiagnostic {
+                lhs_index: 1,
+                lhs_name: "lhs".to_owned(),
+                lhs_mode: "dynamic".to_owned(),
+                rhs_index: 2,
+                rhs_name: "rhs".to_owned(),
+                rhs_mode: "static".to_owned(),
+                distance: 0.125,
+                position_world_on_a: [1.0, 2.0, 3.0],
+                position_world_on_b: [4.0, 5.0, 6.0],
+                normal_world_on_b: [0.0, 1.0, 0.0],
+            }],
+        };
+
+        let value = serde_json::to_value(report).unwrap();
+
+        assert_eq!(value["caseName"], "case-a");
+        assert_eq!(value["oracleFrame"], 119.0);
+        assert_eq!(value["summary"]["maxPenetrationDepth"], 0.0);
+        assert_eq!(value["summary"]["minBulletContactDistance"], 0.125);
+        assert_eq!(value["pairs"][0]["approxGap"], 1.0);
+        assert_eq!(
+            value["contacts"][0]["positionWorldOnA"],
+            serde_json::json!([1.0, 2.0, 3.0])
+        );
+        assert!(value.get("case_name").is_none());
+        assert!(value["summary"].get("max_penetration_depth").is_none());
+    }
+
+    #[test]
     fn obb_obb_sat_gap_reports_positive_separation() {
         let axes = [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z];
         let gap = obb_obb_sat_gap(

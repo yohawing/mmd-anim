@@ -41,6 +41,13 @@ def summarize_report(report: dict[str, Any]) -> str:
         "mismatchCount",
         "maxAbsError",
         "worst",
+        "pairCount",
+        "penetratingPairCount",
+        "severePairCount",
+        "bulletContactCount",
+        "penetratingContactCount",
+        "maxPenetrationDepth",
+        "maxBulletPenetrationDepth",
     ]
     parts = [f"{field}={summary.get(field)}" for field in fields if field in summary]
     return " ".join(parts) if parts else "summary empty"

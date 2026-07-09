@@ -44,6 +44,14 @@ pub enum MmdDumperOracleParseError {
         model: usize,
         bone: usize,
     },
+    #[error(
+        "Unity runtime verification rigid body vector is invalid: frame={frame} body={body} field={field}"
+    )]
+    InvalidUnityRigidBodyVector {
+        frame: i32,
+        body: usize,
+        field: &'static str,
+    },
     #[error("invalid manifest JSON: {source}")]
     ManifestJson {
         #[source]
@@ -203,6 +211,15 @@ impl MmdDumperOracleDump {
                     });
                 }
 
+                let mut rigid_bodies = Vec::with_capacity(frame.body_diagnostics.len());
+                for (body_index, body) in frame.body_diagnostics.into_iter().enumerate() {
+                    rigid_bodies.push(MmdDumperOracleRigidBody::from_unity_body(
+                        frame_number,
+                        body_index,
+                        body,
+                    )?);
+                }
+
                 frames.push(MmdDumperOracleFrame {
                     frame: frame_number,
                     models: vec![MmdDumperOracleModel {
@@ -213,6 +230,7 @@ impl MmdDumperOracleDump {
                         bones,
                         morphs: Vec::new(),
                     }],
+                    rigid_bodies,
                 });
             }
         }
@@ -265,6 +283,7 @@ pub struct MmdDumperOracleSource {
 pub struct MmdDumperOracleFrame {
     pub frame: i32,
     pub models: Vec<MmdDumperOracleModel>,
+    pub rigid_bodies: Vec<MmdDumperOracleRigidBody>,
 }
 
 impl MmdDumperOracleFrame {
@@ -279,6 +298,46 @@ impl MmdDumperOracleFrame {
         Ok(Self {
             frame,
             models: parsed_models,
+            rigid_bodies: Vec::new(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MmdDumperOracleRigidBody {
+    pub index: i32,
+    pub name: String,
+    pub bone_index: i32,
+    pub bone_name: String,
+    pub physics_kind: String,
+    pub shape_type: String,
+    pub readback_mmd_position: [f32; 3],
+    pub readback_mmd_rotation_xyzw: [f32; 4],
+}
+
+impl MmdDumperOracleRigidBody {
+    fn from_unity_body(
+        frame: i32,
+        body: usize,
+        raw: RawUnityRuntimeVerificationBodyDiagnostic,
+    ) -> Result<Self, MmdDumperOracleParseError> {
+        Ok(Self {
+            index: raw.body_index,
+            name: raw.body_name,
+            bone_index: raw.bone_index,
+            bone_name: raw.bone_name,
+            physics_kind: raw.physics_kind,
+            shape_type: raw.shape_type,
+            readback_mmd_position: raw.readback_mmd_position.to_array3(
+                frame,
+                body,
+                "readbackMmdPosition",
+            )?,
+            readback_mmd_rotation_xyzw: raw.readback_mmd_rotation.to_array4(
+                frame,
+                body,
+                "readbackMmdRotation",
+            )?,
         })
     }
 }
@@ -416,7 +475,80 @@ struct RawUnityRuntimeVerificationFrame {
     frame: f32,
     #[serde(rename = "matrixLayout")]
     matrix_layout: Option<String>,
+    #[serde(default, rename = "bodyDiagnostics")]
+    body_diagnostics: Vec<RawUnityRuntimeVerificationBodyDiagnostic>,
     bones: Vec<RawOracleBone>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUnityRuntimeVerificationBodyDiagnostic {
+    #[serde(rename = "bodyIndex")]
+    body_index: i32,
+    #[serde(rename = "bodyName", default)]
+    body_name: String,
+    #[serde(rename = "boneIndex", default = "minus_one")]
+    bone_index: i32,
+    #[serde(rename = "boneName", default)]
+    bone_name: String,
+    #[serde(rename = "physicsKind", default)]
+    physics_kind: String,
+    #[serde(rename = "shapeType", default)]
+    shape_type: String,
+    #[serde(rename = "readbackMmdPosition")]
+    readback_mmd_position: RawUnityVector3,
+    #[serde(rename = "readbackMmdRotation")]
+    readback_mmd_rotation: RawUnityQuaternion,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUnityVector3 {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+impl RawUnityVector3 {
+    fn to_array3(
+        &self,
+        frame: i32,
+        body: usize,
+        field: &'static str,
+    ) -> Result<[f32; 3], MmdDumperOracleParseError> {
+        let values = [self.x, self.y, self.z];
+        if values.iter().all(|value| value.is_finite()) {
+            Ok(values)
+        } else {
+            Err(MmdDumperOracleParseError::InvalidUnityRigidBodyVector { frame, body, field })
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUnityQuaternion {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32,
+}
+
+impl RawUnityQuaternion {
+    fn to_array4(
+        &self,
+        frame: i32,
+        body: usize,
+        field: &'static str,
+    ) -> Result<[f32; 4], MmdDumperOracleParseError> {
+        let values = [self.x, self.y, self.z, self.w];
+        if values.iter().all(|value| value.is_finite()) {
+            Ok(values)
+        } else {
+            Err(MmdDumperOracleParseError::InvalidUnityRigidBodyVector { frame, body, field })
+        }
+    }
+}
+
+fn minus_one() -> i32 {
+    -1
 }
 
 fn unity_matrix_to_cols_array(matrix: [f32; 16], matrix_layout: &Option<String>) -> [f32; 16] {
@@ -457,6 +589,7 @@ mod tests {
         assert_eq!(model.bones[0].world_matrix[15], 1.0);
         assert_eq!(model.morphs.len(), 1);
         assert_eq!(model.morphs[0].weight, 0.5);
+        assert!(dump.frames[0].rigid_bodies.is_empty());
     }
 
     #[test]
@@ -517,6 +650,67 @@ mod tests {
         assert_eq!(bone.world_matrix[12], 7.0);
         assert_eq!(bone.world_matrix[13], 8.0);
         assert_eq!(bone.world_matrix[14], 9.0);
+    }
+
+    #[test]
+    fn parses_unity_runtime_verification_body_diagnostics() {
+        let json = r#"{
+            "schemaVersion": 1,
+            "unityVersion": "6000.4.8f1",
+            "caseResults": [
+                {
+                    "name": "case-a",
+                    "pmxPath": "model.pmx",
+                    "sampledFrames": [
+                        {
+                            "frame": 120,
+                            "matrixLayout": "row-major",
+                            "physicsDiagnosticsAvailable": true,
+                            "bodyDiagnostics": [
+                                {
+                                    "bodyIndex": 234,
+                                    "bodyName": "左HA20",
+                                    "boneIndex": 358,
+                                    "boneName": "左HA20",
+                                    "physicsKind": "dynamic",
+                                    "shapeType": "capsule",
+                                    "readbackMmdPosition": {
+                                        "x": 5.604262,
+                                        "y": 19.46399,
+                                        "z": 1.201375
+                                    },
+                                    "readbackMmdRotation": {
+                                        "x": 0.5974907,
+                                        "y": -0.41258657,
+                                        "z": -0.06107905,
+                                        "w": 0.68486965
+                                    }
+                                }
+                            ],
+                            "bones": []
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let dump =
+            MmdDumperOracleDump::from_unity_runtime_verification_json_str(json, Some(&[120]))
+                .unwrap();
+
+        assert_eq!(dump.frames.len(), 1);
+        let body = &dump.frames[0].rigid_bodies[0];
+        assert_eq!(body.index, 234);
+        assert_eq!(body.name, "左HA20");
+        assert_eq!(body.bone_index, 358);
+        assert_eq!(body.bone_name, "左HA20");
+        assert_eq!(body.physics_kind, "dynamic");
+        assert_eq!(body.shape_type, "capsule");
+        assert_eq!(body.readback_mmd_position, [5.604262, 19.46399, 1.201375]);
+        assert_eq!(
+            body.readback_mmd_rotation_xyzw,
+            [0.5974907, -0.41258657, -0.06107905, 0.68486965]
+        );
     }
 
     #[test]

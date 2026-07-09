@@ -16,6 +16,11 @@ _GOLDEN_GATE_ENV_VARS = (
     "MMD_ANIM_GOLDEN_REPORT_DIR",
     "MMD_ANIM_GOLDEN_REPO_ROOT",
     "MMD_ANIM_BIN",
+    "MMD_ANIM_GOLDEN_PHYSICS_PENETRATION",
+    "MMD_ANIM_GOLDEN_DIAGNOSE_CASE",
+    "MMD_ANIM_GOLDEN_DIAGNOSE_FRAME",
+    "MMD_ANIM_GOLDEN_DIAGNOSE_BONE",
+    "MMD_ANIM_GOLDEN_DIAGNOSE_EVAL_FRAME",
     "MMD_ANIM_GOLDEN_MAX_ABS_ERROR_TOLERANCE",
     "MMD_ANIM_GOLDEN_TRANSLATION_MAX_ERROR_TOLERANCE",
     "MMD_ANIM_GOLDEN_TRANSLATION_RMS_ERROR_TOLERANCE",
@@ -50,6 +55,11 @@ def args(**overrides):
         "baseline": None,
         "report_dir": None,
         "mmd_anim_bin": None,
+        "physics_penetration": None,
+        "diagnose_case": None,
+        "diagnose_frame": None,
+        "diagnose_bone": None,
+        "diagnose_eval_frame": None,
         "max_abs_error_tolerance": None,
         "translation_max_error_tolerance": None,
         "translation_rms_error_tolerance": None,
@@ -79,6 +89,11 @@ def test_config_reads_local_json_relative_paths(tmp_path: Path):
                 "manifest": "manifest.json",
                 "baseline": "reports/baseline.json",
                 "report_dir": "reports",
+                "physics_penetration": True,
+                "diagnose_case": "rem-tail",
+                "diagnose_frame": 119,
+                "diagnose_bone": "左Tail_19",
+                "diagnose_eval_frame": "119.5",
                 "tolerances": {
                     "max_abs_error_tolerance": 0.25,
                     "translation_max_error_tolerance": 0.5,
@@ -107,6 +122,11 @@ def test_config_reads_local_json_relative_paths(tmp_path: Path):
     assert config.manifest == (tmp_path / "manifest.json").resolve()
     assert config.baseline == (tmp_path / "reports" / "baseline.json").resolve()
     assert config.report_dir == (tmp_path / "reports").resolve()
+    assert config.physics_penetration is True
+    assert config.diagnose_case == "rem-tail"
+    assert config.diagnose_frame == "119"
+    assert config.diagnose_bone == "左Tail_19"
+    assert config.diagnose_eval_frame == "119.5"
     assert config.tolerances.max_abs_error_tolerance == 0.25
     assert config.tolerances.translation_max_error_tolerance == 0.5
     assert config.tolerances.translation_rms_error_tolerance == 0.05
@@ -159,6 +179,26 @@ def test_empty_backend_env_disables_required_physics_backend(monkeypatch: pytest
 def test_missing_required_paths_are_reported():
     with pytest.raises(ConfigError, match="manifest"):
         resolve_config(args()).require_paths()
+
+
+def test_physics_penetration_requires_diagnose_case_and_frame(tmp_path: Path):
+    manifest = tmp_path / "manifest.json"
+    baseline = tmp_path / "baseline.json"
+
+    with pytest.raises(ConfigError, match="diagnose_case"):
+        resolve_config(
+            args(manifest=str(manifest), baseline=str(baseline), physics_penetration=True)
+        ).require_paths()
+
+
+def test_diagnose_values_require_physics_penetration(tmp_path: Path):
+    manifest = tmp_path / "manifest.json"
+    baseline = tmp_path / "baseline.json"
+
+    with pytest.raises(ConfigError, match="physics_penetration"):
+        resolve_config(
+            args(manifest=str(manifest), baseline=str(baseline), diagnose_case="case-a", diagnose_frame="60")
+        ).require_paths()
 
 
 def test_negative_tolerance_is_rejected():

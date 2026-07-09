@@ -25,6 +25,11 @@ Example local config:
   "report_dir": "<path-to-local-golden-oracle>/reports",
   "repo_root": "<path-to-mmd-anim>",
   "mmd_anim_bin": null,
+  "physics_penetration": false,
+  "diagnose_case": null,
+  "diagnose_frame": null,
+  "diagnose_bone": null,
+  "diagnose_eval_frame": null,
   "tolerances": {
     "max_abs_error_tolerance": 0.0,
     "translation_max_error_tolerance": 0.0,
@@ -60,6 +65,25 @@ diagnostic reports it compares `summary.maxPenetrationDepth`,
 `summary.maxBulletPenetrationDepth`, `summary.penetratingPairCount`,
 `summary.severePairCount`, and `summary.penetratingContactCount` with the
 penetration-specific tolerances above.
+
+To make `golden-gate baseline` / `golden-gate gate` produce a penetration
+diagnostic report directly, opt in with `physics_penetration` and identify the
+diagnostic case/frame:
+
+```json
+{
+  "manifest": "<path-to-local-golden-oracle>/manifests/physics-coarse.json",
+  "baseline": "<path-to-local-golden-oracle>/reports/baseline-rem-tail-penetration.json",
+  "report_dir": "<path-to-local-golden-oracle>/reports",
+  "repo_root": "<path-to-mmd-anim>",
+  "mmd_anim_bin": "<path-to-mmd-anim-built-with-physics-bullet-native>",
+  "physics_penetration": true,
+  "diagnose_case": "rem-tail",
+  "diagnose_frame": "119",
+  "diagnose_bone": "左Tail_19",
+  "diagnose_eval_frame": null
+}
+```
 
 If `mmd_anim_bin` or `MMD_ANIM_BIN` is set, the binary is used directly. Without
 it, the runner uses:

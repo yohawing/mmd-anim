@@ -42,6 +42,11 @@ class GoldenGateConfig:
     baseline: Path | None
     report_dir: Path | None
     mmd_anim_bin: Path | None
+    physics_penetration: bool
+    diagnose_case: str | None
+    diagnose_frame: str | None
+    diagnose_bone: str | None
+    diagnose_eval_frame: str | None
     tolerances: Tolerances
     options: GateOptions
 
@@ -53,6 +58,13 @@ class GoldenGateConfig:
             missing.append("baseline")
         if missing:
             raise ConfigError(f"missing required config value(s): {', '.join(missing)}")
+        if self.physics_penetration and (self.diagnose_case is None or self.diagnose_frame is None):
+            raise ConfigError("physics_penetration requires diagnose_case and diagnose_frame")
+        if not self.physics_penetration and any(
+            value is not None
+            for value in (self.diagnose_case, self.diagnose_frame, self.diagnose_bone, self.diagnose_eval_frame)
+        ):
+            raise ConfigError("diagnose_* config values require physics_penetration")
         report_dir = self.report_dir
         if report_dir is None and self.baseline is not None:
             report_dir = self.baseline.parent
@@ -83,6 +95,41 @@ def resolve_config(args: Any) -> GoldenGateConfig:
     mmd_anim_bin = _resolve_path(
         _choose("mmd_anim_bin", getattr(args, "mmd_anim_bin", None), "MMD_ANIM_BIN", raw_config),
         base=config_base,
+    )
+    physics_penetration = _bool_value(
+        "physics_penetration",
+        getattr(args, "physics_penetration", None),
+        "MMD_ANIM_GOLDEN_PHYSICS_PENETRATION",
+        raw_config,
+        False,
+    )
+    diagnose_case = _optional_scalar_string_value(
+        "diagnose_case",
+        getattr(args, "diagnose_case", None),
+        "MMD_ANIM_GOLDEN_DIAGNOSE_CASE",
+        raw_config,
+        None,
+    )
+    diagnose_frame = _optional_scalar_string_value(
+        "diagnose_frame",
+        getattr(args, "diagnose_frame", None),
+        "MMD_ANIM_GOLDEN_DIAGNOSE_FRAME",
+        raw_config,
+        None,
+    )
+    diagnose_bone = _optional_scalar_string_value(
+        "diagnose_bone",
+        getattr(args, "diagnose_bone", None),
+        "MMD_ANIM_GOLDEN_DIAGNOSE_BONE",
+        raw_config,
+        None,
+    )
+    diagnose_eval_frame = _optional_scalar_string_value(
+        "diagnose_eval_frame",
+        getattr(args, "diagnose_eval_frame", None),
+        "MMD_ANIM_GOLDEN_DIAGNOSE_EVAL_FRAME",
+        raw_config,
+        None,
     )
 
     tolerances = Tolerances(
@@ -208,6 +255,11 @@ def resolve_config(args: Any) -> GoldenGateConfig:
         baseline=baseline,
         report_dir=report_dir,
         mmd_anim_bin=mmd_anim_bin,
+        physics_penetration=physics_penetration,
+        diagnose_case=diagnose_case,
+        diagnose_frame=diagnose_frame,
+        diagnose_bone=diagnose_bone,
+        diagnose_eval_frame=diagnose_eval_frame,
         tolerances=tolerances,
         options=options,
     )
@@ -334,3 +386,20 @@ def _optional_string_value(
     if not isinstance(value, str):
         raise ConfigError(f"{key} must be a string")
     return value
+
+
+def _optional_scalar_string_value(
+    key: str,
+    cli_value: Any,
+    env_name: str,
+    raw_config: dict[str, Any],
+    default: str | None,
+) -> str | None:
+    value = _choose(key, cli_value, env_name, raw_config)
+    if value is None:
+        return default
+    if value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ConfigError(f"{key} must be a string or number")
+    return str(value)

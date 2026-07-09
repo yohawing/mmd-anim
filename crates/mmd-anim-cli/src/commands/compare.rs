@@ -2999,4 +2999,39 @@ mod tests {
 
         assert_eq!(position_delta(&actual, &expected), [-4.0, 2.0, 9.0]);
     }
+
+    #[cfg(feature = "physics-bullet-native")]
+    #[test]
+    fn physics_compare_defaults_to_static_only_dynamic_bone_feed() {
+        let case = serde_json::json!({
+            "kind": "physics-coarse"
+        });
+
+        assert!(!physics_pin_dynamic_bone_before_step(&case));
+    }
+
+    #[cfg(feature = "physics-bullet-native")]
+    #[test]
+    fn physics_compare_can_opt_into_dynamic_bone_pin_before_step() {
+        let metadata_case = serde_json::json!({
+            "kind": "physics-coarse",
+            "metadata": {
+                "physicsPinDynamicBoneBeforeStep": true
+            }
+        });
+        assert!(physics_pin_dynamic_bone_before_step(&metadata_case));
+
+        let compare_overrides_metadata = serde_json::json!({
+            "kind": "physics-coarse",
+            "metadata": {
+                "physicsPinDynamicBoneBeforeStep": true
+            },
+            "compare": {
+                "physicsPinDynamicBoneBeforeStep": false
+            }
+        });
+        assert!(!physics_pin_dynamic_bone_before_step(
+            &compare_overrides_metadata
+        ));
+    }
 }

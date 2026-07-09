@@ -21,6 +21,11 @@ _GOLDEN_GATE_ENV_VARS = (
     "MMD_ANIM_GOLDEN_TRANSLATION_RMS_ERROR_TOLERANCE",
     "MMD_ANIM_GOLDEN_ROTATION_MAX_ANGLE_RAD_TOLERANCE",
     "MMD_ANIM_GOLDEN_ROTATION_RMS_ANGLE_RAD_TOLERANCE",
+    "MMD_ANIM_GOLDEN_PENETRATION_MAX_DEPTH_TOLERANCE",
+    "MMD_ANIM_GOLDEN_BULLET_PENETRATION_MAX_DEPTH_TOLERANCE",
+    "MMD_ANIM_GOLDEN_PENETRATING_PAIR_COUNT_TOLERANCE",
+    "MMD_ANIM_GOLDEN_SEVERE_PAIR_COUNT_TOLERANCE",
+    "MMD_ANIM_GOLDEN_PENETRATING_CONTACT_COUNT_TOLERANCE",
     "MMD_ANIM_GOLDEN_MISMATCH_COUNT_TOLERANCE",
     "MMD_ANIM_GOLDEN_MISSING_TOLERANCE",
     "MMD_ANIM_GOLDEN_IMPORT_ERROR_TOLERANCE",
@@ -50,6 +55,11 @@ def args(**overrides):
         "translation_rms_error_tolerance": None,
         "rotation_max_angle_rad_tolerance": None,
         "rotation_rms_angle_rad_tolerance": None,
+        "penetration_max_depth_tolerance": None,
+        "bullet_penetration_max_depth_tolerance": None,
+        "penetrating_pair_count_tolerance": None,
+        "severe_pair_count_tolerance": None,
+        "penetrating_contact_count_tolerance": None,
         "mismatch_count_tolerance": None,
         "missing_tolerance": None,
         "import_error_tolerance": None,
@@ -75,6 +85,11 @@ def test_config_reads_local_json_relative_paths(tmp_path: Path):
                     "translation_rms_error_tolerance": 0.05,
                     "rotation_max_angle_rad_tolerance": 0.4,
                     "rotation_rms_angle_rad_tolerance": 0.04,
+                    "penetration_max_depth_tolerance": 0.03,
+                    "bullet_penetration_max_depth_tolerance": 0.02,
+                    "penetrating_pair_count_tolerance": 3,
+                    "severe_pair_count_tolerance": 1,
+                    "penetrating_contact_count_tolerance": 2,
                     "mismatch_count_tolerance": 2,
                 },
                 "options": {
@@ -97,6 +112,11 @@ def test_config_reads_local_json_relative_paths(tmp_path: Path):
     assert config.tolerances.translation_rms_error_tolerance == 0.05
     assert config.tolerances.rotation_max_angle_rad_tolerance == 0.4
     assert config.tolerances.rotation_rms_angle_rad_tolerance == 0.04
+    assert config.tolerances.penetration_max_depth_tolerance == 0.03
+    assert config.tolerances.bullet_penetration_max_depth_tolerance == 0.02
+    assert config.tolerances.penetrating_pair_count_tolerance == 3
+    assert config.tolerances.severe_pair_count_tolerance == 1
+    assert config.tolerances.penetrating_contact_count_tolerance == 2
     assert config.tolerances.mismatch_count_tolerance == 2
     assert config.options.allow_count_changes is True
     assert config.options.required_physics_backend == "bullet-native"

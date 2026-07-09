@@ -47,6 +47,23 @@ CASE_NUMERIC_FIELDS = {
     "importErrors": ("motionImportErrors",),
 }
 
+PENETRATION_SUMMARY_FIELDS = {
+    "maxPenetrationDepth": (),
+    "maxBulletPenetrationDepth": (),
+    "penetratingPairCount": (),
+    "severePairCount": (),
+    "penetratingContactCount": (),
+}
+
+PENETRATION_IDENTITY_FIELDS = (
+    "caseName",
+    "oracleFrame",
+    "evalFrame",
+    "model",
+    "motion",
+    "metric",
+)
+
 COVERAGE_FIELDS = {
     "comparedFrames": ("motionComparedFrames", "motionFrames"),
     "comparedBones": ("motionComparedBones", "motionBones"),
@@ -70,6 +87,9 @@ def compare_reports(
 
     baseline_summary = _object_at(baseline, "summary")
     current_summary = _object_at(current, "summary")
+    if _is_penetration_report(baseline) or _is_penetration_report(current):
+        _compare_penetration_identity(baseline, current, failures)
+        _compare_penetration_summary(baseline_summary, current_summary, tolerances, failures)
     _compare_summary(baseline_summary, current_summary, _has_physics_cases(current), tolerances, options, failures)
     _compare_cases(
         _case_map(baseline),
@@ -79,6 +99,81 @@ def compare_reports(
         failures,
     )
     return failures
+
+
+def _compare_penetration_identity(
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+    failures: list[RegressionFailure],
+) -> None:
+    for field in PENETRATION_IDENTITY_FIELDS:
+        baseline_value = baseline.get(field)
+        current_value = current.get(field)
+        if current_value != baseline_value:
+            failures.append(
+                RegressionFailure(
+                    path=field,
+                    check="fixedIdentity",
+                    baseline=baseline_value,
+                    current=current_value,
+                    tolerance=None,
+                    message=f"{field} changed: current {current_value!r} != baseline {baseline_value!r}",
+                )
+            )
+
+
+def _compare_penetration_summary(
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+    tolerances: Tolerances,
+    failures: list[RegressionFailure],
+) -> None:
+    _require_numeric_fields(current, "summary", PENETRATION_SUMMARY_FIELDS, failures)
+    _compare_not_greater(
+        baseline,
+        current,
+        "summary",
+        "maxPenetrationDepth",
+        PENETRATION_SUMMARY_FIELDS["maxPenetrationDepth"],
+        tolerances.penetration_max_depth_tolerance,
+        failures,
+    )
+    _compare_not_greater(
+        baseline,
+        current,
+        "summary",
+        "maxBulletPenetrationDepth",
+        PENETRATION_SUMMARY_FIELDS["maxBulletPenetrationDepth"],
+        tolerances.bullet_penetration_max_depth_tolerance,
+        failures,
+    )
+    _compare_not_greater(
+        baseline,
+        current,
+        "summary",
+        "penetratingPairCount",
+        PENETRATION_SUMMARY_FIELDS["penetratingPairCount"],
+        tolerances.penetrating_pair_count_tolerance,
+        failures,
+    )
+    _compare_not_greater(
+        baseline,
+        current,
+        "summary",
+        "severePairCount",
+        PENETRATION_SUMMARY_FIELDS["severePairCount"],
+        tolerances.severe_pair_count_tolerance,
+        failures,
+    )
+    _compare_not_greater(
+        baseline,
+        current,
+        "summary",
+        "penetratingContactCount",
+        PENETRATION_SUMMARY_FIELDS["penetratingContactCount"],
+        tolerances.penetrating_contact_count_tolerance,
+        failures,
+    )
 
 
 def _compare_summary(
@@ -395,6 +490,17 @@ def _has_physics_cases(report_or_summary: dict[str, Any]) -> bool:
     return any(isinstance(case, dict) and _is_physics_case(case) for case in cases)
 
 
+def _is_penetration_report(source: dict[str, Any]) -> bool:
+    kind = source.get("kind")
+    if isinstance(kind, str) and "penetration" in kind.lower():
+        return True
+    metric = source.get("metric")
+    if isinstance(metric, str) and ("penetration" in metric.lower() or "bullet-contacts" in metric.lower()):
+        return True
+    summary = source.get("summary")
+    return isinstance(summary, dict) and any(field in summary for field in PENETRATION_SUMMARY_FIELDS)
+
+
 def _require_numeric_fields(
     source: dict[str, Any],
     prefix: str,
@@ -411,7 +517,7 @@ def _require_numeric_fields(
                 baseline="present",
                 current="missing",
                 tolerance=None,
-                message=f"{prefix}.{field} is required for physics numeric cases",
+                message=f"{prefix}.{field} is required for this report kind",
             )
         )
 

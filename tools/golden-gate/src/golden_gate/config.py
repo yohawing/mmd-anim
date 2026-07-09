@@ -18,6 +18,11 @@ class Tolerances:
     translation_rms_error_tolerance: float = 0.0
     rotation_max_angle_rad_tolerance: float = 0.0
     rotation_rms_angle_rad_tolerance: float = 0.0
+    penetration_max_depth_tolerance: float = 0.0
+    bullet_penetration_max_depth_tolerance: float = 0.0
+    penetrating_pair_count_tolerance: int = 0
+    severe_pair_count_tolerance: int = 0
+    penetrating_contact_count_tolerance: int = 0
     mismatch_count_tolerance: int = 0
     missing_tolerance: int = 0
     import_error_tolerance: int = 0
@@ -115,6 +120,41 @@ def resolve_config(args: Any) -> GoldenGateConfig:
             "MMD_ANIM_GOLDEN_ROTATION_RMS_ANGLE_RAD_TOLERANCE",
             raw_config,
             0.0,
+        ),
+        penetration_max_depth_tolerance=_float_value(
+            "penetration_max_depth_tolerance",
+            getattr(args, "penetration_max_depth_tolerance", None),
+            "MMD_ANIM_GOLDEN_PENETRATION_MAX_DEPTH_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        bullet_penetration_max_depth_tolerance=_float_value(
+            "bullet_penetration_max_depth_tolerance",
+            getattr(args, "bullet_penetration_max_depth_tolerance", None),
+            "MMD_ANIM_GOLDEN_BULLET_PENETRATION_MAX_DEPTH_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        penetrating_pair_count_tolerance=_int_value(
+            "penetrating_pair_count_tolerance",
+            getattr(args, "penetrating_pair_count_tolerance", None),
+            "MMD_ANIM_GOLDEN_PENETRATING_PAIR_COUNT_TOLERANCE",
+            raw_config,
+            0,
+        ),
+        severe_pair_count_tolerance=_int_value(
+            "severe_pair_count_tolerance",
+            getattr(args, "severe_pair_count_tolerance", None),
+            "MMD_ANIM_GOLDEN_SEVERE_PAIR_COUNT_TOLERANCE",
+            raw_config,
+            0,
+        ),
+        penetrating_contact_count_tolerance=_int_value(
+            "penetrating_contact_count_tolerance",
+            getattr(args, "penetrating_contact_count_tolerance", None),
+            "MMD_ANIM_GOLDEN_PENETRATING_CONTACT_COUNT_TOLERANCE",
+            raw_config,
+            0,
         ),
         mismatch_count_tolerance=_int_value(
             "mismatch_count_tolerance",

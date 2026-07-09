@@ -31,6 +31,11 @@ Example local config:
     "translation_rms_error_tolerance": 0.0,
     "rotation_max_angle_rad_tolerance": 0.0,
     "rotation_rms_angle_rad_tolerance": 0.0,
+    "penetration_max_depth_tolerance": 0.0,
+    "bullet_penetration_max_depth_tolerance": 0.0,
+    "penetrating_pair_count_tolerance": 0,
+    "severe_pair_count_tolerance": 0,
+    "penetrating_contact_count_tolerance": 0,
     "mismatch_count_tolerance": 0,
     "missing_tolerance": 0,
     "import_error_tolerance": 0
@@ -48,6 +53,13 @@ and RMS metrics in both `summary` and `perCase`. For physics quality gates that
 must use the native Bullet path, set `required_physics_backend` to
 `"bullet-native"` and run with an `mmd_anim_bin` built with
 `physics-bullet-native`, or another runner path that emits that backend.
+
+The same comparison layer also accepts `verify --mode numeric --diagnose ...
+--physics-penetration --json` reports as a baseline/current pair. For those
+diagnostic reports it compares `summary.maxPenetrationDepth`,
+`summary.maxBulletPenetrationDepth`, `summary.penetratingPairCount`,
+`summary.severePairCount`, and `summary.penetratingContactCount` with the
+penetration-specific tolerances above.
 
 If `mmd_anim_bin` or `MMD_ANIM_BIN` is set, the binary is used directly. Without
 it, the runner uses:

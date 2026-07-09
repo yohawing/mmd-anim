@@ -121,6 +121,67 @@ def test_required_physics_backend_is_opt_in():
     assert compare_reports(baseline, current, _physics_tolerances()) == []
 
 
+def test_physics_penetration_report_within_thresholds_pass():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report(
+        {
+            "maxPenetrationDepth": 0.051,
+            "maxBulletPenetrationDepth": 0.021,
+            "penetratingPairCount": 2,
+            "severePairCount": 1,
+            "penetratingContactCount": 1,
+        }
+    )
+
+    assert compare_reports(baseline, current, _penetration_tolerances()) == []
+
+
+def test_physics_penetration_depth_regression_fails():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report({"maxPenetrationDepth": 0.053})
+
+    failures = compare_reports(baseline, current, _penetration_tolerances())
+
+    assert "summary.maxPenetrationDepth" in _failure_paths(failures)
+
+
+def test_physics_penetration_contact_regression_fails():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report(
+        {
+            "maxBulletPenetrationDepth": 0.024,
+            "penetratingContactCount": 3,
+        }
+    )
+
+    failures = compare_reports(baseline, current, _penetration_tolerances())
+
+    assert "summary.maxBulletPenetrationDepth" in _failure_paths(failures)
+    assert "summary.penetratingContactCount" in _failure_paths(failures)
+
+
+def test_physics_penetration_report_rejects_mismatched_identity():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report()
+    current["caseName"] = "sour-necktie"
+    current["oracleFrame"] = 60.0
+
+    failures = compare_reports(baseline, current, _penetration_tolerances())
+
+    assert "caseName" in _failure_paths(failures)
+    assert "oracleFrame" in _failure_paths(failures)
+
+
+def test_physics_penetration_report_requires_stable_summary_metrics():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report()
+    del current["summary"]["severePairCount"]
+
+    failures = compare_reports(baseline, current, _penetration_tolerances())
+
+    assert "summary.severePairCount" in _failure_paths(failures)
+
+
 def test_numeric_gate_roundtrip_with_local_assets(tmp_path: Path):
     config = _local_config_or_skip()
     config = replace(config, baseline=tmp_path / "baseline.json", report_dir=tmp_path / "reports")
@@ -181,6 +242,41 @@ def _physics_tolerances():
         translation_max_error_tolerance=0.02,
         rotation_rms_angle_rad_tolerance=0.001,
         rotation_max_angle_rad_tolerance=0.002,
+    )
+
+
+def _physics_penetration_report(summary=None):
+    return {
+        "caseName": "rem-tail-left",
+        "oracleFrame": 119.0,
+        "evalFrame": 119.0,
+        "model": "rem.pmx",
+        "motion": "motion.vmd",
+        "metric": "shape-proxy+bullet-contacts",
+        "summary": {
+            "pairCount": 30,
+            "penetratingPairCount": 1,
+            "severePairCount": 0,
+            "bulletContactCount": 2,
+            "penetratingContactCount": 0,
+            "minSignedDistance": -0.02,
+            "maxPenetrationDepth": 0.05,
+            "minBulletContactDistance": 0.01,
+            "maxBulletPenetrationDepth": 0.02,
+            **(summary or {}),
+        },
+        "pairs": [],
+        "contacts": [],
+    }
+
+
+def _penetration_tolerances():
+    return Tolerances(
+        penetration_max_depth_tolerance=0.002,
+        bullet_penetration_max_depth_tolerance=0.001,
+        penetrating_pair_count_tolerance=1,
+        severe_pair_count_tolerance=1,
+        penetrating_contact_count_tolerance=1,
     )
 
 

@@ -176,7 +176,7 @@ mod tests {
     use std::sync::Arc;
 
     use glam::Vec3A;
-    use mmd_anim_format::{PmxPartsDescriptor, PmxPartsInput, build_pmx_model_from_parts};
+    use mmd_anim_format::PmxPartsDescriptor;
     use mmd_anim_runtime::{BoneIndex, BoneInit, ModelArena, PhysicsMode, RuntimeInstance};
     use serde_json::json;
 
@@ -204,21 +204,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-        let model = build_pmx_model_from_parts(PmxPartsInput {
-            descriptor,
-            positions_xyz: &positions_xyz,
-            normals_xyz: &normals_xyz,
-            uvs_xy: &uvs_xy,
-            indices: &indices,
-            skin_indices: &[],
-            skin_weights: &[],
-            edge_scale: &[],
-        })
-        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
         let mut bullet = build_bullet_world_from_pmx(&model).unwrap();
         let runtime_model = Arc::new(
             ModelArena::new(vec![BoneInit::new(None, Vec3A::new(0.0, 8.0, 0.0))]).unwrap(),
@@ -277,21 +263,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-        let model = build_pmx_model_from_parts(PmxPartsInput {
-            descriptor,
-            positions_xyz: &positions_xyz,
-            normals_xyz: &normals_xyz,
-            uvs_xy: &uvs_xy,
-            indices: &indices,
-            skin_indices: &[],
-            skin_weights: &[],
-            edge_scale: &[],
-        })
-        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
         let mut bullet = build_bullet_world_from_pmx(&model).unwrap();
         let runtime_model = Arc::new(
             ModelArena::new(vec![
@@ -339,21 +311,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-        let model = build_pmx_model_from_parts(PmxPartsInput {
-            descriptor,
-            positions_xyz: &positions_xyz,
-            normals_xyz: &normals_xyz,
-            uvs_xy: &uvs_xy,
-            indices: &indices,
-            skin_indices: &[],
-            skin_weights: &[],
-            edge_scale: &[],
-        })
-        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
         let mut bullet = build_bullet_world_from_pmx(&model).unwrap();
         let runtime_model = Arc::new(
             ModelArena::new(vec![BoneInit::new(None, Vec3A::new(0.0, 8.0, 0.0))]).unwrap(),
@@ -391,21 +349,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-        let model = build_pmx_model_from_parts(PmxPartsInput {
-            descriptor,
-            positions_xyz: &positions_xyz,
-            normals_xyz: &normals_xyz,
-            uvs_xy: &uvs_xy,
-            indices: &indices,
-            skin_indices: &[],
-            skin_weights: &[],
-            edge_scale: &[],
-        })
-        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
         let runtime_model = Arc::new(
             ModelArena::new(vec![BoneInit::new(None, Vec3A::new(0.0, 8.0, 0.0))]).unwrap(),
         );
@@ -454,21 +398,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-        let model = build_pmx_model_from_parts(PmxPartsInput {
-            descriptor,
-            positions_xyz: &positions_xyz,
-            normals_xyz: &normals_xyz,
-            uvs_xy: &uvs_xy,
-            indices: &indices,
-            skin_indices: &[],
-            skin_weights: &[],
-            edge_scale: &[],
-        })
-        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
         let mut bullet = build_bullet_world_from_pmx(&model).unwrap();
         let runtime_model = Arc::new(
             ModelArena::new(vec![BoneInit::new(None, Vec3A::new(0.0, 8.0, 0.0))]).unwrap(),
@@ -502,21 +432,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-        let model = build_pmx_model_from_parts(PmxPartsInput {
-            descriptor,
-            positions_xyz: &positions_xyz,
-            normals_xyz: &normals_xyz,
-            uvs_xy: &uvs_xy,
-            indices: &indices,
-            skin_indices: &[],
-            skin_weights: &[],
-            edge_scale: &[],
-        })
-        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
         let mut bullet = build_bullet_world_from_pmx(&model).unwrap();
         let runtime_model = Arc::new(
             ModelArena::new(vec![BoneInit::new(None, Vec3A::new(0.0, 10.0, 0.0))]).unwrap(),

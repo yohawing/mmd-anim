@@ -11,6 +11,8 @@ mod native;
 mod pmx;
 #[cfg(all(feature = "native", feature = "pmx-format", feature = "runtime"))]
 mod runtime;
+#[cfg(all(test, feature = "native", feature = "pmx-format"))]
+mod test_support;
 
 #[cfg(feature = "native")]
 pub use native::{

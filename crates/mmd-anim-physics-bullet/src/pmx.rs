@@ -332,7 +332,7 @@ fn body_handle(bodies: &[RigidBodyHandle], index: i32) -> Option<&RigidBodyHandl
 
 #[cfg(test)]
 mod tests {
-    use mmd_anim_format::{PmxPartsDescriptor, PmxPartsInput, build_pmx_model_from_parts};
+    use mmd_anim_format::PmxPartsDescriptor;
     use serde_json::json;
 
     use super::*;
@@ -371,21 +371,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-        let model = build_pmx_model_from_parts(PmxPartsInput {
-            descriptor,
-            positions_xyz: &positions_xyz,
-            normals_xyz: &normals_xyz,
-            uvs_xy: &uvs_xy,
-            indices: &indices,
-            skin_indices: &[],
-            skin_weights: &[],
-            edge_scale: &[],
-        })
-        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
 
         let mut built = build_bullet_world_from_pmx(&model).unwrap();
         let fed = built
@@ -436,21 +422,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-        let model = build_pmx_model_from_parts(PmxPartsInput {
-            descriptor,
-            positions_xyz: &positions_xyz,
-            normals_xyz: &normals_xyz,
-            uvs_xy: &uvs_xy,
-            indices: &indices,
-            skin_indices: &[],
-            skin_weights: &[],
-            edge_scale: &[],
-        })
-        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
 
         let mut built = build_bullet_world_from_pmx(&model).unwrap();
         built.world.step(1.0 / 30.0, 10).unwrap();
@@ -480,21 +452,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-        let model = build_pmx_model_from_parts(PmxPartsInput {
-            descriptor,
-            positions_xyz: &positions_xyz,
-            normals_xyz: &normals_xyz,
-            uvs_xy: &uvs_xy,
-            indices: &indices,
-            skin_indices: &[],
-            skin_weights: &[],
-            edge_scale: &[],
-        })
-        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
 
         let mut built = build_bullet_world_from_pmx(&model).unwrap();
         built
@@ -527,21 +485,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let indices = [0, 1, 2];
-        let model = build_pmx_model_from_parts(PmxPartsInput {
-            descriptor,
-            positions_xyz: &positions_xyz,
-            normals_xyz: &normals_xyz,
-            uvs_xy: &uvs_xy,
-            indices: &indices,
-            skin_indices: &[],
-            skin_weights: &[],
-            edge_scale: &[],
-        })
-        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
 
         let mut built = build_bullet_world_from_pmx(&model).unwrap();
         let moved_bone = [Transform::from_translation([0.0, 20.0, 0.0])];

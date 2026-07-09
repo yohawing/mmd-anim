@@ -1743,6 +1743,19 @@ struct PhysicsContactDiagnostic {
 }
 
 #[cfg(feature = "physics-bullet-native")]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhysicsRigidBodyDiagnostic {
+    index: usize,
+    name: String,
+    bone_index: Option<usize>,
+    mode: String,
+    shape: String,
+    position_world: [f32; 3],
+    rotation_xyzw: [f32; 4],
+}
+
+#[cfg(feature = "physics-bullet-native")]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PhysicsPenetrationDiagnosticReport {
@@ -1753,6 +1766,7 @@ struct PhysicsPenetrationDiagnosticReport {
     motion: String,
     metric: &'static str,
     summary: PhysicsPenetrationDiagnosticSummary,
+    rigid_bodies: Vec<PhysicsRigidBodyDiagnostic>,
     pairs: Vec<PhysicsPenetrationPair>,
     contacts: Vec<PhysicsContactDiagnostic>,
 }
@@ -1847,6 +1861,8 @@ pub(crate) fn diagnose_numeric_physics_penetration(
 
     let focus_bones =
         resolve_focus_bone_indices(&model_import.bone_name_to_index, focus_bone_names);
+    let rigid_bodies =
+        collect_rigidbody_diagnostics(&parsed_pmx, &physics_evaluator, focus_bones.as_ref())?;
     let pairs =
         collect_approx_penetration_pairs(&parsed_pmx, &physics_evaluator, focus_bones.as_ref())?;
     let contacts = collect_bullet_contacts(&parsed_pmx, &physics_evaluator, focus_bones.as_ref())?;
@@ -1905,6 +1921,7 @@ pub(crate) fn diagnose_numeric_physics_penetration(
                 min_bullet_contact_distance,
                 max_bullet_penetration_depth,
             },
+            rigid_bodies,
             pairs,
             contacts,
         };
@@ -1998,6 +2015,43 @@ fn resolve_focus_bone_indices(
         }
     }
     Some(indices)
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn collect_rigidbody_diagnostics(
+    parsed_pmx: &mmd_anim_format::PmxParsedModel,
+    physics_evaluator: &PhysicsCoarseEvaluator,
+    focus_bones: Option<&HashSet<usize>>,
+) -> Result<Vec<PhysicsRigidBodyDiagnostic>, Box<dyn std::error::Error>> {
+    let mut diagnostics = Vec::new();
+    for (index, body) in parsed_pmx.rigid_bodies.iter().enumerate() {
+        if let Some(focus_bones) = focus_bones {
+            let focused =
+                rigidbody_bone_index(body).is_some_and(|index| focus_bones.contains(&index));
+            if !focused {
+                continue;
+            }
+        }
+        let Some(handle) = physics_evaluator
+            .bullet
+            .rigidbody_handles
+            .get(index)
+            .copied()
+        else {
+            continue;
+        };
+        let transform = physics_evaluator.bullet.world.rigidbody_transform(handle)?;
+        diagnostics.push(PhysicsRigidBodyDiagnostic {
+            index,
+            name: body.name.clone(),
+            bone_index: rigidbody_bone_index(body),
+            mode: body.mode.clone(),
+            shape: body.shape.clone(),
+            position_world: transform.position,
+            rotation_xyzw: transform.rotation_xyzw,
+        });
+    }
+    Ok(diagnostics)
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -2532,6 +2586,15 @@ mod physics_penetration_geometry_tests {
                 min_bullet_contact_distance: Some(0.125),
                 max_bullet_penetration_depth: 0.0,
             },
+            rigid_bodies: vec![PhysicsRigidBodyDiagnostic {
+                index: 3,
+                name: "body".to_owned(),
+                bone_index: Some(4),
+                mode: "dynamic".to_owned(),
+                shape: "capsule".to_owned(),
+                position_world: [7.0, 8.0, 9.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            }],
             pairs: vec![PhysicsPenetrationPair {
                 lhs_index: 1,
                 lhs_name: "lhs".to_owned(),
@@ -2568,6 +2631,11 @@ mod physics_penetration_geometry_tests {
         assert_eq!(value["summary"]["jointConnectedPairCount"], 1);
         assert_eq!(value["summary"]["unconnectedSeverePairCount"], 0);
         assert_eq!(value["summary"]["minBulletContactDistance"], 0.125);
+        assert_eq!(value["rigidBodies"][0]["boneIndex"], 4);
+        assert_eq!(
+            value["rigidBodies"][0]["positionWorld"],
+            serde_json::json!([7.0, 8.0, 9.0])
+        );
         assert_eq!(value["pairs"][0]["approxGap"], 1.0);
         assert_eq!(value["pairs"][0]["jointConnected"], true);
         assert_eq!(

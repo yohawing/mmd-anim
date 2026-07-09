@@ -3034,4 +3034,53 @@ mod tests {
             &compare_overrides_metadata
         ));
     }
+
+    #[cfg(feature = "physics-bullet-native")]
+    fn minimal_runtime_for_physics_tick_config() -> RuntimeInstance {
+        let model = Arc::new(
+            ModelArena::new(vec![mmd_anim_runtime::BoneInit::new(
+                None,
+                glam::Vec3A::ZERO,
+            )])
+            .unwrap(),
+        );
+        RuntimeInstance::new(model)
+    }
+
+    #[cfg(feature = "physics-bullet-native")]
+    #[test]
+    fn physics_tick_config_manifest_defaults_leave_runtime_unchanged() {
+        let mut runtime = minimal_runtime_for_physics_tick_config();
+        let before = runtime.physics_tick_config();
+        let case = serde_json::json!({
+            "kind": "physics-coarse"
+        });
+
+        apply_physics_tick_config(&case, &mut runtime);
+
+        assert_eq!(runtime.physics_tick_config(), before);
+    }
+
+    #[cfg(feature = "physics-bullet-native")]
+    #[test]
+    fn physics_tick_config_compare_values_override_metadata_values() {
+        let mut runtime = minimal_runtime_for_physics_tick_config();
+        let case = serde_json::json!({
+            "kind": "physics-coarse",
+            "metadata": {
+                "physicsTickFixedSubstepSeconds": 0.008333333,
+                "physicsMaxSubstepsPerTick": 2
+            },
+            "compare": {
+                "physicsTickFixedSubstepSeconds": 0.016666667,
+                "physicsMaxSubstepsPerTick": 4
+            }
+        });
+
+        apply_physics_tick_config(&case, &mut runtime);
+
+        let config = runtime.physics_tick_config();
+        assert_f32_near(config.fixed_substep_seconds, 0.016666667);
+        assert_eq!(config.max_substeps_per_tick, 4);
+    }
 }

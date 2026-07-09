@@ -382,6 +382,81 @@ mod tests {
     }
 
     #[test]
+    fn runtime_clock_static_only_option_does_not_pin_dynamic_bone_before_step() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [{"name": "dynamicBone", "position": [0.0, 8.0, 0.0]}],
+            "rigidBodies": [
+                {
+                    "name": "dynamicBoneBody",
+                    "boneIndex": 0,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 8.0, 0.0],
+                    "mass": 1.0,
+                    "mode": "dynamicBone"
+                }
+            ]
+        }))
+        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
+        let runtime_model = Arc::new(
+            ModelArena::new(vec![BoneInit::new(None, Vec3A::new(0.0, 8.0, 0.0))]).unwrap(),
+        );
+
+        let mut static_only_runtime = RuntimeInstance::new(Arc::clone(&runtime_model));
+        static_only_runtime.evaluate_rest_pose();
+        static_only_runtime.set_physics_mode(PhysicsMode::Live);
+        let mut static_only_bullet = build_bullet_world_from_pmx(&model).unwrap();
+        assert_eq!(
+            static_only_bullet
+                .seed_runtime_physics(&static_only_runtime)
+                .unwrap(),
+            1
+        );
+        static_only_runtime
+            .pose_mut()
+            .set_local_position_offset(BoneIndex(0), Vec3A::new(0.0, 12.0, 0.0));
+        static_only_runtime.evaluate_current_pose();
+        let static_only_report = static_only_bullet
+            .step_runtime_physics_with_runtime_clock_options(
+                &mut static_only_runtime,
+                1.0 / 60.0,
+                false,
+            )
+            .unwrap();
+        let static_only_y = translation(static_only_runtime.world_matrices()[0]).y;
+
+        let mut pinned_runtime = RuntimeInstance::new(runtime_model);
+        pinned_runtime.evaluate_rest_pose();
+        pinned_runtime.set_physics_mode(PhysicsMode::Live);
+        let mut pinned_bullet = build_bullet_world_from_pmx(&model).unwrap();
+        assert_eq!(
+            pinned_bullet.seed_runtime_physics(&pinned_runtime).unwrap(),
+            1
+        );
+        pinned_runtime
+            .pose_mut()
+            .set_local_position_offset(BoneIndex(0), Vec3A::new(0.0, 12.0, 0.0));
+        pinned_runtime.evaluate_current_pose();
+        let pinned_report = pinned_bullet
+            .step_runtime_physics_with_runtime_clock_options(&mut pinned_runtime, 1.0 / 60.0, true)
+            .unwrap();
+        let pinned_y = translation(pinned_runtime.world_matrices()[0]).y;
+
+        assert_eq!(static_only_report.kinematic_rigidbodies_fed, 0);
+        assert_eq!(static_only_report.bones_written_back, 1);
+        assert!(
+            static_only_y < 10.0,
+            "static-only step should not teleport DynamicBone to moved runtime pose: y={static_only_y}"
+        );
+        assert_eq!(pinned_report.kinematic_rigidbodies_fed, 1);
+        assert!(
+            pinned_y > 15.0,
+            "pinned step should follow moved runtime pose before Bullet step: y={pinned_y}"
+        );
+    }
+
+    #[test]
     fn bridge_runtime_clock_respects_off_mode() {
         let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
             "bones": [{"name": "physics", "position": [0.0, 8.0, 0.0]}],

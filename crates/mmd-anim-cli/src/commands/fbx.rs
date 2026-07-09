@@ -409,13 +409,13 @@ fn build_physics_params_sidecar_json(
                 "name": body.name,
                 "englishName": body.english_name,
                 "bone": bone,
-            "collision": {
-                "group": body.group,
-                "mask": body.mask,
-                "collisionMask": body.mask,
-                "nonCollisionMask": !body.mask,
-                "bulletCollisionMask": body.mask,
-            },
+                "collision": {
+                    "group": body.group,
+                    "mask": body.mask,
+                    "collisionMask": body.mask,
+                    "nonCollisionMask": !body.mask,
+                    "bulletCollisionMask": body.mask,
+                },
                 "shape": {
                     "type": body.shape,
                     "size": body.size,

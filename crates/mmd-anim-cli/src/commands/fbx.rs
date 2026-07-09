@@ -412,6 +412,8 @@ fn build_physics_params_sidecar_json(
                 "collision": {
                     "group": body.group,
                     "mask": body.mask,
+                    "nonCollisionMask": body.mask,
+                    "bulletCollisionMask": !body.mask,
                 },
                 "shape": {
                     "type": body.shape,
@@ -879,6 +881,18 @@ mod tests {
         assert_eq!(
             report["rigidBodies"][0]["dynamics"]["mass"],
             model.rigid_bodies[0].mass
+        );
+        assert_eq!(
+            report["rigidBodies"][0]["collision"]["mask"],
+            model.rigid_bodies[0].mask
+        );
+        assert_eq!(
+            report["rigidBodies"][0]["collision"]["nonCollisionMask"],
+            model.rigid_bodies[0].mask
+        );
+        assert_eq!(
+            report["rigidBodies"][0]["collision"]["bulletCollisionMask"],
+            !model.rigid_bodies[0].mask
         );
         assert_eq!(report["joints"][0]["name"], model.joints[0].name);
         assert_eq!(

@@ -923,6 +923,20 @@ bool mmd_runtime_instance_evaluate_clip_frame_batch(
     float*                        out_morph_weights_f32,
     size_t                        out_morph_weights_f32_len);
 
+mmd_runtime_status_t mmd_runtime_physics_world_bake_clip_frames(
+    mmd_runtime_physics_world_t*                      world,
+    mmd_runtime_instance_t*                           instance,
+    const mmd_runtime_clip_t*                         clip,
+    float                                             start_frame,
+    float                                             frame_step,
+    float                                             dt_seconds,
+    size_t                                            frame_count,
+    float*                                            out_world_matrices_f32,
+    size_t                                            out_world_matrices_f32_len,
+    float*                                            out_morph_weights_f32,
+    size_t                                            out_morph_weights_f32_len,
+    mmd_runtime_ffi_physics_world_step_report_t*      out_last_report);
+
 /* ------------------------------------------------------------------ */
 /*  Output: world matrices                                             */
 /* ------------------------------------------------------------------ */

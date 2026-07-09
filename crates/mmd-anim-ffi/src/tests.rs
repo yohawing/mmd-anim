@@ -791,6 +791,25 @@ fn physics_world_abi_exports_unsupported_stubs_when_feature_is_off() {
         },
         MmdRuntimeStatus::Unsupported
     );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_bake_clip_frames(
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null(),
+                0.0,
+                1.0,
+                1.0 / 60.0,
+                0,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+            )
+        },
+        MmdRuntimeStatus::Unsupported
+    );
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -1022,6 +1041,263 @@ fn physics_world_descriptor_abi_rejects_invalid_inputs() {
         unsafe { mmd_runtime_physics_world_create(&body, 1, ptr::null(), 0, ptr::null_mut()) },
         MmdRuntimeStatus::InvalidInput
     );
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn create_physics_bake_clip() -> *mut MmdRuntimeClip {
+    let bone_tracks = [MmdRuntimeFfiBoneTrack {
+        bone_index: 0,
+        keyframe_offset: 0,
+        keyframe_count: 2,
+    }];
+    let bone_keyframes = [
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 0,
+            position_xyz: [0.0, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        },
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 30,
+            position_xyz: [0.0, 1.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        },
+    ];
+    let morph_tracks = [MmdRuntimeFfiMorphTrack {
+        morph_index: 0,
+        keyframe_offset: 0,
+        keyframe_count: 2,
+    }];
+    let morph_keyframes = [
+        MmdRuntimeFfiMorphKeyframe {
+            frame: 0,
+            weight: 0.0,
+        },
+        MmdRuntimeFfiMorphKeyframe {
+            frame: 30,
+            weight: 1.0,
+        },
+    ];
+    unsafe {
+        mmd_runtime_clip_create(
+            bone_tracks.as_ptr(),
+            bone_tracks.len(),
+            bone_keyframes.as_ptr(),
+            bone_keyframes.len(),
+            morph_tracks.as_ptr(),
+            morph_tracks.len(),
+            morph_keyframes.as_ptr(),
+            morph_keyframes.len(),
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+        )
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_world_bake_clip_frames_matches_manual_sequential_loop() {
+    let parents = [-1];
+    let rest_positions = [0.0, 8.0, 0.0];
+    let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
+    assert!(!model.is_null());
+    let manual = unsafe { mmd_runtime_instance_create(model, 1) };
+    let baked = unsafe { mmd_runtime_instance_create(model, 1) };
+    assert!(!manual.is_null());
+    assert!(!baked.is_null());
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(manual) });
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(baked) });
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_set_physics_mode(manual, MmdRuntimeFfiPhysicsMode::Live as u32)
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_set_physics_mode(baked, MmdRuntimeFfiPhysicsMode::Live as u32)
+        },
+        MmdRuntimeStatus::Ok
+    );
+    let clip = create_physics_bake_clip();
+    assert!(!clip.is_null());
+
+    let bodies = [dynamic_physics_body_desc()];
+    let mut manual_world = ptr::null_mut();
+    let mut bake_world = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create(
+                bodies.as_ptr(),
+                bodies.len(),
+                ptr::null(),
+                0,
+                &mut manual_world,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create(
+                bodies.as_ptr(),
+                bodies.len(),
+                ptr::null(),
+                0,
+                &mut bake_world,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_reset(manual_world, manual, ptr::null_mut()) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_reset(bake_world, baked, ptr::null_mut()) },
+        MmdRuntimeStatus::Ok
+    );
+
+    let mut manual_world_out = [0.0f32; 48];
+    let mut manual_morphs = [0.0f32; 3];
+    let mut manual_report = MmdRuntimeFfiPhysicsWorldStepReport {
+        tick: MmdRuntimeFfiPhysicsStepStats {
+            input_dt_seconds: 0.0,
+            clamped_dt_seconds: 0.0,
+            substeps: 0,
+            accumulator_seconds: 0.0,
+        },
+        kinematic_rigidbodies_fed: 0,
+        bones_written_back: 0,
+    };
+    for frame_index in 0..3 {
+        assert_eq!(
+            unsafe {
+                mmd_runtime_instance_evaluate_clip_frame_before_physics(
+                    manual,
+                    clip,
+                    frame_index as f32 * 15.0,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                mmd_runtime_physics_world_step_runtime(
+                    manual_world,
+                    manual,
+                    1.0 / 60.0,
+                    &mut manual_report,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        let world_start = frame_index * 16;
+        assert!(unsafe {
+            mmd_runtime_instance_copy_world_matrices(
+                manual,
+                manual_world_out[world_start..].as_mut_ptr(),
+                16,
+            )
+        });
+        assert!(unsafe {
+            mmd_runtime_instance_copy_morph_weights(
+                manual,
+                manual_morphs[frame_index..].as_mut_ptr(),
+                1,
+            )
+        });
+    }
+
+    let mut baked_world_out = [0.0f32; 48];
+    let mut baked_morphs = [0.0f32; 3];
+    let mut baked_report = MmdRuntimeFfiPhysicsWorldStepReport {
+        tick: MmdRuntimeFfiPhysicsStepStats {
+            input_dt_seconds: 0.0,
+            clamped_dt_seconds: 0.0,
+            substeps: 0,
+            accumulator_seconds: 0.0,
+        },
+        kinematic_rigidbodies_fed: 0,
+        bones_written_back: 0,
+    };
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_bake_clip_frames(
+                bake_world,
+                baked,
+                clip,
+                0.0,
+                15.0,
+                1.0 / 60.0,
+                3,
+                baked_world_out.as_mut_ptr(),
+                baked_world_out.len(),
+                baked_morphs.as_mut_ptr(),
+                baked_morphs.len(),
+                &mut baked_report,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+
+    assert_slice_near(&baked_world_out, &manual_world_out, 1.0e-5);
+    assert_slice_near(&baked_morphs, &manual_morphs, 0.0);
+    assert_eq!(baked_report.tick.substeps, manual_report.tick.substeps);
+    assert_eq!(
+        baked_report.bones_written_back,
+        manual_report.bones_written_back
+    );
+    assert_eq!(baked_report.bones_written_back, 1);
+
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_bake_clip_frames(
+                bake_world,
+                baked,
+                clip,
+                0.0,
+                15.0,
+                f32::NAN,
+                3,
+                baked_world_out.as_mut_ptr(),
+                baked_world_out.len(),
+                baked_morphs.as_mut_ptr(),
+                baked_morphs.len(),
+                ptr::null_mut(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_bake_clip_frames(
+                bake_world,
+                baked,
+                clip,
+                0.0,
+                15.0,
+                1.0 / 60.0,
+                3,
+                baked_world_out.as_mut_ptr(),
+                baked_world_out.len() - 1,
+                baked_morphs.as_mut_ptr(),
+                baked_morphs.len(),
+                ptr::null_mut(),
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+
+    unsafe {
+        mmd_runtime_physics_world_free(bake_world);
+        mmd_runtime_physics_world_free(manual_world);
+        mmd_runtime_clip_free(clip);
+        mmd_runtime_instance_free(baked);
+        mmd_runtime_instance_free(manual);
+        mmd_runtime_model_free(model);
+    }
 }
 
 #[test]

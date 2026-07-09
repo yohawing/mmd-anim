@@ -4520,6 +4520,186 @@ fn evaluate_clip_frame_batch_chunk(
     }
 }
 
+/// Sequentially bakes clip frames through a stateful physics world.
+///
+/// Unlike `mmd_runtime_instance_evaluate_clip_frame_batch`, this mutates the
+/// supplied runtime instance and physics world in frame order. `frame_step`
+/// advances clip sampling; `dt_seconds` advances the physics clock.
+///
+/// # Safety
+///
+/// `world`, `instance`, and `clip` must be valid handles. Non-empty output
+/// regions must point to writable buffers of at least the corresponding `*_len`
+/// count and must not alias each other. `out_last_report` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_world_bake_clip_frames(
+    world: *mut MmdRuntimePhysicsWorld,
+    instance: *mut MmdRuntimeInstance,
+    clip: *const MmdRuntimeClip,
+    start_frame: f32,
+    frame_step: f32,
+    dt_seconds: f32,
+    frame_count: usize,
+    out_world_matrices_f32: *mut f32,
+    out_world_matrices_f32_len: usize,
+    out_morph_weights_f32: *mut f32,
+    out_morph_weights_f32_len: usize,
+    out_last_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        physics_world_bake_clip_frames_impl(
+            world,
+            instance,
+            clip,
+            start_frame,
+            frame_step,
+            dt_seconds,
+            frame_count,
+            out_world_matrices_f32,
+            out_world_matrices_f32_len,
+            out_morph_weights_f32,
+            out_morph_weights_f32_len,
+            out_last_report,
+        )
+    })
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+#[allow(clippy::too_many_arguments)]
+fn physics_world_bake_clip_frames_impl(
+    _world: *mut MmdRuntimePhysicsWorld,
+    _instance: *mut MmdRuntimeInstance,
+    _clip: *const MmdRuntimeClip,
+    _start_frame: f32,
+    _frame_step: f32,
+    _dt_seconds: f32,
+    _frame_count: usize,
+    _out_world_matrices_f32: *mut f32,
+    _out_world_matrices_f32_len: usize,
+    _out_morph_weights_f32: *mut f32,
+    _out_morph_weights_f32_len: usize,
+    _out_last_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[allow(clippy::too_many_arguments)]
+fn physics_world_bake_clip_frames_impl(
+    world: *mut MmdRuntimePhysicsWorld,
+    instance: *mut MmdRuntimeInstance,
+    clip: *const MmdRuntimeClip,
+    start_frame: f32,
+    frame_step: f32,
+    dt_seconds: f32,
+    frame_count: usize,
+    out_world_matrices_f32: *mut f32,
+    out_world_matrices_f32_len: usize,
+    out_morph_weights_f32: *mut f32,
+    out_morph_weights_f32_len: usize,
+    out_last_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    use mmd_anim_physics_bullet::RuntimePhysicsBridgeExt;
+
+    let Some(world) = (unsafe { world.as_mut() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(instance) = (unsafe { instance.as_mut() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(clip) = (unsafe { clip.as_ref() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    if !start_frame.is_finite()
+        || !frame_step.is_finite()
+        || !dt_seconds.is_finite()
+        || dt_seconds < 0.0
+    {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    }
+
+    let world_frame_len = match instance.runtime.world_matrices().len().checked_mul(16) {
+        Some(len) => len,
+        None => return status_failure(MmdRuntimeStatus::BufferTooSmall, FFI_ERR_INVALID_INPUT),
+    };
+    let morph_frame_len = instance.runtime.morph_weights().len();
+    let required_world_len = match world_frame_len.checked_mul(frame_count) {
+        Some(len) => len,
+        None => return status_failure(MmdRuntimeStatus::BufferTooSmall, FFI_ERR_INVALID_INPUT),
+    };
+    let required_morph_len = match morph_frame_len.checked_mul(frame_count) {
+        Some(len) => len,
+        None => return status_failure(MmdRuntimeStatus::BufferTooSmall, FFI_ERR_INVALID_INPUT),
+    };
+
+    if out_world_matrices_f32_len < required_world_len
+        || out_morph_weights_f32_len < required_morph_len
+    {
+        return status_failure(MmdRuntimeStatus::BufferTooSmall, FFI_ERR_INVALID_INPUT);
+    }
+    if required_world_len > 0 && out_world_matrices_f32.is_null() {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    }
+    if required_morph_len > 0 && out_morph_weights_f32.is_null() {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    }
+
+    let out_world = if required_world_len == 0 {
+        &mut []
+    } else {
+        unsafe { slice::from_raw_parts_mut(out_world_matrices_f32, required_world_len) }
+    };
+    let out_morph = if required_morph_len == 0 {
+        &mut []
+    } else {
+        unsafe { slice::from_raw_parts_mut(out_morph_weights_f32, required_morph_len) }
+    };
+
+    let mut last_report = MmdRuntimeFfiPhysicsWorldStepReport {
+        tick: physics_step_stats_to_ffi(PhysicsStepStats::default()),
+        kinematic_rigidbodies_fed: 0,
+        bones_written_back: 0,
+    };
+    for frame_index in 0..frame_count {
+        let frame = start_frame + frame_step * frame_index as f32;
+        instance
+            .runtime
+            .evaluate_clip_frame_before_physics(&clip.clip, frame);
+        let report = match world
+            .world
+            .step_runtime_physics_with_runtime_clock(&mut instance.runtime, dt_seconds)
+        {
+            Ok(report) => report,
+            Err(err) => return status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
+        };
+        last_report = MmdRuntimeFfiPhysicsWorldStepReport {
+            tick: physics_step_stats_to_ffi(report.tick),
+            kinematic_rigidbodies_fed: report.kinematic_rigidbodies_fed,
+            bones_written_back: report.bones_written_back,
+        };
+
+        let world_start = frame_index * world_frame_len;
+        let world_end = world_start + world_frame_len;
+        flatten_matrices_into_slice(
+            &mut out_world[world_start..world_end],
+            instance.runtime.world_matrices(),
+        );
+        if morph_frame_len > 0 {
+            let morph_start = frame_index * morph_frame_len;
+            let morph_end = morph_start + morph_frame_len;
+            out_morph[morph_start..morph_end].copy_from_slice(instance.runtime.morph_weights());
+        }
+    }
+
+    instance.refresh_matrix_caches();
+    if !out_last_report.is_null() {
+        unsafe {
+            *out_last_report = last_report;
+        }
+    }
+    MmdRuntimeStatus::Ok
+}
+
 /// Returns the required `f32` count for copying world matrices.
 ///
 /// # Safety

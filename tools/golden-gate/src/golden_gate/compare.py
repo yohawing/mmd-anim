@@ -52,6 +52,9 @@ PENETRATION_SUMMARY_FIELDS = {
     "maxBulletPenetrationDepth": (),
     "penetratingPairCount": (),
     "severePairCount": (),
+    "unconnectedPairCount": (),
+    "unconnectedPenetratingPairCount": (),
+    "unconnectedSeverePairCount": (),
     "penetratingContactCount": (),
 }
 
@@ -89,7 +92,13 @@ def compare_reports(
     current_summary = _object_at(current, "summary")
     if _is_penetration_report(baseline) or _is_penetration_report(current):
         _compare_penetration_identity(baseline, current, failures)
-        _compare_penetration_summary(baseline_summary, current_summary, tolerances, options, failures)
+        _compare_penetration_summary(
+            _penetration_summary_with_inferred_baseline_counts(baseline, baseline_summary, failures),
+            current_summary,
+            tolerances,
+            options,
+            failures,
+        )
     _compare_summary(baseline_summary, current_summary, _has_physics_cases(current), tolerances, options, failures)
     _compare_cases(
         _case_map(baseline),
@@ -170,6 +179,24 @@ def _compare_penetration_summary(
         baseline,
         current,
         "summary",
+        "unconnectedPenetratingPairCount",
+        PENETRATION_SUMMARY_FIELDS["unconnectedPenetratingPairCount"],
+        0,
+        failures,
+    )
+    _compare_not_greater(
+        baseline,
+        current,
+        "summary",
+        "unconnectedSeverePairCount",
+        PENETRATION_SUMMARY_FIELDS["unconnectedSeverePairCount"],
+        0,
+        failures,
+    )
+    _compare_not_greater(
+        baseline,
+        current,
+        "summary",
         "penetratingContactCount",
         PENETRATION_SUMMARY_FIELDS["penetratingContactCount"],
         tolerances.penetrating_contact_count_tolerance,
@@ -215,6 +242,73 @@ def _compare_penetration_summary(
         options.max_allowed_penetrating_contact_count,
         failures,
     )
+
+
+def _penetration_summary_with_inferred_baseline_counts(
+    report: dict[str, Any],
+    summary: dict[str, Any],
+    failures: list[RegressionFailure],
+) -> dict[str, Any]:
+    fields = (
+        "unconnectedPairCount",
+        "unconnectedPenetratingPairCount",
+        "unconnectedSeverePairCount",
+    )
+    missing_fields = [
+        field
+        for field in fields
+        if not _has_number(summary, field, PENETRATION_SUMMARY_FIELDS[field])
+    ]
+    if not missing_fields:
+        return summary
+
+    pairs = report.get("pairs")
+    if not isinstance(pairs, list):
+        return _baseline_requires_regeneration(summary, missing_fields, failures)
+
+    inferred = dict(summary)
+    if any(not isinstance(pair, dict) or not isinstance(pair.get("jointConnected"), bool) for pair in pairs):
+        return _baseline_requires_regeneration(inferred, missing_fields, failures)
+
+    unconnected_pairs = [
+        pair
+        for pair in pairs
+        if isinstance(pair, dict) and pair.get("jointConnected") is False
+    ]
+    if any(not _has_number(pair, "approxGap", ()) for pair in unconnected_pairs):
+        return _baseline_requires_regeneration(inferred, missing_fields, failures)
+
+    inferred.setdefault("unconnectedPairCount", len(unconnected_pairs))
+    inferred.setdefault(
+        "unconnectedPenetratingPairCount",
+        sum(1 for pair in unconnected_pairs if _number(pair, "approxGap", ()) < 0.0),
+    )
+    inferred.setdefault(
+        "unconnectedSeverePairCount",
+        sum(1 for pair in unconnected_pairs if _number(pair, "approxGap", ()) < -0.05),
+    )
+    return inferred
+
+
+def _baseline_requires_regeneration(
+    summary: dict[str, Any],
+    missing_fields: Iterable[str],
+    failures: list[RegressionFailure],
+) -> dict[str, Any]:
+    inferred = dict(summary)
+    for field in missing_fields:
+        failures.append(
+            RegressionFailure(
+                path=f"summary.{field}",
+                check="baselineRequiredMetric",
+                baseline="missing",
+                current="present",
+                tolerance=None,
+                message=f"baseline summary.{field} cannot be inferred; regenerate the penetration baseline",
+            )
+        )
+        inferred.setdefault(field, float("inf"))
+    return inferred
 
 
 def _compare_summary(

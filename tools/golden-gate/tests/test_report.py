@@ -13,6 +13,9 @@ def test_summarize_report_includes_physics_penetration_metrics():
                 "jointConnectedPairCount": 2,
                 "jointConnectedPenetratingPairCount": 2,
                 "jointConnectedSeverePairCount": 2,
+                "unconnectedPairCount": 2,
+                "unconnectedPenetratingPairCount": 0,
+                "unconnectedSeverePairCount": 0,
                 "bulletContactCount": 0,
                 "penetratingContactCount": 0,
                 "maxPenetrationDepth": 0.7402609,
@@ -24,5 +27,6 @@ def test_summarize_report_includes_physics_penetration_metrics():
     assert "pairCount=4" in summary
     assert "severePairCount=2" in summary
     assert "jointConnectedSeverePairCount=2" in summary
+    assert "unconnectedSeverePairCount=0" in summary
     assert "bulletContactCount=0" in summary
     assert "maxBulletPenetrationDepth=0.0" in summary

@@ -1767,6 +1767,9 @@ struct PhysicsPenetrationDiagnosticSummary {
     joint_connected_pair_count: usize,
     joint_connected_penetrating_pair_count: usize,
     joint_connected_severe_pair_count: usize,
+    unconnected_pair_count: usize,
+    unconnected_penetrating_pair_count: usize,
+    unconnected_severe_pair_count: usize,
     bullet_contact_count: usize,
     penetrating_contact_count: usize,
     min_signed_distance: Option<f32>,
@@ -1858,6 +1861,10 @@ pub(crate) fn diagnose_numeric_physics_penetration(
         .iter()
         .filter(|pair| pair.joint_connected && pair.approx_gap < -0.05)
         .count();
+    let unconnected_count = pairs.len().saturating_sub(joint_connected_count);
+    let unconnected_penetrating_count =
+        penetrating_count.saturating_sub(joint_connected_penetrating_count);
+    let unconnected_severe_count = severe_count.saturating_sub(joint_connected_severe_count);
     let penetrating_contacts = contacts
         .iter()
         .filter(|contact| contact.distance < 0.0)
@@ -1888,6 +1895,9 @@ pub(crate) fn diagnose_numeric_physics_penetration(
                 joint_connected_pair_count: joint_connected_count,
                 joint_connected_penetrating_pair_count: joint_connected_penetrating_count,
                 joint_connected_severe_pair_count: joint_connected_severe_count,
+                unconnected_pair_count: unconnected_count,
+                unconnected_penetrating_pair_count: unconnected_penetrating_count,
+                unconnected_severe_pair_count: unconnected_severe_count,
                 bullet_contact_count: contacts.len(),
                 penetrating_contact_count: penetrating_contacts,
                 min_signed_distance,
@@ -2512,6 +2522,9 @@ mod physics_penetration_geometry_tests {
                 joint_connected_pair_count: 1,
                 joint_connected_penetrating_pair_count: 0,
                 joint_connected_severe_pair_count: 0,
+                unconnected_pair_count: 0,
+                unconnected_penetrating_pair_count: 0,
+                unconnected_severe_pair_count: 0,
                 bullet_contact_count: 1,
                 penetrating_contact_count: 0,
                 min_signed_distance: Some(0.25),
@@ -2553,6 +2566,7 @@ mod physics_penetration_geometry_tests {
         assert_eq!(value["oracleFrame"], 119.0);
         assert_eq!(value["summary"]["maxPenetrationDepth"], 0.0);
         assert_eq!(value["summary"]["jointConnectedPairCount"], 1);
+        assert_eq!(value["summary"]["unconnectedSeverePairCount"], 0);
         assert_eq!(value["summary"]["minBulletContactDistance"], 0.125);
         assert_eq!(value["pairs"][0]["approxGap"], 1.0);
         assert_eq!(value["pairs"][0]["jointConnected"], true);

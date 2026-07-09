@@ -154,7 +154,7 @@ def test_physics_penetration_contact_regression_fails():
         }
     )
 
-    failures = compare_reports(baseline, current, _penetration_tolerances())
+    failures = compare_reports(baseline, current, Tolerances())
 
     assert "summary.maxBulletPenetrationDepth" in _failure_paths(failures)
     assert "summary.penetratingContactCount" in _failure_paths(failures)
@@ -222,6 +222,87 @@ def test_physics_penetration_contact_zero_limit_can_ignore_shape_proxy_overlap()
     )
 
     assert failures == []
+
+
+def test_physics_penetration_unconnected_pair_regression_fails():
+    baseline = _physics_penetration_report(
+        {
+            "unconnectedPenetratingPairCount": 0,
+            "unconnectedSeverePairCount": 0,
+        }
+    )
+    current = _physics_penetration_report(
+        {
+            "unconnectedPenetratingPairCount": 1,
+            "unconnectedSeverePairCount": 1,
+        }
+    )
+
+    failures = compare_reports(baseline, current, Tolerances())
+
+    assert "summary.unconnectedPenetratingPairCount" in _failure_paths(failures)
+    assert "summary.unconnectedSeverePairCount" in _failure_paths(failures)
+
+
+def test_physics_penetration_legacy_baseline_infers_unconnected_counts_from_pairs():
+    baseline = _physics_penetration_report(
+        pairs=[
+            {"jointConnected": False, "approxGap": -0.10},
+            {"jointConnected": True, "approxGap": -0.20},
+        ]
+    )
+    del baseline["summary"]["unconnectedPairCount"]
+    del baseline["summary"]["unconnectedPenetratingPairCount"]
+    del baseline["summary"]["unconnectedSeverePairCount"]
+    current = _physics_penetration_report(
+        {
+            "unconnectedPairCount": 1,
+            "unconnectedPenetratingPairCount": 1,
+            "unconnectedSeverePairCount": 1,
+        }
+    )
+
+    assert compare_reports(baseline, current, Tolerances()) == []
+
+
+def test_physics_penetration_legacy_baseline_still_fails_new_unconnected_overlap():
+    baseline = _physics_penetration_report(
+        pairs=[
+            {"jointConnected": False, "approxGap": 0.10},
+        ]
+    )
+    del baseline["summary"]["unconnectedPairCount"]
+    del baseline["summary"]["unconnectedPenetratingPairCount"]
+    del baseline["summary"]["unconnectedSeverePairCount"]
+    current = _physics_penetration_report(
+        {
+            "unconnectedPairCount": 1,
+            "unconnectedPenetratingPairCount": 1,
+            "unconnectedSeverePairCount": 1,
+        }
+    )
+
+    failures = compare_reports(baseline, current, Tolerances())
+
+    assert "summary.unconnectedPenetratingPairCount" in _failure_paths(failures)
+    assert "summary.unconnectedSeverePairCount" in _failure_paths(failures)
+
+
+def test_physics_penetration_legacy_baseline_without_pair_flags_requires_regeneration():
+    baseline = _physics_penetration_report(pairs=[{"approxGap": -0.10}])
+    del baseline["summary"]["unconnectedPairCount"]
+    del baseline["summary"]["unconnectedPenetratingPairCount"]
+    del baseline["summary"]["unconnectedSeverePairCount"]
+    current = _physics_penetration_report()
+
+    failures = compare_reports(baseline, current, Tolerances())
+
+    assert {
+        "summary.unconnectedPairCount",
+        "summary.unconnectedPenetratingPairCount",
+        "summary.unconnectedSeverePairCount",
+    }.issubset(_failure_paths(failures))
+    assert all(failure.check == "baselineRequiredMetric" for failure in failures)
 
 
 def test_physics_penetration_report_requires_stable_summary_metrics():
@@ -297,7 +378,7 @@ def _physics_tolerances():
     )
 
 
-def _physics_penetration_report(summary=None):
+def _physics_penetration_report(summary=None, pairs=None):
     return {
         "caseName": "rem-tail-left",
         "oracleFrame": 119.0,
@@ -309,6 +390,9 @@ def _physics_penetration_report(summary=None):
             "pairCount": 30,
             "penetratingPairCount": 1,
             "severePairCount": 0,
+            "unconnectedPairCount": 0,
+            "unconnectedPenetratingPairCount": 0,
+            "unconnectedSeverePairCount": 0,
             "bulletContactCount": 2,
             "penetratingContactCount": 0,
             "minSignedDistance": -0.02,
@@ -317,7 +401,7 @@ def _physics_penetration_report(summary=None):
             "maxBulletPenetrationDepth": 0.02,
             **(summary or {}),
         },
-        "pairs": [],
+        "pairs": pairs or [],
         "contacts": [],
     }
 

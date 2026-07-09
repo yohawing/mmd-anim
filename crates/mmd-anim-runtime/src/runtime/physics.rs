@@ -1,7 +1,7 @@
 use glam::{Mat4, Vec3A};
 
 use super::{IkSolveOptions, RuntimeInstance};
-use crate::BoneIndex;
+use crate::{BoneIndex, ik_primitive::constrain_rotation_to_axis};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PhysicsMode {
@@ -97,12 +97,35 @@ impl RuntimeInstance {
     ) -> usize {
         let mut updated = 0;
         let mut earliest_eval_order_position = None;
+        let mut target_world_matrices = self.pose.world_matrices().to_vec();
+        let mut has_physics_target = vec![false; self.model.bone_count()];
 
-        for (bone_index, physics_world_matrix) in physics_world_matrices.iter().enumerate() {
-            let Some(physics_world_matrix) = physics_world_matrix else {
+        for (bone_index, target_world_matrix) in physics_world_matrices.iter().enumerate() {
+            let Some(target_world_matrix) = target_world_matrix else {
                 continue;
             };
-            if bone_index >= self.model.bone_count() {
+            let Some(slot) = target_world_matrices.get_mut(bone_index) else {
+                continue;
+            };
+            *slot = *target_world_matrix;
+            has_physics_target[bone_index] = true;
+        }
+
+        for bone in self.model.eval_order() {
+            let bone_index = bone.as_usize();
+            if has_physics_target[bone_index] {
+                continue;
+            }
+            let local_matrix = self.current_local_matrix_for_physics_scratch(*bone);
+            target_world_matrices[bone_index] = self
+                .model
+                .parent_index(*bone)
+                .map(|parent| target_world_matrices[parent.as_usize()] * local_matrix)
+                .unwrap_or(local_matrix);
+        }
+
+        for bone_index in 0..self.model.bone_count() {
+            if !has_physics_target[bone_index] {
                 continue;
             }
 
@@ -110,9 +133,9 @@ impl RuntimeInstance {
             let parent_inverse_world = self
                 .model
                 .parent_index(bone)
-                .map(|parent| self.pose.world_matrices()[parent.as_usize()].inverse())
+                .map(|parent| target_world_matrices[parent.as_usize()].inverse())
                 .unwrap_or(Mat4::IDENTITY);
-            let local_matrix = parent_inverse_world * *physics_world_matrix;
+            let local_matrix = parent_inverse_world * target_world_matrices[bone_index];
             let (scale, rotation, translation) = local_matrix.to_scale_rotation_translation();
 
             self.pose.set_local_position_offset(
@@ -136,6 +159,33 @@ impl RuntimeInstance {
         }
 
         updated
+    }
+
+    fn current_local_matrix_for_physics_scratch(&self, bone: BoneIndex) -> Mat4 {
+        let mut local_position =
+            self.model.rest_position(bone) + self.pose.local_position_offset(bone);
+        let mut local_rotation = self.pose.local_rotation(bone);
+        let local_scale = self.pose.local_scale(bone);
+
+        if let Some(append_index) = self.model.append_transform_index(bone) {
+            let append = self.model.append_transform(append_index);
+            if append.affect_rotation {
+                local_rotation = (local_rotation * self.pose.append_rotation(bone)).normalize();
+            }
+            if append.affect_translation {
+                local_position += self.pose.append_position_offset(bone);
+            }
+        }
+
+        if let Some(axis) = self.model.fixed_axis_constraint(bone) {
+            local_rotation = constrain_rotation_to_axis(local_rotation, axis);
+        }
+
+        Mat4::from_scale_rotation_translation(
+            local_scale.into(),
+            local_rotation,
+            local_position.into(),
+        )
     }
 
     /// Advance the physics clock independently from animation sampling.

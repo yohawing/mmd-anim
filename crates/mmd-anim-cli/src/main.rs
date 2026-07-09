@@ -180,6 +180,9 @@ enum Commands {
         /// Diagnose a specific case/frame, with optional bone name
         #[arg(long, num_args = 2..=3, value_names = ["CASE", "FRAME", "BONE"])]
         diagnose: Option<Vec<String>>,
+        /// For numeric physics-coarse diagnosis, print approximate rigid-body penetration pairs
+        #[arg(long)]
+        physics_penetration: bool,
         /// Compare IK golden data instead of printing the IK summary
         #[arg(long)]
         compare: bool,
@@ -424,6 +427,7 @@ fn main() -> ExitCode {
             target,
             mode,
             diagnose,
+            physics_penetration,
             compare,
             json,
             eval_frame,
@@ -432,6 +436,7 @@ fn main() -> ExitCode {
             &target,
             mode,
             diagnose,
+            physics_penetration,
             compare,
             json,
             eval_frame,
@@ -743,17 +748,24 @@ fn dispatch_bench(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_verify(
     target: &Path,
     mode: Option<VerifyMode>,
     diagnose: Option<Vec<String>>,
+    physics_penetration: bool,
     compare: bool,
     use_json: bool,
     eval_frame: Option<f32>,
     sample_frame_offset: Option<f32>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let Some(mode) = mode else {
-        if diagnose.is_some() || compare || eval_frame.is_some() || sample_frame_offset.is_some() {
+        if diagnose.is_some()
+            || physics_penetration
+            || compare
+            || eval_frame.is_some()
+            || sample_frame_offset.is_some()
+        {
             return usage_error("verify without --mode only supports oracle summary files");
         }
         return commands::oracle::oracle_summary(&target.to_string_lossy(), use_json);
@@ -768,15 +780,33 @@ fn dispatch_verify(
                 return usage_error("verify --mode numeric does not support --sample-frame-offset");
             }
             if use_json {
-                if diagnose.is_some() || eval_frame.is_some() {
+                if diagnose.is_some() && physics_penetration {
+                    return dispatch_numeric_diagnose(
+                        target,
+                        diagnose.unwrap_or_default(),
+                        eval_frame,
+                        physics_penetration,
+                        use_json,
+                    );
+                }
+                if diagnose.is_some() || physics_penetration || eval_frame.is_some() {
                     return usage_error(
-                        "verify --mode numeric --json cannot be combined with --diagnose or --eval-frame",
+                        "verify --mode numeric --json can only be combined with --diagnose when --physics-penetration is set",
                     );
                 }
                 return commands::compare::compare_numeric_manifest_json(target);
             }
             if let Some(parts) = diagnose {
-                return dispatch_numeric_diagnose(target, parts, eval_frame);
+                return dispatch_numeric_diagnose(
+                    target,
+                    parts,
+                    eval_frame,
+                    physics_penetration,
+                    false,
+                );
+            }
+            if physics_penetration {
+                return usage_error("verify --physics-penetration requires --diagnose CASE FRAME");
             }
             if eval_frame.is_some() {
                 return usage_error("verify --eval-frame requires --diagnose");
@@ -791,15 +821,23 @@ fn dispatch_verify(
                 return usage_error("verify --mode camera does not support --sample-frame-offset");
             }
             if use_json {
-                if diagnose.is_some() || eval_frame.is_some() {
+                if diagnose.is_some() || physics_penetration || eval_frame.is_some() {
                     return usage_error(
-                        "verify --mode camera --json cannot be combined with --diagnose or --eval-frame",
+                        "verify --mode camera --json cannot be combined with --diagnose, --physics-penetration, or --eval-frame",
                     );
                 }
                 return commands::compare::compare_numeric_manifest_json(target);
             }
             if let Some(parts) = diagnose {
-                return dispatch_numeric_diagnose(target, parts, eval_frame);
+                if physics_penetration {
+                    return usage_error(
+                        "verify --mode camera does not support --physics-penetration",
+                    );
+                }
+                return dispatch_numeric_diagnose(target, parts, eval_frame, false, false);
+            }
+            if physics_penetration {
+                return usage_error("verify --mode camera does not support --physics-penetration");
             }
             if eval_frame.is_some() {
                 return usage_error("verify --eval-frame requires --diagnose");
@@ -812,6 +850,7 @@ fn dispatch_verify(
         VerifyMode::Parser => {
             if diagnose.is_some()
                 || compare
+                || physics_penetration
                 || eval_frame.is_some()
                 || sample_frame_offset.is_some()
             {
@@ -828,6 +867,8 @@ fn dispatch_numeric_diagnose(
     manifest: &Path,
     parts: Vec<String>,
     eval_frame: Option<f32>,
+    physics_penetration: bool,
+    use_json: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut parts = parts.into_iter();
     let case_name = parts.next().ok_or("missing diagnose case name")?;
@@ -854,6 +895,19 @@ fn dispatch_numeric_diagnose(
     };
     let eval_frame = diagnose_options.eval_frame;
     let bone_names = diagnose_options.bone_names;
+    if physics_penetration {
+        return commands::compare::diagnose_numeric_physics_penetration(
+            manifest,
+            &case_name,
+            frame,
+            eval_frame,
+            &bone_names,
+            use_json,
+        );
+    }
+    if use_json {
+        return usage_error("verify --mode numeric --json diagnose requires --physics-penetration");
+    }
     if bone_names.is_empty() {
         eprintln!("{}", commands::compare::DIAGNOSE_NUMERIC_BONE_USAGE);
         return Ok(ExitCode::from(2));

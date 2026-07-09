@@ -195,6 +195,16 @@ impl Transform {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactPoint {
+    pub rigidbody_a: RigidBodyHandle,
+    pub rigidbody_b: RigidBodyHandle,
+    pub distance: f32,
+    pub position_world_on_a: [f32; 3],
+    pub position_world_on_b: [f32; 3],
+    pub normal_world_on_b: [f32; 3],
+}
+
 pub struct BulletWorld {
     raw: NonNull<ffi::World>,
 }
@@ -293,6 +303,44 @@ impl BulletWorld {
             )
         })
     }
+
+    pub fn contact_points(&self) -> Result<Vec<ContactPoint>, BulletError> {
+        let mut count = 0;
+        check(unsafe {
+            ffi::mmd_anim_bullet_world_collect_contacts(
+                self.raw.as_ptr(),
+                ptr::null_mut(),
+                0,
+                &mut count,
+            )
+        })?;
+        if count <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut contacts = vec![ffi::ContactPoint::default(); count as usize];
+        let mut written = 0;
+        check(unsafe {
+            ffi::mmd_anim_bullet_world_collect_contacts(
+                self.raw.as_ptr(),
+                contacts.as_mut_ptr(),
+                contacts.len() as i32,
+                &mut written,
+            )
+        })?;
+        contacts.truncate(written.max(0) as usize);
+        Ok(contacts
+            .into_iter()
+            .map(|contact| ContactPoint {
+                rigidbody_a: RigidBodyHandle(contact.rigidbody_index_a),
+                rigidbody_b: RigidBodyHandle(contact.rigidbody_index_b),
+                distance: contact.distance,
+                position_world_on_a: contact.position_world_on_a,
+                position_world_on_b: contact.position_world_on_b,
+                normal_world_on_b: contact.normal_world_on_b,
+            })
+            .collect())
+    }
 }
 
 impl Drop for BulletWorld {
@@ -350,6 +398,17 @@ mod ffi {
         pub spring_rotation_factor: [f32; 3],
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct ContactPoint {
+        pub rigidbody_index_a: i32,
+        pub rigidbody_index_b: i32,
+        pub distance: f32,
+        pub position_world_on_a: [f32; 3],
+        pub position_world_on_b: [f32; 3],
+        pub normal_world_on_b: [f32; 3],
+    }
+
     unsafe extern "C" {
         pub fn mmd_anim_bullet_get_last_error() -> *const c_char;
         pub fn mmd_anim_bullet_world_create(out_world: *mut *mut World) -> i32;
@@ -385,6 +444,12 @@ mod ffi {
             out_index: *mut i32,
         ) -> i32;
         pub fn mmd_anim_bullet_world_get_constraint_count(world: *const World) -> i32;
+        pub fn mmd_anim_bullet_world_collect_contacts(
+            world: *const World,
+            out_contacts: *mut ContactPoint,
+            capacity: i32,
+            out_count: *mut i32,
+        ) -> i32;
     }
 }
 
@@ -481,6 +546,42 @@ mod tests {
         assert!(
             sphere_y < 9.0,
             "sphere did not fall meaningfully: y={sphere_y}"
+        );
+    }
+
+    #[test]
+    fn contact_points_report_resting_body_contact() {
+        let mut world = BulletWorld::new().unwrap();
+        let _floor = world
+            .add_rigidbody(RigidBodyDesc {
+                shape: RigidBodyShape::Box {
+                    half_extents: [20.0, 1.0, 20.0],
+                },
+                position: [0.0, 0.0, 0.0],
+                rotation_euler: [0.0; 3],
+                mass: 0.0,
+                linear_damping: 0.0,
+                angular_damping: 0.0,
+                friction: 0.5,
+                restitution: 0.0,
+                collision_group: 0,
+                collision_mask: 0xffff,
+            })
+            .unwrap();
+        let sphere = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(1.0, [0.0, 10.0, 0.0], 1.0))
+            .unwrap();
+
+        for _ in 0..180 {
+            world.step(1.0 / 60.0, 2).unwrap();
+        }
+
+        let contacts = world.contact_points().unwrap();
+        assert!(
+            contacts
+                .iter()
+                .any(|contact| { contact.rigidbody_a == sphere || contact.rigidbody_b == sphere }),
+            "expected contact involving resting sphere: {contacts:?}"
         );
     }
 

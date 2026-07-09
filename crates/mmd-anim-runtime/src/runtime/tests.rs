@@ -112,6 +112,86 @@ fn apply_physics_world_matrices_updates_local_pose_and_descendants() {
 }
 
 #[test]
+fn apply_physics_world_matrices_uses_physics_parent_for_child_local_pose() {
+    let model = Arc::new(
+        ModelArena::new(vec![
+            BoneInit::new(None, Vec3A::ZERO),
+            BoneInit::new(Some(BoneIndex(0)), Vec3A::new(0.0, 1.0, 0.0)),
+            BoneInit::new(Some(BoneIndex(1)), Vec3A::new(0.0, 1.0, 0.0)),
+        ])
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+    runtime.evaluate_rest_pose();
+
+    let updated = runtime.apply_physics_world_matrices(&[
+        None,
+        Some(glam::Mat4::from_translation(
+            Vec3A::new(10.0, 10.0, 0.0).into(),
+        )),
+        Some(glam::Mat4::from_translation(
+            Vec3A::new(10.0, 11.0, 0.0).into(),
+        )),
+    ]);
+
+    assert_eq!(updated, 2);
+    assert_vec3a_near(
+        runtime.pose().local_position_offset(BoneIndex(2)),
+        Vec3A::ZERO,
+    );
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[1]),
+        Vec3A::new(10.0, 10.0, 0.0),
+    );
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[2]),
+        Vec3A::new(10.0, 11.0, 0.0),
+    );
+}
+
+#[test]
+fn apply_physics_world_matrices_propagates_sparse_physics_ancestors() {
+    let model = Arc::new(
+        ModelArena::new(vec![
+            BoneInit::new(None, Vec3A::ZERO),
+            BoneInit::new(Some(BoneIndex(0)), Vec3A::new(0.0, 1.0, 0.0)),
+            BoneInit::new(Some(BoneIndex(1)), Vec3A::new(0.0, 1.0, 0.0)),
+        ])
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+    runtime.evaluate_rest_pose();
+
+    let updated = runtime.apply_physics_world_matrices(&[
+        Some(glam::Mat4::from_translation(
+            Vec3A::new(10.0, 10.0, 0.0).into(),
+        )),
+        None,
+        Some(glam::Mat4::from_translation(
+            Vec3A::new(10.0, 12.0, 0.0).into(),
+        )),
+    ]);
+
+    assert_eq!(updated, 2);
+    assert_vec3a_near(
+        runtime.pose().local_position_offset(BoneIndex(2)),
+        Vec3A::ZERO,
+    );
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[0]),
+        Vec3A::new(10.0, 10.0, 0.0),
+    );
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[1]),
+        Vec3A::new(10.0, 11.0, 0.0),
+    );
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[2]),
+        Vec3A::new(10.0, 12.0, 0.0),
+    );
+}
+
+#[test]
 fn fixed_axis_bone_rotation_keeps_only_axis_twist() {
     let model = Arc::new(
         ModelArena::new(vec![

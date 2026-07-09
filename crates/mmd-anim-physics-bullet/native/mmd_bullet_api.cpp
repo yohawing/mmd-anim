@@ -74,6 +74,26 @@ static btCollisionShape *make_shape(const mmd_anim_bullet_rigidbody_desc &desc) 
     }
 }
 
+static int32_t rigidbody_index_for_collision_object(
+    const mmd_anim_bullet_world *world,
+    const btCollisionObject *object) {
+    if (!world || !object) {
+        return -1;
+    }
+    for (size_t i = 0; i < world->rigidbodies.size(); ++i) {
+        if (world->rigidbodies[i].body.get() == object) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+static void copy_vec3(const btVector3 &source, float target[3]) {
+    target[0] = source.x();
+    target[1] = source.y();
+    target[2] = source.z();
+}
+
 extern "C" {
 
 uint32_t mmd_anim_bullet_get_version(void) {
@@ -348,6 +368,59 @@ int32_t mmd_anim_bullet_world_get_constraint_count(const mmd_anim_bullet_world *
     }
     g_last_error.clear();
     return static_cast<int32_t>(world->constraints.size());
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_collect_contacts(
+    const mmd_anim_bullet_world *world,
+    mmd_anim_bullet_contact_point *out_contacts,
+    int32_t capacity,
+    int32_t *out_count) {
+    if (!world || !out_count) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world or out_count is null");
+    }
+    if (capacity < 0) {
+        return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "capacity must be non-negative");
+    }
+    if (capacity > 0 && !out_contacts) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "out_contacts is null with non-zero capacity");
+    }
+
+    int32_t count = 0;
+    btDispatcher *dispatcher = world->dynamics_world->getDispatcher();
+    const int manifold_count = dispatcher->getNumManifolds();
+    for (int manifold_index = 0; manifold_index < manifold_count; ++manifold_index) {
+        btPersistentManifold *manifold = dispatcher->getManifoldByIndexInternal(manifold_index);
+        if (!manifold) {
+            continue;
+        }
+        const int32_t body_a = rigidbody_index_for_collision_object(
+            world,
+            static_cast<const btCollisionObject *>(manifold->getBody0()));
+        const int32_t body_b = rigidbody_index_for_collision_object(
+            world,
+            static_cast<const btCollisionObject *>(manifold->getBody1()));
+        if (body_a < 0 || body_b < 0) {
+            continue;
+        }
+        const int contact_count = manifold->getNumContacts();
+        for (int contact_index = 0; contact_index < contact_count; ++contact_index) {
+            const btManifoldPoint &point = manifold->getContactPoint(contact_index);
+            if (count < capacity) {
+                auto &out = out_contacts[count];
+                out.rigidbody_index_a = body_a;
+                out.rigidbody_index_b = body_b;
+                out.distance = point.getDistance();
+                copy_vec3(point.getPositionWorldOnA(), out.position_world_on_a);
+                copy_vec3(point.getPositionWorldOnB(), out.position_world_on_b);
+                copy_vec3(point.m_normalWorldOnB, out.normal_world_on_b);
+            }
+            ++count;
+        }
+    }
+
+    *out_count = count;
+    g_last_error.clear();
+    return MMD_ANIM_BULLET_OK;
 }
 
 }

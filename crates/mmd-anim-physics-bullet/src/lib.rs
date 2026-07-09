@@ -14,8 +14,8 @@ mod runtime;
 
 #[cfg(feature = "native")]
 pub use native::{
-    BulletError, BulletWorld, ConstraintHandle, RigidBodyDesc, RigidBodyHandle, RigidBodyShape,
-    SixDofSpringJointDesc, Transform,
+    BulletError, BulletWorld, ConstraintHandle, ContactPoint, RigidBodyDesc, RigidBodyHandle,
+    RigidBodyShape, SixDofSpringJointDesc, Transform,
 };
 #[cfg(all(feature = "native", feature = "pmx-format"))]
 pub use pmx::{

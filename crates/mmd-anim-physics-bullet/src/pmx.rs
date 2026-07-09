@@ -42,6 +42,14 @@ impl PmxBulletWorld {
         &mut self,
         bone_world_transforms: &[Transform],
     ) -> Result<usize, BulletError> {
+        self.feed_kinematic_rigidbodies_with_options(bone_world_transforms, true)
+    }
+
+    pub fn feed_kinematic_rigidbodies_with_options(
+        &mut self,
+        bone_world_transforms: &[Transform],
+        include_dynamic_bone: bool,
+    ) -> Result<usize, BulletError> {
         let mut fed = 0;
         for (handle, binding) in self
             .rigidbody_handles
@@ -49,7 +57,7 @@ impl PmxBulletWorld {
             .copied()
             .zip(self.rigidbody_bindings.iter())
         {
-            if !binding.mode.follows_bone_before_step() {
+            if !binding.mode.follows_bone_before_step(include_dynamic_bone) {
                 continue;
             }
             let Some(bone_index) = binding.bone_index else {
@@ -64,6 +72,31 @@ impl PmxBulletWorld {
             fed += 1;
         }
         Ok(fed)
+    }
+
+    pub fn seed_rigidbodies_from_bones(
+        &mut self,
+        bone_world_transforms: &[Transform],
+    ) -> Result<usize, BulletError> {
+        let mut seeded = 0;
+        for (handle, binding) in self
+            .rigidbody_handles
+            .iter()
+            .copied()
+            .zip(self.rigidbody_bindings.iter())
+        {
+            let Some(bone_index) = binding.bone_index else {
+                continue;
+            };
+            let Some(transform) = bone_world_transforms.get(bone_index).copied() else {
+                continue;
+            };
+            let body_world = transform.to_mat4() * binding.body_from_bone.to_mat4();
+            self.world
+                .set_rigidbody_transform(handle, Transform::from_mat4(body_world))?;
+            seeded += 1;
+        }
+        Ok(seeded)
     }
 
     pub fn readback_bone_world_transforms(
@@ -104,8 +137,8 @@ pub enum PmxRigidBodyMode {
 }
 
 impl PmxRigidBodyMode {
-    pub fn follows_bone_before_step(self) -> bool {
-        matches!(self, Self::Static | Self::DynamicBone)
+    pub fn follows_bone_before_step(self, include_dynamic_bone: bool) -> bool {
+        matches!(self, Self::Static) || (include_dynamic_bone && matches!(self, Self::DynamicBone))
     }
 
     pub fn writes_back_to_bone(self) -> bool {
@@ -475,6 +508,62 @@ mod tests {
         assert!((built.rigidbody_bindings[0].body_from_bone.position[1] + 1.0).abs() < 1.0e-4);
         assert!((body.position[1] - 19.0).abs() < 1.0e-4);
         assert!((built.rigidbody_bindings[0].bone_from_body.position[1] - 1.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn feed_options_can_skip_dynamic_bone_bodies() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [{"name": "root", "position": [0.0, 5.0, 0.0]}],
+            "rigidBodies": [
+                {
+                    "name": "dynamicBoneBody",
+                    "boneIndex": 0,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 5.0, 0.0],
+                    "mass": 1.0,
+                    "mode": "dynamicBone"
+                }
+            ]
+        }))
+        .unwrap();
+        let positions_xyz = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normals_xyz = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let uvs_xy = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let indices = [0, 1, 2];
+        let model = build_pmx_model_from_parts(PmxPartsInput {
+            descriptor,
+            positions_xyz: &positions_xyz,
+            normals_xyz: &normals_xyz,
+            uvs_xy: &uvs_xy,
+            indices: &indices,
+            skin_indices: &[],
+            skin_weights: &[],
+            edge_scale: &[],
+        })
+        .unwrap();
+
+        let mut built = build_bullet_world_from_pmx(&model).unwrap();
+        let moved_bone = [Transform::from_translation([0.0, 20.0, 0.0])];
+        let skipped = built
+            .feed_kinematic_rigidbodies_with_options(&moved_bone, false)
+            .unwrap();
+        let skipped_body = built
+            .world
+            .rigidbody_transform(built.rigidbody_handles[0])
+            .unwrap();
+        let included = built
+            .feed_kinematic_rigidbodies_with_options(&moved_bone, true)
+            .unwrap();
+        let included_body = built
+            .world
+            .rigidbody_transform(built.rigidbody_handles[0])
+            .unwrap();
+
+        assert_eq!(skipped, 0);
+        assert!((skipped_body.position[1] - 5.0).abs() < 1.0e-4);
+        assert_eq!(included, 1);
+        assert!((included_body.position[1] - 20.0).abs() < 1.0e-4);
     }
 
     #[test]

@@ -50,6 +50,15 @@ typedef struct mmd_anim_bullet_6dof_spring_joint_desc {
     float spring_rotation_factor[3];
 } mmd_anim_bullet_6dof_spring_joint_desc;
 
+typedef struct mmd_anim_bullet_contact_point {
+    int32_t rigidbody_index_a;
+    int32_t rigidbody_index_b;
+    float distance;
+    float position_world_on_a[3];
+    float position_world_on_b[3];
+    float normal_world_on_b[3];
+} mmd_anim_bullet_contact_point;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -94,6 +103,12 @@ mmd_anim_bullet_world_add_6dof_spring_joint(
     int32_t *out_index);
 MMD_ANIM_BULLET_API int32_t
 mmd_anim_bullet_world_get_constraint_count(const mmd_anim_bullet_world *world);
+MMD_ANIM_BULLET_API mmd_anim_bullet_status
+mmd_anim_bullet_world_collect_contacts(
+    const mmd_anim_bullet_world *world,
+    mmd_anim_bullet_contact_point *out_contacts,
+    int32_t capacity,
+    int32_t *out_count);
 
 #ifdef __cplusplus
 }

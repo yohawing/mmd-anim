@@ -2522,6 +2522,45 @@ mod physics_penetration_geometry_tests {
     }
 
     #[test]
+    fn sphere_capsule_gap_uses_segment_distance() {
+        let gap = collision_proxy_gap(
+            &CollisionProxy::Sphere {
+                center: glam::Vec3::new(3.0, 0.0, 0.0),
+                radius: 0.5,
+            },
+            &CollisionProxy::Capsule {
+                a: glam::Vec3::new(0.0, -1.0, 0.0),
+                b: glam::Vec3::new(0.0, 1.0, 0.0),
+                radius: 0.25,
+            },
+        );
+
+        assert_eq!(gap.metric, "sphere-capsule");
+        assert!((gap.distance - 3.0).abs() < 1.0e-6, "gap={gap:?}");
+        assert!((gap.gap - 2.25).abs() < 1.0e-6, "gap={gap:?}");
+    }
+
+    #[test]
+    fn capsule_capsule_gap_reports_overlap() {
+        let gap = collision_proxy_gap(
+            &CollisionProxy::Capsule {
+                a: glam::Vec3::new(0.0, -1.0, 0.0),
+                b: glam::Vec3::new(0.0, 1.0, 0.0),
+                radius: 0.5,
+            },
+            &CollisionProxy::Capsule {
+                a: glam::Vec3::new(0.75, -1.0, 0.0),
+                b: glam::Vec3::new(0.75, 1.0, 0.0),
+                radius: 0.5,
+            },
+        );
+
+        assert_eq!(gap.metric, "capsule-capsule");
+        assert!((gap.distance - 0.75).abs() < 1.0e-6, "gap={gap:?}");
+        assert!((gap.gap + 0.25).abs() < 1.0e-6, "gap={gap:?}");
+    }
+
+    #[test]
     fn obb_obb_sat_gap_reports_positive_separation() {
         let axes = [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z];
         let gap = obb_obb_sat_gap(

@@ -43,6 +43,24 @@ def test_physics_numeric_summary_accepts_motion_metric_aliases():
     assert compare_reports(baseline, current, _physics_tolerances()) == []
 
 
+def test_physics_numeric_per_case_accepts_motion_metric_aliases():
+    baseline = _physics_report()
+    current = _physics_report(
+        cases=[
+            {
+                "motionTranslationRmsError": 0.009,
+                "motionTranslationMaxError": 0.019,
+                "motionRotationRmsAngleRad": 0.0009,
+                "motionRotationMaxAngleRad": 0.0019,
+            }
+        ]
+    )
+    for legacy_field in ("translationRms", "translationMax", "rotationRmsRad", "rotationMaxRad"):
+        del current["perCase"][0][legacy_field]
+
+    assert compare_reports(baseline, current, _physics_tolerances()) == []
+
+
 def test_physics_numeric_per_case_translation_rms_over_threshold_fails():
     baseline = _physics_report()
     current = _physics_report({"translationRms": 0.009}, [{"translationRms": 0.011}])

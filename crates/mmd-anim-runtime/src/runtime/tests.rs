@@ -1332,10 +1332,15 @@ fn physics_mode_defaults_off_and_resets_tick_when_disabled() {
 
     assert_eq!(runtime.physics_mode(), PhysicsMode::Off);
     assert!(!runtime.physics_mode().steps_backend());
+    assert!(PhysicsMode::Trace.steps_backend());
+    assert!(PhysicsMode::Live.steps_backend());
 
-    runtime.set_physics_mode(PhysicsMode::Live);
+    runtime.set_physics_mode(PhysicsMode::Trace);
     let stats = runtime.advance_physics_tick_clock(1.0 / 240.0);
     assert_eq!(stats.substeps, 0);
+    assert!(runtime.physics_accumulator_seconds() > 0.0);
+
+    runtime.set_physics_mode(PhysicsMode::Live);
     assert!(runtime.physics_accumulator_seconds() > 0.0);
 
     runtime.set_physics_mode(PhysicsMode::Off);

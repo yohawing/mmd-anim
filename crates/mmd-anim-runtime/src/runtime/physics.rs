@@ -5,9 +5,17 @@ use crate::{BoneIndex, ik_primitive::constrain_rotation_to_axis};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PhysicsMode {
+    /// Physics is disabled. Switching to this mode resets the accumulated
+    /// physics tick state.
     #[default]
     Off,
+    /// Host-synchronized physics. The host is expected to evaluate animation
+    /// frames before stepping physics, so random seeks should reset/reseed the
+    /// backend before continuing.
     Trace,
+    /// Wall-clock physics. The host may keep stepping physics while animation
+    /// sampling is paused, using the latest evaluated pose as the kinematic
+    /// target.
     Live,
 }
 

@@ -41,6 +41,8 @@ Example local config:
     "penetrating_pair_count_tolerance": 0,
     "severe_pair_count_tolerance": 0,
     "penetrating_contact_count_tolerance": 0,
+    "rigid_body_position_tolerance": 0.0,
+    "rigid_body_rotation_tolerance": 0.0,
     "mismatch_count_tolerance": 0,
     "missing_tolerance": 0,
     "import_error_tolerance": 0
@@ -78,6 +80,13 @@ gate is `max_allowed_bullet_penetration_depth: 0.0` and
 overlaps can remain baseline-not-worse. Unconnected shape-proxy penetration
 counts are compared with zero tolerance so a new unconnected overlap fails even
 when total shape-proxy pair tolerances are relaxed.
+
+If a penetration baseline includes `rigidBodies`, the gate also fixes each
+baselined rigid body's identity (`index`, `name`, `boneIndex`, `mode`, `shape`)
+and compares `positionWorld` / `rotationXyzw` component deltas using
+`rigid_body_position_tolerance` and `rigid_body_rotation_tolerance`. Legacy
+baselines without `rigidBodies` keep working; extra current rigid-body dumps are
+ignored until a new body-transform baseline is accepted.
 
 To make `golden-gate baseline` / `golden-gate gate` produce a penetration
 diagnostic report directly, opt in with `physics_penetration` and identify the

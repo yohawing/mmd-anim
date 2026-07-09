@@ -315,6 +315,87 @@ def test_physics_penetration_report_requires_stable_summary_metrics():
     assert "summary.severePairCount" in _failure_paths(failures)
 
 
+def test_physics_penetration_rigid_body_transform_regression_fails_when_baselined():
+    baseline = _physics_penetration_report(
+        rigid_bodies=[
+            {
+                "index": 234,
+                "name": "左HA20",
+                "boneIndex": 358,
+                "mode": "dynamic",
+                "shape": "capsule",
+                "positionWorld": [5.0, 19.0, 1.0],
+                "rotationXyzw": [0.5, -0.4, -0.1, 0.7],
+            }
+        ]
+    )
+    current = _physics_penetration_report(
+        rigid_bodies=[
+            {
+                "index": 234,
+                "name": "左HA20",
+                "boneIndex": 358,
+                "mode": "dynamic",
+                "shape": "capsule",
+                "positionWorld": [5.0, 19.25, 1.0],
+                "rotationXyzw": [0.5, -0.4, -0.1, 0.72],
+            }
+        ]
+    )
+
+    failures = compare_reports(
+        baseline,
+        current,
+        Tolerances(
+            rigid_body_position_tolerance=0.01,
+            rigid_body_rotation_tolerance=0.001,
+        ),
+    )
+
+    assert "rigidBodies.#234.positionWorld[1]" in _failure_paths(failures)
+    assert "rigidBodies.#234.rotationXyzw[3]" in _failure_paths(failures)
+
+
+def test_physics_penetration_rigid_body_missing_current_fails_when_baselined():
+    baseline = _physics_penetration_report(
+        rigid_bodies=[
+            {
+                "index": 234,
+                "name": "左HA20",
+                "boneIndex": 358,
+                "mode": "dynamic",
+                "shape": "capsule",
+                "positionWorld": [5.0, 19.0, 1.0],
+                "rotationXyzw": [0.5, -0.4, -0.1, 0.7],
+            }
+        ]
+    )
+    current = _physics_penetration_report(rigid_bodies=[])
+
+    failures = compare_reports(baseline, current, Tolerances())
+
+    assert "rigidBodies.#234" in _failure_paths(failures)
+
+
+def test_physics_penetration_extra_current_rigid_body_is_ignored_for_legacy_baseline():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report(
+        rigid_bodies=[
+            {
+                "index": 234,
+                "name": "左HA20",
+                "boneIndex": 358,
+                "mode": "dynamic",
+                "shape": "capsule",
+                "positionWorld": [5.0, 19.0, 1.0],
+                "rotationXyzw": [0.5, -0.4, -0.1, 0.7],
+            }
+        ]
+    )
+
+    assert compare_reports(baseline, current, Tolerances()) == []
+
+
 def test_numeric_gate_roundtrip_with_local_assets(tmp_path: Path):
     config = _local_config_or_skip()
     config = replace(config, baseline=tmp_path / "baseline.json", report_dir=tmp_path / "reports")
@@ -378,7 +459,7 @@ def _physics_tolerances():
     )
 
 
-def _physics_penetration_report(summary=None, pairs=None):
+def _physics_penetration_report(summary=None, pairs=None, rigid_bodies=None):
     return {
         "caseName": "rem-tail-left",
         "oracleFrame": 119.0,
@@ -401,6 +482,7 @@ def _physics_penetration_report(summary=None, pairs=None):
             "maxBulletPenetrationDepth": 0.02,
             **(summary or {}),
         },
+        "rigidBodies": rigid_bodies or [],
         "pairs": pairs or [],
         "contacts": [],
     }

@@ -93,6 +93,8 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--penetrating-pair-count-tolerance", type=int, default=None)
     parser.add_argument("--severe-pair-count-tolerance", type=int, default=None)
     parser.add_argument("--penetrating-contact-count-tolerance", type=int, default=None)
+    parser.add_argument("--rigid-body-position-tolerance", type=float, default=None)
+    parser.add_argument("--rigid-body-rotation-tolerance", type=float, default=None)
     parser.add_argument("--mismatch-count-tolerance", type=int, default=None)
     parser.add_argument("--missing-tolerance", type=int, default=None)
     parser.add_argument("--import-error-tolerance", type=int, default=None)

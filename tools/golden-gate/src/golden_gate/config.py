@@ -23,6 +23,8 @@ class Tolerances:
     penetrating_pair_count_tolerance: int = 0
     severe_pair_count_tolerance: int = 0
     penetrating_contact_count_tolerance: int = 0
+    rigid_body_position_tolerance: float = 0.0
+    rigid_body_rotation_tolerance: float = 0.0
     mismatch_count_tolerance: int = 0
     missing_tolerance: int = 0
     import_error_tolerance: int = 0
@@ -207,6 +209,20 @@ def resolve_config(args: Any) -> GoldenGateConfig:
             "MMD_ANIM_GOLDEN_PENETRATING_CONTACT_COUNT_TOLERANCE",
             raw_config,
             0,
+        ),
+        rigid_body_position_tolerance=_float_value(
+            "rigid_body_position_tolerance",
+            getattr(args, "rigid_body_position_tolerance", None),
+            "MMD_ANIM_GOLDEN_RIGID_BODY_POSITION_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        rigid_body_rotation_tolerance=_float_value(
+            "rigid_body_rotation_tolerance",
+            getattr(args, "rigid_body_rotation_tolerance", None),
+            "MMD_ANIM_GOLDEN_RIGID_BODY_ROTATION_TOLERANCE",
+            raw_config,
+            0.0,
         ),
         mismatch_count_tolerance=_int_value(
             "mismatch_count_tolerance",

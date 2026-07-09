@@ -99,6 +99,7 @@ def compare_reports(
             options,
             failures,
         )
+        _compare_penetration_rigid_bodies(baseline, current, tolerances, failures)
     _compare_summary(baseline_summary, current_summary, _has_physics_cases(current), tolerances, options, failures)
     _compare_cases(
         _case_map(baseline),
@@ -242,6 +243,64 @@ def _compare_penetration_summary(
         options.max_allowed_penetrating_contact_count,
         failures,
     )
+
+
+def _compare_penetration_rigid_bodies(
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+    tolerances: Tolerances,
+    failures: list[RegressionFailure],
+) -> None:
+    baseline_bodies = _rigid_body_map(baseline.get("rigidBodies"))
+    if not baseline_bodies:
+        return
+    current_bodies = _rigid_body_map(current.get("rigidBodies"))
+    for key, baseline_body in baseline_bodies.items():
+        prefix = f"rigidBodies.{key}"
+        current_body = current_bodies.get(key)
+        if current_body is None:
+            failures.append(
+                RegressionFailure(
+                    path=prefix,
+                    check="requiredRigidBody",
+                    baseline="present",
+                    current="missing",
+                    tolerance=None,
+                    message=f"{prefix} is missing from current report",
+                )
+            )
+            continue
+        for field in ("index", "name", "boneIndex", "mode", "shape"):
+            if current_body.get(field) != baseline_body.get(field):
+                failures.append(
+                    RegressionFailure(
+                        path=f"{prefix}.{field}",
+                        check="fixedIdentity",
+                        baseline=baseline_body.get(field),
+                        current=current_body.get(field),
+                        tolerance=None,
+                        message=(
+                            f"{prefix}.{field} changed: current {current_body.get(field)!r} "
+                            f"!= baseline {baseline_body.get(field)!r}"
+                        ),
+                    )
+                )
+        _compare_vector_components(
+            baseline_body,
+            current_body,
+            prefix,
+            "positionWorld",
+            tolerances.rigid_body_position_tolerance,
+            failures,
+        )
+        _compare_vector_components(
+            baseline_body,
+            current_body,
+            prefix,
+            "rotationXyzw",
+            tolerances.rigid_body_rotation_tolerance,
+            failures,
+        )
 
 
 def _penetration_summary_with_inferred_baseline_counts(
@@ -754,6 +813,45 @@ def _compare_not_above_limit(
         )
 
 
+def _compare_vector_components(
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+    prefix: str,
+    field: str,
+    tolerance: float,
+    failures: list[RegressionFailure],
+) -> None:
+    baseline_values = _numeric_list(baseline, field)
+    current_values = _numeric_list(current, field)
+    if len(current_values) != len(baseline_values):
+        failures.append(
+            RegressionFailure(
+                path=f"{prefix}.{field}",
+                check="fixedVectorLength",
+                baseline=len(baseline_values),
+                current=len(current_values),
+                tolerance=None,
+                message=f"{prefix}.{field} length changed",
+            )
+        )
+        return
+    for index, (baseline_value, current_value) in enumerate(zip(baseline_values, current_values)):
+        if abs(current_value - baseline_value) > tolerance:
+            failures.append(
+                RegressionFailure(
+                    path=f"{prefix}.{field}[{index}]",
+                    check="componentDelta",
+                    baseline=baseline_value,
+                    current=current_value,
+                    tolerance=tolerance,
+                    message=(
+                        f"{prefix}.{field}[{index}] changed: |current {current_value} - "
+                        f"baseline {baseline_value}| > tolerance {tolerance}"
+                    ),
+                )
+            )
+
+
 def _compare_set_equal(
     baseline: dict[str, Any],
     current: dict[str, Any],
@@ -800,6 +898,24 @@ def _case_map(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return mapped
 
 
+def _rigid_body_map(value: Any) -> dict[str, dict[str, Any]]:
+    mapped: dict[str, dict[str, Any]] = {}
+    if not isinstance(value, list):
+        return mapped
+    for index, body in enumerate(value):
+        if not isinstance(body, dict):
+            continue
+        body_index = body.get("index")
+        name = body.get("name")
+        if isinstance(body_index, int):
+            mapped[f"#{body_index}"] = body
+        elif isinstance(name, str) and name:
+            mapped[name] = body
+        else:
+            mapped[f"@{index}"] = body
+    return mapped
+
+
 def _number(source: dict[str, Any], field: str, aliases: Iterable[str]) -> float:
     for key in (field, *aliases):
         value = source.get(key)
@@ -826,3 +942,17 @@ def _string_list(source: dict[str, Any], field: str, aliases: Iterable[str]) -> 
         if isinstance(value, list):
             return [item for item in value if isinstance(item, str)]
     return []
+
+
+def _numeric_list(source: dict[str, Any], field: str) -> list[float]:
+    value = source.get(field)
+    if not isinstance(value, list):
+        return []
+    values: list[float] = []
+    for item in value:
+        if isinstance(item, bool):
+            return []
+        if not isinstance(item, (int, float)):
+            return []
+        values.append(float(item))
+    return values

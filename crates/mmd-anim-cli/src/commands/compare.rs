@@ -1723,6 +1723,7 @@ struct PhysicsPenetrationPair {
     rhs_radius: f32,
     approx_gap: f32,
     metric: &'static str,
+    joint_connected: bool,
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -1763,6 +1764,9 @@ struct PhysicsPenetrationDiagnosticSummary {
     pair_count: usize,
     penetrating_pair_count: usize,
     severe_pair_count: usize,
+    joint_connected_pair_count: usize,
+    joint_connected_penetrating_pair_count: usize,
+    joint_connected_severe_pair_count: usize,
     bullet_contact_count: usize,
     penetrating_contact_count: usize,
     min_signed_distance: Option<f32>,
@@ -1845,6 +1849,15 @@ pub(crate) fn diagnose_numeric_physics_penetration(
     let contacts = collect_bullet_contacts(&parsed_pmx, &physics_evaluator, focus_bones.as_ref())?;
     let severe_count = pairs.iter().filter(|pair| pair.approx_gap < -0.05).count();
     let penetrating_count = pairs.iter().filter(|pair| pair.approx_gap < 0.0).count();
+    let joint_connected_count = pairs.iter().filter(|pair| pair.joint_connected).count();
+    let joint_connected_penetrating_count = pairs
+        .iter()
+        .filter(|pair| pair.joint_connected && pair.approx_gap < 0.0)
+        .count();
+    let joint_connected_severe_count = pairs
+        .iter()
+        .filter(|pair| pair.joint_connected && pair.approx_gap < -0.05)
+        .count();
     let penetrating_contacts = contacts
         .iter()
         .filter(|contact| contact.distance < 0.0)
@@ -1872,6 +1885,9 @@ pub(crate) fn diagnose_numeric_physics_penetration(
                 pair_count: pairs.len(),
                 penetrating_pair_count: penetrating_count,
                 severe_pair_count: severe_count,
+                joint_connected_pair_count: joint_connected_count,
+                joint_connected_penetrating_pair_count: joint_connected_penetrating_count,
+                joint_connected_severe_pair_count: joint_connected_severe_count,
                 bullet_contact_count: contacts.len(),
                 penetrating_contact_count: penetrating_contacts,
                 min_signed_distance,
@@ -1986,6 +2002,7 @@ fn collect_approx_penetration_pairs(
     }
 
     let mut pairs = Vec::new();
+    let joint_connected_pairs = joint_connected_rigidbody_pairs(parsed_pmx);
     for lhs_index in 0..parsed_pmx.rigid_bodies.len() {
         for rhs_index in lhs_index + 1..parsed_pmx.rigid_bodies.len() {
             let lhs_body = &parsed_pmx.rigid_bodies[lhs_index];
@@ -2024,11 +2041,31 @@ fn collect_approx_penetration_pairs(
                 rhs_radius,
                 approx_gap,
                 metric: proxy_gap.metric,
+                joint_connected: joint_connected_pairs.contains(&(lhs_index, rhs_index)),
             });
         }
     }
     pairs.sort_by(|lhs, rhs| lhs.approx_gap.total_cmp(&rhs.approx_gap));
     Ok(pairs)
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn joint_connected_rigidbody_pairs(
+    parsed_pmx: &mmd_anim_format::PmxParsedModel,
+) -> HashSet<(usize, usize)> {
+    let rigidbody_count = parsed_pmx.rigid_bodies.len();
+    parsed_pmx
+        .joints
+        .iter()
+        .filter_map(|joint| {
+            let lhs = usize::try_from(joint.rigid_body_index_a).ok()?;
+            let rhs = usize::try_from(joint.rigid_body_index_b).ok()?;
+            if lhs >= rigidbody_count || rhs >= rigidbody_count || lhs == rhs {
+                return None;
+            }
+            Some(if lhs < rhs { (lhs, rhs) } else { (rhs, lhs) })
+        })
+        .collect()
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -2472,6 +2509,9 @@ mod physics_penetration_geometry_tests {
                 pair_count: 1,
                 penetrating_pair_count: 0,
                 severe_pair_count: 0,
+                joint_connected_pair_count: 1,
+                joint_connected_penetrating_pair_count: 0,
+                joint_connected_severe_pair_count: 0,
                 bullet_contact_count: 1,
                 penetrating_contact_count: 0,
                 min_signed_distance: Some(0.25),
@@ -2491,6 +2531,7 @@ mod physics_penetration_geometry_tests {
                 rhs_radius: 1.0,
                 approx_gap: 1.0,
                 metric: "sphere-sphere",
+                joint_connected: true,
             }],
             contacts: vec![PhysicsContactDiagnostic {
                 lhs_index: 1,
@@ -2511,8 +2552,10 @@ mod physics_penetration_geometry_tests {
         assert_eq!(value["caseName"], "case-a");
         assert_eq!(value["oracleFrame"], 119.0);
         assert_eq!(value["summary"]["maxPenetrationDepth"], 0.0);
+        assert_eq!(value["summary"]["jointConnectedPairCount"], 1);
         assert_eq!(value["summary"]["minBulletContactDistance"], 0.125);
         assert_eq!(value["pairs"][0]["approxGap"], 1.0);
+        assert_eq!(value["pairs"][0]["jointConnected"], true);
         assert_eq!(
             value["contacts"][0]["positionWorldOnA"],
             serde_json::json!([1.0, 2.0, 3.0])

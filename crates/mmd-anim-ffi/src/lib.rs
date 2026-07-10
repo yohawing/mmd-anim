@@ -181,6 +181,18 @@ pub struct MmdRuntimeFfiRigBone {
     pub fixed_axis_xyz: [f32; 3],
 }
 
+/// Additive v2 per-bone local-axis descriptor for primitive IK-chain creation.
+///
+/// Existing `MmdRuntimeFfiRigBone` layout is unchanged. Hosts that need PMX
+/// localAxis angle-limit frames pass a parallel array of these into
+/// `mmd_runtime_ik_chain_create_v2`.
+#[repr(C)]
+pub struct MmdRuntimeFfiRigBoneLocalAxisV2 {
+    pub has_local_axis: bool,
+    pub local_axis_x_xyz: [f32; 3],
+    pub local_axis_z_xyz: [f32; 3],
+}
+
 #[repr(C)]
 pub struct MmdRuntimeFfiIkSolveStats {
     pub executed_iterations: u32,
@@ -391,6 +403,43 @@ pub unsafe extern "C" fn mmd_runtime_ik_chain_create(
     iteration_count: u32,
     limit_angle: f32,
 ) -> *mut MmdRuntimeIkChain {
+    unsafe {
+        mmd_runtime_ik_chain_create_v2(
+            bones,
+            bone_count,
+            ptr::null(),
+            target_bone_slot,
+            links,
+            link_count,
+            iteration_count,
+            limit_angle,
+        )
+    }
+}
+
+/// Creates a stateful per-chain IK primitive solver with optional local-axis
+/// bases (additive v2 entry point).
+///
+/// When `local_axes` is null, behavior matches `mmd_runtime_ik_chain_create`
+/// (no local-axis angle-limit frames). When non-null, it must point to
+/// `bone_count` readable entries; degenerate axes are ignored, while non-finite
+/// axes cause this function to return null.
+///
+/// # Safety
+///
+/// Same pointer requirements as `mmd_runtime_ik_chain_create`. `local_axes`,
+/// when non-null, must be readable for `bone_count` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_ik_chain_create_v2(
+    bones: *const MmdRuntimeFfiRigBone,
+    bone_count: usize,
+    local_axes: *const MmdRuntimeFfiRigBoneLocalAxisV2,
+    target_bone_slot: u32,
+    links: *const MmdRuntimeFfiRigIkLink,
+    link_count: usize,
+    iteration_count: u32,
+    limit_angle: f32,
+) -> *mut MmdRuntimeIkChain {
     ffi_guard(ptr::null_mut(), || {
         let definition = unsafe {
             build_ik_chain_definition(
@@ -406,7 +455,11 @@ pub unsafe extern "C" fn mmd_runtime_ik_chain_create(
         let Some(definition) = definition else {
             return ptr::null_mut();
         };
-        let solver = IkChainSolver::new(definition);
+        let local_axis_bases = unsafe { build_ik_chain_local_axis_bases(local_axes, bone_count) };
+        let Some(local_axis_bases) = local_axis_bases else {
+            return ptr::null_mut();
+        };
+        let solver = IkChainSolver::new_with_local_axis_bases(definition, local_axis_bases);
         Box::into_raw(Box::new(MmdRuntimeIkChain {
             solver,
             bone_count,
@@ -419,7 +472,8 @@ pub unsafe extern "C" fn mmd_runtime_ik_chain_create(
 ///
 /// # Safety
 ///
-/// `chain` must be null or a pointer returned by `mmd_runtime_ik_chain_create`.
+/// `chain` must be null or a pointer returned by `mmd_runtime_ik_chain_create`
+/// or `mmd_runtime_ik_chain_create_v2`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_ik_chain_free(chain: *mut MmdRuntimeIkChain) {
     ffi_guard_void(|| {
@@ -4099,6 +4153,40 @@ unsafe fn build_ik_chain_definition(
         iteration_count,
         limit_angle,
     })
+}
+
+unsafe fn build_ik_chain_local_axis_bases(
+    local_axes: *const MmdRuntimeFfiRigBoneLocalAxisV2,
+    bone_count: usize,
+) -> Option<Vec<Option<glam::Quat>>> {
+    if local_axes.is_null() {
+        return Some(vec![None; bone_count]);
+    }
+    let local_axes = unsafe { checked_slice(local_axes, bone_count) }?;
+    let mut bases = Vec::with_capacity(bone_count);
+    for axis in local_axes {
+        if !axis.has_local_axis {
+            bases.push(None);
+            continue;
+        }
+        if !all_finite(&axis.local_axis_x_xyz) || !all_finite(&axis.local_axis_z_xyz) {
+            return None;
+        }
+        let x = glam::Vec3A::new(
+            axis.local_axis_x_xyz[0],
+            axis.local_axis_x_xyz[1],
+            axis.local_axis_x_xyz[2],
+        );
+        let z = glam::Vec3A::new(
+            axis.local_axis_z_xyz[0],
+            axis.local_axis_z_xyz[1],
+            axis.local_axis_z_xyz[2],
+        );
+        // Degenerate axes are treated as "no local axis" rather than hard fail,
+        // matching ModelArena::with_local_axes defensive behavior.
+        bases.push(mmd_anim_runtime::LocalAxis::new(x, z).basis_quat());
+    }
+    Some(bases)
 }
 
 fn checked_range<T>(slice: &[T], offset: usize, count: usize) -> Option<&[T]> {

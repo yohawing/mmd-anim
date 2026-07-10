@@ -255,6 +255,205 @@ fn ik_chain_lifecycle_solve_converges_and_uses_column_major_parent_matrix() {
 }
 
 #[test]
+fn ik_chain_create_v2_null_local_axes_matches_v1() {
+    let bones = [
+        MmdRuntimeFfiRigBone {
+            parent_slot: -1,
+            rest_position_xyz: [0.0, 0.0, 0.0],
+            flags: 0,
+            fixed_axis_xyz: [0.0, 0.0, 0.0],
+        },
+        MmdRuntimeFfiRigBone {
+            parent_slot: 0,
+            rest_position_xyz: [1.0, 0.0, 0.0],
+            flags: 0,
+            fixed_axis_xyz: [0.0, 0.0, 0.0],
+        },
+    ];
+    let links = [MmdRuntimeFfiRigIkLink {
+        bone_slot: 0,
+        has_angle_limit: false,
+        angle_limit_min_xyz: [0.0, 0.0, 0.0],
+        angle_limit_max_xyz: [0.0, 0.0, 0.0],
+    }];
+    let v1 = unsafe {
+        mmd_runtime_ik_chain_create(
+            bones.as_ptr(),
+            bones.len(),
+            1,
+            links.as_ptr(),
+            links.len(),
+            4,
+            0.0,
+        )
+    };
+    let v2 = unsafe {
+        mmd_runtime_ik_chain_create_v2(
+            bones.as_ptr(),
+            bones.len(),
+            ptr::null(),
+            1,
+            links.as_ptr(),
+            links.len(),
+            4,
+            0.0,
+        )
+    };
+    assert!(!v1.is_null());
+    assert!(!v2.is_null());
+
+    let local_rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let goal = [0.0, 1.0, 0.0];
+    let mut out_v1 = [0.0; 4];
+    let mut out_v2 = [0.0; 4];
+    assert!(unsafe {
+        mmd_runtime_ik_chain_solve(
+            v1,
+            ptr::null(),
+            ptr::null(),
+            local_rotations.as_ptr(),
+            goal.as_ptr(),
+            0.0,
+            0,
+            out_v1.as_mut_ptr(),
+            out_v1.len(),
+            ptr::null_mut(),
+        )
+    });
+    assert!(unsafe {
+        mmd_runtime_ik_chain_solve(
+            v2,
+            ptr::null(),
+            ptr::null(),
+            local_rotations.as_ptr(),
+            goal.as_ptr(),
+            0.0,
+            0,
+            out_v2.as_mut_ptr(),
+            out_v2.len(),
+            ptr::null_mut(),
+        )
+    });
+    assert_slice_near(&out_v1, &out_v2, 1.0e-6);
+    unsafe {
+        mmd_runtime_ik_chain_free(v1);
+        mmd_runtime_ik_chain_free(v2);
+    }
+}
+
+#[test]
+fn ik_chain_create_v2_local_axis_changes_limited_solve() {
+    // Pure X-axis limit in a Y-rotated local-axis frame behaves differently
+    // from unit XYZ, matching the runtime local-axis angle-limit path.
+    let bones = [
+        MmdRuntimeFfiRigBone {
+            parent_slot: -1,
+            rest_position_xyz: [0.0, 0.0, 0.0],
+            flags: 0,
+            fixed_axis_xyz: [0.0, 0.0, 0.0],
+        },
+        MmdRuntimeFfiRigBone {
+            parent_slot: 0,
+            rest_position_xyz: [1.0, 0.0, 0.0],
+            flags: 0,
+            fixed_axis_xyz: [0.0, 0.0, 0.0],
+        },
+    ];
+    let half_pi = std::f32::consts::FRAC_PI_2;
+    let links = [MmdRuntimeFfiRigIkLink {
+        bone_slot: 0,
+        has_angle_limit: true,
+        angle_limit_min_xyz: [-half_pi, 0.0, 0.0],
+        angle_limit_max_xyz: [half_pi, 0.0, 0.0],
+    }];
+    // localAxis x=(0,0,1), z=(0,1,0) rebuilds a non-identity LA frame.
+    let local_axes = [
+        MmdRuntimeFfiRigBoneLocalAxisV2 {
+            has_local_axis: true,
+            local_axis_x_xyz: [0.0, 0.0, 1.0],
+            local_axis_z_xyz: [0.0, 1.0, 0.0],
+        },
+        MmdRuntimeFfiRigBoneLocalAxisV2 {
+            has_local_axis: false,
+            local_axis_x_xyz: [0.0, 0.0, 0.0],
+            local_axis_z_xyz: [0.0, 0.0, 0.0],
+        },
+    ];
+    let unit = unsafe {
+        mmd_runtime_ik_chain_create(
+            bones.as_ptr(),
+            bones.len(),
+            1,
+            links.as_ptr(),
+            links.len(),
+            4,
+            0.0,
+        )
+    };
+    let la = unsafe {
+        mmd_runtime_ik_chain_create_v2(
+            bones.as_ptr(),
+            bones.len(),
+            local_axes.as_ptr(),
+            1,
+            links.as_ptr(),
+            links.len(),
+            4,
+            0.0,
+        )
+    };
+    assert!(!unit.is_null());
+    assert!(!la.is_null());
+
+    let local_rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let goal = [0.0, 1.0, 0.0];
+    let mut out_unit = [0.0; 4];
+    let mut out_la = [0.0; 4];
+    assert!(unsafe {
+        mmd_runtime_ik_chain_solve(
+            unit,
+            ptr::null(),
+            ptr::null(),
+            local_rotations.as_ptr(),
+            goal.as_ptr(),
+            0.0,
+            0,
+            out_unit.as_mut_ptr(),
+            out_unit.len(),
+            ptr::null_mut(),
+        )
+    });
+    assert!(unsafe {
+        mmd_runtime_ik_chain_solve(
+            la,
+            ptr::null(),
+            ptr::null(),
+            local_rotations.as_ptr(),
+            goal.as_ptr(),
+            0.0,
+            0,
+            out_la.as_mut_ptr(),
+            out_la.len(),
+            ptr::null_mut(),
+        )
+    });
+
+    let unit_q = glam::Quat::from_xyzw(out_unit[0], out_unit[1], out_unit[2], out_unit[3]);
+    let la_q = glam::Quat::from_xyzw(out_la[0], out_la[1], out_la[2], out_la[3]);
+    let unit_dir = unit_q.mul_vec3(glam::Vec3::X);
+    let la_dir = la_q.mul_vec3(glam::Vec3::X);
+    assert!(
+        (unit_dir - la_dir).length() > 0.15,
+        "v2 localAxis must change limited solve; unit={unit_dir:?} la={la_dir:?}"
+    );
+
+    unsafe {
+        mmd_runtime_ik_chain_free(unit);
+        mmd_runtime_ik_chain_free(la);
+    }
+}
+
+#[test]
 fn ik_chain_rejects_null_and_short_buffer_inputs() {
     let chain = simple_ik_chain();
     assert!(!chain.is_null());

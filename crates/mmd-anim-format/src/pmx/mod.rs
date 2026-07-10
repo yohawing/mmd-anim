@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use mmd_anim_runtime::{
     AppendTransformInit, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit,
-    IkLinkInit, IkSolverInit, ModelArena, MorphIndex, MorphInit, MorphOffsetSpan,
+    IkLinkInit, IkSolverInit, LocalAxis, ModelArena, MorphIndex, MorphInit, MorphOffsetSpan,
 };
 
 use crate::binary::{
@@ -602,11 +602,16 @@ pub struct PmxBoneImport {
     pub bone_names: Vec<String>,
 }
 
-pub fn read_bones(
+struct PmxBoneRead {
+    import: PmxBoneImport,
+    local_axes: Vec<Option<LocalAxis>>,
+}
+
+fn read_bones_with_local_axes(
     data: &[u8],
     header: &PmxHeader,
     pos: usize,
-) -> Result<(PmxBoneImport, usize), ImportError> {
+) -> Result<(PmxBoneRead, usize), ImportError> {
     let mut r = Reader { data, pos };
     let count = r.read_i32_le()?;
     if count < 0 {
@@ -616,6 +621,7 @@ pub fn read_bones(
     r.require_record_bytes(count, 1)?;
 
     let mut bones = Vec::with_capacity(count);
+    let mut local_axes = Vec::with_capacity(count);
     let mut ik_solvers = Vec::new();
     let mut append_transforms = Vec::new();
 
@@ -663,10 +669,13 @@ pub fn read_bones(
             None
         };
 
-        if flags & BONE_FLAG_LOCAL_AXIS != 0 {
-            r.read_vec3()?;
-            r.read_vec3()?;
-        }
+        let local_axis = if flags & BONE_FLAG_LOCAL_AXIS != 0 {
+            let x = r.read_vec3()?;
+            let z = r.read_vec3()?;
+            Some(LocalAxis::new(x, z))
+        } else {
+            None
+        };
 
         if flags & BONE_FLAG_EXTERNAL_PARENT != 0 {
             r.read_i32_le()?;
@@ -722,9 +731,11 @@ pub fn read_bones(
             transform_after_physics: flags & BONE_FLAG_TRANSFORM_AFTER_PHYSICS != 0,
             fixed_axis,
             // PMX fixed-axis is preserved as rig metadata. MMD-compatible pose evaluation
-            // does not project ordinary VMD/local rotations onto this axis.
+            // does not project ordinary VMD/local rotations onto this axis; the runtime IK
+            // solver still uses fixed_axis to constrain the CCD rotation axis only.
             enforce_fixed_axis: false,
         });
+        local_axes.push(local_axis);
     }
 
     for bone in bones.iter_mut() {
@@ -736,15 +747,27 @@ pub fn read_bones(
     }
 
     Ok((
-        PmxBoneImport {
-            bones,
-            ik_solvers,
-            append_transforms,
-            bone_name_bytes,
-            bone_names,
+        PmxBoneRead {
+            import: PmxBoneImport {
+                bones,
+                ik_solvers,
+                append_transforms,
+                bone_name_bytes,
+                bone_names,
+            },
+            local_axes,
         },
         r.pos,
     ))
+}
+
+pub fn read_bones(
+    data: &[u8],
+    header: &PmxHeader,
+    pos: usize,
+) -> Result<(PmxBoneImport, usize), ImportError> {
+    let (bone_read, pos) = read_bones_with_local_axes(data, header, pos)?;
+    Ok((bone_read.import, pos))
 }
 
 pub fn import_pmx_model(data: &[u8]) -> Result<PmxBoneImport, ImportError> {
@@ -4599,7 +4622,11 @@ pub fn import_pmx_runtime(data: &[u8]) -> Result<PmxRuntimeImport, ImportError> 
     let pos = skip_faces(data, header.vertex_index_size, pos)?;
     let pos = skip_textures(data, header.encoding, pos)?;
     let pos = skip_materials(data, &header, pos)?;
-    let (bone_import, pos) = read_bones(data, &header, pos)?;
+    let (bone_read, pos) = read_bones_with_local_axes(data, &header, pos)?;
+    let PmxBoneRead {
+        import: bone_import,
+        local_axes,
+    } = bone_read;
     let (morph_names, morph_init, _pos) = read_morph_offsets(data, &header, pos)?;
 
     let mut bone_name_to_index = HashMap::with_capacity(bone_import.bone_name_bytes.len() * 2);
@@ -4641,7 +4668,8 @@ pub fn import_pmx_runtime(data: &[u8]) -> Result<PmxRuntimeImport, ImportError> 
         bone_import.append_transforms,
         morph_init,
     )
-    .map_err(ImportError::ModelBuildFailed)?;
+    .map_err(ImportError::ModelBuildFailed)?
+    .with_local_axes(local_axes);
 
     Ok(PmxRuntimeImport {
         model,
@@ -6519,6 +6547,54 @@ mod tests {
         let result = import_pmx_model(&buf).unwrap();
         assert_eq!(result.bones[0].fixed_axis, Some(Vec3A::Y));
         assert!(!result.bones[0].enforce_fixed_axis);
+    }
+
+    #[test]
+    fn reads_pmx_local_axis_bone_descriptor_into_runtime_init() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(1));
+
+        buf.extend_from_slice(&build_bone_name_bytes("Local"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&BONE_FLAG_LOCAL_AXIS.to_le_bytes());
+        // Tail offset (BONE_FLAG_TAIL_INDEX clear) then localAxis x/z.
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        // localAxis.x = (0, 1, 0), localAxis.z = (0, 0, 1)
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&1.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&1.0f32.to_le_bytes());
+        // Empty morph section: import_pmx_runtime stops after this section.
+        buf.extend_from_slice(&0i32.to_le_bytes());
+
+        let result = import_pmx_runtime(&buf).expect("localAxis PMX must import for runtime");
+        let model = result.model;
+        let local = model
+            .local_axis(BoneIndex(0))
+            .expect("runtime import must retain PMX localAxis");
+        assert_eq!(local.x, Vec3A::Y);
+        assert_eq!(local.z, Vec3A::Z);
+        let basis = model
+            .local_axis_basis(BoneIndex(0))
+            .expect("runtime import must precompute a localAxis basis");
+        assert!((basis.mul_vec3a(Vec3A::X) - Vec3A::Y).length() < 1.0e-5);
+        assert!((basis.mul_vec3a(Vec3A::Y) + Vec3A::X).length() < 1.0e-5);
+        assert!((basis.mul_vec3a(Vec3A::Z) - Vec3A::Z).length() < 1.0e-5);
     }
 
     #[test]

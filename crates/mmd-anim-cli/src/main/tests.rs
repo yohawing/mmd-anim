@@ -1318,12 +1318,145 @@ fn numeric_compare_json_report_is_report_only_for_missing_motion_case() {
         Some(VerifyMode::Numeric),
         None,
         false,
+        false,
         true,
         None,
         None,
     )
     .unwrap();
     assert_eq!(code, ExitCode::SUCCESS);
+
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn numeric_compare_reports_no_targets_when_focus_bones_do_not_match() {
+    let temp = unique_test_dir("compare-numeric-no-targets");
+    fs::create_dir_all(&temp).unwrap();
+    let (pmx, vmd) = runtime_batch_fixture_paths();
+    let oracle = r#"{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"test"},"frame":0.0,"models":[{"index":0,"name":"m","filename":"m.pmx","visible":true,"bones":[{"index":0,"name":"not-a-focus-bone","worldMatrix":[1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0]}],"morphs":[]}]}"#;
+    fs::write(temp.join("oracle.actual.jsonl"), oracle).unwrap();
+    fs::write(
+        temp.join("manifest.json"),
+        format!(
+            r#"{{
+                "cases": [
+                    {{
+                        "name": "no-targets",
+                        "kind": "physics-coarse",
+                        "assets": {{
+                            "model": "{}",
+                            "motion": "{}"
+                        }},
+                        "oracle": {{ "path": "oracle.actual.jsonl" }},
+                        "frames": [0],
+                        "metadata": {{ "focus": {{ "bones": ["missing-focus"] }} }},
+                        "compare": {{ "targets": ["bones"], "epsilon": 0.003 }}
+                    }}
+                ]
+            }}"#,
+            pmx.display().to_string().replace('\\', "\\\\"),
+            vmd.display().to_string().replace('\\', "\\\\")
+        ),
+    )
+    .unwrap();
+
+    let report = compare::build_numeric_compare_report(&temp.join("manifest.json"), false)
+        .unwrap()
+        .to_json();
+
+    assert_eq!(report["summary"]["motionNoTargets"], 1);
+    assert_eq!(report["summary"]["mismatchCount"], 0);
+    assert_eq!(report["perCase"][0]["status"], "no-targets");
+    assert_eq!(
+        report["perCase"][0]["physicsBackend"],
+        if cfg!(feature = "physics-bullet-native") {
+            "bullet-native"
+        } else {
+            "none"
+        }
+    );
+    assert_eq!(report["perCase"][0]["noTargets"], 1);
+    assert_eq!(report["perCase"][0]["comparedBones"], 0);
+
+    let error = compare::compare_numeric_manifest(&temp.join("manifest.json"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("motionNoTargets=1"));
+
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn numeric_compare_accepts_unity_runtime_verification_oracle_format() {
+    let temp = unique_test_dir("compare-numeric-unity-oracle");
+    fs::create_dir_all(&temp).unwrap();
+    let (pmx, vmd) = runtime_batch_fixture_paths();
+    let oracle = format!(
+        r#"{{
+        "schemaVersion": 1,
+        "unityVersion": "6000.4.8f1",
+        "caseResults": [
+            {{
+                "name": "unity-case",
+                "pmxPath": "{}",
+                "sampledFrames": [
+                    {{
+                        "frame": 0,
+                        "bones": [
+                            {{
+                                "index": 0,
+                                "name": "not-a-focus-bone",
+                                "worldMatrix": [
+                                    1.0, 0.0, 0.0, 7.0,
+                                    0.0, 1.0, 0.0, 8.0,
+                                    0.0, 0.0, 1.0, 9.0,
+                                    0.0, 0.0, 0.0, 1.0
+                                ]
+                            }}
+                        ]
+                    }}
+                ]
+            }}
+        ]
+    }}"#,
+        pmx.display().to_string().replace('\\', "\\\\")
+    );
+    fs::write(temp.join("unity-oracle.json"), oracle).unwrap();
+    fs::write(
+        temp.join("manifest.json"),
+        format!(
+            r#"{{
+                "cases": [
+                    {{
+                        "name": "unity-no-targets",
+                        "kind": "physics-coarse",
+                        "assets": {{
+                            "model": "{}",
+                            "motion": "{}"
+                        }},
+                        "oracle": {{
+                            "path": "unity-oracle.json",
+                            "format": "unity-runtime-verification"
+                        }},
+                        "frames": [0],
+                        "metadata": {{ "focus": {{ "bones": ["missing-focus"] }} }},
+                        "compare": {{ "targets": ["bones"], "epsilon": 0.003 }}
+                    }}
+                ]
+            }}"#,
+            pmx.display().to_string().replace('\\', "\\\\"),
+            vmd.display().to_string().replace('\\', "\\\\")
+        ),
+    )
+    .unwrap();
+
+    let report = compare::build_numeric_compare_report(&temp.join("manifest.json"), false)
+        .unwrap()
+        .to_json();
+
+    assert_eq!(report["perCase"][0]["status"], "no-targets");
+    assert_eq!(report["perCase"][0]["comparedBones"], 0);
 
     fs::remove_dir_all(temp).unwrap();
 }
@@ -1348,6 +1481,17 @@ fn numeric_compare_report_summary_reuses_merged_stats() {
         worst_frame: Some(30),
         worst_bone: "左足".to_owned(),
         worst_component: Some(12),
+        translation_max_error: 0.75,
+        translation_error_sum_sq: 0.25,
+        translation_error_count: 1,
+        worst_translation_frame: Some(31),
+        worst_translation_bone: "左足".to_owned(),
+        worst_translation_axis: Some(1),
+        rotation_max_angle_rad: 0.5,
+        rotation_angle_sum_sq: 0.04,
+        rotation_angle_count: 1,
+        worst_rotation_frame: Some(32),
+        worst_rotation_bone: "左足".to_owned(),
         ..compare::MotionNumericCompareStats::default()
     };
     motion.skipped_targets.insert("morphs".to_owned());
@@ -1365,7 +1509,17 @@ fn numeric_compare_report_summary_reuses_merged_stats() {
     assert_eq!(value["summary"]["comparedFrames"], 7);
     assert_eq!(value["summary"]["comparedBones"], 7);
     assert_eq!(value["summary"]["mismatchCount"], 14);
+    assert_eq!(value["summary"]["motionNoTargets"], 0);
     assert_eq!(value["summary"]["maxAbsError"], 1.25);
+    assert_eq!(value["summary"]["motionTranslationMaxError"], 0.75);
+    assert_eq!(value["summary"]["motionTranslationRmsError"], 0.5);
+    assert_eq!(value["summary"]["motionWorstTranslationFrame"], 31);
+    assert_eq!(value["summary"]["motionWorstTranslationBone"], "左足");
+    assert_eq!(value["summary"]["motionWorstTranslationAxis"], 1);
+    assert_eq!(value["summary"]["motionRotationMaxAngleRad"], 0.5);
+    assert_eq!(value["summary"]["motionRotationRmsAngleRad"], 0.2);
+    assert_eq!(value["summary"]["motionWorstRotationFrame"], 32);
+    assert_eq!(value["summary"]["motionWorstRotationBone"], "左足");
     assert_eq!(value["summary"]["cameraMaxDelta"], 0.25);
     assert_eq!(
         value["summary"]["skippedTargets"],
@@ -1439,6 +1593,24 @@ fn verify_numeric_json_rejects_diagnose() {
         Some(VerifyMode::Numeric),
         Some(vec!["case".to_owned(), "0".to_owned(), "bone".to_owned()]),
         false,
+        false,
+        true,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(numeric, ExitCode::from(2));
+}
+
+#[test]
+fn verify_numeric_json_rejects_physics_penetration_without_diagnose() {
+    let target = Path::new("manifest.json");
+    let numeric = dispatch_verify(
+        target,
+        Some(VerifyMode::Numeric),
+        None,
+        true,
+        false,
         true,
         None,
         None,
@@ -1486,6 +1658,7 @@ fn verify_camera_json_uses_numeric_compare_report() {
         Some(VerifyMode::Camera),
         None,
         false,
+        false,
         true,
         None,
         None,
@@ -1526,7 +1699,7 @@ fn verify_oracle_json_dispatch_accepts_modeless_summary() {
     )
     .unwrap();
 
-    let code = dispatch_verify(&oracle_path, None, None, false, true, None, None).unwrap();
+    let code = dispatch_verify(&oracle_path, None, None, false, false, true, None, None).unwrap();
     assert_eq!(code, ExitCode::SUCCESS);
 
     fs::remove_dir_all(temp).unwrap();
@@ -1601,6 +1774,8 @@ fn dispatch_numeric_diagnose_reports_usage_error_exit_code() {
         Path::new("manifest.json"),
         vec!["case".to_owned(), "0".to_owned(), "--bogus".to_owned()],
         None,
+        false,
+        false,
     )
     .unwrap();
     assert_eq!(exit, ExitCode::from(2));

@@ -1341,6 +1341,7 @@ pub struct PmxParsedRigidBody {
     pub english_name: String,
     pub bone_index: i32,
     pub group: u8,
+    /// PMX rigid-body collision mask, stored as a collide-with group bitmask.
     pub mask: u16,
     pub shape: String,
     #[serde(with = "json_f32::array3")]
@@ -1621,7 +1622,8 @@ pub struct PmxPartsRigidBodyDescriptor {
     pub bone_index: i32,
     #[serde(default)]
     pub group: u8,
-    #[serde(default)]
+    /// Collide-with group bitmask. Omitted masks collide with every group.
+    #[serde(default = "default_collision_mask_all")]
     pub mask: u16,
     #[serde(default = "default_pmx_parts_rigid_body_shape")]
     pub shape: String,
@@ -1779,6 +1781,10 @@ fn default_pmx_parts_rigid_body_mode() -> String {
 
 fn default_pmx_parts_joint_kind() -> String {
     "generic6dofSpring".to_owned()
+}
+
+fn default_collision_mask_all() -> u16 {
+    0xffff
 }
 
 fn default_unit_vec3() -> [f32; 3] {
@@ -6224,6 +6230,22 @@ mod tests {
         assert_eq!(reparsed.joints[0].kind, "generic6dofSpring");
         assert_eq!(reparsed.joints[0].rigid_body_index_a, 0);
         assert_eq!(reparsed.joints[0].rigid_body_index_b, -1);
+    }
+
+    #[test]
+    fn pmx_parts_rigidbody_mask_defaults_to_collide_with_all_groups() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(serde_json::json!({
+            "bones": [{ "name": "root" }],
+            "rigidBodies": [
+                {
+                    "name": "body",
+                    "boneIndex": 0
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(descriptor.rigid_bodies[0].mask, 0xffff);
     }
 
     #[test]

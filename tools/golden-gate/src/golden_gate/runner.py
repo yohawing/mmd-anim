@@ -18,7 +18,7 @@ def generate_current_report(config: GoldenGateConfig) -> tuple[dict[str, Any], P
     config = config.require_paths()
     report = run_numeric_verify(config)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    report_path = config.report_dir / f"compare-numeric-report-{timestamp}.json"
+    report_path = config.report_dir / f"{_report_stem(config)}-{timestamp}.json"
     save_report(report_path, report)
     return report, report_path
 
@@ -56,7 +56,7 @@ def run_numeric_verify(config: GoldenGateConfig) -> dict[str, Any]:
 
 def _command(config: GoldenGateConfig) -> list[str]:
     if config.mmd_anim_bin is not None:
-        return [
+        command = [
             str(config.mmd_anim_bin),
             "verify",
             str(config.manifest),
@@ -64,16 +64,33 @@ def _command(config: GoldenGateConfig) -> list[str]:
             "numeric",
             "--json",
         ]
-    return [
-        "cargo",
-        "run",
-        "-q",
-        "-p",
-        "mmd-anim-cli",
-        "--",
-        "verify",
-        str(config.manifest),
-        "--mode",
-        "numeric",
-        "--json",
-    ]
+    else:
+        command = [
+            "cargo",
+            "run",
+            "-q",
+            "-p",
+            "mmd-anim-cli",
+            "--",
+            "verify",
+            str(config.manifest),
+            "--mode",
+            "numeric",
+            "--json",
+        ]
+    if config.physics_penetration:
+        if config.diagnose_case is None or config.diagnose_frame is None:
+            raise RunnerError("physics penetration report requires diagnose_case and diagnose_frame")
+        command.extend(["--diagnose", config.diagnose_case, config.diagnose_frame])
+        if config.diagnose_bone is not None:
+            command.append(config.diagnose_bone)
+        command.append("--physics-penetration")
+        if config.diagnose_eval_frame is not None:
+            command.extend(["--eval-frame", config.diagnose_eval_frame])
+    return command
+
+
+def _report_stem(config: GoldenGateConfig) -> str:
+    if config.physics_penetration:
+        return "physics-penetration-report"
+    return "compare-numeric-report"

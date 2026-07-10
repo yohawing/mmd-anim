@@ -472,7 +472,7 @@ pub(crate) fn compute_root_motion_oracle_lag(
 
     let mut matches: Vec<GoldenRootMotionOracleLagMatch> = Vec::new();
 
-    for (_bone, entries) in by_bone.iter_mut() {
+    for entries in by_bone.values_mut() {
         // Sort by frame ascending
         entries.sort_by_key(|d| d.frame);
 

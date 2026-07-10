@@ -49,6 +49,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
+Maintainers with local GoldenOracle physics baselines should also run the local
+physics release gate before cutting a release:
+
+```powershell
+.\scripts\local-physics-release-gate.ps1
+```
+
+The physics gate uses ignored `tools/golden-gate/physics-*.local.json` configs
+and local `.ai/` baselines. It never updates baselines; use
+`tools/golden-gate` directly when accepting a new baseline.
+
 ## Used By
 
 `mmd-anim` is developed as the shared animation backend for MMD-related projects.
@@ -216,6 +227,7 @@ mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 mmd-anim convert-fbx model.pmx model.fbx --copy-diffuse-textures
 mmd-anim convert-fbx model.pmx motion.fbx --vmd motion.vmd --bones-only
 mmd-anim convert-fbx model.pmx model.fbx --readable-bone-names
+mmd-anim convert-fbx model.pmx model.fbx --write-physics-params
 ```
 
 With `--vmd`, `convert-fbx` uses runtime-baked output for bones and vertex
@@ -232,6 +244,15 @@ Use `--readable-bone-names` to opt into English PMX names, a standard MMD bone
 dictionary, and sanitized ASCII fallbacks instead.
 When enabled, the CLI also writes `<fbx-stem>.bone-map.json` with PMX bone
 indices, source names, FBX names, and name source labels.
+
+Use `--write-physics-params` to write `<fbx-stem>.physics-params.json` with
+PMX rigid-body and joint parameters as schema version 1 JSON. This is a
+sidecar for future physics bake and DCC parameter-editing workflows; it does
+not enable physics simulation in the exported FBX. PMX rigid-body
+`collision.mask` is the collide-with group mask passed to Bullet. The sidecar
+also writes `collision.collisionMask` / `collision.bulletCollisionMask` as
+explicit aliases and `collision.nonCollisionMask` as the complementary mask for
+tools that need a blocked-group view.
 
 By default, PMX diffuse texture paths are written to FBX as-is. With
 `--copy-diffuse-textures`, referenced diffuse textures are copied next to the

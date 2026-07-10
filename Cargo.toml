@@ -6,6 +6,7 @@ members = [
     "crates/mmd-anim-wasm",
     "crates/mmd-anim-cli",
     "crates/mmd-anim-format",
+    "crates/mmd-anim-physics-bullet",
 ]
 resolver = "3"
 

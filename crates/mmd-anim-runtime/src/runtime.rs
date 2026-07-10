@@ -7,6 +7,7 @@ use crate::{AnimationClip, ModelArena, PoseArena};
 
 mod ik;
 mod morph;
+mod physics;
 mod world;
 
 #[cfg(test)]
@@ -87,6 +88,8 @@ pub struct IkSolveOptions {
     pub max_iterations_cap: Option<u32>,
 }
 
+pub use physics::{PhysicsMode, PhysicsStepStats, PhysicsTickConfig};
+
 impl Default for IkSolveOptions {
     fn default() -> Self {
         Self {
@@ -111,6 +114,9 @@ pub(super) enum WorldMatrixBoneUpdateCategory {
 pub struct RuntimeInstance {
     model: Arc<ModelArena>,
     pose: PoseArena,
+    physics_mode: PhysicsMode,
+    physics_tick_config: PhysicsTickConfig,
+    physics_accumulator_seconds: f32,
     ik_scratch: IkScratch,
     morph_scratch: MorphScratch,
     ik_stats: Vec<IkSolverRuntimeStats>,
@@ -152,6 +158,9 @@ impl RuntimeInstance {
         Self {
             model,
             pose,
+            physics_mode: PhysicsMode::default(),
+            physics_tick_config: PhysicsTickConfig::default(),
+            physics_accumulator_seconds: 0.0,
             ik_scratch,
             morph_scratch,
             ik_stats,
@@ -207,41 +216,96 @@ impl RuntimeInstance {
     }
 
     fn evaluate_current_pose_ordered(&mut self, options: IkSolveOptions) {
+        self.begin_current_pose_evaluation();
+        let mut earliest_after_physics_eval_order_position = None;
+        self.evaluate_current_pose_phase(
+            false,
+            options,
+            &mut earliest_after_physics_eval_order_position,
+        );
+        self.evaluate_current_pose_phase(
+            true,
+            options,
+            &mut earliest_after_physics_eval_order_position,
+        );
+        self.finish_current_pose_evaluation(earliest_after_physics_eval_order_position);
+    }
+
+    pub fn evaluate_current_pose_before_physics(&mut self) {
+        self.evaluate_current_pose_before_physics_with_ik_options(IkSolveOptions::default());
+    }
+
+    pub fn evaluate_current_pose_before_physics_with_ik_options(
+        &mut self,
+        options: IkSolveOptions,
+    ) {
+        self.pose.reset_ik_rotations();
+        self.begin_current_pose_evaluation();
+        let mut earliest_after_physics_eval_order_position = None;
+        self.evaluate_current_pose_phase(
+            false,
+            options,
+            &mut earliest_after_physics_eval_order_position,
+        );
+    }
+
+    pub fn evaluate_current_pose_after_physics(&mut self) {
+        self.evaluate_current_pose_after_physics_with_ik_options(IkSolveOptions::default());
+    }
+
+    pub fn evaluate_current_pose_after_physics_with_ik_options(&mut self, options: IkSolveOptions) {
+        let mut earliest_after_physics_eval_order_position = None;
+        self.evaluate_current_pose_phase(
+            true,
+            options,
+            &mut earliest_after_physics_eval_order_position,
+        );
+        self.finish_current_pose_evaluation(earliest_after_physics_eval_order_position);
+    }
+
+    fn begin_current_pose_evaluation(&mut self) {
         self.pose.reset_append_transforms();
         #[cfg(test)]
         self.set_world_matrix_bone_update_category(WorldMatrixBoneUpdateCategory::LeadingBookend);
         self.update_world_matrices_using_current_append_from_eval_order_position(0);
+    }
 
-        let mut earliest_after_physics_eval_order_position: Option<usize> = None;
-        for after_physics in [false, true] {
-            let phase_bone_count = self.model.eval_order_for_phase(after_physics).len();
-            for phase_index in 0..phase_bone_count {
-                let bone = self.model.eval_order_for_phase(after_physics)[phase_index];
-                if after_physics {
-                    let position = self.model.eval_order_position(bone);
-                    earliest_after_physics_eval_order_position = Some(
-                        earliest_after_physics_eval_order_position
-                            .map_or(position, |earliest| earliest.min(position)),
-                    );
-                }
-                if self.model.append_transform_index(bone).is_some() {
-                    self.pose.reset_append_transform(bone);
-                    self.update_append_transform_for_bone(bone);
-                }
-                #[cfg(test)]
-                self.set_world_matrix_bone_update_category(
-                    WorldMatrixBoneUpdateCategory::PhaseLoop,
+    fn evaluate_current_pose_phase(
+        &mut self,
+        after_physics: bool,
+        options: IkSolveOptions,
+        earliest_after_physics_eval_order_position: &mut Option<usize>,
+    ) {
+        let phase_bone_count = self.model.eval_order_for_phase(after_physics).len();
+        for phase_index in 0..phase_bone_count {
+            let bone = self.model.eval_order_for_phase(after_physics)[phase_index];
+            if after_physics {
+                let position = self.model.eval_order_position(bone);
+                *earliest_after_physics_eval_order_position = Some(
+                    (*earliest_after_physics_eval_order_position)
+                        .map_or(position, |earliest| earliest.min(position)),
                 );
-                self.update_world_matrix_for_bone(bone);
+            }
+            if self.model.append_transform_index(bone).is_some() {
+                self.pose.reset_append_transform(bone);
+                self.update_append_transform_for_bone(bone);
+            }
+            #[cfg(test)]
+            self.set_world_matrix_bone_update_category(WorldMatrixBoneUpdateCategory::PhaseLoop);
+            self.update_world_matrix_for_bone(bone);
 
-                let ik_solver_count = self.model.ik_solver_count_for_bone(bone);
-                for local_index in 0..ik_solver_count {
-                    let ik_index = self.model.ik_solver_index_for_bone(bone, local_index);
-                    self.solve_ik_solver(ik_index, options, after_physics);
-                }
+            let ik_solver_count = self.model.ik_solver_count_for_bone(bone);
+            for local_index in 0..ik_solver_count {
+                let ik_index = self.model.ik_solver_index_for_bone(bone, local_index);
+                self.solve_ik_solver(ik_index, options, after_physics);
             }
         }
+    }
 
+    fn finish_current_pose_evaluation(
+        &mut self,
+        earliest_after_physics_eval_order_position: Option<usize>,
+    ) {
         let mut trailing_refresh_start = earliest_after_physics_eval_order_position;
         for append in self.model.append_transforms() {
             let source_position = self.model.eval_order_position(append.source_bone);
@@ -285,6 +349,25 @@ impl RuntimeInstance {
         clip.apply_to_pose(frame, &mut self.pose);
         self.expand_morphs();
         self.evaluate_current_pose_with_ik_options(options);
+    }
+
+    pub fn evaluate_clip_frame_before_physics(&mut self, clip: &AnimationClip, frame: f32) {
+        self.evaluate_clip_frame_before_physics_with_ik_options(
+            clip,
+            frame,
+            IkSolveOptions::default(),
+        );
+    }
+
+    pub fn evaluate_clip_frame_before_physics_with_ik_options(
+        &mut self,
+        clip: &AnimationClip,
+        frame: f32,
+        options: IkSolveOptions,
+    ) {
+        clip.apply_to_pose(frame, &mut self.pose);
+        self.expand_morphs();
+        self.evaluate_current_pose_before_physics_with_ik_options(options);
     }
 
     /// Evaluate a clip frame but stop before solving IK. Applies the clip to

@@ -6598,6 +6598,62 @@ mod tests {
     }
 
     #[test]
+    fn pmx_fixed_axis_constrains_ik_end_to_end() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(3));
+
+        // Link: rest direction is +Y. A +Z target needs an X rotation, so it
+        // is reachable without a constraint but impossible for a Z-only link.
+        buf.extend_from_slice(&build_bone_name_bytes("link"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&BONE_FLAG_FIXED_AXIS.to_le_bytes());
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&[0.0f32, 0.0, 1.0].map(f32::to_le_bytes).concat());
+
+        buf.extend_from_slice(&build_bone_name_bytes("tip"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[0.0f32, 1.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&0i16.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+
+        buf.extend_from_slice(&build_bone_name_bytes("ik"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[0.0f32, 0.0, 1.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&(BONE_FLAG_TAIL_INDEX | BONE_FLAG_IK).to_le_bytes());
+        buf.extend_from_slice(&1i16.to_le_bytes());
+        buf.extend_from_slice(&1i16.to_le_bytes());
+        buf.extend_from_slice(&16i32.to_le_bytes());
+        buf.extend_from_slice(&std::f32::consts::PI.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0i16.to_le_bytes());
+        buf.push(0);
+        buf.extend_from_slice(&0i32.to_le_bytes());
+
+        let imported = import_pmx_runtime(&buf).expect("fixed-axis IK PMX must import");
+        let mut runtime = RuntimeInstance::new(Arc::new(imported.model));
+        runtime.evaluate_current_pose();
+
+        let tip = Vec3A::from_vec4(runtime.world_matrices()[1].w_axis);
+        assert!((tip - Vec3A::Y).length() < 1.0e-3, "tip={tip:?}");
+        let rotation = runtime.pose().local_rotation(BoneIndex(0));
+        assert!(rotation.x.abs() < 1.0e-4 && rotation.y.abs() < 1.0e-4);
+        assert!(rotation.z.abs() < 1.0e-4, "rotation={rotation:?}");
+    }
+
+    #[test]
     fn child_inverse_bind_uses_absolute_not_local_position() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));

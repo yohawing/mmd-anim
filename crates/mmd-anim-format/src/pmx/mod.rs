@@ -6681,6 +6681,89 @@ mod tests {
     }
 
     #[test]
+    fn pmx_local_axis_rotates_ik_limit_frame() {
+        let with_local_axis = import_pmx_runtime(&build_local_axis_limit_pmx(true)).unwrap();
+        let without_local_axis = import_pmx_runtime(&build_local_axis_limit_pmx(false)).unwrap();
+
+        let mut local_runtime = RuntimeInstance::new(Arc::new(with_local_axis.model));
+        local_runtime.evaluate_current_pose();
+        let local_tip = Vec3A::from_vec4(local_runtime.world_matrices()[1].w_axis);
+        assert!(
+            (local_tip - Vec3A::Z).length() < 1.0e-3,
+            "local-axis limit should reach +Z; tip={local_tip:?}"
+        );
+
+        let mut unit_runtime = RuntimeInstance::new(Arc::new(without_local_axis.model));
+        unit_runtime.evaluate_current_pose();
+        let unit_tip = Vec3A::from_vec4(unit_runtime.world_matrices()[1].w_axis);
+        assert!(
+            (unit_tip - Vec3A::Z).length() > 0.2,
+            "unit XYZ limit must not use the PMX local-axis frame; tip={unit_tip:?}"
+        );
+    }
+
+    fn build_local_axis_limit_pmx(has_local_axis: bool) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(3));
+
+        buf.extend_from_slice(&build_bone_name_bytes("link"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(
+            &(if has_local_axis {
+                BONE_FLAG_LOCAL_AXIS
+            } else {
+                0
+            })
+            .to_le_bytes(),
+        );
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        if has_local_axis {
+            // Basis X=+Y, Z=+Z: local X limit is a bone-local Y rotation.
+            buf.extend_from_slice(&[0.0f32, 1.0, 0.0].map(f32::to_le_bytes).concat());
+            buf.extend_from_slice(&[0.0f32, 0.0, 1.0].map(f32::to_le_bytes).concat());
+        }
+
+        buf.extend_from_slice(&build_bone_name_bytes("tip"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[1.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&0i16.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+
+        buf.extend_from_slice(&build_bone_name_bytes("ik"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[0.0f32, 0.0, 1.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&(BONE_FLAG_TAIL_INDEX | BONE_FLAG_IK).to_le_bytes());
+        buf.extend_from_slice(&1i16.to_le_bytes());
+        buf.extend_from_slice(&1i16.to_le_bytes());
+        buf.extend_from_slice(&16i32.to_le_bytes());
+        buf.extend_from_slice(&std::f32::consts::PI.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0i16.to_le_bytes());
+        buf.push(1);
+        buf.extend_from_slice(&(-std::f32::consts::FRAC_PI_2).to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf
+    }
+
+    #[test]
     fn child_inverse_bind_uses_absolute_not_local_position() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));

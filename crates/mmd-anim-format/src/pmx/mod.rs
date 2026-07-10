@@ -6598,6 +6598,33 @@ mod tests {
     }
 
     #[test]
+    fn runtime_import_drops_degenerate_local_axis() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(1));
+        buf.extend_from_slice(&build_bone_name_bytes("DegenerateLocal"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&BONE_FLAG_LOCAL_AXIS.to_le_bytes());
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        // localAxis.x is zero, so the runtime must reject it without failing import.
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&[0.0f32, 0.0, 1.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+
+        let imported = import_pmx_runtime(&buf).expect("degenerate localAxis must not reject PMX");
+        assert!(imported.model.local_axis(BoneIndex(0)).is_none());
+        assert!(imported.model.local_axis_basis(BoneIndex(0)).is_none());
+    }
+
+    #[test]
     fn pmx_fixed_axis_constrains_ik_end_to_end() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));

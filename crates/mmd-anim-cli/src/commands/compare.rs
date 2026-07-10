@@ -1371,9 +1371,13 @@ fn build_physics_coarse_evaluator(
     let parsed = mmd_anim_format::parse_pmx_model(model_bytes)?;
     let mut bullet = build_bullet_world_from_pmx(&parsed)?;
     apply_physics_tick_config(case, runtime);
-    runtime.set_physics_mode(PhysicsMode::Live);
+    // Evaluate frame-0 clip motion with physics Off, seed Bullet from that pose,
+    // then enable Live only for later stepping. current_frame stays 0.0 so the
+    // first evaluate_to_frame call does not take an accidental physics step.
+    runtime.set_physics_mode(PhysicsMode::Off);
     runtime.evaluate_clip_frame_before_physics(clip, 0.0);
     bullet.seed_runtime_physics(runtime)?;
+    runtime.set_physics_mode(PhysicsMode::Live);
     if emit_diagnostics {
         eprintln!(
             "physics-coarse native bullet case={} rigidBodies={} joints={}",

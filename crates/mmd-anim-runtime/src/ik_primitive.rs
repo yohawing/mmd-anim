@@ -275,6 +275,18 @@ pub(crate) fn solve_link_step(input: LinkStepInput<'_>) {
             fixed_axis: Some(fixed_axis),
         });
         if let Some(angle_limit) = input.angle_limit {
+            // Preserve a valid fixed-axis candidate as-is. Decomposing and
+            // rebuilding an already-valid rotation can select a different
+            // Euler representation, especially with a non-identity base pose.
+            if link_rotation_within_angle_limits(
+                input.link_index,
+                input.base_rotations,
+                input.ik_rotations,
+                angle_limit,
+                input.local_axis_basis,
+            ) {
+                return;
+            }
             clamp_link_rotation_to_angle_limits(ClampAngleLimitInput {
                 link_index: input.link_index,
                 base_rotations: input.base_rotations,
@@ -285,7 +297,12 @@ pub(crate) fn solve_link_step(input: LinkStepInput<'_>) {
             });
             // Euler clamping can reintroduce non-twist components (and is
             // singular near ±π/2); re-project so fixedAxis remains hard.
-            project_link_rotation_onto_fixed_axis(input.link_index, input.ik_rotations, fixed_axis);
+            project_link_rotation_onto_fixed_axis(
+                input.link_index,
+                input.base_rotations,
+                input.ik_rotations,
+                fixed_axis,
+            );
             // A twist about an arbitrary fixed axis may leave the Euler box
             // after projection. Keep the previously accepted IK step rather
             // than emitting a rotation that violates the PMX link limits.
@@ -430,6 +447,7 @@ fn clamp_link_rotation_to_angle_limits(input: ClampAngleLimitInput<'_>) {
 
 fn project_link_rotation_onto_fixed_axis(
     link_index: usize,
+    base_rotations: &[Quat],
     ik_rotations: &mut [Quat],
     fixed_axis: Vec3A,
 ) {
@@ -440,7 +458,15 @@ fn project_link_rotation_onto_fixed_axis(
     if !ik_rotation.is_finite() || ik_rotation.length_squared() <= f32::EPSILON {
         return;
     }
-    let constrained = constrain_rotation_to_axis(ik_rotation.normalize(), fixed_axis);
+    let base = base_rotations[link_index];
+    if !base.is_finite() || base.length_squared() <= f32::EPSILON {
+        return;
+    }
+    // The effective link rotation is `ik * base`. A fixed-axis delta is
+    // composed on the right of `base`, so its equivalent axis in the left-side
+    // IK correction is the bone-local axis rotated by the current base pose.
+    let correction_axis = base.normalize().mul_vec3a(fixed_axis.normalize());
+    let constrained = constrain_rotation_to_axis(ik_rotation.normalize(), correction_axis);
     if !constrained.is_finite() || constrained.length_squared() <= f32::EPSILON {
         return;
     }
@@ -1413,6 +1439,70 @@ mod tests {
         assert!(
             child.z > 0.2,
             "fixed-axis multi-limit IK should still approach +Z; child={child:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_axis_angle_limit_preserves_correction_with_non_identity_base() {
+        let limit = IkAngleLimit::new(
+            Vec3A::splat(-std::f32::consts::PI),
+            Vec3A::splat(std::f32::consts::PI),
+        );
+        let definition = IkChainDefinition {
+            parent_slots: vec![None, Some(0)],
+            rest_positions: vec![Vec3A::ZERO, Vec3A::X],
+            fixed_axes: vec![Some(Vec3A::Y), None],
+            target_slot: 1,
+            links: vec![IkChainLinkDefinition {
+                bone_slot: 0,
+                angle_limit: Some(limit),
+            }],
+            iteration_count: 1,
+            limit_angle: 0.0,
+        };
+        let base = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let goal = Vec3A::Y;
+        let mut solver = IkChainSolver::new(definition);
+        let output = solver.solve(IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 2],
+            local_rotations: &[base, Quat::IDENTITY],
+            goal_position: goal,
+            tolerance: 0.0,
+            max_iterations_cap: None,
+        });
+
+        let solved = output.solved_link_rotations[0];
+        let child = solved.mul_vec3a(Vec3A::X).normalize();
+        assert!(
+            child.dot(goal) > 0.99,
+            "fixed-axis correction must survive projection in the base-rotated frame; solved={solved:?} child={child:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_axis_projection_uses_base_rotated_correction_axis() {
+        let base = Quat::from_rotation_x(0.7);
+        let correction_axis = base.mul_vec3a(Vec3A::Y).normalize();
+        let mut ik_rotations = [(Quat::from_axis_angle(correction_axis.into(), 0.6)
+            * Quat::from_rotation_x(0.2))
+        .normalize()];
+
+        project_link_rotation_onto_fixed_axis(0, &[base], &mut ik_rotations, Vec3A::Y);
+
+        let vector = Vec3A::new(ik_rotations[0].x, ik_rotations[0].y, ik_rotations[0].z);
+        assert!(
+            vector.length_squared() > 1.0e-4,
+            "projection must preserve a non-trivial fixed-axis correction"
+        );
+        let projected_axis = vector.normalize();
+        assert!(
+            projected_axis.dot(correction_axis).abs() > 0.999,
+            "projection axis must follow base * fixedAxis; projected={projected_axis:?} expected={correction_axis:?}"
+        );
+        assert!(
+            projected_axis.dot(Vec3A::Y).abs() < 0.95,
+            "non-identity base must not project the IK correction onto raw fixedAxis"
         );
     }
 

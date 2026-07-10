@@ -100,6 +100,11 @@ impl RuntimeInstance {
                         continue;
                     }
 
+                    let local_axis_basis = self.model.local_axis_basis(link_bone);
+                    // PMX fixed-axis constrains the CCD rotation axis only. Ordinary
+                    // pose projection still requires enforce_fixed_axis (kept false
+                    // for PMX import).
+                    let fixed_axis = self.model.fixed_axis(link_bone);
                     solve_link_step(LinkStepInput {
                         local_effector: &local_effector,
                         local_target: &local_target,
@@ -110,6 +115,8 @@ impl RuntimeInstance {
                         angle_limit: link.angle_limit,
                         iteration: _iteration,
                         limit_angle,
+                        local_axis_basis,
+                        fixed_axis,
                     });
 
                     self.apply_ik_link_rotations(

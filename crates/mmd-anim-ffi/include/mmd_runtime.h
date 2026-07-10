@@ -157,6 +157,17 @@ typedef struct mmd_runtime_ffi_rig_bone {
     float    fixed_axis_xyz[3];
 } mmd_runtime_ffi_rig_bone_t;
 
+/* Additive v2 per-bone local-axis descriptor for primitive IK-chain creation.
+   Existing mmd_runtime_ffi_rig_bone_t layout is intentionally unchanged.
+   has_local_axis == false means unit XYZ angle-limit frames for that bone.
+   When has_local_axis is true, local_axis_x_xyz / local_axis_z_xyz are the PMX
+   bone-local X/Z directions used only as the IK angle-limit evaluation frame. */
+typedef struct mmd_runtime_ffi_rig_bone_local_axis_v2 {
+    bool  has_local_axis;
+    float local_axis_x_xyz[3];
+    float local_axis_z_xyz[3];
+} mmd_runtime_ffi_rig_bone_local_axis_v2_t;
+
 typedef struct mmd_runtime_ffi_ik_solve_stats {
     uint32_t executed_iterations;
     uint32_t link_steps;
@@ -499,7 +510,9 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_skinning_modes_json(
    sized array ordered the same way PMX IK links are solved. iteration_count
    and limit_angle are the per-chain solve settings. bones and links are
    borrowed only for the call. Returns NULL if required arrays are NULL,
-   indices are out of range, values are non-finite, or counts are invalid. */
+   indices are out of range, values are non-finite, or counts are invalid.
+   Local-axis angle-limit frames are not provided by this entry point; use
+   mmd_runtime_ik_chain_create_v2 when localAxis data is available. */
 mmd_runtime_ik_chain_t* mmd_runtime_ik_chain_create(
     const mmd_runtime_ffi_rig_bone_t*    bones,
     size_t                               bone_count,
@@ -508,6 +521,23 @@ mmd_runtime_ik_chain_t* mmd_runtime_ik_chain_create(
     size_t                               link_count,
     uint32_t                             iteration_count,
     float                                limit_angle);
+
+/* Additive v2 IK-chain create with optional per-bone localAxis bases.
+   Same arguments as mmd_runtime_ik_chain_create, plus local_axes:
+   - local_axes may be NULL → identical to mmd_runtime_ik_chain_create.
+   - When non-NULL, local_axes must point to bone_count entries. Degenerate
+     axes (near-zero / parallel) are treated as no local axis for that bone.
+   Non-finite local-axis vectors cause NULL. Existing create/solve/free
+   contracts are otherwise unchanged. */
+mmd_runtime_ik_chain_t* mmd_runtime_ik_chain_create_v2(
+    const mmd_runtime_ffi_rig_bone_t*                 bones,
+    size_t                                            bone_count,
+    const mmd_runtime_ffi_rig_bone_local_axis_v2_t*  local_axes,
+    uint32_t                                          target_bone_slot,
+    const mmd_runtime_ffi_rig_ik_link_t*              links,
+    size_t                                            link_count,
+    uint32_t                                          iteration_count,
+    float                                             limit_angle);
 
 void mmd_runtime_ik_chain_free(
     mmd_runtime_ik_chain_t* chain);

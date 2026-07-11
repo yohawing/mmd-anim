@@ -903,11 +903,15 @@ mmd_runtime_status_t mmd_runtime_physics_world_create_from_pmx_bytes(
 void mmd_runtime_physics_world_free(
     mmd_runtime_physics_world_t* world);
 
+/* Successful reset reseeds from the runtime pose and arms seed-only behavior
+   for the next mmd_runtime_physics_world_bake_clip_frames sample. */
 mmd_runtime_status_t mmd_runtime_physics_world_reset(
     mmd_runtime_physics_world_t* world,
     mmd_runtime_instance_t*      instance,
     size_t*                      out_seeded_rigidbody_count);
 
+/* Successful explicit step disarms bake seed-only state so the next bake
+   sample advances physics normally. */
 mmd_runtime_status_t mmd_runtime_physics_world_step_runtime(
     mmd_runtime_physics_world_t*                      world,
     mmd_runtime_instance_t*                           instance,
@@ -953,6 +957,17 @@ bool mmd_runtime_instance_evaluate_clip_frame_batch(
     float*                        out_morph_weights_f32,
     size_t                        out_morph_weights_f32_len);
 
+/* Stateful sequential physics bake.
+   After world creation or a successful mmd_runtime_physics_world_reset, the
+   first bake sample is seed-only: evaluate_clip_frame_before_physics at that
+   sample, reset/reseed Bullet from the evaluated pose (physics tick reset
+   included), copy world/morph outputs, and do NOT step physics. Later samples
+   use evaluate -> step -> copy. A continuation bake without another successful
+   reset does not skip its first sample. frame_count == 0 does not consume the
+   seed-only state. A successful mmd_runtime_physics_world_step_runtime also
+   disarms seed-only. out_last_report for a one-sample seed-only bake remains
+   the default zero report; multi-sample bakes report the final actual step.
+   Layout matches evaluate_clip_frame_batch: [frame][bone][16] and [frame][morph]. */
 mmd_runtime_status_t mmd_runtime_physics_world_bake_clip_frames(
     mmd_runtime_physics_world_t*                      world,
     mmd_runtime_instance_t*                           instance,

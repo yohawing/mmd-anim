@@ -111,6 +111,15 @@ pub struct MmdRuntimeAppendSolver {
 pub struct MmdRuntimePhysicsWorld {
     #[cfg(feature = "physics-bullet-native")]
     world: mmd_anim_physics_bullet::PmxBulletWorld,
+    /// When true, the next bake sample reseeds the Bullet world from the
+    /// evaluated pose and copies outputs without advancing physics.
+    ///
+    /// Armed on world creation and on a successful
+    /// `mmd_runtime_physics_world_reset`. Disarmed after the seed-only bake
+    /// sample, or after a successful explicit
+    /// `mmd_runtime_physics_world_step_runtime`.
+    #[cfg(feature = "physics-bullet-native")]
+    next_bake_sample_is_seed_only: bool,
 }
 
 #[repr(C)]
@@ -3866,6 +3875,10 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_free(world: *mut MmdRuntimePh
 
 /// Resets the physics world and reseeds it from the runtime pose.
 ///
+/// A successful reset also arms seed-only behavior for the next
+/// `mmd_runtime_physics_world_bake_clip_frames` sample: that sample evaluates,
+/// reseeds, and copies without stepping physics.
+///
 /// # Safety
 ///
 /// `world` and `instance` must be valid handles. `out_seeded_rigidbody_count`
@@ -3882,6 +3895,10 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_reset(
 }
 
 /// Steps a physics world using the runtime's fixed-step physics clock.
+///
+/// A successful step disarms bake seed-only state: the next
+/// `mmd_runtime_physics_world_bake_clip_frames` sample advances physics
+/// normally rather than reseeding without a step.
 ///
 /// # Safety
 ///
@@ -4018,7 +4035,10 @@ fn physics_world_create_impl(
     match mmd_anim_physics_bullet::build_bullet_world_from_descriptors(&rigidbodies, &joints) {
         Ok(world) => {
             unsafe {
-                *out_world = Box::into_raw(Box::new(MmdRuntimePhysicsWorld { world }));
+                *out_world = Box::into_raw(Box::new(MmdRuntimePhysicsWorld {
+                    world,
+                    next_bake_sample_is_seed_only: true,
+                }));
             }
             MmdRuntimeStatus::Ok
         }
@@ -4041,7 +4061,10 @@ fn physics_world_create_from_pmx_bytes_impl(
     match mmd_anim_physics_bullet::build_bullet_world_from_pmx(&model) {
         Ok(world) => {
             unsafe {
-                *out_world = Box::into_raw(Box::new(MmdRuntimePhysicsWorld { world }));
+                *out_world = Box::into_raw(Box::new(MmdRuntimePhysicsWorld {
+                    world,
+                    next_bake_sample_is_seed_only: true,
+                }));
             }
             MmdRuntimeStatus::Ok
         }
@@ -4065,6 +4088,8 @@ fn physics_world_reset_impl(
     };
     match world.world.reset_runtime_physics(&mut instance.runtime) {
         Ok(seeded) => {
+            // Successful reset re-arms seed-only behavior for the next bake sample.
+            world.next_bake_sample_is_seed_only = true;
             instance.refresh_matrix_caches();
             if !out_seeded_rigidbody_count.is_null() {
                 unsafe {
@@ -4100,6 +4125,8 @@ fn physics_world_step_runtime_impl(
         .step_runtime_physics_with_runtime_clock(&mut instance.runtime, dt_seconds)
     {
         Ok(report) => {
+            // Explicit physics advance disarms seed-only so the next bake sample steps.
+            world.next_bake_sample_is_seed_only = false;
             instance.refresh_matrix_caches();
             if !out_report.is_null() {
                 unsafe {
@@ -4580,6 +4607,21 @@ fn evaluate_clip_frame_batch_chunk(
 /// supplied runtime instance and physics world in frame order. `frame_step`
 /// advances clip sampling; `dt_seconds` advances the physics clock.
 ///
+/// # Seed-only first sample
+///
+/// After physics world creation or a successful
+/// `mmd_runtime_physics_world_reset`, the next bake sample is **seed-only**:
+/// the clip frame is evaluated, the Bullet world is reset/reseeded from that
+/// pose (physics tick reset included), outputs are copied, and physics is
+/// **not** stepped. That sample disarms the seed-only state. Later samples in
+/// the same or subsequent bake calls use evaluate → step → copy.
+///
+/// A continuation bake call without an intervening successful reset (or after
+/// a successful `mmd_runtime_physics_world_step_runtime`) does **not** skip its
+/// first sample. `frame_count == 0` does not consume or disarm the seed-only
+/// state. `out_last_report` for a one-sample seed-only bake remains the default
+/// zero report; for multi-sample bakes it reports the final actual physics step.
+///
 /// # Safety
 ///
 /// `world`, `instance`, and `clip` must be valid handles. Non-empty output
@@ -4719,18 +4761,31 @@ fn physics_world_bake_clip_frames_impl(
         instance
             .runtime
             .evaluate_clip_frame_before_physics(&clip.clip, frame);
-        let report = match world
-            .world
-            .step_runtime_physics_with_runtime_clock(&mut instance.runtime, dt_seconds)
-        {
-            Ok(report) => report,
-            Err(err) => return status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
-        };
-        last_report = MmdRuntimeFfiPhysicsWorldStepReport {
-            tick: physics_step_stats_to_ffi(report.tick),
-            kinematic_rigidbodies_fed: report.kinematic_rigidbodies_fed,
-            bones_written_back: report.bones_written_back,
-        };
+
+        if world.next_bake_sample_is_seed_only {
+            // Initial seed-only sample: reseed Bullet from the evaluated pose
+            // and reset the physics tick, then copy without stepping.
+            if let Err(err) = world.world.reset_runtime_physics(&mut instance.runtime) {
+                return status_failure(MmdRuntimeStatus::Error, err.to_string().as_str());
+            }
+            world.next_bake_sample_is_seed_only = false;
+            // Keep last_report as the default zero report for this sample.
+        } else {
+            let report = match world
+                .world
+                .step_runtime_physics_with_runtime_clock(&mut instance.runtime, dt_seconds)
+            {
+                Ok(report) => report,
+                Err(err) => {
+                    return status_failure(MmdRuntimeStatus::Error, err.to_string().as_str());
+                }
+            };
+            last_report = MmdRuntimeFfiPhysicsWorldStepReport {
+                tick: physics_step_stats_to_ffi(report.tick),
+                kinematic_rigidbodies_fed: report.kinematic_rigidbodies_fed,
+                bones_written_back: report.bones_written_back,
+            };
+        }
 
         let world_start = frame_index * world_frame_len;
         let world_end = world_start + world_frame_len;

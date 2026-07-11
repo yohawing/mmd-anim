@@ -21,10 +21,9 @@ frozen yet, and breaking changes may happen before 1.0. Feedback is welcome.
 - Load a PMX model and convert it into runtime-ready model data.
 - Load a VMD motion and convert bone, camera, light, and other motion tracks into a playable form.
 - Interpolate between keyframes with MMD-style Bezier interpolation for translation and rotation.
-
-> **Physics simulation is not included.** Rigid-body and joint data can be read
-> and written, but cloth, hair, and other physics-driven motion must be handled
-> by the host-side physics engine.
+- An optional MMD physics backend using Bullet Physics, available to
+  `mmd-anim-cli` and `mmd-anim-ffi` builds through their
+  `physics-bullet-native` feature.
 
 ## Test Foundation
 
@@ -85,7 +84,7 @@ Format support overview. "Loading" means parsing a file into structured data.
 | VPD | **supported** | **supported** |
 | PMM | header, timeline, display state, referenced assets, PMMv2 summaries, and selected keyframe payload metadata | partial support: lossless parsed-byte round trip, limited source-byte patches, and experimental single-model PMX/VMD scene generation |
 | X/VAC | text X mesh, material, UV, normal, vertex color + VAC settings and raw lines | text X / VAC wrapper writing |
-| FBX | not loaded | experimental FBX 7.4 binary export for PMX mesh/skeleton/skin/bind pose, vertex morph blendshapes, runtime-baked VMD bone + vertex morph animation, and bones-only skeleton/motion output |
+| FBX | not supported | Experimental FBX 7.4 Binary export for PMX meshes, skeletons, skinning, bind poses, and vertex morphs (blendshapes), as well as runtime-baked VMD bone and vertex-morph animation. `--bones-only` can export just the skeleton and optional bone animation. |
 
 ## Rust Usage
 
@@ -224,40 +223,7 @@ You can export animated FBX files from PMX and VMD inputs.
 
 ```powershell
 mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
-mmd-anim convert-fbx model.pmx model.fbx --copy-diffuse-textures
-mmd-anim convert-fbx model.pmx motion.fbx --vmd motion.vmd --bones-only
-mmd-anim convert-fbx model.pmx model.fbx --readable-bone-names
-mmd-anim convert-fbx model.pmx model.fbx --write-physics-params
 ```
-
-With `--vmd`, `convert-fbx` uses runtime-baked output for bones and vertex
-morph weights, so IK, append transforms, and fixed-axis constraints are sampled
-before writing FBX animation curves. Camera, light, self-shadow, visibility,
-physics, and non-vertex morph tracks are not exported as FBX tracks.
-
-Use `--bones-only` to write only the FBX skeleton and optional runtime-baked
-bone animation, without mesh, materials, skin clusters, bind pose, textures, or
-blendshapes.
-
-By default, bone names keep the legacy UTF-8 hex encoding for compatibility.
-Use `--readable-bone-names` to opt into English PMX names, a standard MMD bone
-dictionary, and sanitized ASCII fallbacks instead.
-When enabled, the CLI also writes `<fbx-stem>.bone-map.json` with PMX bone
-indices, source names, FBX names, and name source labels.
-
-Use `--write-physics-params` to write `<fbx-stem>.physics-params.json` with
-PMX rigid-body and joint parameters as schema version 1 JSON. This is a
-sidecar for future physics bake and DCC parameter-editing workflows; it does
-not enable physics simulation in the exported FBX. PMX rigid-body
-`collision.mask` is the collide-with group mask passed to Bullet. The sidecar
-also writes `collision.collisionMask` / `collision.bulletCollisionMask` as
-explicit aliases and `collision.nonCollisionMask` as the complementary mask for
-tools that need a blocked-group view.
-
-By default, PMX diffuse texture paths are written to FBX as-is. With
-`--copy-diffuse-textures`, referenced diffuse textures are copied next to the
-FBX into a managed `*-textures` directory and FBX paths are rewritten to those
-relative files. Sphere, toon, and material-morph textures are not exported.
 
 ## Crates
 
@@ -279,8 +245,6 @@ lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
 - **Writing:** PMX generation from parts currently covers the initial range of geometry, materials, bones, display frames, morphs, and physics. PMM writing is limited to the data currently represented by the PMM manifest parser.
 - **PMM:** Supported PMM data currently includes project header information, timeline-derived values, display state, initial model-slot data, referenced assets, PMMv2 summary information, and asset/header consistency diagnostics. The PMM exporter can re-emit that limited manifest/header/slot/asset-reference surface as a PMMv2 file, but it is not a full PMM project-graph exporter. Keyframe payloads, full camera/light/accessory/self-shadow tracks, and other binary project graph data that are only summarized or not preserved by the parser cannot be reconstructed from `PmmParsedManifest`.
 - **X/VAC:** Text X mesh, material, normal, UV, vertex color, and common VAC line order are handled. Binary X is diagnostic-only.
-- **Physics:** Rigid-body and joint data can be read and written, but physics simulation itself is not provided. Physics-driven parts should be handled by the host engine.
-- **API / ABI / WASM:** These surfaces are still experimental. When integrating with an external host, start with a small smoke test and representative-frame checks.
 
 ## Japanese README
 

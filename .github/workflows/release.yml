@@ -152,6 +152,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download CLI artifacts
         uses: actions/download-artifact@v4
         with:
@@ -173,10 +176,27 @@ jobs:
         run: |
           set -euo pipefail
 
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="$version" '
+            $0 ~ "^## " version "([[:space:]]|$)" { found = 1; next }
+            found && $0 ~ "^## " { exit }
+            found { print }
+            END { if (!found) exit 2 }
+          ' CHANGELOG.md > release-notes.md
+
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "CHANGELOG.md section for ${version} is missing or empty."
+            exit 1
+          fi
+
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" \
               --title "$GITHUB_REF_NAME" \
-              --notes "mmd-anim $GITHUB_REF_NAME"
+              --notes-file release-notes.md
+          else
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md
           fi
 
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber

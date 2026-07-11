@@ -133,7 +133,7 @@ host-side geometry data, use `mmd_runtime_export_pmx_from_parts`.
 Input arrays remain owned by the caller, and returned bytes must be freed with
 `mmd_runtime_byte_buffer_free`.
 
-This native integration crate is not published to crates.io for the 0.1.x line. It is
+This native integration crate is not published to crates.io. It is
 kept in the Rust workspace for builds and checks.
 
 ## WASM / Browser
@@ -196,7 +196,7 @@ const generatedPmxBytes = exportPmxFromParts(
 );
 ```
 
-The WASM package is not published to crates.io for the 0.1.x line. It is kept in the Rust
+The WASM package is not published to crates.io. It is kept in the Rust
 workspace for builds and checks.
 
 ## CLI

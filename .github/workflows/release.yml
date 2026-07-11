@@ -45,6 +45,7 @@ jobs:
         run: |
           cargo package -p mmd-anim-runtime --list
           cargo package -p mmd-anim-format --list
+          cargo package -p mmd-anim-physics-bullet --list
           cargo package -p mmd-anim --list
           cargo package -p mmd-anim-cli --list
 
@@ -241,5 +242,6 @@ jobs:
 
           publish_crate mmd-anim-runtime
           publish_crate mmd-anim-format
+          publish_crate mmd-anim-physics-bullet
           publish_crate mmd-anim
           publish_crate mmd-anim-cli

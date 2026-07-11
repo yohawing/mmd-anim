@@ -67,6 +67,9 @@ and local `.ai/` baselines. It never updates baselines; use
   MMD loader that uses `mmd-anim` as its animation and format backend.
 - [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools): Maya plugin for
   MMD model and motion handling, using `mmd-anim` as its native runtime.
+- [unity-mmd-loader](https://github.com/yohawing/unity-mmd-loader): An MMD
+  loader optimized for Unity 6 and URP, using `mmd-anim` for importing and as
+  its core animation runtime.
 
 More integrations can share the same runtime core through the Rust API, C ABI,
 or WASM wrapper.
@@ -82,9 +85,9 @@ Format support overview. "Loading" means parsing a file into structured data.
 | PMD | model structure + partial runtime import | writing / JSON conversion |
 | VMD | **supported** | **supported** |
 | VPD | **supported** | **supported** |
-| PMM | header, timeline, display state, referenced assets, PMMv2 summaries, and selected keyframe payload metadata | partial support: lossless parsed-byte round trip, limited source-byte patches, and experimental single-model PMX/VMD scene generation |
+| PMM | header, timeline, display state, referenced assets, PMMv2 summaries, and selected keyframe payload metadata | partial support: rewriting selected parts of the original data and experimental generation of single-model PMX/VMD scenes |
 | X/VAC | text X mesh, material, UV, normal, vertex color + VAC settings and raw lines | text X / VAC wrapper writing |
-| FBX | not supported | Experimental FBX 7.4 Binary export for PMX meshes, skeletons, skinning, bind poses, and vertex morphs (blendshapes), as well as runtime-baked VMD bone and vertex-morph animation. `--bones-only` can export just the skeleton and optional bone animation. |
+| FBX | not supported | Experimental binary export for PMX meshes, skeletons, skinning, bind poses, and vertex morphs (blendshapes), as well as runtime-baked VMD bone and vertex-morph animation. |
 
 ## Rust Usage
 
@@ -205,18 +208,7 @@ MMD format files (PMX, VMD, VPD, PMM, X/VAC).
 
 ```powershell
 cargo install mmd-anim-cli
-```
-
-After installation, the `mmd-anim` command is available:
-
-```powershell
 mmd-anim --help
-```
-
-For development, you can also run directly from the workspace:
-
-```powershell
-cargo run -p mmd-anim-cli -- --help
 ```
 
 You can export animated FBX files from PMX and VMD inputs.

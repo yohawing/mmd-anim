@@ -34,12 +34,11 @@ The repository includes tests for:
 
 - animation evaluation, bone hierarchy evaluation, IK, append transforms, morphs, and format read/write paths;
 - round-trip checks that write parsed data and read it back without changing the represented content;
-- frame-by-frame PMX/VMD runtime evaluation against expected synthetic results;
+- frame-by-frame PMX/VMD runtime evaluation against expected results;
 - maintainer CLI diagnostics for inspecting loaded models and evaluated state;
 - C ABI and WASM smoke checks to confirm host-facing APIs use the same runtime path.
 
 Recommended public release checks:
-
 
 ```powershell
 cargo test --workspace
@@ -48,25 +47,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
-Maintainers with local GoldenOracle physics baselines should also run the local
-physics release gate before cutting a release:
-
-```powershell
-.\scripts\local-physics-release-gate.ps1
-```
-
-The physics gate uses ignored `tools/golden-gate/physics-*.local.json` configs
-and local `.ai/` baselines. It never updates baselines; use
-`tools/golden-gate` directly when accepting a new baseline.
-
 ## Used By
 
 `mmd-anim` is developed as the shared animation backend for MMD-related projects.
 
 - [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): A Three.js
   MMD loader that uses `mmd-anim` as its animation and format backend.
-- [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools): Maya plugin for
-  MMD model and motion handling, using `mmd-anim` as its native runtime.
+- [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools): A Maya plugin
+  for editing MMD animation. It uses `mmd-anim` for full-bake VMD import and as
+  the source of truth for its rig implementation.
 - [unity-mmd-loader](https://github.com/yohawing/unity-mmd-loader): An MMD
   loader optimized for Unity 6 and URP, using `mmd-anim` for importing and as
   its core animation runtime.
@@ -135,9 +124,6 @@ host-side geometry data, use `mmd_runtime_export_pmx_from_parts`.
 Input arrays remain owned by the caller, and returned bytes must be freed with
 `mmd_runtime_byte_buffer_free`.
 
-This native integration crate is not published to crates.io. It is
-kept in the Rust workspace for builds and checks.
-
 ## WASM / Browser
 
 The browser build uses `wasm-pack build --target web`. A Node.js-only build is
@@ -197,9 +183,6 @@ const generatedPmxBytes = exportPmxFromParts(
   edgeScale,
 );
 ```
-
-The WASM package is not published to crates.io. It is kept in the Rust
-workspace for builds and checks.
 
 ## CLI
 

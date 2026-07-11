@@ -1,4 +1,4 @@
-use glam::{Mat4, Quat, Vec3A};
+use glam::{Mat3, Mat4, Quat, Vec3, Vec3A};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -57,6 +57,32 @@ impl BoneIndex {
     }
 }
 
+/// PMX bone local-axis descriptor (bone-local X/Z directions from the file).
+///
+/// The runtime builds a defensive right-handed orthonormal frame from these
+/// vectors for IK angle-limit evaluation only. Ordinary pose evaluation does
+/// not reorient bones by this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LocalAxis {
+    pub x: Vec3A,
+    pub z: Vec3A,
+}
+
+impl LocalAxis {
+    pub fn new(x: Vec3A, z: Vec3A) -> Self {
+        Self { x, z }
+    }
+
+    /// Build a right-handed orthonormal basis quaternion whose columns are
+    /// `(x, y, z)` in bone-local space: `y = normalize(z × x)`, `z = x × y`.
+    ///
+    /// Returns `None` when inputs are non-finite or degenerate (near-zero /
+    /// nearly parallel axes). Callers must treat `None` as "no local axis".
+    pub fn basis_quat(self) -> Option<Quat> {
+        build_local_axis_basis_quat(self.x, self.z)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BoneInit {
     pub parent: Option<BoneIndex>,
@@ -65,6 +91,10 @@ pub struct BoneInit {
     pub transform_order: i32,
     pub transform_after_physics: bool,
     pub fixed_axis: Option<Vec3A>,
+    /// When true, ordinary world-pose evaluation projects local rotation onto
+    /// `fixed_axis`. PMX import keeps this false so VMD/local rotations stay
+    /// unprojected; fixed-axis still constrains CCD during IK steps via the
+    /// stored `fixed_axis` descriptor.
     pub enforce_fixed_axis: bool,
 }
 
@@ -86,6 +116,42 @@ impl BoneInit {
         self.enforce_fixed_axis = true;
         self
     }
+}
+
+/// Build a defensive right-handed local-axis basis quaternion.
+///
+/// Frame construction matches nanoem / Dayo style:
+/// `x = normalize(local_x)`, `y = normalize(local_z × x)`, `z = x × y`.
+fn build_local_axis_basis_quat(x: Vec3A, z: Vec3A) -> Option<Quat> {
+    if !x.is_finite() || !z.is_finite() {
+        return None;
+    }
+    let x_len_sq = x.length_squared();
+    if x_len_sq <= f32::EPSILON {
+        return None;
+    }
+    let x_n = x * x_len_sq.sqrt().recip();
+    let y = z.cross(x_n);
+    let y_len_sq = y.length_squared();
+    if y_len_sq <= f32::EPSILON {
+        return None;
+    }
+    let y_n = y * y_len_sq.sqrt().recip();
+    let z_n = x_n.cross(y_n);
+    let z_len_sq = z_n.length_squared();
+    if z_len_sq <= f32::EPSILON {
+        return None;
+    }
+    let z_n = z_n * z_len_sq.sqrt().recip();
+    if !x_n.is_finite() || !y_n.is_finite() || !z_n.is_finite() {
+        return None;
+    }
+    let mat = Mat3::from_cols(Vec3::from(x_n), Vec3::from(y_n), Vec3::from(z_n));
+    let quat = Quat::from_mat3(&mat);
+    if !quat.is_finite() || quat.length_squared() <= f32::EPSILON {
+        return None;
+    }
+    Some(quat.normalize())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -222,10 +288,18 @@ pub struct ModelArena {
     fixed_axis_flags: Box<[u8]>,
     fixed_axis_constraint_flags: Box<[u8]>,
     fixed_axes: Box<[Vec3A]>,
+    local_axis_flags: Box<[u8]>,
+    local_axis_x: Box<[Vec3A]>,
+    local_axis_z: Box<[Vec3A]>,
+    local_axis_basis: Box<[Quat]>,
     transform_after_physics_flags: Box<[u8]>,
     ik_link_flags: Box<[u8]>,
     eval_order: Box<[BoneIndex]>,
+    eval_order_before_physics: Box<[BoneIndex]>,
+    eval_order_after_physics: Box<[BoneIndex]>,
     eval_order_positions: Box<[usize]>,
+    ik_bone_solver_spans: Box<[MorphOffsetSpan]>,
+    ik_bone_solver_indices: Box<[u32]>,
     ik_solvers: Box<[IkSolver]>,
     append_transforms: Box<[AppendTransform]>,
     append_transform_indices: Box<[i32]>,
@@ -277,6 +351,10 @@ impl ModelArena {
         let mut fixed_axis_flags = Vec::with_capacity(bone_count);
         let mut fixed_axis_constraint_flags = Vec::with_capacity(bone_count);
         let mut fixed_axes = Vec::with_capacity(bone_count);
+        let mut local_axis_flags = Vec::with_capacity(bone_count);
+        let mut local_axis_x = Vec::with_capacity(bone_count);
+        let mut local_axis_z = Vec::with_capacity(bone_count);
+        let mut local_axis_basis = Vec::with_capacity(bone_count);
 
         for (bone_index, bone) in bones.iter().enumerate() {
             let parent = match bone.parent {
@@ -296,7 +374,7 @@ impl ModelArena {
             transform_orders.push(bone.transform_order);
             transform_after_physics_flags.push(u8::from(bone.transform_after_physics));
             match bone.fixed_axis {
-                Some(axis) if axis.length_squared() > f32::EPSILON => {
+                Some(axis) if axis.length_squared() > f32::EPSILON && axis.is_finite() => {
                     fixed_axis_flags.push(1);
                     fixed_axis_constraint_flags.push(u8::from(bone.enforce_fixed_axis));
                     fixed_axes.push(axis.normalize());
@@ -307,11 +385,23 @@ impl ModelArena {
                     fixed_axes.push(Vec3A::X);
                 }
             }
+            // Local axes are applied via `with_local_axes` so existing BoneInit
+            // struct literals stay source-compatible (no new required fields).
+            local_axis_flags.push(0);
+            local_axis_x.push(Vec3A::X);
+            local_axis_z.push(Vec3A::Z);
+            local_axis_basis.push(Quat::IDENTITY);
         }
 
         let eval_order = build_eval_order(&parent_indices, &transform_orders)?;
+        let eval_order_before_physics =
+            build_eval_order_for_phase(&eval_order, &transform_after_physics_flags, false);
+        let eval_order_after_physics =
+            build_eval_order_for_phase(&eval_order, &transform_after_physics_flags, true);
         let eval_order_positions = build_eval_order_positions(&eval_order, bone_count);
         let (ik_solvers, ik_link_flags) = build_ik_solvers(ik_solvers, bone_count)?;
+        let (ik_bone_solver_spans, ik_bone_solver_indices) =
+            build_ik_bone_solver_lookup(&ik_solvers, bone_count);
         let (append_transforms, append_transform_indices) =
             build_append_transforms(append_transforms, bone_count)?;
         validate_morph_init(&morph, bone_count)?;
@@ -324,10 +414,18 @@ impl ModelArena {
             fixed_axis_flags: fixed_axis_flags.into_boxed_slice(),
             fixed_axis_constraint_flags: fixed_axis_constraint_flags.into_boxed_slice(),
             fixed_axes: fixed_axes.into_boxed_slice(),
+            local_axis_flags: local_axis_flags.into_boxed_slice(),
+            local_axis_x: local_axis_x.into_boxed_slice(),
+            local_axis_z: local_axis_z.into_boxed_slice(),
+            local_axis_basis: local_axis_basis.into_boxed_slice(),
             transform_after_physics_flags: transform_after_physics_flags.into_boxed_slice(),
             ik_link_flags,
             eval_order,
+            eval_order_before_physics,
+            eval_order_after_physics,
             eval_order_positions,
+            ik_bone_solver_spans,
+            ik_bone_solver_indices,
             ik_solvers,
             append_transforms,
             append_transform_indices,
@@ -397,6 +495,69 @@ impl ModelArena {
             .count()
     }
 
+    /// Overlay per-bone PMX local-axis descriptors without changing existing
+    /// constructors. Entries beyond `bone_count` are ignored; shorter lists
+    /// leave trailing bones without a local axis. Degenerate axes are dropped.
+    pub fn with_local_axes(
+        mut self,
+        local_axes: impl IntoIterator<Item = Option<LocalAxis>>,
+    ) -> Self {
+        for (bone_index, axis) in local_axes.into_iter().enumerate() {
+            if bone_index >= self.bone_count() {
+                break;
+            }
+            match axis.and_then(|axis| {
+                let basis = axis.basis_quat()?;
+                Some((axis.x, axis.z, basis))
+            }) {
+                Some((x, z, basis)) => {
+                    self.local_axis_flags[bone_index] = 1;
+                    self.local_axis_x[bone_index] = x;
+                    self.local_axis_z[bone_index] = z;
+                    self.local_axis_basis[bone_index] = basis;
+                }
+                None => {
+                    self.local_axis_flags[bone_index] = 0;
+                    self.local_axis_x[bone_index] = Vec3A::X;
+                    self.local_axis_z[bone_index] = Vec3A::Z;
+                    self.local_axis_basis[bone_index] = Quat::IDENTITY;
+                }
+            }
+        }
+        self
+    }
+
+    #[inline]
+    pub fn local_axis(&self, bone: BoneIndex) -> Option<LocalAxis> {
+        if self.local_axis_flags[bone.as_usize()] != 0 {
+            Some(LocalAxis {
+                x: self.local_axis_x[bone.as_usize()],
+                z: self.local_axis_z[bone.as_usize()],
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Orthonormal local-axis basis as a quaternion (columns of the bone-local
+    /// frame). Used only as the IK angle-limit evaluation frame.
+    #[inline]
+    pub fn local_axis_basis(&self, bone: BoneIndex) -> Option<Quat> {
+        if self.local_axis_flags[bone.as_usize()] != 0 {
+            Some(self.local_axis_basis[bone.as_usize()])
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn local_axis_count(&self) -> usize {
+        self.local_axis_flags
+            .iter()
+            .filter(|&&flag| flag != 0)
+            .count()
+    }
+
     #[inline]
     pub fn transform_after_physics(&self, bone: BoneIndex) -> bool {
         self.transform_after_physics_flags[bone.as_usize()] != 0
@@ -413,6 +574,15 @@ impl ModelArena {
     }
 
     #[inline]
+    pub(crate) fn eval_order_for_phase(&self, after_physics: bool) -> &[BoneIndex] {
+        if after_physics {
+            &self.eval_order_after_physics
+        } else {
+            &self.eval_order_before_physics
+        }
+    }
+
+    #[inline]
     pub(crate) fn eval_order_position(&self, bone: BoneIndex) -> usize {
         self.eval_order_positions[bone.as_usize()]
     }
@@ -425,6 +595,17 @@ impl ModelArena {
     #[inline]
     pub fn ik_solvers(&self) -> &[IkSolver] {
         &self.ik_solvers
+    }
+
+    #[inline]
+    pub(crate) fn ik_solver_count_for_bone(&self, bone: BoneIndex) -> usize {
+        self.ik_bone_solver_spans[bone.as_usize()].count as usize
+    }
+
+    #[inline]
+    pub(crate) fn ik_solver_index_for_bone(&self, bone: BoneIndex, local_index: usize) -> usize {
+        let span = &self.ik_bone_solver_spans[bone.as_usize()];
+        self.ik_bone_solver_indices[span.start as usize + local_index] as usize
     }
 
     #[inline]
@@ -544,6 +725,36 @@ fn build_ik_solvers(
     Ok((solvers.into_boxed_slice(), ik_link_flags.into_boxed_slice()))
 }
 
+type IkBoneSolverLookup = (Box<[MorphOffsetSpan]>, Box<[u32]>);
+
+fn build_ik_bone_solver_lookup(ik_solvers: &[IkSolver], bone_count: usize) -> IkBoneSolverLookup {
+    let mut counts = vec![0u32; bone_count];
+    for solver in ik_solvers {
+        counts[solver.ik_bone.as_usize()] += 1;
+    }
+
+    let mut spans = Vec::with_capacity(bone_count);
+    let mut next_offset = 0u32;
+    for count in counts {
+        spans.push(MorphOffsetSpan {
+            start: next_offset,
+            count,
+        });
+        next_offset += count;
+    }
+
+    let mut indices = vec![0u32; ik_solvers.len()];
+    let mut write_positions: Vec<u32> = spans.iter().map(|span| span.start).collect();
+    for (solver_index, solver) in ik_solvers.iter().enumerate() {
+        let bone = solver.ik_bone.as_usize();
+        let write_index = write_positions[bone] as usize;
+        indices[write_index] = solver_index as u32;
+        write_positions[bone] += 1;
+    }
+
+    (spans.into_boxed_slice(), indices.into_boxed_slice())
+}
+
 fn validate_ik_bone(
     solver: usize,
     role: &'static str,
@@ -626,6 +837,21 @@ fn build_eval_order(
     }
 
     Ok(order.into_boxed_slice())
+}
+
+fn build_eval_order_for_phase(
+    eval_order: &[BoneIndex],
+    transform_after_physics_flags: &[u8],
+    after_physics: bool,
+) -> Box<[BoneIndex]> {
+    eval_order
+        .iter()
+        .copied()
+        .filter(|bone| {
+            let bone_after_physics = transform_after_physics_flags[bone.as_usize()] != 0;
+            bone_after_physics == after_physics
+        })
+        .collect()
 }
 
 fn build_eval_order_positions(eval_order: &[BoneIndex], bone_count: usize) -> Box<[usize]> {
@@ -799,6 +1025,61 @@ mod tests {
     }
 
     #[test]
+    fn eval_order_for_phase_preserves_relative_order_within_each_phase() {
+        let mut root = BoneInit::new(None, Vec3A::ZERO);
+        root.transform_order = 0;
+        let mut pre_child = BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO);
+        pre_child.transform_order = 2;
+        let mut after_parent = BoneInit::new(None, Vec3A::ZERO);
+        after_parent.transform_order = 1;
+        after_parent.transform_after_physics = true;
+        let mut after_child = BoneInit::new(Some(BoneIndex(2)), Vec3A::ZERO);
+        after_child.transform_order = 3;
+        after_child.transform_after_physics = true;
+        let mut pre_sibling = BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO);
+        pre_sibling.transform_order = 4;
+
+        let model = ModelArena::new(vec![
+            root,
+            pre_child,
+            after_parent,
+            after_child,
+            pre_sibling,
+        ])
+        .unwrap();
+
+        let expected_before_physics: Vec<_> = model
+            .eval_order()
+            .iter()
+            .copied()
+            .filter(|bone| !model.transform_after_physics(*bone))
+            .collect();
+        let expected_after_physics: Vec<_> = model
+            .eval_order()
+            .iter()
+            .copied()
+            .filter(|bone| model.transform_after_physics(*bone))
+            .collect();
+
+        assert_eq!(
+            model.eval_order_for_phase(false),
+            expected_before_physics.as_slice()
+        );
+        assert_eq!(
+            model.eval_order_for_phase(true),
+            expected_after_physics.as_slice()
+        );
+        assert_eq!(
+            model.eval_order_for_phase(false),
+            &[BoneIndex(0), BoneIndex(1), BoneIndex(4)]
+        );
+        assert_eq!(
+            model.eval_order_for_phase(true),
+            &[BoneIndex(2), BoneIndex(3)]
+        );
+    }
+
+    #[test]
     fn parent_is_ordered_before_child_even_if_input_order_is_not_transform_order() {
         let mut root = BoneInit::new(None, Vec3A::ZERO);
         root.transform_order = 10;
@@ -841,6 +1122,46 @@ mod tests {
     }
 
     #[test]
+    fn ik_bone_solver_lookup_maps_multiple_bones_and_preserves_registration_order() {
+        let model = ModelArena::new_with_ik(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(1)), Vec3A::ZERO),
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(None, Vec3A::ZERO),
+            ],
+            vec![
+                IkSolverInit::new(
+                    BoneIndex(2),
+                    BoneIndex(1),
+                    vec![IkLinkInit::new(BoneIndex(0))],
+                ),
+                IkSolverInit::new(
+                    BoneIndex(4),
+                    BoneIndex(3),
+                    vec![IkLinkInit::new(BoneIndex(0))],
+                ),
+                IkSolverInit::new(
+                    BoneIndex(2),
+                    BoneIndex(1),
+                    vec![IkLinkInit::new(BoneIndex(0))],
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(model.ik_solver_count_for_bone(BoneIndex(0)), 0);
+        assert_eq!(model.ik_solver_count_for_bone(BoneIndex(1)), 0);
+        assert_eq!(model.ik_solver_count_for_bone(BoneIndex(2)), 2);
+        assert_eq!(model.ik_solver_count_for_bone(BoneIndex(3)), 0);
+        assert_eq!(model.ik_solver_count_for_bone(BoneIndex(4)), 1);
+        assert_eq!(model.ik_solver_index_for_bone(BoneIndex(2), 0), 0);
+        assert_eq!(model.ik_solver_index_for_bone(BoneIndex(2), 1), 2);
+        assert_eq!(model.ik_solver_index_for_bone(BoneIndex(4), 0), 1);
+    }
+
+    #[test]
     fn stores_normalized_fixed_axis_descriptors() {
         let model = ModelArena::new(vec![
             BoneInit::new(None, Vec3A::ZERO).with_fixed_axis(Vec3A::new(0.0, 2.0, 0.0)),
@@ -850,6 +1171,63 @@ mod tests {
 
         assert_eq!(model.fixed_axis(BoneIndex(0)), Some(Vec3A::Y));
         assert_eq!(model.fixed_axis(BoneIndex(1)), None);
+    }
+
+    #[test]
+    fn stores_local_axis_descriptors_and_basis() {
+        let model = ModelArena::new(vec![
+            BoneInit::new(None, Vec3A::ZERO),
+            BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO),
+            BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO),
+        ])
+        .unwrap()
+        .with_local_axes([
+            Some(LocalAxis::new(
+                Vec3A::new(0.0, 1.0, 0.0),
+                Vec3A::new(0.0, 0.0, 1.0),
+            )),
+            Some(LocalAxis::new(Vec3A::ZERO, Vec3A::Z)),
+            None,
+        ]);
+
+        let axis = model.local_axis(BoneIndex(0)).expect("local axis retained");
+        assert_eq!(axis.x, Vec3A::new(0.0, 1.0, 0.0));
+        assert_eq!(axis.z, Vec3A::new(0.0, 0.0, 1.0));
+        let basis = model
+            .local_axis_basis(BoneIndex(0))
+            .expect("local axis basis");
+        // Right-handed rebuild: x=(0,1,0), y=z×x=(0,0,1)×(0,1,0)=(-1,0,0), z=x×y=(0,0,1).
+        let x_dir = basis * Vec3A::X;
+        let y_dir = basis * Vec3A::Y;
+        let z_dir = basis * Vec3A::Z;
+        assert!((x_dir - Vec3A::Y).length() < 1.0e-5);
+        assert!((y_dir - (-Vec3A::X)).length() < 1.0e-5);
+        assert!((z_dir - Vec3A::Z).length() < 1.0e-5);
+        assert!(model.local_axis(BoneIndex(1)).is_none());
+        assert!(model.local_axis_basis(BoneIndex(1)).is_none());
+        assert!(model.local_axis(BoneIndex(2)).is_none());
+        assert_eq!(model.local_axis_count(), 1);
+    }
+
+    #[test]
+    fn existing_bone_init_constructors_have_no_local_axes() {
+        // Source-compatible construction: BoneInit::new and full struct literal
+        // without any local-axis field retain empty local-axis storage.
+        let via_new = ModelArena::new(vec![BoneInit::new(None, Vec3A::ZERO)]).unwrap();
+        assert_eq!(via_new.local_axis_count(), 0);
+        assert!(via_new.local_axis(BoneIndex(0)).is_none());
+
+        let via_literal = ModelArena::new(vec![BoneInit {
+            parent: None,
+            rest_position: Vec3A::ZERO,
+            inverse_bind_matrix: Mat4::IDENTITY,
+            transform_order: 0,
+            transform_after_physics: false,
+            fixed_axis: None,
+            enforce_fixed_axis: false,
+        }])
+        .unwrap();
+        assert_eq!(via_literal.local_axis_count(), 0);
     }
 
     #[test]

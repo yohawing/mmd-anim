@@ -3,6 +3,10 @@
   mmd-anim-ffi smoke test: build cdylib and validate header symbol coverage.
 #>
 $ErrorActionPreference = "Stop"
+# Cargo writes normal progress messages to stderr. Treat that stream as output
+# and rely on its exit code below, otherwise PowerShell 7 can stop here before
+# the release build completes.
+$PSNativeCommandUseErrorActionPreference = $false
 $ProjectRoot = Resolve-Path "$PSScriptRoot\..\..\.."
 $FfiDir     = Resolve-Path "$PSScriptRoot\.."
 
@@ -10,7 +14,7 @@ Write-Host "=== mmd-anim-ffi smoke ===" -ForegroundColor Cyan
 
 # --- 1. Build cdylib -------------------------------------------------
 Write-Host "`n[1/3] Building mmd-anim-ffi (release)..." -ForegroundColor Yellow
-$build = & cargo build -p mmd-anim-ffi --release 2>&1
+& cargo build -p mmd-anim-ffi --release
 if ($LASTEXITCODE -ne 0) {
     Write-Host "FAIL: cargo build exited $LASTEXITCODE" -ForegroundColor Red
     exit 1

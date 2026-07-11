@@ -9,18 +9,25 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "CLI diagnostics and roundtrip tools for mmd-anim"
+build = "build.rs"
 
 [[bin]]
 name = "mmd-anim"
 path = "src/main.rs"
 doc = false
 
+[features]
+default = []
+physics-bullet-native = ["dep:mmd-anim-physics-bullet"]
+
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 glam.workspace = true
 mmd-anim-runtime.workspace = true
-mmd-anim-format = { path = "../mmd-anim-format", version = "0.1.9" }
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.2.0", features = ["fbx"] }
+mmd-anim-physics-bullet = { path = "../mmd-anim-physics-bullet", version = "0.2.0", features = ["native", "pmx-format", "runtime"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

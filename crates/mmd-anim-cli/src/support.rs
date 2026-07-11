@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use mmd_anim_format::MmdFormatKind;
 
 pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).map_err(|error| {
@@ -43,9 +44,83 @@ pub(crate) fn diagnostics_suffix(count: usize) -> String {
     }
 }
 
-pub(crate) fn unsupported_format_error(path: &Path) -> Box<dyn std::error::Error> {
+pub(crate) fn format_kind_label(kind: MmdFormatKind) -> &'static str {
+    match kind {
+        MmdFormatKind::Pmd => "PMD",
+        MmdFormatKind::Pmx => "PMX",
+        MmdFormatKind::Vmd => "VMD",
+        MmdFormatKind::Vpd => "VPD",
+        MmdFormatKind::Pmm => "PMM",
+        MmdFormatKind::Nmd => "NMD",
+        MmdFormatKind::X => "X",
+        MmdFormatKind::Vac => "VAC",
+        MmdFormatKind::Unknown => "unknown",
+    }
+}
+
+pub(crate) fn unsupported_format_error(
+    command: &str,
+    path: &Path,
+    kind: MmdFormatKind,
+) -> Box<dyn std::error::Error> {
     anyhow!(
-        "unsupported or unrecognized file format: {}",
+        "{command}: unsupported or unrecognized file format (detected={}): {}",
+        format_kind_label(kind),
+        path.display()
+    )
+    .into()
+}
+
+pub(crate) fn unsupported_format_usage_message(
+    command: &str,
+    path: &Path,
+    kind: MmdFormatKind,
+    hint: &str,
+) -> String {
+    format!(
+        "{command}: unsupported or unrecognized file format (detected={}): {}; {hint}",
+        format_kind_label(kind),
+        path.display()
+    )
+}
+
+pub(crate) fn unsupported_format_operation_error(
+    command: &str,
+    path: &Path,
+    kind: MmdFormatKind,
+    operation: &str,
+) -> Box<dyn std::error::Error> {
+    anyhow!(
+        "{command}: {operation} is not supported for {} file: {}",
+        format_kind_label(kind),
+        path.display()
+    )
+    .into()
+}
+
+pub(crate) fn parse_failure_error(
+    command: &str,
+    path: &Path,
+    kind: MmdFormatKind,
+    error: impl std::fmt::Display,
+) -> Box<dyn std::error::Error> {
+    anyhow!(
+        "{command}: failed to parse {} file {}: {error}",
+        format_kind_label(kind),
+        path.display()
+    )
+    .into()
+}
+
+pub(crate) fn import_failure_error(
+    command: &str,
+    path: &Path,
+    kind: MmdFormatKind,
+    error: impl std::fmt::Display,
+) -> Box<dyn std::error::Error> {
+    anyhow!(
+        "{command}: failed to import {} file {}: {error}",
+        format_kind_label(kind),
         path.display()
     )
     .into()
@@ -108,5 +183,41 @@ pub(crate) fn copy_world_matrices_to_f32(matrices: &[glam::Mat4], out: &mut [f32
     for (index, matrix) in matrices.iter().enumerate() {
         let offset = index * 16;
         out[offset..offset + 16].copy_from_slice(&matrix.to_cols_array());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn unsupported_format_error_includes_command_path_and_detected_kind() {
+        let path = Path::new("assets/mystery.bin");
+        let error = unsupported_format_error("inspect", path, MmdFormatKind::Unknown);
+        let message = error.to_string();
+        assert!(message.contains("inspect:"));
+        assert!(message.contains("assets/mystery.bin"));
+        assert!(message.contains("detected=unknown"));
+    }
+
+    #[test]
+    fn parse_failure_error_includes_command_path_and_format() {
+        let path = Path::new("model.pmx");
+        let error = parse_failure_error("inspect", path, MmdFormatKind::Pmx, "bad header");
+        let message = error.to_string();
+        assert!(message.contains("inspect:"));
+        assert!(message.contains("failed to parse PMX file model.pmx"));
+        assert!(message.contains("bad header"));
+    }
+
+    #[test]
+    fn import_failure_error_includes_command_path_and_format() {
+        let path = Path::new("motion.vmd");
+        let error = import_failure_error("import", path, MmdFormatKind::Vmd, "truncated frame");
+        let message = error.to_string();
+        assert!(message.contains("import:"));
+        assert!(message.contains("failed to import VMD file motion.vmd"));
+        assert!(message.contains("truncated frame"));
     }
 }

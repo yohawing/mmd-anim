@@ -52,6 +52,50 @@ function buildMinimalVmdBytes() {
   return new Uint8Array(bytes);
 }
 
+function buildFixedAxisIkPmxBytes() {
+  const bytes = [];
+  const pushU8 = (value) => bytes.push(value & 0xff);
+  const pushI16 = (value) => {
+    const view = new DataView(new ArrayBuffer(2));
+    view.setInt16(0, value, true);
+    bytes.push(...new Uint8Array(view.buffer));
+  };
+  const pushI32 = (value) => {
+    const view = new DataView(new ArrayBuffer(4));
+    view.setInt32(0, value, true);
+    bytes.push(...new Uint8Array(view.buffer));
+  };
+  const pushF32 = (value) => {
+    const view = new DataView(new ArrayBuffer(4));
+    view.setFloat32(0, value, true);
+    bytes.push(...new Uint8Array(view.buffer));
+  };
+  const pushVec3 = (x, y, z) => { pushF32(x); pushF32(y); pushF32(z); };
+  const pushText = (value) => {
+    const text = new TextEncoder().encode(value);
+    pushI32(text.length);
+    bytes.push(...text);
+  };
+  const pushBone = (name, position, parent, flags, extra) => {
+    pushText(name); pushText(''); pushVec3(...position); pushI16(parent); pushI32(0); pushI16(flags);
+    extra();
+  };
+
+  bytes.push(...new TextEncoder().encode('PMX '));
+  pushF32(2.0); pushU8(8);
+  bytes.push(1, 0, 2, 2, 2, 2, 2, 2); // UTF-8, no extra UVs, i16 indices
+  pushText(''); pushText(''); pushText(''); pushText('');
+  for (let section = 0; section < 4; section++) pushI32(0);
+  pushI32(3);
+  pushBone('link', [0, 0, 0], -1, 0x0400, () => { pushVec3(0, 0, 0); pushVec3(0, 0, 1); });
+  pushBone('tip', [0, 1, 0], 0, 0, () => pushVec3(0, 0, 0));
+  pushBone('ik', [0, 0, 1], -1, 0x0001 | 0x0020, () => {
+    pushI16(1); pushI16(1); pushI32(16); pushF32(Math.PI); pushI32(1); pushI16(0); pushU8(0);
+  });
+  pushI32(0); // morph count
+  return new Uint8Array(bytes);
+}
+
 console.log('=== Wasm Smoke Test ===\n');
 
 console.log('1. wasm_wrapper_version');
@@ -103,6 +147,17 @@ const autoRuntime = wasm.WasmMmdRuntimeInstance.forModel(model);
 assert(autoRuntime.worldMatrixF32Len() === 32, 'forModel worldMatrixF32Len() === 32');
 assert(autoRuntime.morphWeightLen() === 0, 'forModel morphWeightLen() === 0');
 assert(autoRuntime.ikEnabledLen() === 0, 'forModel ikEnabledLen() === 0');
+
+console.log('\n6c. Import fixedAxis IK PMX bytes');
+const axisModel = wasm.WasmMmdModel.fromPmxBytes(buildFixedAxisIkPmxBytes());
+assert(axisModel.boneCount() === 3, 'fromPmxBytes fixedAxis model has 3 bones');
+assert(axisModel.ikCount() === 1, 'fromPmxBytes fixedAxis model has 1 IK solver');
+const axisRuntime = wasm.WasmMmdRuntimeInstance.forModel(axisModel);
+axisRuntime.evaluateRestPose();
+const axisWorld = axisRuntime.worldMatrices();
+assertClose(axisWorld[28], 0.0, 1e-3, 'fixedAxis IK tip x remains 0');
+assertClose(axisWorld[29], 1.0, 1e-3, 'fixedAxis IK tip y remains 1');
+assertClose(axisWorld[30], 0.0, 1e-3, 'fixedAxis IK tip z remains 0');
 
 console.log('\n7. Create WasmMmdClip and evaluate frame');
 const clip = new wasm.WasmMmdClip(

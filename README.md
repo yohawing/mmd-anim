@@ -21,10 +21,9 @@ frozen yet, and breaking changes may happen before 1.0. Feedback is welcome.
 - Load a PMX model and convert it into runtime-ready model data.
 - Load a VMD motion and convert bone, camera, light, and other motion tracks into a playable form.
 - Interpolate between keyframes with MMD-style Bezier interpolation for translation and rotation.
-
-> **Physics simulation is not included.** Rigid-body and joint data can be read
-> and written, but cloth, hair, and other physics-driven motion must be handled
-> by the host-side physics engine.
+- An optional MMD physics backend using Bullet Physics, available to
+  `mmd-anim-cli` and `mmd-anim-ffi` builds through their
+  `physics-bullet-native` feature.
 
 ## Test Foundation
 
@@ -49,6 +48,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
+Maintainers with local GoldenOracle physics baselines should also run the local
+physics release gate before cutting a release:
+
+```powershell
+.\scripts\local-physics-release-gate.ps1
+```
+
+The physics gate uses ignored `tools/golden-gate/physics-*.local.json` configs
+and local `.ai/` baselines. It never updates baselines; use
+`tools/golden-gate` directly when accepting a new baseline.
+
 ## Used By
 
 `mmd-anim` is developed as the shared animation backend for MMD-related projects.
@@ -57,6 +67,9 @@ cargo doc --workspace --no-deps
   MMD loader that uses `mmd-anim` as its animation and format backend.
 - [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools): Maya plugin for
   MMD model and motion handling, using `mmd-anim` as its native runtime.
+- [unity-mmd-loader](https://github.com/yohawing/unity-mmd-loader): An MMD
+  loader optimized for Unity 6 and URP, using `mmd-anim` for importing and as
+  its core animation runtime.
 
 More integrations can share the same runtime core through the Rust API, C ABI,
 or WASM wrapper.
@@ -72,22 +85,9 @@ Format support overview. "Loading" means parsing a file into structured data.
 | PMD | model structure + partial runtime import | writing / JSON conversion |
 | VMD | **supported** | **supported** |
 | VPD | **supported** | **supported** |
-| PMM | header, timeline, display state, referenced assets, PMMv2 summaries, and selected keyframe payload metadata | partial support: lossless parsed-byte round trip, limited source-byte patches, and experimental single-model PMX/VMD scene generation |
+| PMM | header, timeline, display state, referenced assets, PMMv2 summaries, and selected keyframe payload metadata | partial support: rewriting selected parts of the original data and experimental generation of single-model PMX/VMD scenes |
 | X/VAC | text X mesh, material, UV, normal, vertex color + VAC settings and raw lines | text X / VAC wrapper writing |
-
-## Crates
-
-| Crate | Role |
-|---|---|
-| `mmd-anim` | Main public crate. Provides the evaluation core and format handling through one entry point. |
-| `mmd-anim-runtime` | Format-independent evaluation core: model arena, pose, VMD evaluation, append transforms, IK, and morphs. |
-| `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
-| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for the 0.1.x line. |
-| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for the 0.1.x line. |
-| `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files, including maintainer-local oracle and numeric comparison schemas. Installable via `cargo install mmd-anim-cli`. |
-
-For normal library use, depend on `mmd-anim`. Advanced users who only need a
-lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
+| FBX | not supported | Experimental binary export for PMX meshes, skeletons, skinning, bind poses, and vertex morphs (blendshapes), as well as runtime-baked VMD bone and vertex-morph animation. |
 
 ## Rust Usage
 
@@ -135,7 +135,7 @@ host-side geometry data, use `mmd_runtime_export_pmx_from_parts`.
 Input arrays remain owned by the caller, and returned bytes must be freed with
 `mmd_runtime_byte_buffer_free`.
 
-This native integration crate is not published to crates.io for the 0.1.x line. It is
+This native integration crate is not published to crates.io. It is
 kept in the Rust workspace for builds and checks.
 
 ## WASM / Browser
@@ -198,7 +198,7 @@ const generatedPmxBytes = exportPmxFromParts(
 );
 ```
 
-The WASM package is not published to crates.io for the 0.1.x line. It is kept in the Rust
+The WASM package is not published to crates.io. It is kept in the Rust
 workspace for builds and checks.
 
 ## CLI
@@ -208,19 +208,28 @@ MMD format files (PMX, VMD, VPD, PMM, X/VAC).
 
 ```powershell
 cargo install mmd-anim-cli
-```
-
-After installation, the `mmd-anim` command is available:
-
-```powershell
 mmd-anim --help
 ```
 
-For development, you can also run directly from the workspace:
+You can export animated FBX files from PMX and VMD inputs.
 
 ```powershell
-cargo run -p mmd-anim-cli -- --help
+mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 ```
+
+## Crates
+
+| Crate | Role |
+|---|---|
+| `mmd-anim` | Main public crate. Provides the evaluation core and format handling through one entry point. |
+| `mmd-anim-runtime` | Format-independent evaluation core: model arena, pose, VMD evaluation, append transforms, IK, and morphs. |
+| `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
+| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for the 0.1.x line. |
+| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for the 0.1.x line. |
+| `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files, including maintainer-local oracle and numeric comparison schemas. Installable via `cargo install mmd-anim-cli`. |
+
+For normal library use, depend on `mmd-anim`. Advanced users who only need a
+lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
 
 ## Current Limitations
 
@@ -228,8 +237,6 @@ cargo run -p mmd-anim-cli -- --help
 - **Writing:** PMX generation from parts currently covers the initial range of geometry, materials, bones, display frames, morphs, and physics. PMM writing is limited to the data currently represented by the PMM manifest parser.
 - **PMM:** Supported PMM data currently includes project header information, timeline-derived values, display state, initial model-slot data, referenced assets, PMMv2 summary information, and asset/header consistency diagnostics. The PMM exporter can re-emit that limited manifest/header/slot/asset-reference surface as a PMMv2 file, but it is not a full PMM project-graph exporter. Keyframe payloads, full camera/light/accessory/self-shadow tracks, and other binary project graph data that are only summarized or not preserved by the parser cannot be reconstructed from `PmmParsedManifest`.
 - **X/VAC:** Text X mesh, material, normal, UV, vertex color, and common VAC line order are handled. Binary X is diagnostic-only.
-- **Physics:** Rigid-body and joint data can be read and written, but physics simulation itself is not provided. Physics-driven parts should be handled by the host engine.
-- **API / ABI / WASM:** These surfaces are still experimental. When integrating with an external host, start with a small smoke test and representative-frame checks.
 
 ## Japanese README
 

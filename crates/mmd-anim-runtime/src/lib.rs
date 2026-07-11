@@ -31,8 +31,11 @@ pub use ik_primitive::{
 };
 pub use model::{
     AppendTransform, AppendTransformInit, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset,
-    IkAngleLimit, IkLink, IkLinkInit, IkSolver, IkSolverInit, ModelArena, ModelBuildError,
-    MorphIndex, MorphInit, MorphOffsetSpan, VertexMorphOffset,
+    IkAngleLimit, IkLink, IkLinkInit, IkSolver, IkSolverInit, LocalAxis, ModelArena,
+    ModelBuildError, MorphIndex, MorphInit, MorphOffsetSpan, VertexMorphOffset,
 };
 pub use pose::PoseArena;
-pub use runtime::{IkSolveOptions, IkSolverRuntimeStats, RuntimeInstance};
+pub use runtime::{
+    IkSolveOptions, IkSolverRuntimeStats, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
+    RuntimeInstance,
+};

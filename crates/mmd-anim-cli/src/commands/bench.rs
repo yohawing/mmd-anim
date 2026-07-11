@@ -2,23 +2,271 @@ use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Instant};
 
 use glam::{Quat, Vec3A};
 use mmd_anim_runtime::{
-    AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, IkSolveOptions, ModelArena,
-    MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
+    AnimationClip, BoneAnimationBinding, BoneIndex, BoneInit, IkSolveOptions, IkSolverRuntimeStats,
+    ModelArena, MovableBoneKeyframe, MovableBoneTrack, RuntimeInstance,
 };
+use serde_json::json;
 
 use crate::{copy_world_matrices_to_f32, f32_checksum, read_file, translation_checksum};
 
-pub(crate) const BENCH_PAIR_USAGE: &str = "usage: mmd-anim bench-pair <model.pmx> <motion.vmd> [start-frame] [frame-count] [step] [--no-ik] [--ik-tolerance <value>] [--ik-max-iterations-cap <count>]";
+pub(crate) const BENCH_PAIR_USAGE: &str = "usage: mmd-anim bench-pair <model.pmx> <motion.vmd> [start-frame] [frame-count] [step] [--instances <count>] [--no-ik] [--ik-tolerance <value>] [--ik-max-iterations-cap <count>] [--json]";
 
 #[derive(Debug)]
 pub(crate) struct BenchPairConfig {
-    pmx_path: PathBuf,
-    vmd_path: PathBuf,
-    start_frame: f32,
-    frame_count: usize,
-    step: f32,
-    solve_ik: bool,
-    ik_options: IkSolveOptions,
+    pub(crate) pmx_path: PathBuf,
+    pub(crate) vmd_path: PathBuf,
+    pub(crate) start_frame: f32,
+    pub(crate) frame_count: usize,
+    pub(crate) step: f32,
+    pub(crate) solve_ik: bool,
+    pub(crate) ik_options: IkSolveOptions,
+    pub(crate) instances: usize,
+    pub(crate) use_json: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct BenchPairIkSolverSummary {
+    pub solver_index: usize,
+    pub bone_index: usize,
+    pub name: String,
+    pub max_iterations: u32,
+    pub links: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct BenchPairReportInput<'a> {
+    pub pmx_path: &'a PathBuf,
+    pub vmd_path: &'a PathBuf,
+    pub bone_count: usize,
+    pub append_count: usize,
+    pub fixed_axis_count: usize,
+    pub solver_count: usize,
+    pub morph_count: usize,
+    pub vmd_bone_keys: usize,
+    pub vmd_morph_keys: usize,
+    pub clip_bone_tracks: usize,
+    pub clip_morph_tracks: usize,
+    pub property_track: bool,
+    pub clip_frame_range: Option<(u32, u32)>,
+    pub start_frame: f32,
+    pub frame_count: usize,
+    pub step: f32,
+    pub instances: usize,
+    pub total_evaluations: u64,
+    pub solve_ik: bool,
+    pub ik_options: IkSolveOptions,
+    pub read_ms: f64,
+    pub pmx_import_ms: f64,
+    pub vmd_import_ms: f64,
+    pub clip_build_ms: f64,
+    pub eval_ms: f64,
+    pub apply_pose_ms: f64,
+    pub morph_expand_ms: f64,
+    pub pose_eval_ms: f64,
+    pub world_copy_ms: f64,
+    pub skinning_copy_ms: f64,
+    pub morph_copy_ms: f64,
+    pub hot_loop_ms: f64,
+    pub total_ms: f64,
+    pub ms_per_frame: f64,
+    pub fps: f64,
+    pub ms_per_evaluation: f64,
+    pub evaluations_per_second: f64,
+    pub checksum: u32,
+    pub morph_checksum: u32,
+    pub ik_solver_summaries: &'a [BenchPairIkSolverSummary],
+    pub ik_stats: Option<&'a [IkSolverRuntimeStats]>,
+}
+
+pub(crate) fn bench_pair_report_json(input: BenchPairReportInput<'_>) -> serde_json::Value {
+    let clip_frame_range = input
+        .clip_frame_range
+        .map(|(first, last)| format!("{first}..{last}"));
+
+    let mut root = json!({
+        "status": "ok",
+        "command": "bench",
+        "mode": "pair",
+        "model": input.pmx_path.display().to_string(),
+        "motion": input.vmd_path.display().to_string(),
+        "counts": {
+            "bones": input.bone_count,
+            "append": input.append_count,
+            "fixedAxis": input.fixed_axis_count,
+            "ikSolvers": input.solver_count,
+            "morphs": input.morph_count,
+            "vmdBoneKeys": input.vmd_bone_keys,
+            "vmdMorphKeys": input.vmd_morph_keys,
+            "clipBoneTracks": input.clip_bone_tracks,
+            "clipMorphTracks": input.clip_morph_tracks,
+            "propertyTrack": input.property_track,
+        },
+        "config": {
+            "startFrame": input.start_frame,
+            "frameCount": input.frame_count,
+            "step": input.step,
+            "instances": input.instances,
+            "totalEvaluations": input.total_evaluations,
+            "solveIk": input.solve_ik,
+            "ikTolerance": input.ik_options.tolerance,
+            "ikMaxIterationsCap": input.ik_options.max_iterations_cap,
+        },
+        "timing": {
+            "readMs": input.read_ms,
+            "pmxImportMs": input.pmx_import_ms,
+            "vmdImportMs": input.vmd_import_ms,
+            "clipBuildMs": input.clip_build_ms,
+            "evalMs": input.eval_ms,
+            "applyPoseMs": input.apply_pose_ms,
+            "morphExpandMs": input.morph_expand_ms,
+            "poseEvalMs": input.pose_eval_ms,
+            "worldCopyMs": input.world_copy_ms,
+            "skinningCopyMs": input.skinning_copy_ms,
+            "morphCopyMs": input.morph_copy_ms,
+            "hotLoopMs": input.hot_loop_ms,
+            "totalMs": input.total_ms,
+            "msPerFrame": input.ms_per_frame,
+            "fps": input.fps,
+            "msPerEvaluation": input.ms_per_evaluation,
+            "evaluationsPerSecond": input.evaluations_per_second,
+        },
+        "result": {
+            "checksum": format!("{:08x}", input.checksum),
+            "morphChecksum": format!("{:08x}", input.morph_checksum),
+            "clipFrameRange": clip_frame_range,
+        },
+    });
+
+    if let Some(stats) = input.ik_stats {
+        let total_evaluations = stats
+            .iter()
+            .map(|stats| stats.solver_evaluations)
+            .sum::<u64>();
+        let configured_iterations = stats
+            .iter()
+            .map(|stats| stats.configured_iterations)
+            .sum::<u64>();
+        let executed_iterations = stats
+            .iter()
+            .map(|stats| stats.executed_iterations)
+            .sum::<u64>();
+        let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
+        let tolerance_precheck_breaks = stats
+            .iter()
+            .map(|stats| stats.tolerance_precheck_breaks)
+            .sum::<u64>();
+        let tolerance_post_iteration_breaks = stats
+            .iter()
+            .map(|stats| stats.tolerance_post_iteration_breaks)
+            .sum::<u64>();
+        let rollback_breaks = stats.iter().map(|stats| stats.rollback_breaks).sum::<u64>();
+        let max_iteration_exhaustions = stats
+            .iter()
+            .map(|stats| stats.max_iteration_exhaustions)
+            .sum::<u64>();
+        let link_steps = stats.iter().map(|stats| stats.link_steps).sum::<u64>();
+        let skip_ratio = if configured_iterations == 0 {
+            0.0
+        } else {
+            skipped_iterations as f64 / configured_iterations as f64
+        };
+
+        let mut ranked = stats
+            .iter()
+            .enumerate()
+            .map(|(index, stats)| (index, *stats))
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(_, stats)| {
+            std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
+        });
+
+        let top_solvers = ranked
+            .into_iter()
+            .take(8)
+            .map(|(index, stats)| {
+                let summary = &input.ik_solver_summaries[index];
+                let skipped = stats
+                    .configured_iterations
+                    .saturating_sub(stats.executed_iterations);
+                let avg_final_distance = if stats.solver_evaluations == 0 {
+                    0.0
+                } else {
+                    stats.final_distance_sum / stats.solver_evaluations as f64
+                };
+                let avg_exhausted_final_distance = if stats.max_iteration_exhaustions == 0 {
+                    0.0
+                } else {
+                    stats.exhausted_final_distance_sum / stats.max_iteration_exhaustions as f64
+                };
+                json!({
+                    "solver": summary.solver_index,
+                    "bone": summary.bone_index,
+                    "name": summary.name,
+                    "maxIterations": summary.max_iterations,
+                    "links": summary.links,
+                    "evaluations": stats.solver_evaluations,
+                    "configuredIterations": stats.configured_iterations,
+                    "executedIterations": stats.executed_iterations,
+                    "skippedIterations": skipped,
+                    "precheckBreaks": stats.tolerance_precheck_breaks,
+                    "postBreaks": stats.tolerance_post_iteration_breaks,
+                    "rollbackBreaks": stats.rollback_breaks,
+                    "exhausted": stats.max_iteration_exhaustions,
+                    "avgFinalDistance": avg_final_distance,
+                    "maxFinalDistance": stats.final_distance_max,
+                    "avgExhaustedFinalDistance": avg_exhausted_final_distance,
+                    "maxExhaustedFinalDistance": stats.exhausted_final_distance_max,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        root["ik"] = json!({
+            "aggregate": {
+                "solverEvaluations": total_evaluations,
+                "configuredIterations": configured_iterations,
+                "executedIterations": executed_iterations,
+                "skippedIterations": skipped_iterations,
+                "skippedRatio": skip_ratio,
+                "tolerancePrecheckBreaks": tolerance_precheck_breaks,
+                "tolerancePostIterationBreaks": tolerance_post_iteration_breaks,
+                "rollbackBreaks": rollback_breaks,
+                "maxIterationExhaustions": max_iteration_exhaustions,
+                "linkSteps": link_steps,
+            },
+            "topSolvers": top_solvers,
+        });
+    }
+
+    root
+}
+
+pub(crate) fn aggregate_ik_runtime_stats<'a>(
+    runtime_stats: impl IntoIterator<Item = &'a [IkSolverRuntimeStats]>,
+) -> Vec<IkSolverRuntimeStats> {
+    let mut aggregate = Vec::new();
+    for stats_set in runtime_stats {
+        if aggregate.len() < stats_set.len() {
+            aggregate.resize(stats_set.len(), IkSolverRuntimeStats::default());
+        }
+        for (target, stats) in aggregate.iter_mut().zip(stats_set.iter()) {
+            target.solver_evaluations += stats.solver_evaluations;
+            target.configured_iterations += stats.configured_iterations;
+            target.executed_iterations += stats.executed_iterations;
+            target.tolerance_precheck_breaks += stats.tolerance_precheck_breaks;
+            target.tolerance_post_iteration_breaks += stats.tolerance_post_iteration_breaks;
+            target.rollback_breaks += stats.rollback_breaks;
+            target.max_iteration_exhaustions += stats.max_iteration_exhaustions;
+            target.link_visits += stats.link_visits;
+            target.link_steps += stats.link_steps;
+            target.final_distance_sum += stats.final_distance_sum;
+            target.final_distance_max = target.final_distance_max.max(stats.final_distance_max);
+            target.exhausted_final_distance_sum += stats.exhausted_final_distance_sum;
+            target.exhausted_final_distance_max = target
+                .exhausted_final_distance_max
+                .max(stats.exhausted_final_distance_max);
+        }
+    }
+    aggregate
 }
 
 pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -46,19 +294,16 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
         .ik_solvers()
         .iter()
         .enumerate()
-        .map(|(index, solver)| {
-            let name = pmx
+        .map(|(index, solver)| BenchPairIkSolverSummary {
+            solver_index: index,
+            bone_index: solver.ik_bone.as_usize(),
+            name: pmx
                 .bone_names
                 .get(solver.ik_bone.as_usize())
                 .cloned()
-                .unwrap_or_else(|| "<unknown>".to_owned());
-            (
-                index,
-                solver.ik_bone.as_usize(),
-                name,
-                solver.iteration_count,
-                solver.links.len(),
-            )
+                .unwrap_or_else(|| "<unknown>".to_owned()),
+            max_iterations: solver.iteration_count,
+            links: solver.links.len(),
         })
         .collect::<Vec<_>>();
     let morph_count = pmx
@@ -79,32 +324,162 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
     let clip_elapsed = clip_start.elapsed();
 
     let model = Arc::new(pmx.model);
-    let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, solver_count);
-    runtime.reset_ik_runtime_stats();
+    let mut runtimes: Vec<RuntimeInstance> = (0..cfg.instances)
+        .map(|_| RuntimeInstance::new_with_counts(Arc::clone(&model), morph_count, solver_count))
+        .collect();
+    if cfg.solve_ik {
+        for runtime in &mut runtimes {
+            runtime.reset_ik_runtime_stats();
+        }
+    }
 
-    let eval_start = Instant::now();
+    let world_scratch_len = bone_count * 16;
+    let mut world_scratch = vec![0.0f32; world_scratch_len];
+    let mut skinning_scratch = vec![0.0f32; world_scratch_len];
+    let mut morph_scratch = vec![0.0f32; morph_count];
+
+    let hot_loop_start = Instant::now();
+    let mut apply_pose_elapsed = std::time::Duration::ZERO;
+    let mut morph_expand_elapsed = std::time::Duration::ZERO;
+    let mut pose_eval_elapsed = std::time::Duration::ZERO;
+    let mut world_copy_elapsed = std::time::Duration::ZERO;
+    let mut skinning_copy_elapsed = std::time::Duration::ZERO;
+    let mut morph_copy_elapsed = std::time::Duration::ZERO;
     let mut checksum = 0u32;
     let mut morph_checksum = 0u32;
     for i in 0..cfg.frame_count {
         let frame = cfg.start_frame + cfg.step * i as f32;
-        if cfg.solve_ik {
-            runtime.evaluate_clip_frame_with_ik_options(&clip, frame, cfg.ik_options);
-        } else {
-            runtime.evaluate_clip_frame_without_ik(&clip, frame);
+        for runtime in &mut runtimes {
+            let apply_pose_start = Instant::now();
+            clip.apply_to_pose(frame, runtime.pose_mut());
+            apply_pose_elapsed += apply_pose_start.elapsed();
+
+            let morph_expand_start = Instant::now();
+            runtime.expand_morphs();
+            morph_expand_elapsed += morph_expand_start.elapsed();
+
+            let pose_eval_start = Instant::now();
+            if cfg.solve_ik {
+                runtime.evaluate_current_pose_with_ik_options(cfg.ik_options);
+            } else {
+                runtime.evaluate_current_pose_without_ik();
+            }
+            pose_eval_elapsed += pose_eval_start.elapsed();
+
+            let world_start = Instant::now();
+            copy_world_matrices_to_f32(runtime.world_matrices(), &mut world_scratch);
+            world_copy_elapsed += world_start.elapsed();
+
+            let skinning_start = Instant::now();
+            copy_world_matrices_to_f32(runtime.skinning_matrices(), &mut skinning_scratch);
+            skinning_copy_elapsed += skinning_start.elapsed();
+
+            let morph_start = Instant::now();
+            if !morph_scratch.is_empty() {
+                morph_scratch.copy_from_slice(runtime.morph_weights());
+            }
+            morph_copy_elapsed += morph_start.elapsed();
+
+            checksum = checksum.rotate_left(1) ^ translation_checksum(runtime.world_matrices());
+            morph_checksum = morph_checksum.rotate_left(1) ^ f32_checksum(runtime.morph_weights());
+            std::hint::black_box(world_scratch.first().copied());
+            std::hint::black_box(skinning_scratch.first().copied());
+            std::hint::black_box(morph_scratch.first().copied());
         }
-        checksum = checksum.rotate_left(1) ^ translation_checksum(runtime.world_matrices());
-        morph_checksum = morph_checksum.rotate_left(1) ^ f32_checksum(runtime.morph_weights());
     }
-    let eval_elapsed = eval_start.elapsed();
+    let hot_loop_elapsed = hot_loop_start.elapsed();
     let total_elapsed = total_start.elapsed();
 
-    let frame_range = clip
-        .frame_range()
+    let clip_frame_range = clip.frame_range();
+    let frame_range = clip_frame_range
         .map(|(first, last)| format!("{first}..{last}"))
         .unwrap_or_else(|| "none".to_owned());
-    let eval_ms = eval_elapsed.as_secs_f64() * 1000.0;
-    let ms_per_frame = eval_ms / cfg.frame_count as f64;
-    let fps = cfg.frame_count as f64 / eval_elapsed.as_secs_f64();
+    let total_evaluations = cfg.instances as u64 * cfg.frame_count as u64;
+    let apply_pose_ms = duration_to_ms(apply_pose_elapsed);
+    let morph_expand_ms = duration_to_ms(morph_expand_elapsed);
+    let pose_eval_ms = duration_to_ms(pose_eval_elapsed);
+    let eval_ms = apply_pose_ms + morph_expand_ms + pose_eval_ms;
+    let world_copy_ms = duration_to_ms(world_copy_elapsed);
+    let skinning_copy_ms = duration_to_ms(skinning_copy_elapsed);
+    let morph_copy_ms = duration_to_ms(morph_copy_elapsed);
+    let hot_loop_ms = duration_to_ms(hot_loop_elapsed);
+    let hot_loop_secs = hot_loop_elapsed.as_secs_f64();
+    let ms_per_frame = if cfg.frame_count == 0 {
+        0.0
+    } else {
+        hot_loop_ms / cfg.frame_count as f64
+    };
+    let fps = if hot_loop_secs == 0.0 {
+        0.0
+    } else {
+        cfg.frame_count as f64 / hot_loop_secs
+    };
+    let ms_per_evaluation = if total_evaluations == 0 {
+        0.0
+    } else {
+        hot_loop_ms / total_evaluations as f64
+    };
+    let evaluations_per_second = if hot_loop_secs == 0.0 {
+        0.0
+    } else {
+        total_evaluations as f64 / hot_loop_secs
+    };
+    let read_ms = read_elapsed.as_secs_f64() * 1000.0;
+    let pmx_import_ms = pmx_elapsed.as_secs_f64() * 1000.0;
+    let vmd_import_ms = vmd_elapsed.as_secs_f64() * 1000.0;
+    let clip_build_ms = clip_elapsed.as_secs_f64() * 1000.0;
+    let total_ms = total_elapsed.as_secs_f64() * 1000.0;
+    let aggregated_ik_stats = cfg.solve_ik.then(|| {
+        aggregate_ik_runtime_stats(runtimes.iter().map(RuntimeInstance::ik_runtime_stats))
+    });
+
+    if cfg.use_json {
+        let report = bench_pair_report_json(BenchPairReportInput {
+            pmx_path: &cfg.pmx_path,
+            vmd_path: &cfg.vmd_path,
+            bone_count,
+            append_count,
+            fixed_axis_count,
+            solver_count,
+            morph_count,
+            vmd_bone_keys: vmd.bone_keyframes.len(),
+            vmd_morph_keys: vmd.morph_keyframes.len(),
+            clip_bone_tracks: clip.bone_track_count(),
+            clip_morph_tracks: clip.morph_track_count(),
+            property_track: clip.has_property_track(),
+            clip_frame_range,
+            start_frame: cfg.start_frame,
+            frame_count: cfg.frame_count,
+            step: cfg.step,
+            instances: cfg.instances,
+            total_evaluations,
+            solve_ik: cfg.solve_ik,
+            ik_options: cfg.ik_options,
+            read_ms,
+            pmx_import_ms,
+            vmd_import_ms,
+            clip_build_ms,
+            eval_ms,
+            apply_pose_ms,
+            morph_expand_ms,
+            pose_eval_ms,
+            world_copy_ms,
+            skinning_copy_ms,
+            morph_copy_ms,
+            hot_loop_ms,
+            total_ms,
+            ms_per_frame,
+            fps,
+            ms_per_evaluation,
+            evaluations_per_second,
+            checksum,
+            morph_checksum,
+            ik_solver_summaries: &ik_solver_summaries,
+            ik_stats: aggregated_ik_stats.as_deref(),
+        });
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(ExitCode::SUCCESS);
+    }
 
     let ik_display = if cfg.solve_ik {
         solver_count.to_string()
@@ -136,20 +511,36 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
         frame_range,
     );
     println!(
-        "  timing:  readMs={:.3} pmxImportMs={:.3} vmdImportMs={:.3} clipBuildMs={:.3} evalMs={:.3} totalMs={:.3}",
-        read_elapsed.as_secs_f64() * 1000.0,
-        pmx_elapsed.as_secs_f64() * 1000.0,
-        vmd_elapsed.as_secs_f64() * 1000.0,
-        clip_elapsed.as_secs_f64() * 1000.0,
+        "  timing:  readMs={:.3} pmxImportMs={:.3} vmdImportMs={:.3} clipBuildMs={:.3} evalMs={:.3} applyPoseMs={:.3} morphExpandMs={:.3} poseEvalMs={:.3} worldCopyMs={:.3} skinningCopyMs={:.3} morphCopyMs={:.3} hotLoopMs={:.3} totalMs={:.3}",
+        read_ms,
+        pmx_import_ms,
+        vmd_import_ms,
+        clip_build_ms,
         eval_ms,
-        total_elapsed.as_secs_f64() * 1000.0,
+        apply_pose_ms,
+        morph_expand_ms,
+        pose_eval_ms,
+        world_copy_ms,
+        skinning_copy_ms,
+        morph_copy_ms,
+        hot_loop_ms,
+        total_ms,
     );
     println!(
-        "  result:  frames={} startFrame={:.3} step={:.3} msPerFrame={:.6} fps={:.1} checksum={:08x} morphChecksum={:08x}",
-        cfg.frame_count, cfg.start_frame, cfg.step, ms_per_frame, fps, checksum, morph_checksum,
+        "  result:  instances={} frames={} totalEvaluations={} startFrame={:.3} step={:.3} msPerFrame={:.6} fps={:.1} msPerEvaluation={:.6} evaluationsPerSecond={:.1} checksum={:08x} morphChecksum={:08x}",
+        cfg.instances,
+        cfg.frame_count,
+        total_evaluations,
+        cfg.start_frame,
+        cfg.step,
+        ms_per_frame,
+        fps,
+        ms_per_evaluation,
+        evaluations_per_second,
+        checksum,
+        morph_checksum,
     );
-    if cfg.solve_ik {
-        let stats = runtime.ik_runtime_stats();
+    if let Some(stats) = aggregated_ik_stats.as_deref() {
         let total_evaluations = stats
             .iter()
             .map(|stats| stats.solver_evaluations)
@@ -205,8 +596,7 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
             std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
         });
         for (index, stats) in ranked.into_iter().take(8) {
-            let (solver_index, bone_index, name, max_iterations, links) =
-                &ik_solver_summaries[index];
+            let summary = &ik_solver_summaries[index];
             let skipped = stats
                 .configured_iterations
                 .saturating_sub(stats.executed_iterations);
@@ -222,11 +612,11 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
             };
             println!(
                 "bench-pair-ik-solver: solver={} bone={} name={} maxIterations={} links={} evaluations={} configuredIterations={} executedIterations={} skippedIterations={} precheckBreaks={} postBreaks={} rollbackBreaks={} exhausted={} avgFinalDistance={:.8} maxFinalDistance={:.8} avgExhaustedFinalDistance={:.8} maxExhaustedFinalDistance={:.8}",
-                solver_index,
-                bone_index,
-                name,
-                max_iterations,
-                links,
+                summary.solver_index,
+                summary.bone_index,
+                summary.name,
+                summary.max_iterations,
+                summary.links,
                 stats.solver_evaluations,
                 stats.configured_iterations,
                 stats.executed_iterations,
@@ -388,12 +778,19 @@ pub(crate) fn parse_bench_pair_args(
     let mut solve_ik = true;
     let mut ik_tolerance = IkSolveOptions::default().tolerance;
     let mut ik_max_iterations_cap = None;
+    let mut instances = 1usize;
+    let mut use_json = false;
     let mut positional = Vec::new();
 
     let mut raw_iter = raw.into_iter();
     while let Some(token) = raw_iter.next() {
         match token.as_str() {
+            "--json" => use_json = true,
             "--no-ik" => solve_ik = false,
+            "--instances" => {
+                let value = raw_iter.next().ok_or("missing value for --instances")?;
+                instances = parse_positive_usize(&value, "instances")?;
+            }
             "--ik-tolerance" => {
                 let value = raw_iter.next().ok_or("missing value for --ik-tolerance")?;
                 ik_tolerance = parse_finite_f32(&value, "ik-tolerance")?;
@@ -438,7 +835,13 @@ pub(crate) fn parse_bench_pair_args(
             tolerance: ik_tolerance,
             max_iterations_cap: ik_max_iterations_cap,
         },
+        instances,
+        use_json,
     })
+}
+
+fn duration_to_ms(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 fn optional_positive_usize_arg(
@@ -468,6 +871,16 @@ fn optional_positive_u32_arg(
     };
     let parsed = value
         .parse::<u32>()
+        .map_err(|_| format!("invalid {label}: {value}"))?;
+    if parsed == 0 {
+        return Err(format!("{label} must be positive").into());
+    }
+    Ok(parsed)
+}
+
+fn parse_positive_usize(value: &str, label: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let parsed = value
+        .parse::<usize>()
         .map_err(|_| format!("invalid {label}: {value}"))?;
     if parsed == 0 {
         return Err(format!("{label} must be positive").into());

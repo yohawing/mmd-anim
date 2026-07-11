@@ -7,7 +7,7 @@ use crate::binary::{
 };
 use crate::error::ImportError;
 use crate::pmx::PmxParsedModel;
-use crate::sjis::{decode_sjis, decode_sjis_trim_nul, encode_sjis};
+use crate::sjis::{decode_sjis, decode_sjis_trim_nul, encode_sjis, encode_sjis_prefix_fit};
 use crate::vmd::{VmdParsedAnimation, VmdParsedBoneFrame, VmdParsedMorphFrame};
 
 #[derive(Debug, Clone, Serialize)]
@@ -2268,6 +2268,58 @@ fn pmm_bone_interpolation_from_vmd(interpolation: &[u8]) -> [u8; 16] {
     ]
 }
 
+/// Max byte length MMD keeps for a bone/morph name (20-byte NUL-terminated buffer).
+const PMM_MODEL_NAME_MAX_BYTES: usize = 19;
+
+struct PmmExportModelStructure {
+    fixed_tracks: u8,
+    constraint_bone_indices: Vec<i32>,
+    outside_parent_subject_bone_indices: Vec<i32>,
+}
+
+fn pmm_export_model_structure_from_pmx(model: &PmxParsedModel) -> PmmExportModelStructure {
+    let constraint_bone_indices = model
+        .skeleton
+        .bones
+        .iter()
+        .enumerate()
+        .filter(|(_, bone)| bone.flags.ik)
+        .map(|(index, _)| index as i32)
+        .collect();
+    let outside_parent_subject_bone_indices = std::iter::once(-1)
+        .chain(
+            model
+                .skeleton
+                .bones
+                .iter()
+                .enumerate()
+                .filter(|(_, bone)| pmm_is_outside_parent_subject_bone(bone))
+                .map(|(index, _)| index as i32),
+        )
+        .collect();
+    let fixed_tracks = if model.display_frames.is_empty() {
+        0
+    } else {
+        (model.display_frames.len() + 1).min(255) as u8
+    };
+    PmmExportModelStructure {
+        fixed_tracks,
+        constraint_bone_indices,
+        outside_parent_subject_bone_indices,
+    }
+}
+
+fn pmm_is_outside_parent_subject_bone(bone: &crate::pmx::PmxParsedBone) -> bool {
+    bone.flags.ik || (bone.flags.visible && bone.flags.translatable)
+}
+
+fn push_document_outside_parent_current_state(out: &mut Vec<u8>) {
+    push_i32(out, 0);
+    push_i32(out, 0);
+    push_i32(out, -1);
+    push_i32(out, 0);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_pmm_scene(
     model: &PmxParsedModel,
@@ -2281,6 +2333,12 @@ fn write_pmm_scene(
     additional_morphs: &[PmmExportMorphKeyframe],
     max_frame: u32,
 ) -> Vec<u8> {
+    let model_structure = pmm_export_model_structure_from_pmx(model);
+    let constraint_count = model_structure.constraint_bone_indices.len();
+    let outside_parent_count = model_structure.outside_parent_subject_bone_indices.len();
+    let constraint_states = vec![true; constraint_count];
+    let outside_parent_keyframe_indices = vec![(-1, 0); outside_parent_count];
+
     let mut out = b"Polygon Movie maker 0002".to_vec();
     out.resize(30, 0);
     push_u32(&mut out, options.screen_width);
@@ -2295,20 +2353,31 @@ fn write_pmm_scene(
     push_pmm_len_prefixed_sjis(&mut out, &model.metadata.name, &[]);
     push_pmm_len_prefixed_sjis(&mut out, &model.metadata.english_name, &[]);
     push_pmm_fixed_sjis(&mut out, model_path, 256);
-    out.push(0);
+    out.push(model_structure.fixed_tracks);
 
+    // MMD stores bone/morph names in a 20-byte NUL-terminated buffer, so it caps
+    // each name at 19 content bytes (on a char boundary) when it loads the PMX. The
+    // PMM must carry the same truncated names or MMD reports "モデル構造が異なります".
     push_i32(&mut out, bone_names.len() as i32);
     for name in bone_names {
-        push_pmm_len_prefixed_sjis(&mut out, name, &[]);
+        let fitted = encode_sjis_prefix_fit(name, PMM_MODEL_NAME_MAX_BYTES);
+        push_pmm_len_prefixed_sjis(&mut out, name, &fitted);
     }
     push_i32(&mut out, morph_names.len() as i32);
     for name in morph_names {
-        push_pmm_len_prefixed_sjis(&mut out, name, &[]);
+        let fitted = encode_sjis_prefix_fit(name, PMM_MODEL_NAME_MAX_BYTES);
+        push_pmm_len_prefixed_sjis(&mut out, name, &fitted);
     }
 
-    push_i32(&mut out, 0);
-    push_i32(&mut out, 0);
-    out.push(0);
+    push_i32(&mut out, constraint_count as i32);
+    for index in &model_structure.constraint_bone_indices {
+        push_i32(&mut out, *index);
+    }
+    push_i32(&mut out, outside_parent_count as i32);
+    for index in &model_structure.outside_parent_subject_bone_indices {
+        push_i32(&mut out, *index);
+    }
+    out.push(1); // draw order index (1-based; MMD treats 0 as invalid)
     out.push(1);
     push_i32(&mut out, -1);
     for _ in 0..4 {
@@ -2411,7 +2480,17 @@ fn write_pmm_scene(
         );
     }
 
-    push_document_model_keyframe(&mut out, None, 0, 0, 0, true);
+    push_document_model_keyframe(
+        &mut out,
+        None,
+        0,
+        0,
+        0,
+        true,
+        &constraint_states,
+        &outside_parent_keyframe_indices,
+        false,
+    );
     push_i32(&mut out, 0);
 
     for _ in bone_names {
@@ -2426,10 +2505,16 @@ fn write_pmm_scene(
         push_f32(&mut out, 0.0);
     }
 
+    // Constraint (IK) current states: all enabled.
+    out.resize(out.len() + constraint_count, 1);
+    for _ in 0..outside_parent_count {
+        push_document_outside_parent_current_state(&mut out);
+    }
+
     out.push(0);
     push_f32(&mut out, 1.0);
     out.push(0);
-    out.push(0);
+    out.push(1); // transform order index (1-based, single model)
 
     write_pmm_global_tail(&mut out, max_frame, options.camera_fov);
     push_pmm_sjis_string(&mut out, model_path, None);
@@ -2553,6 +2638,7 @@ fn push_document_morph_keyframe(
     out.push(0);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_document_model_keyframe(
     out: &mut Vec<u8>,
     index: Option<i32>,
@@ -2560,6 +2646,9 @@ fn push_document_model_keyframe(
     previous: i32,
     next: i32,
     visible: bool,
+    constraint_states: &[bool],
+    outside_parent_indices: &[(i32, i32)],
+    self_shadow_enabled: bool,
 ) {
     if let Some(index) = index {
         push_i32(out, index);
@@ -2568,7 +2657,14 @@ fn push_document_model_keyframe(
     push_i32(out, previous);
     push_i32(out, next);
     out.push(u8::from(visible));
-    out.push(0);
+    for &enabled in constraint_states {
+        out.push(u8::from(enabled));
+    }
+    for &(parent_model_index, parent_model_bone_index) in outside_parent_indices {
+        push_i32(out, parent_model_index);
+        push_i32(out, parent_model_bone_index);
+    }
+    out.push(u8::from(self_shadow_enabled));
 }
 
 fn push_document_base_keyframe(
@@ -9528,5 +9624,44 @@ mod tests {
         // exporter always emits per-bone initials (fallback identity when absent in VMD) + additionals
         assert_eq!(m.initial_bone_keyframes, 3);
         assert_eq!(m.bone_keyframes, 2);
+
+        assert_eq!(m.constraint_bone_count, 1);
+        assert_eq!(m.outside_parent_subject_bone_count, 2);
+        assert_eq!(m.initial_model_keyframe.constraint_states, vec![true]);
+        for outside_parent in &m.initial_model_keyframe.outside_parent_indices {
+            assert_eq!(outside_parent.parent_model_index, -1);
+            assert_eq!(outside_parent.parent_model_bone_index, 0);
+        }
+        assert_eq!(m.constraint_state_summaries.len(), 1);
+        assert!(m.constraint_state_summaries[0].enabled);
+        assert_eq!(m.outside_parent_state_summaries.len(), 2);
+        assert_eq!(m.outside_parent_state_summaries[0].parent_model_index, 0);
+        assert_eq!(
+            m.outside_parent_state_summaries[0].parent_model_bone_index,
+            0
+        );
+        assert_eq!(m.outside_parent_state_summaries[0].subject_bone_index, -1);
+        assert_eq!(m.outside_parent_state_summaries[0].target_model_index, 0);
+
+        let fixed_tracks_offset = m.path_offset + 256;
+        assert_eq!(reparsed.source_bytes[fixed_tracks_offset], 2);
+    }
+
+    #[test]
+    fn pmm_export_model_structure_matches_pmx_bone_flags_and_display_frames() {
+        let pmx = include_bytes!("../fixtures/pmx/ik_multi_axis_limit.pmx");
+        let model = crate::pmx::parse_pmx_model(pmx).unwrap();
+        let structure = pmm_export_model_structure_from_pmx(&model);
+
+        assert_eq!(structure.fixed_tracks, 2);
+        assert_eq!(structure.constraint_bone_indices, vec![2]);
+        assert_eq!(structure.outside_parent_subject_bone_indices, vec![-1, 2]);
+        assert!(pmm_is_outside_parent_subject_bone(&model.skeleton.bones[2]));
+        assert!(!pmm_is_outside_parent_subject_bone(
+            &model.skeleton.bones[0]
+        ));
+        assert!(!pmm_is_outside_parent_subject_bone(
+            &model.skeleton.bones[1]
+        ));
     }
 }

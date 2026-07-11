@@ -12,6 +12,8 @@ pub struct IkChainLinkDefinition {
 pub struct IkChainDefinition {
     pub parent_slots: Vec<Option<usize>>,
     pub rest_positions: Vec<Vec3A>,
+    /// Per-bone fixed axis used to constrain the CCD rotation axis during IK
+    /// link steps. Does not project ordinary pose rotations.
     pub fixed_axes: Vec<Option<Vec3A>>,
     pub target_slot: usize,
     pub links: Vec<IkChainLinkDefinition>,
@@ -40,6 +42,9 @@ pub struct IkChainSolveOutput {
 #[derive(Debug)]
 pub struct IkChainSolver {
     definition: IkChainDefinition,
+    /// Per-bone local-axis basis for angle-limit evaluation. Stored privately so
+    /// existing `IkChainDefinition` struct literals stay source-compatible.
+    local_axis_bases: Vec<Option<Quat>>,
     world_matrices: Vec<Mat4>,
     local_rotations: Vec<Quat>,
     base_rotations: Vec<Quat>,
@@ -49,11 +54,32 @@ pub struct IkChainSolver {
 }
 
 impl IkChainSolver {
+    /// Create a solver with no local-axis bases (unit XYZ angle-limit frames).
     pub fn new(definition: IkChainDefinition) -> Self {
         let bone_count = definition.rest_positions.len();
+        Self::new_with_local_axis_bases(definition, vec![None; bone_count])
+    }
+
+    /// Additive constructor: attach per-bone local-axis bases used only as the
+    /// angle-limit evaluation frame. Shorter lists are padded with `None`;
+    /// longer lists are truncated to the definition bone count.
+    pub fn new_with_local_axis_bases(
+        definition: IkChainDefinition,
+        local_axis_bases: Vec<Option<Quat>>,
+    ) -> Self {
+        let bone_count = definition.rest_positions.len();
         let link_count = definition.links.len();
+        let mut bases = local_axis_bases
+            .into_iter()
+            .map(|basis| {
+                basis.filter(|basis| basis.is_finite() && basis.length_squared() > f32::EPSILON)
+            })
+            .collect::<Vec<_>>();
+        bases.resize(bone_count, None);
+        bases.truncate(bone_count);
         Self {
             definition,
+            local_axis_bases: bases,
             world_matrices: vec![Mat4::IDENTITY; bone_count],
             local_rotations: vec![Quat::IDENTITY; bone_count],
             base_rotations: Vec::with_capacity(link_count),
@@ -130,6 +156,9 @@ impl IkChainSolver {
                     continue;
                 }
 
+                let bone_slot = link.bone_slot;
+                let fixed_axis = self.definition.fixed_axes.get(bone_slot).copied().flatten();
+                let local_axis_basis = self.local_axis_bases.get(bone_slot).copied().flatten();
                 solve_link_step(LinkStepInput {
                     local_effector: &local_effector,
                     local_target: &local_target,
@@ -140,6 +169,8 @@ impl IkChainSolver {
                     angle_limit: link.angle_limit,
                     iteration,
                     limit_angle,
+                    local_axis_basis,
+                    fixed_axis,
                 });
 
                 self.apply_link_rotations();
@@ -198,10 +229,9 @@ impl IkChainSolver {
     fn apply_link_rotations(&mut self) {
         for (i, link) in self.definition.links.iter().enumerate() {
             let effective = (self.ik_rotations[i] * self.base_rotations[i]).normalize();
-            self.local_rotations[link.bone_slot] = constrain_rotation_to_axis_if_needed(
-                effective,
-                self.definition.fixed_axes[link.bone_slot],
-            );
+            // Fixed-axis is applied only during the CCD link step, not as a
+            // post-projection of ordinary / base pose rotations.
+            self.local_rotations[link.bone_slot] = effective;
         }
     }
 }
@@ -215,10 +245,7 @@ pub(crate) fn update_mini_chain_world_matrices(
 ) {
     for slot in 0..definition.rest_positions.len() {
         let local_position = definition.rest_positions[slot] + local_position_offsets[slot];
-        let local_rotation = constrain_rotation_to_axis_if_needed(
-            local_rotations[slot],
-            definition.fixed_axes[slot],
-        );
+        let local_rotation = local_rotations[slot];
         let local_matrix = Mat4::from_scale_rotation_translation(
             Vec3A::ONE.into(),
             local_rotation,
@@ -232,6 +259,67 @@ pub(crate) fn update_mini_chain_world_matrices(
 }
 
 pub(crate) fn solve_link_step(input: LinkStepInput<'_>) {
+    // fixedAxis is a hard CCD constraint. When present it owns the free
+    // rotation axis; angle limits (single- or multi-axis) are then applied as a
+    // post-step clamp so both constraints compose on every solver path.
+    if let Some(fixed_axis) = input.fixed_axis {
+        let prior_ik_rotation = input.ik_rotations[input.link_index];
+        let prior_chain_state = input.chain_states[input.link_index];
+        solve_unconstrained_link_step(UnconstrainedLinkStepInput {
+            local_effector: input.local_effector,
+            local_target: input.local_target,
+            link_index: input.link_index,
+            base_rotations: input.base_rotations,
+            ik_rotations: input.ik_rotations,
+            limit_angle: input.limit_angle,
+            fixed_axis: Some(fixed_axis),
+        });
+        if let Some(angle_limit) = input.angle_limit {
+            // Preserve a valid fixed-axis candidate as-is. Decomposing and
+            // rebuilding an already-valid rotation can select a different
+            // Euler representation, especially with a non-identity base pose.
+            if link_rotation_within_angle_limits(
+                input.link_index,
+                input.base_rotations,
+                input.ik_rotations,
+                angle_limit,
+                input.local_axis_basis,
+            ) {
+                return;
+            }
+            clamp_link_rotation_to_angle_limits(ClampAngleLimitInput {
+                link_index: input.link_index,
+                base_rotations: input.base_rotations,
+                ik_rotations: input.ik_rotations,
+                chain_states: input.chain_states,
+                limits: angle_limit,
+                local_axis_basis: input.local_axis_basis,
+            });
+            // Euler clamping can reintroduce non-twist components (and is
+            // singular near ±π/2); re-project so fixedAxis remains hard.
+            project_link_rotation_onto_fixed_axis(
+                input.link_index,
+                input.base_rotations,
+                input.ik_rotations,
+                fixed_axis,
+            );
+            // A twist about an arbitrary fixed axis may leave the Euler box
+            // after projection. Keep the previously accepted IK step rather
+            // than emitting a rotation that violates the PMX link limits.
+            if !link_rotation_within_angle_limits(
+                input.link_index,
+                input.base_rotations,
+                input.ik_rotations,
+                angle_limit,
+                input.local_axis_basis,
+            ) {
+                input.ik_rotations[input.link_index] = prior_ik_rotation;
+                input.chain_states[input.link_index] = prior_chain_state;
+            }
+        }
+        return;
+    }
+
     let single_axis = get_single_axis_limit(input.angle_limit);
     if let (Some(angle_limit), Some(axis_index)) = (input.angle_limit, single_axis) {
         solve_plane_link_step(PlaneLinkStepInput {
@@ -245,6 +333,7 @@ pub(crate) fn solve_link_step(input: LinkStepInput<'_>) {
             limits: angle_limit,
             iteration: input.iteration,
             limit_angle: input.limit_angle,
+            local_axis_basis: input.local_axis_basis,
         });
     } else if let Some(angle_limit) = input.angle_limit {
         solve_limited_axes_link_step(LimitedAxesLinkStepInput {
@@ -256,6 +345,7 @@ pub(crate) fn solve_link_step(input: LinkStepInput<'_>) {
             chain_states: input.chain_states,
             limits: angle_limit,
             limit_angle: input.limit_angle,
+            local_axis_basis: input.local_axis_basis,
         });
     } else {
         solve_unconstrained_link_step(UnconstrainedLinkStepInput {
@@ -265,8 +355,122 @@ pub(crate) fn solve_link_step(input: LinkStepInput<'_>) {
             base_rotations: input.base_rotations,
             ik_rotations: input.ik_rotations,
             limit_angle: input.limit_angle,
+            fixed_axis: input.fixed_axis,
         });
     }
+}
+
+fn link_rotation_within_angle_limits(
+    link_index: usize,
+    base_rotations: &[Quat],
+    ik_rotations: &[Quat],
+    limits: IkAngleLimit,
+    local_axis_basis: Option<Quat>,
+) -> bool {
+    let chain = ik_rotations[link_index] * base_rotations[link_index];
+    if !chain.is_finite() || chain.length_squared() <= f32::EPSILON {
+        return false;
+    }
+    let basis =
+        local_axis_basis.filter(|basis| basis.is_finite() && basis.length_squared() > f32::EPSILON);
+    let (q_b, q_b_inv) = basis.map_or((Quat::IDENTITY, Quat::IDENTITY), |basis| {
+        let basis = basis.normalize();
+        (basis, basis.inverse())
+    });
+    let local = (q_b_inv * chain.normalize() * q_b).normalize();
+    if !local.is_finite() {
+        return false;
+    }
+    let euler = decompose_euler_xyz(&quat_to_rotation_mat3(local), &[0.0; 3]);
+    euler.iter().enumerate().all(|(axis, value)| {
+        let (lower, upper) = limit_axis_bounds(limits, axis);
+        *value >= lower - 1.0e-5 && *value <= upper + 1.0e-5
+    })
+}
+
+struct ClampAngleLimitInput<'a> {
+    link_index: usize,
+    base_rotations: &'a [Quat],
+    ik_rotations: &'a mut [Quat],
+    chain_states: &'a mut [ChainLinkState],
+    limits: IkAngleLimit,
+    local_axis_basis: Option<Quat>,
+}
+
+/// Clamp the current chain rotation into angle limits without adding free CCD
+/// motion. Used after a fixed-axis step so both constraints compose.
+fn clamp_link_rotation_to_angle_limits(input: ClampAngleLimitInput<'_>) {
+    let base = input.base_rotations[input.link_index];
+    let current = input.ik_rotations[input.link_index] * base;
+    if !current.is_finite() || current.length_squared() <= f32::EPSILON {
+        return;
+    }
+    let current = current.normalize();
+    let (q_b, q_b_inv) = match input.local_axis_basis {
+        Some(basis) if basis.is_finite() => (basis.normalize(), basis.normalize().inverse()),
+        _ => (Quat::IDENTITY, Quat::IDENTITY),
+    };
+    let current_la = q_b_inv * current * q_b;
+    if !current_la.is_finite() || current_la.length_squared() <= f32::EPSILON {
+        return;
+    }
+    let current_la = current_la.normalize();
+    let current_mat = quat_to_rotation_mat3(current_la);
+    let state = &mut input.chain_states[input.link_index];
+    let mut euler = decompose_euler_xyz(&current_mat, &state.previous_euler);
+    if !euler.iter().all(|v| v.is_finite()) {
+        return;
+    }
+    for (axis_index, value) in euler.iter_mut().enumerate() {
+        let (lower, upper) = limit_axis_bounds(input.limits, axis_index);
+        *value = value.clamp(lower, upper);
+    }
+    state.previous_euler = euler;
+    if let Some(axis_index) = get_single_axis_limit(Some(input.limits)) {
+        state.plane_mode_angle = euler[axis_index];
+    }
+    let chain_rotation_la = euler_xyz_to_quat(&euler);
+    if !chain_rotation_la.is_finite() || chain_rotation_la.length_squared() <= f32::EPSILON {
+        return;
+    }
+    let chain_rotation = q_b * chain_rotation_la.normalize() * q_b_inv;
+    if !chain_rotation.is_finite() || chain_rotation.length_squared() <= f32::EPSILON {
+        return;
+    }
+    let chain_rotation = chain_rotation.normalize();
+    let next_ik = chain_rotation * base.inverse();
+    if !next_ik.is_finite() || next_ik.length_squared() <= f32::EPSILON {
+        return;
+    }
+    input.ik_rotations[input.link_index] = next_ik.normalize();
+}
+
+fn project_link_rotation_onto_fixed_axis(
+    link_index: usize,
+    base_rotations: &[Quat],
+    ik_rotations: &mut [Quat],
+    fixed_axis: Vec3A,
+) {
+    if fixed_axis.length_squared() <= f32::EPSILON || !fixed_axis.is_finite() {
+        return;
+    }
+    let ik_rotation = ik_rotations[link_index];
+    if !ik_rotation.is_finite() || ik_rotation.length_squared() <= f32::EPSILON {
+        return;
+    }
+    let base = base_rotations[link_index];
+    if !base.is_finite() || base.length_squared() <= f32::EPSILON {
+        return;
+    }
+    // The effective link rotation is `ik * base`. A fixed-axis delta is
+    // composed on the right of `base`, so its equivalent axis in the left-side
+    // IK correction is the bone-local axis rotated by the current base pose.
+    let correction_axis = base.normalize().mul_vec3a(fixed_axis.normalize());
+    let constrained = constrain_rotation_to_axis(ik_rotation.normalize(), correction_axis);
+    if !constrained.is_finite() || constrained.length_squared() <= f32::EPSILON {
+        return;
+    }
+    ik_rotations[link_index] = constrained.normalize();
 }
 
 pub(crate) struct LinkStepInput<'a> {
@@ -279,6 +483,10 @@ pub(crate) struct LinkStepInput<'a> {
     pub angle_limit: Option<IkAngleLimit>,
     pub iteration: usize,
     pub limit_angle: f32,
+    /// Optional PMX local-axis basis for angle-limit evaluation.
+    pub local_axis_basis: Option<Quat>,
+    /// Optional fixed axis that constrains the unconstrained CCD rotation axis.
+    pub fixed_axis: Option<Vec3A>,
 }
 
 struct UnconstrainedLinkStepInput<'a> {
@@ -288,37 +496,52 @@ struct UnconstrainedLinkStepInput<'a> {
     base_rotations: &'a [Quat],
     ik_rotations: &'a mut [Quat],
     limit_angle: f32,
+    fixed_axis: Option<Vec3A>,
 }
 
 fn solve_unconstrained_link_step(input: UnconstrainedLinkStepInput<'_>) {
     let local_eff_n = input.local_effector.normalize();
     let local_tgt_n = input.local_target.normalize();
-    let dot = local_eff_n.dot(local_tgt_n).clamp(-1.0, 1.0);
-    let mut angle = dot.acos();
 
     let tiny_angle = 1e-3 * std::f32::consts::PI / 180.0;
-    if angle < tiny_angle {
-        return;
-    }
 
-    if input.limit_angle > 0.0 {
-        angle = angle.min(input.limit_angle);
-    }
-
-    let axis = local_eff_n.cross(local_tgt_n);
-    let axis_vec = if axis.length() < 1e-5 {
-        if dot > -1.0 + 1e-5 {
+    let (axis_vec, mut angle) = if let Some(fixed) = input.fixed_axis {
+        let axis = if fixed.length_squared() > f32::EPSILON && fixed.is_finite() {
+            fixed.normalize()
+        } else {
+            return;
+        };
+        let signed = signed_projected_angle(local_eff_n, local_tgt_n, axis);
+        if signed.abs() < tiny_angle {
             return;
         }
-        let basis = if local_eff_n.x.abs() < 0.9 {
-            Vec3A::new(1.0, 0.0, 0.0)
-        } else {
-            Vec3A::new(0.0, 1.0, 0.0)
-        };
-        local_eff_n.cross(basis).normalize()
+        (axis, signed)
     } else {
-        axis.normalize()
+        let dot = local_eff_n.dot(local_tgt_n).clamp(-1.0, 1.0);
+        let angle = dot.acos();
+        if angle < tiny_angle {
+            return;
+        }
+        let axis = local_eff_n.cross(local_tgt_n);
+        let axis_vec = if axis.length() < 1e-5 {
+            if dot > -1.0 + 1e-5 {
+                return;
+            }
+            let basis = if local_eff_n.x.abs() < 0.9 {
+                Vec3A::new(1.0, 0.0, 0.0)
+            } else {
+                Vec3A::new(0.0, 1.0, 0.0)
+            };
+            local_eff_n.cross(basis).normalize()
+        } else {
+            axis.normalize()
+        };
+        (axis_vec, angle)
     };
+
+    if input.limit_angle > 0.0 {
+        angle = angle.clamp(-input.limit_angle, input.limit_angle);
+    }
 
     let delta = Quat::from_axis_angle(axis_vec.into(), angle);
     let base = input.base_rotations[input.link_index];
@@ -346,10 +569,6 @@ pub(crate) fn constrain_rotation_to_axis(rotation: Quat, axis: Vec3A) -> Quat {
     } else {
         twist.normalize()
     }
-}
-
-fn constrain_rotation_to_axis_if_needed(rotation: Quat, axis: Option<Vec3A>) -> Quat {
-    axis.map_or(rotation, |axis| constrain_rotation_to_axis(rotation, axis))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -518,20 +737,25 @@ pub(crate) struct LimitedAxesLinkStepInput<'a> {
     pub chain_states: &'a mut [ChainLinkState],
     pub limits: IkAngleLimit,
     pub limit_angle: f32,
+    pub local_axis_basis: Option<Quat>,
 }
 
 pub(crate) fn solve_limited_axes_link_step(input: LimitedAxesLinkStepInput<'_>) {
     let state = &mut input.chain_states[input.link_index];
     let base = input.base_rotations[input.link_index];
     let current = (input.ik_rotations[input.link_index] * base).normalize();
-    let current_mat = quat_to_rotation_mat3(current);
+    // Evaluate Euler / axis limits in the optional local-axis frame, then map
+    // the clamped rotation back to bone-local space.
+    let (q_b, q_b_inv) = match input.local_axis_basis {
+        Some(basis) if basis.is_finite() => (basis.normalize(), basis.normalize().inverse()),
+        _ => (Quat::IDENTITY, Quat::IDENTITY),
+    };
+    let current_la = (q_b_inv * current * q_b).normalize();
+    let current_mat = quat_to_rotation_mat3(current_la);
     let mut total_euler = decompose_euler_xyz(&current_mat, &state.previous_euler);
-    let mut working_effector = *input.local_effector;
-    let target = input.local_target.normalize();
+    let mut working_effector = q_b_inv.mul_vec3a(*input.local_effector);
+    let target = q_b_inv.mul_vec3a(*input.local_target).normalize();
 
-    // PMX local_axis is intentionally not used as an angle-limit basis in v1.
-    // It remains rig metadata / host control orientation only to preserve the
-    // existing whole-runtime IK behavior.
     for axis_index in [2usize, 1, 0] {
         let (lower, upper) = limit_axis_bounds(input.limits, axis_index);
         if lower == 0.0 && upper == 0.0 {
@@ -565,7 +789,8 @@ pub(crate) fn solve_limited_axes_link_step(input: LimitedAxesLinkStepInput<'_>) 
     }
 
     state.previous_euler = total_euler;
-    let chain_rotation = euler_xyz_to_quat(&total_euler).normalize();
+    let chain_rotation_la = euler_xyz_to_quat(&total_euler).normalize();
+    let chain_rotation = (q_b * chain_rotation_la * q_b_inv).normalize();
     input.ik_rotations[input.link_index] = (chain_rotation * base.inverse()).normalize();
 }
 
@@ -612,16 +837,22 @@ pub(crate) struct PlaneLinkStepInput<'a> {
     pub limits: IkAngleLimit,
     pub iteration: usize,
     pub limit_angle: f32,
+    pub local_axis_basis: Option<Quat>,
 }
 
 pub(crate) fn solve_plane_link_step(input: PlaneLinkStepInput<'_>) {
-    let rotate_axis = match input.axis_index {
+    let rotate_axis_la = match input.axis_index {
         0 => Vec3A::new(1.0, 0.0, 0.0),
         1 => Vec3A::new(0.0, 1.0, 0.0),
         _ => Vec3A::new(0.0, 0.0, 1.0),
     };
-    let local_eff_n = input.local_effector.normalize();
-    let local_tgt_n = input.local_target.normalize();
+    let (q_b, q_b_inv) = match input.local_axis_basis {
+        Some(basis) if basis.is_finite() => (basis.normalize(), basis.normalize().inverse()),
+        _ => (Quat::IDENTITY, Quat::IDENTITY),
+    };
+    // Solve the plane limit in local-axis space, then conjugate back.
+    let local_eff_n = q_b_inv.mul_vec3a(*input.local_effector).normalize();
+    let local_tgt_n = q_b_inv.mul_vec3a(*input.local_target).normalize();
 
     let dot = local_eff_n.dot(local_tgt_n).clamp(-1.0, 1.0);
     let raw_angle = dot.acos();
@@ -632,9 +863,9 @@ pub(crate) fn solve_plane_link_step(input: PlaneLinkStepInput<'_>) {
     };
 
     let target_vec1 =
-        Quat::from_axis_angle(rotate_axis.into(), capped_angle).mul_vec3a(local_eff_n);
+        Quat::from_axis_angle(rotate_axis_la.into(), capped_angle).mul_vec3a(local_eff_n);
     let target_vec2 =
-        Quat::from_axis_angle(rotate_axis.into(), -capped_angle).mul_vec3a(local_eff_n);
+        Quat::from_axis_angle(rotate_axis_la.into(), -capped_angle).mul_vec3a(local_eff_n);
     let signed_angle = if target_vec1.dot(local_tgt_n) > target_vec2.dot(local_tgt_n) {
         capped_angle
     } else {
@@ -662,7 +893,8 @@ pub(crate) fn solve_plane_link_step(input: PlaneLinkStepInput<'_>) {
     }
 
     state.plane_mode_angle = next_angle.clamp(lower, upper);
-    let chain_rotation = Quat::from_axis_angle(rotate_axis.into(), state.plane_mode_angle);
+    let chain_rotation_la = Quat::from_axis_angle(rotate_axis_la.into(), state.plane_mode_angle);
+    let chain_rotation = (q_b * chain_rotation_la * q_b_inv).normalize();
     input.ik_rotations[input.link_index] = (chain_rotation * base.inverse()).normalize();
 }
 
@@ -864,6 +1096,7 @@ mod tests {
                 let local_effector = link_world_rot.inverse().mul_vec3a(eff_pos - link_pos);
                 let local_target = link_world_rot.inverse().mul_vec3a(goal_position - link_pos);
 
+                let fixed_axis = definition.fixed_axes.get(link_slot).copied().flatten();
                 solve_link_step(LinkStepInput {
                     local_effector: &local_effector,
                     local_target: &local_target,
@@ -874,6 +1107,8 @@ mod tests {
                     angle_limit: link.angle_limit,
                     iteration: 0,
                     limit_angle: definition.limit_angle,
+                    local_axis_basis: None,
+                    fixed_axis,
                 });
 
                 if strict {
@@ -1088,5 +1323,223 @@ mod tests {
                 .collect();
             assert_eq!(actual_bits, expected_bits);
         }
+    }
+
+    #[test]
+    fn existing_ik_chain_definition_struct_literal_has_no_local_axes() {
+        // Source-compatible: no local_axis_bases field required on the public
+        // definition. IkChainSolver::new leaves all bases as None.
+        let definition = IkChainDefinition {
+            parent_slots: vec![None, Some(0)],
+            rest_positions: vec![Vec3A::ZERO, Vec3A::X],
+            fixed_axes: vec![None, None],
+            target_slot: 1,
+            links: vec![IkChainLinkDefinition {
+                bone_slot: 0,
+                angle_limit: None,
+            }],
+            iteration_count: 1,
+            limit_angle: 0.0,
+        };
+        let mut solver = IkChainSolver::new(definition);
+        let output = solver.solve(IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 2],
+            local_rotations: &[Quat::IDENTITY; 2],
+            goal_position: Vec3A::Y,
+            tolerance: 0.0,
+            max_iterations_cap: None,
+        });
+        assert_eq!(output.solved_link_rotations.len(), 1);
+    }
+
+    #[test]
+    fn fixed_axis_composes_with_single_axis_angle_limit() {
+        // Without fixed-axis, pure Z plane limit can rotate X toward Y.
+        // With fixed-axis = Y, CCD may only twist about Y, so X stays on XZ.
+        let limit = IkAngleLimit::new(
+            Vec3A::new(0.0, 0.0, -std::f32::consts::FRAC_PI_2),
+            Vec3A::new(0.0, 0.0, std::f32::consts::FRAC_PI_2),
+        );
+        let definition = IkChainDefinition {
+            parent_slots: vec![None, Some(0)],
+            rest_positions: vec![Vec3A::ZERO, Vec3A::X],
+            fixed_axes: vec![Some(Vec3A::Y), None],
+            target_slot: 1,
+            links: vec![IkChainLinkDefinition {
+                bone_slot: 0,
+                angle_limit: Some(limit),
+            }],
+            iteration_count: 4,
+            limit_angle: 0.0,
+        };
+        let mut solver = IkChainSolver::new(definition);
+        let output = solver.solve(IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 2],
+            local_rotations: &[Quat::IDENTITY; 2],
+            goal_position: Vec3A::Y,
+            tolerance: 0.0,
+            max_iterations_cap: None,
+        });
+        let child = output.solved_link_rotations[0].mul_vec3a(Vec3A::X);
+        assert!(
+            child.y.abs() < 1.0e-3,
+            "fixed Y + Z-plane limit must not lift child off XZ; child={child:?}"
+        );
+        // Twist about Y is still free within limits → can move toward +Z goal component.
+        // Goal is +Y which is unreachable under Y-fixed; stay near rest +X.
+        assert!(
+            child.x > 0.9,
+            "unreachable +Y goal under Y fixed-axis keeps child near +X; child={child:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_axis_composes_with_multi_axis_angle_limit() {
+        let limit = IkAngleLimit::new(Vec3A::new(-1.0, -1.0, 0.0), Vec3A::new(1.0, 1.0, 0.0));
+        let definition = IkChainDefinition {
+            parent_slots: vec![None, Some(0)],
+            rest_positions: vec![Vec3A::ZERO, Vec3A::X],
+            fixed_axes: vec![Some(Vec3A::Y), None],
+            target_slot: 1,
+            links: vec![IkChainLinkDefinition {
+                bone_slot: 0,
+                angle_limit: Some(limit),
+            }],
+            iteration_count: 4,
+            limit_angle: 0.0,
+        };
+        let mut solver = IkChainSolver::new(definition);
+        let output = solver.solve(IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 2],
+            local_rotations: &[Quat::IDENTITY; 2],
+            // Mild XZ goal avoids Euler singularities near ±π/2 while still
+            // requiring a non-trivial Y twist under multi-axis limits.
+            goal_position: Vec3A::new(0.7, 0.0, 0.7),
+            tolerance: 0.0,
+            max_iterations_cap: None,
+        });
+        let solved = output.solved_link_rotations[0];
+        let child = solved.mul_vec3a(Vec3A::X);
+        assert!(
+            child.y.abs() < 1.0e-3,
+            "fixed Y + multi-axis limit must keep child on XZ; child={child:?}"
+        );
+        // Pure Y twist of the chain rotation: rotation vector parallel to Y.
+        let rot_vec = Vec3A::new(solved.x, solved.y, solved.z);
+        if rot_vec.length_squared() > 1.0e-8 {
+            let axis = rot_vec.normalize();
+            assert!(
+                axis.x.abs() < 1.0e-3 && axis.z.abs() < 1.0e-3,
+                "IK delta must remain pure Y twist; axis={axis:?} quat={solved:?}"
+            );
+        }
+        assert!(
+            child.z > 0.2,
+            "fixed-axis multi-limit IK should still approach +Z; child={child:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_axis_angle_limit_preserves_correction_with_non_identity_base() {
+        let limit = IkAngleLimit::new(
+            Vec3A::splat(-std::f32::consts::PI),
+            Vec3A::splat(std::f32::consts::PI),
+        );
+        let definition = IkChainDefinition {
+            parent_slots: vec![None, Some(0)],
+            rest_positions: vec![Vec3A::ZERO, Vec3A::X],
+            fixed_axes: vec![Some(Vec3A::Y), None],
+            target_slot: 1,
+            links: vec![IkChainLinkDefinition {
+                bone_slot: 0,
+                angle_limit: Some(limit),
+            }],
+            iteration_count: 1,
+            limit_angle: 0.0,
+        };
+        let base = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let goal = Vec3A::Y;
+        let mut solver = IkChainSolver::new(definition);
+        let output = solver.solve(IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 2],
+            local_rotations: &[base, Quat::IDENTITY],
+            goal_position: goal,
+            tolerance: 0.0,
+            max_iterations_cap: None,
+        });
+
+        let solved = output.solved_link_rotations[0];
+        let child = solved.mul_vec3a(Vec3A::X).normalize();
+        assert!(
+            child.dot(goal) > 0.99,
+            "fixed-axis correction must survive projection in the base-rotated frame; solved={solved:?} child={child:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_axis_projection_uses_base_rotated_correction_axis() {
+        let base = Quat::from_rotation_x(0.7);
+        let correction_axis = base.mul_vec3a(Vec3A::Y).normalize();
+        let mut ik_rotations = [(Quat::from_axis_angle(correction_axis.into(), 0.6)
+            * Quat::from_rotation_x(0.2))
+        .normalize()];
+
+        project_link_rotation_onto_fixed_axis(0, &[base], &mut ik_rotations, Vec3A::Y);
+
+        let vector = Vec3A::new(ik_rotations[0].x, ik_rotations[0].y, ik_rotations[0].z);
+        assert!(
+            vector.length_squared() > 1.0e-4,
+            "projection must preserve a non-trivial fixed-axis correction"
+        );
+        let projected_axis = vector.normalize();
+        assert!(
+            projected_axis.dot(correction_axis).abs() > 0.999,
+            "projection axis must follow base * fixedAxis; projected={projected_axis:?} expected={correction_axis:?}"
+        );
+        assert!(
+            projected_axis.dot(Vec3A::Y).abs() < 0.95,
+            "non-identity base must not project the IK correction onto raw fixedAxis"
+        );
+    }
+
+    #[test]
+    fn additive_local_axis_bases_change_limited_solve() {
+        let limits = IkAngleLimit::new(
+            Vec3A::new(-std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+            Vec3A::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+        );
+        let definition = one_link_definition(Some(limits));
+        let local_position_offsets = [Vec3A::ZERO; 2];
+        let local_rotations = [Quat::IDENTITY; 2];
+        let input = IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &local_position_offsets,
+            local_rotations: &local_rotations,
+            goal_position: Vec3A::Y,
+            tolerance: 0.0,
+            max_iterations_cap: None,
+        };
+
+        let mut unit = IkChainSolver::new(definition.clone());
+        let unit_out = unit.solve(input);
+
+        let basis = Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+        let mut la = IkChainSolver::new_with_local_axis_bases(definition, vec![Some(basis), None]);
+        let la_out = la.solve(input);
+
+        let unit_dir = unit_out.solved_link_rotations[0]
+            .mul_vec3a(Vec3A::X)
+            .normalize();
+        let la_dir = la_out.solved_link_rotations[0]
+            .mul_vec3a(Vec3A::X)
+            .normalize();
+        assert!(
+            (unit_dir - la_dir).length() > 0.2,
+            "additive local-axis bases must change limited solve; unit={unit_dir:?} la={la_dir:?}"
+        );
     }
 }

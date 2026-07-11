@@ -7,6 +7,8 @@
 
 mod binary;
 pub mod error;
+#[cfg(feature = "fbx")]
+pub mod fbx;
 pub mod format;
 pub mod nmd;
 pub mod normalize;

@@ -78,12 +78,38 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--baseline", help="accepted baseline report path")
     parser.add_argument("--report-dir", help="directory for timestamped current reports")
     parser.add_argument("--mmd-anim-bin", help="direct mmd-anim CLI binary path")
+    parser.add_argument("--physics-penetration", action="store_true", default=None)
+    parser.add_argument("--diagnose-case", default=None)
+    parser.add_argument("--diagnose-frame", default=None)
+    parser.add_argument("--diagnose-bone", default=None)
+    parser.add_argument("--diagnose-eval-frame", default=None)
     parser.add_argument("--max-abs-error-tolerance", type=float, default=None)
+    parser.add_argument("--translation-max-error-tolerance", type=float, default=None)
+    parser.add_argument("--translation-rms-error-tolerance", type=float, default=None)
+    parser.add_argument("--rotation-max-angle-rad-tolerance", type=float, default=None)
+    parser.add_argument("--rotation-rms-angle-rad-tolerance", type=float, default=None)
+    parser.add_argument("--penetration-max-depth-tolerance", type=float, default=None)
+    parser.add_argument("--bullet-penetration-max-depth-tolerance", type=float, default=None)
+    parser.add_argument("--penetrating-pair-count-tolerance", type=int, default=None)
+    parser.add_argument("--severe-pair-count-tolerance", type=int, default=None)
+    parser.add_argument("--penetrating-contact-count-tolerance", type=int, default=None)
+    parser.add_argument("--rigid-body-position-tolerance", type=float, default=None)
+    parser.add_argument("--rigid-body-rotation-tolerance", type=float, default=None)
     parser.add_argument("--mismatch-count-tolerance", type=int, default=None)
     parser.add_argument("--missing-tolerance", type=int, default=None)
     parser.add_argument("--import-error-tolerance", type=int, default=None)
     parser.add_argument("--allow-count-changes", action="store_true", default=None)
     parser.add_argument("--allow-skipped-target-changes", action="store_true", default=None)
+    parser.add_argument(
+        "--required-physics-backend",
+        default=None,
+        help="required physicsBackend for physics cases; disabled when omitted or empty",
+    )
+    parser.add_argument("--max-allowed-penetration-depth", type=float, default=None)
+    parser.add_argument("--max-allowed-bullet-penetration-depth", type=float, default=None)
+    parser.add_argument("--max-allowed-penetrating-pair-count", type=int, default=None)
+    parser.add_argument("--max-allowed-severe-pair-count", type=int, default=None)
+    parser.add_argument("--max-allowed-penetrating-contact-count", type=int, default=None)
 
 
 if __name__ == "__main__":

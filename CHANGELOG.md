@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.2.0 - 2026-07-11
+
+FBX conversion, optional native Bullet physics integration, PMX IK axis
+correctness, and release-quality local regression gates.
+
+### Added
+
+- Added FBX skeleton and animation conversion, including bones-only export,
+  readable bone-name policy, diffuse texture copying, vertex BlendShapes, and
+  morph-weight curves validated in Maya, Unity, and Blender.
+- Added an optional native Bullet bridge and feature-gated C ABI for typed
+  physics-world creation, reset, stepping, diagnostics, and sequential clip
+  baking. The default FFI build remains Bullet-free.
+- Added local GoldenOracle physics release gates and benchmark-history tooling
+  for explicit baseline-not-worse checks.
+
+### Changed
+
+- Extended PMX runtime import and IK evaluation to honor local-axis and
+  fixed-axis constraints, including rotated base poses and combined angle
+  limits.
+- Made the first sequential physics-bake sample seed-only after world creation
+  or reset, so frame zero initializes from the evaluated animation pose without
+  advancing simulation.
+- Expanded the experimental host-facing FFI and WASM validation surface while
+  preserving caller-owned hot-path output buffers.
+
+### Fixed
+
+- Fixed physics frame-zero initialization that could advance Bullet before the
+  intended evaluated pose had seeded the world.
+- Fixed fixed-axis IK correction loss when a non-identity base rotation and
+  angle limits were active together.
+- Fixed PowerShell 7 FFI release smoke runs treating Cargo's normal stderr
+  progress output as a native-command failure.
+
+### Known limitations
+
+- GoldenOracle comparisons and real-asset physics baselines remain
+  maintainer-local and are not required for normal crate tests.
+- Some Unity-reference rigid-body diagnostics still contain known host/harness
+  residuals; the accepted v0.2.0 local release baselines gate regressions from
+  the current runtime rather than claiming cross-host bitwise parity.
+- The FFI, WASM, and optional native physics surfaces remain experimental.
+
 ## 0.1.9 - 2026-07-03
 
 CLI/API brush-up, FFI hardening, typed diagnostics, and CI-built CLI release

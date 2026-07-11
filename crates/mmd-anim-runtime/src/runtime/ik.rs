@@ -9,7 +9,7 @@ impl RuntimeInstance {
         &mut self,
         ik_index: usize,
         options: IkSolveOptions,
-        after_physics: bool,
+        _after_physics: bool,
     ) {
         if self.pose.ik_enabled()[ik_index] == 0 {
             return;
@@ -60,12 +60,7 @@ impl RuntimeInstance {
                 &base_ik_rotations,
                 &ik_rotations,
             );
-            self.update_world_matrices_after_ik_link_change(
-                &links,
-                ik_bone,
-                target_bone,
-                Some(after_physics),
-            );
+            self.update_world_matrices_after_ik_link_change(ik_index);
 
             let mut broke_early = false;
             let mut final_distance = f32::MAX;
@@ -105,6 +100,11 @@ impl RuntimeInstance {
                         continue;
                     }
 
+                    let local_axis_basis = self.model.local_axis_basis(link_bone);
+                    // PMX fixed-axis constrains the CCD rotation axis only. Ordinary
+                    // pose projection still requires enforce_fixed_axis (kept false
+                    // for PMX import).
+                    let fixed_axis = self.model.fixed_axis(link_bone);
                     solve_link_step(LinkStepInput {
                         local_effector: &local_effector,
                         local_target: &local_target,
@@ -115,6 +115,8 @@ impl RuntimeInstance {
                         angle_limit: link.angle_limit,
                         iteration: _iteration,
                         limit_angle,
+                        local_axis_basis,
+                        fixed_axis,
                     });
 
                     self.apply_ik_link_rotations(
@@ -123,12 +125,7 @@ impl RuntimeInstance {
                         &base_ik_rotations,
                         &ik_rotations,
                     );
-                    self.update_world_matrices_after_ik_link_change(
-                        &links,
-                        ik_bone,
-                        target_bone,
-                        Some(after_physics),
-                    );
+                    self.update_world_matrices_after_ik_link_change(ik_index);
                     self.ik_stats[ik_index].link_steps += 1;
                 }
 
@@ -156,12 +153,7 @@ impl RuntimeInstance {
                         &base_ik_rotations,
                         &ik_rotations,
                     );
-                    self.update_world_matrices_after_ik_link_change(
-                        &links,
-                        ik_bone,
-                        target_bone,
-                        Some(after_physics),
-                    );
+                    self.update_world_matrices_after_ik_link_change(ik_index);
                     broke_early = true;
                     break;
                 }
@@ -184,12 +176,7 @@ impl RuntimeInstance {
                 &base_ik_rotations,
                 &best_ik_rotations,
             );
-            self.update_world_matrices_after_ik_link_change(
-                &links,
-                ik_bone,
-                target_bone,
-                Some(after_physics),
-            );
+            self.update_world_matrices_after_ik_link_change(ik_index);
         }
 
         self.ik_scratch.links = links;
@@ -200,31 +187,53 @@ impl RuntimeInstance {
         self.ik_scratch.chain_states = chain_states;
     }
 
-    fn update_world_matrices_after_ik_link_change(
-        &mut self,
-        links: &[crate::IkLink],
-        ik_bone: crate::BoneIndex,
-        target_bone: crate::BoneIndex,
-        phase: Option<bool>,
-    ) {
+    fn update_world_matrices_after_ik_link_change(&mut self, ik_index: usize) {
+        if self.ik_link_change_update_bones[ik_index].is_none() {
+            self.ik_link_change_update_bones[ik_index] =
+                Some(self.compute_ik_link_change_update_bones(ik_index));
+        }
+        let update_bone_count = self.ik_link_change_update_bones[ik_index]
+            .as_ref()
+            .map_or(0, Vec::len);
+        #[cfg(test)]
+        let previous_category = self.world_matrix_bone_update_category;
+        #[cfg(test)]
+        self.set_world_matrix_bone_update_category(
+            super::WorldMatrixBoneUpdateCategory::IkLinkChange,
+        );
+        for update_index in 0..update_bone_count {
+            let bone = self.ik_link_change_update_bones[ik_index]
+                .as_ref()
+                .expect("ik link-change update bones are computed lazily")[update_index];
+            self.update_append_transform_for_bone(bone);
+            self.update_world_matrix_for_bone(bone);
+        }
+        #[cfg(test)]
+        self.set_world_matrix_bone_update_category(previous_category);
+    }
+
+    fn compute_ik_link_change_update_bones(&self, ik_index: usize) -> Vec<crate::BoneIndex> {
+        let solver = &self.model.ik_solvers()[ik_index];
+        let links = &solver.links;
+        let ik_bone = solver.ik_bone;
+        let target_bone = solver.target_bone;
+
         let start_position =
             self.min_ik_dependency_eval_order_position(links, ik_bone, target_bone);
         let start_position = self.expand_update_start_for_append_dependencies(start_position, None);
+        let append_dependency_roots =
+            self.ik_update_scope_append_dependency_roots(links, ik_bone, target_bone);
+
+        let mut update_bones = Vec::new();
         for position in start_position..self.model.eval_order().len() {
             let bone = self.model.eval_order()[position];
-            if self.bone_matches_phase(bone, phase)
-                || self.bone_is_in_ik_update_scope(bone, links, ik_bone, target_bone)
-                || self.bone_depends_on_ik_update_scope_append_source(
-                    bone,
-                    links,
-                    ik_bone,
-                    target_bone,
-                )
+            if self.bone_is_in_ik_update_scope(bone, links, ik_bone, target_bone)
+                || self.bone_depends_on_ik_update_scope_append_roots(bone, &append_dependency_roots)
             {
-                self.update_append_transform_for_bone(bone);
-                self.update_world_matrix_for_bone(bone);
+                update_bones.push(bone);
             }
         }
+        update_bones
     }
 
     fn min_ik_dependency_eval_order_position(
@@ -264,18 +273,20 @@ impl RuntimeInstance {
         if self.bone_is_ancestor_of(bone, ik_bone) || self.bone_is_ancestor_of(bone, target_bone) {
             return true;
         }
+        if self.bone_is_ancestor_of(target_bone, bone) {
+            return true;
+        }
         links.iter().any(|link| {
             self.bone_is_ancestor_of(bone, link.bone) || self.bone_is_ancestor_of(link.bone, bone)
         })
     }
 
-    fn bone_depends_on_ik_update_scope_append_source(
+    fn ik_update_scope_append_dependency_roots(
         &self,
-        bone: crate::BoneIndex,
         links: &[crate::IkLink],
         ik_bone: crate::BoneIndex,
         target_bone: crate::BoneIndex,
-    ) -> bool {
+    ) -> Vec<crate::BoneIndex> {
         let mut changed_append_roots = Vec::new();
         loop {
             let mut changed = false;
@@ -298,8 +309,15 @@ impl RuntimeInstance {
                 break;
             }
         }
-
         changed_append_roots
+    }
+
+    fn bone_depends_on_ik_update_scope_append_roots(
+        &self,
+        bone: crate::BoneIndex,
+        append_dependency_roots: &[crate::BoneIndex],
+    ) -> bool {
+        append_dependency_roots
             .iter()
             .any(|root| bone == *root || self.bone_is_ancestor_of(*root, bone))
     }

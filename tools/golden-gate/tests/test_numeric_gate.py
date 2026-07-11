@@ -8,9 +8,392 @@ from pathlib import Path
 import pytest
 
 from golden_gate.compare import compare_reports
-from golden_gate.config import ConfigError, resolve_config
+from golden_gate.config import ConfigError, GateOptions, Tolerances, resolve_config
 from golden_gate.report import save_report
 from golden_gate.runner import generate_current_report
+
+
+def test_physics_numeric_metrics_within_thresholds_pass():
+    baseline = _physics_report()
+    current = _physics_report(
+        {
+            "translationRms": 0.009,
+            "translationMax": 0.019,
+            "rotationRmsRad": 0.0009,
+            "rotationMaxRad": 0.0019,
+        }
+    )
+
+    assert compare_reports(baseline, current, _physics_tolerances()) == []
+
+
+def test_physics_numeric_summary_accepts_motion_metric_aliases():
+    baseline = _physics_report()
+    current = _physics_report(
+        {
+            "motionTranslationRmsError": 0.009,
+            "motionTranslationMaxError": 0.019,
+            "motionRotationRmsAngleRad": 0.0009,
+            "motionRotationMaxAngleRad": 0.0019,
+        }
+    )
+    for legacy_field in ("translationRms", "translationMax", "rotationRmsRad", "rotationMaxRad"):
+        del current["summary"][legacy_field]
+
+    assert compare_reports(baseline, current, _physics_tolerances()) == []
+
+
+def test_physics_numeric_per_case_accepts_motion_metric_aliases():
+    baseline = _physics_report()
+    current = _physics_report(
+        cases=[
+            {
+                "motionTranslationRmsError": 0.009,
+                "motionTranslationMaxError": 0.019,
+                "motionRotationRmsAngleRad": 0.0009,
+                "motionRotationMaxAngleRad": 0.0019,
+            }
+        ]
+    )
+    for legacy_field in ("translationRms", "translationMax", "rotationRmsRad", "rotationMaxRad"):
+        del current["perCase"][0][legacy_field]
+
+    assert compare_reports(baseline, current, _physics_tolerances()) == []
+
+
+def test_physics_numeric_per_case_translation_rms_over_threshold_fails():
+    baseline = _physics_report()
+    current = _physics_report({"translationRms": 0.009}, [{"translationRms": 0.011}])
+
+    failures = compare_reports(baseline, current, _physics_tolerances())
+
+    assert "perCase.physics-a.translationRmsError" in _failure_paths(failures)
+    assert "summary.translationRmsError" not in _failure_paths(failures)
+
+
+def test_physics_numeric_case_requires_bullet_native_backend():
+    baseline = _physics_report()
+    current = _physics_report({"physicsBackend": "rapier"}, [{"physicsBackend": "rapier"}])
+
+    failures = compare_reports(
+        baseline,
+        current,
+        _physics_tolerances(),
+        GateOptions(required_physics_backend="bullet-native"),
+    )
+
+    assert "perCase.physics-a.physicsBackend" in _failure_paths(failures)
+
+
+def test_added_physics_case_requires_backend_even_when_count_changes_are_allowed():
+    baseline = _physics_report()
+    baseline["perCase"] = []
+    baseline["summary"]["cases"] = 0
+    baseline["summary"]["comparedCases"] = 0
+    current = _physics_report({"physicsBackend": "rapier"}, [{"physicsBackend": "rapier"}])
+
+    failures = compare_reports(
+        baseline,
+        current,
+        _physics_tolerances(),
+        GateOptions(allow_count_changes=True, required_physics_backend="bullet-native"),
+    )
+
+    assert "perCase.physics-a.physicsBackend" in _failure_paths(failures)
+
+
+def test_physics_numeric_missing_current_metrics_fail():
+    baseline = _physics_report()
+    current = _physics_report()
+    del current["summary"]["translationRms"]
+    del current["perCase"][0]["translationRms"]
+
+    failures = compare_reports(baseline, current, _physics_tolerances())
+
+    assert "summary.translationRmsError" in _failure_paths(failures)
+    assert "perCase.physics-a.translationRmsError" in _failure_paths(failures)
+
+
+def test_required_physics_backend_is_opt_in():
+    baseline = _physics_report()
+    current = _physics_report({"physicsBackend": "none"}, [{"physicsBackend": "none"}])
+
+    assert compare_reports(baseline, current, _physics_tolerances()) == []
+
+
+def test_physics_penetration_report_within_thresholds_pass():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report(
+        {
+            "maxPenetrationDepth": 0.051,
+            "maxBulletPenetrationDepth": 0.021,
+            "penetratingPairCount": 2,
+            "severePairCount": 1,
+            "penetratingContactCount": 1,
+        }
+    )
+
+    assert compare_reports(baseline, current, _penetration_tolerances()) == []
+
+
+def test_physics_penetration_depth_regression_fails():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report({"maxPenetrationDepth": 0.053})
+
+    failures = compare_reports(baseline, current, _penetration_tolerances())
+
+    assert "summary.maxPenetrationDepth" in _failure_paths(failures)
+
+
+def test_physics_penetration_contact_regression_fails():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report(
+        {
+            "maxBulletPenetrationDepth": 0.024,
+            "penetratingContactCount": 3,
+        }
+    )
+
+    failures = compare_reports(baseline, current, Tolerances())
+
+    assert "summary.maxBulletPenetrationDepth" in _failure_paths(failures)
+    assert "summary.penetratingContactCount" in _failure_paths(failures)
+
+
+def test_physics_penetration_report_rejects_mismatched_identity():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report()
+    current["caseName"] = "sour-necktie"
+    current["oracleFrame"] = 60.0
+
+    failures = compare_reports(baseline, current, _penetration_tolerances())
+
+    assert "caseName" in _failure_paths(failures)
+    assert "oracleFrame" in _failure_paths(failures)
+
+
+def test_physics_penetration_absolute_limits_fail_independent_of_baseline():
+    baseline = _physics_penetration_report(
+        {
+            "maxBulletPenetrationDepth": 0.2,
+            "penetratingContactCount": 4,
+        }
+    )
+    current = _physics_penetration_report(
+        {
+            "maxBulletPenetrationDepth": 0.1,
+            "penetratingContactCount": 2,
+        }
+    )
+
+    failures = compare_reports(
+        baseline,
+        current,
+        _penetration_tolerances(),
+        GateOptions(
+            max_allowed_bullet_penetration_depth=0.0,
+            max_allowed_penetrating_contact_count=0,
+        ),
+    )
+
+    assert "summary.maxBulletPenetrationDepth" in _failure_paths(failures)
+    assert "summary.penetratingContactCount" in _failure_paths(failures)
+
+
+def test_physics_penetration_contact_zero_limit_can_ignore_shape_proxy_overlap():
+    shape_proxy_overlap = {
+        "maxPenetrationDepth": 0.74,
+        "penetratingPairCount": 2,
+        "severePairCount": 2,
+        "maxBulletPenetrationDepth": 0.0,
+        "penetratingContactCount": 0,
+    }
+    baseline = _physics_penetration_report(shape_proxy_overlap)
+    current = _physics_penetration_report(shape_proxy_overlap)
+
+    failures = compare_reports(
+        baseline,
+        current,
+        _penetration_tolerances(),
+        GateOptions(
+            max_allowed_bullet_penetration_depth=0.0,
+            max_allowed_penetrating_contact_count=0,
+        ),
+    )
+
+    assert failures == []
+
+
+def test_physics_penetration_unconnected_pair_regression_fails():
+    baseline = _physics_penetration_report(
+        {
+            "unconnectedPenetratingPairCount": 0,
+            "unconnectedSeverePairCount": 0,
+        }
+    )
+    current = _physics_penetration_report(
+        {
+            "unconnectedPenetratingPairCount": 1,
+            "unconnectedSeverePairCount": 1,
+        }
+    )
+
+    failures = compare_reports(baseline, current, Tolerances())
+
+    assert "summary.unconnectedPenetratingPairCount" in _failure_paths(failures)
+    assert "summary.unconnectedSeverePairCount" in _failure_paths(failures)
+
+
+def test_physics_penetration_legacy_baseline_infers_unconnected_counts_from_pairs():
+    baseline = _physics_penetration_report(
+        pairs=[
+            {"jointConnected": False, "approxGap": -0.10},
+            {"jointConnected": True, "approxGap": -0.20},
+        ]
+    )
+    del baseline["summary"]["unconnectedPairCount"]
+    del baseline["summary"]["unconnectedPenetratingPairCount"]
+    del baseline["summary"]["unconnectedSeverePairCount"]
+    current = _physics_penetration_report(
+        {
+            "unconnectedPairCount": 1,
+            "unconnectedPenetratingPairCount": 1,
+            "unconnectedSeverePairCount": 1,
+        }
+    )
+
+    assert compare_reports(baseline, current, Tolerances()) == []
+
+
+def test_physics_penetration_legacy_baseline_still_fails_new_unconnected_overlap():
+    baseline = _physics_penetration_report(
+        pairs=[
+            {"jointConnected": False, "approxGap": 0.10},
+        ]
+    )
+    del baseline["summary"]["unconnectedPairCount"]
+    del baseline["summary"]["unconnectedPenetratingPairCount"]
+    del baseline["summary"]["unconnectedSeverePairCount"]
+    current = _physics_penetration_report(
+        {
+            "unconnectedPairCount": 1,
+            "unconnectedPenetratingPairCount": 1,
+            "unconnectedSeverePairCount": 1,
+        }
+    )
+
+    failures = compare_reports(baseline, current, Tolerances())
+
+    assert "summary.unconnectedPenetratingPairCount" in _failure_paths(failures)
+    assert "summary.unconnectedSeverePairCount" in _failure_paths(failures)
+
+
+def test_physics_penetration_legacy_baseline_without_pair_flags_requires_regeneration():
+    baseline = _physics_penetration_report(pairs=[{"approxGap": -0.10}])
+    del baseline["summary"]["unconnectedPairCount"]
+    del baseline["summary"]["unconnectedPenetratingPairCount"]
+    del baseline["summary"]["unconnectedSeverePairCount"]
+    current = _physics_penetration_report()
+
+    failures = compare_reports(baseline, current, Tolerances())
+
+    assert {
+        "summary.unconnectedPairCount",
+        "summary.unconnectedPenetratingPairCount",
+        "summary.unconnectedSeverePairCount",
+    }.issubset(_failure_paths(failures))
+    assert all(failure.check == "baselineRequiredMetric" for failure in failures)
+
+
+def test_physics_penetration_report_requires_stable_summary_metrics():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report()
+    del current["summary"]["severePairCount"]
+
+    failures = compare_reports(baseline, current, _penetration_tolerances())
+
+    assert "summary.severePairCount" in _failure_paths(failures)
+
+
+def test_physics_penetration_rigid_body_transform_regression_fails_when_baselined():
+    baseline = _physics_penetration_report(
+        rigid_bodies=[
+            {
+                "index": 234,
+                "name": "左HA20",
+                "boneIndex": 358,
+                "mode": "dynamic",
+                "shape": "capsule",
+                "positionWorld": [5.0, 19.0, 1.0],
+                "rotationXyzw": [0.5, -0.4, -0.1, 0.7],
+            }
+        ]
+    )
+    current = _physics_penetration_report(
+        rigid_bodies=[
+            {
+                "index": 234,
+                "name": "左HA20",
+                "boneIndex": 358,
+                "mode": "dynamic",
+                "shape": "capsule",
+                "positionWorld": [5.0, 19.25, 1.0],
+                "rotationXyzw": [0.5, -0.4, -0.1, 0.72],
+            }
+        ]
+    )
+
+    failures = compare_reports(
+        baseline,
+        current,
+        Tolerances(
+            rigid_body_position_tolerance=0.01,
+            rigid_body_rotation_tolerance=0.001,
+        ),
+    )
+
+    assert "rigidBodies.#234.positionWorld[1]" in _failure_paths(failures)
+    assert "rigidBodies.#234.rotationXyzw[3]" in _failure_paths(failures)
+
+
+def test_physics_penetration_rigid_body_missing_current_fails_when_baselined():
+    baseline = _physics_penetration_report(
+        rigid_bodies=[
+            {
+                "index": 234,
+                "name": "左HA20",
+                "boneIndex": 358,
+                "mode": "dynamic",
+                "shape": "capsule",
+                "positionWorld": [5.0, 19.0, 1.0],
+                "rotationXyzw": [0.5, -0.4, -0.1, 0.7],
+            }
+        ]
+    )
+    current = _physics_penetration_report(rigid_bodies=[])
+
+    failures = compare_reports(baseline, current, Tolerances())
+
+    assert "rigidBodies.#234" in _failure_paths(failures)
+
+
+def test_physics_penetration_extra_current_rigid_body_is_ignored_for_legacy_baseline():
+    baseline = _physics_penetration_report()
+    current = _physics_penetration_report(
+        rigid_bodies=[
+            {
+                "index": 234,
+                "name": "左HA20",
+                "boneIndex": 358,
+                "mode": "dynamic",
+                "shape": "capsule",
+                "positionWorld": [5.0, 19.0, 1.0],
+                "rotationXyzw": [0.5, -0.4, -0.1, 0.7],
+            }
+        ]
+    )
+
+    assert compare_reports(baseline, current, Tolerances()) == []
 
 
 def test_numeric_gate_roundtrip_with_local_assets(tmp_path: Path):
@@ -25,6 +408,98 @@ def test_numeric_gate_roundtrip_with_local_assets(tmp_path: Path):
     assert current_report_path.exists()
     assert config.baseline.exists()
     assert compare_reports(baseline_report, current_report, config.tolerances, config.options) == []
+
+
+def _physics_report(summary=None, cases=None):
+    case_values = (cases or [{}])[0]
+    return {
+        "summary": {
+            "cases": 1,
+            "comparedCases": 1,
+            "missing": 0,
+            "importErrors": 0,
+            "comparedFrames": 10,
+            "comparedBones": 20,
+            "mismatchCount": 0,
+            "maxAbsError": 0.0,
+            "translationRms": 0.0,
+            "translationMax": 0.0,
+            "rotationRmsRad": 0.0,
+            "rotationMaxRad": 0.0,
+            "skippedTargets": [],
+            **(summary or {}),
+        },
+        "perCase": [
+            {
+                "name": "physics-a",
+                "kind": "physics-numeric",
+                "status": "ok",
+                "physicsBackend": "bullet-native",
+                "comparedFrames": 10,
+                "comparedBones": 20,
+                "mismatchCount": 0,
+                "maxAbsError": 0.0,
+                "translationRms": 0.0,
+                "translationMax": 0.0,
+                "rotationRmsRad": 0.0,
+                "rotationMaxRad": 0.0,
+                "skippedTargets": [],
+                **case_values,
+            }
+        ],
+    }
+
+
+def _physics_tolerances():
+    return Tolerances(
+        translation_rms_error_tolerance=0.01,
+        translation_max_error_tolerance=0.02,
+        rotation_rms_angle_rad_tolerance=0.001,
+        rotation_max_angle_rad_tolerance=0.002,
+    )
+
+
+def _physics_penetration_report(summary=None, pairs=None, rigid_bodies=None):
+    return {
+        "caseName": "rem-tail-left",
+        "oracleFrame": 119.0,
+        "evalFrame": 119.0,
+        "model": "rem.pmx",
+        "motion": "motion.vmd",
+        "metric": "shape-proxy+bullet-contacts",
+        "summary": {
+            "pairCount": 30,
+            "penetratingPairCount": 1,
+            "severePairCount": 0,
+            "unconnectedPairCount": 0,
+            "unconnectedPenetratingPairCount": 0,
+            "unconnectedSeverePairCount": 0,
+            "bulletContactCount": 2,
+            "penetratingContactCount": 0,
+            "minSignedDistance": -0.02,
+            "maxPenetrationDepth": 0.05,
+            "minBulletContactDistance": 0.01,
+            "maxBulletPenetrationDepth": 0.02,
+            **(summary or {}),
+        },
+        "rigidBodies": rigid_bodies or [],
+        "pairs": pairs or [],
+        "contacts": [],
+    }
+
+
+def _penetration_tolerances():
+    return Tolerances(
+        penetration_max_depth_tolerance=0.002,
+        bullet_penetration_max_depth_tolerance=0.001,
+        penetrating_pair_count_tolerance=1,
+        severe_pair_count_tolerance=1,
+        penetrating_contact_count_tolerance=1,
+    )
+
+
+def _failure_paths(failures):
+    return {failure.path for failure in failures}
 
 
 def _local_config_or_skip():

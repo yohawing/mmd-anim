@@ -3,7 +3,7 @@ use std::{path::Path, process::ExitCode};
 use clap::ValueEnum;
 use serde::Serialize;
 
-use crate::read_file;
+use crate::{parse_failure_error, read_file};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum VmdSampleKind {
@@ -61,7 +61,15 @@ pub(crate) fn vmd_sample(
     json: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data = read_file(motion)?;
-    let state = sample_vmd_bytes(&data, kind, frame)?;
+    let parsed = mmd_anim_format::parse_vmd_animation(&data).map_err(|error| {
+        parse_failure_error(
+            "vmd-sample",
+            motion,
+            mmd_anim_format::MmdFormatKind::Vmd,
+            error,
+        )
+    })?;
+    let state = sample_vmd_animation(&parsed, kind, frame)?;
     if json {
         print_json(motion, frame, &state)?;
     } else {
@@ -70,12 +78,21 @@ pub(crate) fn vmd_sample(
     Ok(ExitCode::SUCCESS)
 }
 
+#[cfg(test)]
 pub(crate) fn sample_vmd_bytes(
     data: &[u8],
     kind: VmdSampleKind,
     frame: f32,
 ) -> Result<VmdSampleState, Box<dyn std::error::Error>> {
     let parsed = mmd_anim_format::parse_vmd_animation(data)?;
+    sample_vmd_animation(&parsed, kind, frame)
+}
+
+fn sample_vmd_animation(
+    parsed: &mmd_anim_format::VmdParsedAnimation,
+    kind: VmdSampleKind,
+    frame: f32,
+) -> Result<VmdSampleState, Box<dyn std::error::Error>> {
     match kind {
         VmdSampleKind::Camera => {
             mmd_anim_format::sample_vmd_camera_frames(&parsed.camera_frames, frame)

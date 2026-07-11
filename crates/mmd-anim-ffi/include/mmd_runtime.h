@@ -30,6 +30,7 @@ typedef struct mmd_runtime_append_solver_t mmd_runtime_append_solver_t;
 typedef struct mmd_runtime_vmd_camera_track_t mmd_runtime_vmd_camera_track_t;
 typedef struct mmd_runtime_vmd_light_track_t mmd_runtime_vmd_light_track_t;
 typedef struct mmd_runtime_vmd_self_shadow_track_t mmd_runtime_vmd_self_shadow_track_t;
+typedef struct mmd_runtime_physics_world_t mmd_runtime_physics_world_t;
 
 /* ------------------------------------------------------------------ */
 /*  Flag constants                                                    */
@@ -45,6 +46,46 @@ typedef struct mmd_runtime_vmd_self_shadow_track_t mmd_runtime_vmd_self_shadow_t
 
 /* Rig primitive bone flags (bitmask) */
 #define MMD_RUNTIME_RIG_BONE_FIXED_AXIS (1u << 0)
+
+/* Runtime feature flags (bitmask) */
+#define MMD_RUNTIME_FEATURE_SPLIT_PHYSICS_EVALUATION (1u << 0)
+#define MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE    (1u << 1)
+
+/* ------------------------------------------------------------------ */
+/*  Status and mode enums                                             */
+/* ------------------------------------------------------------------ */
+
+typedef enum mmd_runtime_status {
+    MMD_RUNTIME_STATUS_OK = 0,
+    MMD_RUNTIME_STATUS_INVALID_INPUT = 1,
+    MMD_RUNTIME_STATUS_UNSUPPORTED = 2,
+    MMD_RUNTIME_STATUS_BUFFER_TOO_SMALL = 3,
+    MMD_RUNTIME_STATUS_ERROR = 4
+} mmd_runtime_status_t;
+
+typedef enum mmd_runtime_physics_mode {
+    MMD_RUNTIME_PHYSICS_MODE_OFF = 0,
+    MMD_RUNTIME_PHYSICS_MODE_TRACE = 1,
+    MMD_RUNTIME_PHYSICS_MODE_LIVE = 2
+} mmd_runtime_physics_mode_t;
+
+typedef enum mmd_runtime_physics_rigidbody_shape {
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_SHAPE_SPHERE = 0,
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_SHAPE_BOX = 1,
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_SHAPE_CAPSULE = 2
+} mmd_runtime_physics_rigidbody_shape_t;
+
+typedef enum mmd_runtime_physics_rigidbody_mode {
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_MODE_STATIC = 0,
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_MODE_DYNAMIC = 1,
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_MODE_DYNAMIC_BONE = 2,
+    MMD_RUNTIME_PHYSICS_RIGIDBODY_MODE_UNKNOWN = 3
+} mmd_runtime_physics_rigidbody_mode_t;
+
+typedef enum mmd_runtime_physics_joint_kind {
+    MMD_RUNTIME_PHYSICS_JOINT_KIND_GENERIC_6DOF_SPRING = 0,
+    MMD_RUNTIME_PHYSICS_JOINT_KIND_UNSUPPORTED = 1
+} mmd_runtime_physics_joint_kind_t;
 
 /* ------------------------------------------------------------------ */
 /*  Descriptor structs                                                */
@@ -116,6 +157,17 @@ typedef struct mmd_runtime_ffi_rig_bone {
     float    fixed_axis_xyz[3];
 } mmd_runtime_ffi_rig_bone_t;
 
+/* Additive v2 per-bone local-axis descriptor for primitive IK-chain creation.
+   Existing mmd_runtime_ffi_rig_bone_t layout is intentionally unchanged.
+   has_local_axis == false means unit XYZ angle-limit frames for that bone.
+   When has_local_axis is true, local_axis_x_xyz / local_axis_z_xyz are the PMX
+   bone-local X/Z directions used only as the IK angle-limit evaluation frame. */
+typedef struct mmd_runtime_ffi_rig_bone_local_axis_v2 {
+    bool  has_local_axis;
+    float local_axis_x_xyz[3];
+    float local_axis_z_xyz[3];
+} mmd_runtime_ffi_rig_bone_local_axis_v2_t;
+
 typedef struct mmd_runtime_ffi_ik_solve_stats {
     uint32_t executed_iterations;
     uint32_t link_steps;
@@ -147,11 +199,65 @@ typedef struct mmd_runtime_ffi_byte_buffer {
     size_t   len;
 } mmd_runtime_ffi_byte_buffer_t;
 
+typedef struct mmd_runtime_ffi_physics_tick_config {
+    float    fixed_substep_seconds;
+    uint32_t max_substeps_per_tick;
+} mmd_runtime_ffi_physics_tick_config_t;
+
+typedef struct mmd_runtime_ffi_physics_step_stats {
+    float    input_dt_seconds;
+    float    clamped_dt_seconds;
+    uint32_t substeps;
+    float    accumulator_seconds;
+} mmd_runtime_ffi_physics_step_stats_t;
+
+typedef struct mmd_runtime_ffi_physics_rigidbody_desc {
+    uint32_t shape;
+    float    shape_size[3];
+    float    position_xyz[3];
+    float    rotation_euler_xyz[3];
+    float    mass;
+    float    linear_damping;
+    float    angular_damping;
+    float    friction;
+    float    restitution;
+    uint16_t collision_group;
+    uint16_t collision_mask;
+    int32_t  bone_index;
+    uint32_t mode;
+    float    body_from_bone_position_xyz[3];
+    float    body_from_bone_rotation_xyzw[4];
+    float    bone_from_body_position_xyz[3];
+    float    bone_from_body_rotation_xyzw[4];
+} mmd_runtime_ffi_physics_rigidbody_desc_t;
+
+typedef struct mmd_runtime_ffi_physics_joint_desc {
+    uint32_t kind;
+    size_t   rigidbody_a;
+    size_t   rigidbody_b;
+    float    position_xyz[3];
+    float    rotation_euler_xyz[3];
+    float    translation_lower_limit_xyz[3];
+    float    translation_upper_limit_xyz[3];
+    float    rotation_lower_limit_xyz[3];
+    float    rotation_upper_limit_xyz[3];
+    float    spring_translation_factor_xyz[3];
+    float    spring_rotation_factor_xyz[3];
+} mmd_runtime_ffi_physics_joint_desc_t;
+
+typedef struct mmd_runtime_ffi_physics_world_step_report {
+    mmd_runtime_ffi_physics_step_stats_t tick;
+    size_t kinematic_rigidbodies_fed;
+    size_t bones_written_back;
+} mmd_runtime_ffi_physics_world_step_report_t;
+
 /* ------------------------------------------------------------------ */
 /*  Model lifecycle                                                   */
 /* ------------------------------------------------------------------ */
 
 uint32_t mmd_runtime_abi_version(void);
+
+uint32_t mmd_runtime_feature_flags(void);
 
 /* Returns the most recent FFI error message for the calling thread, or NULL.
    The returned pointer is valid only until the next FFI call on the same
@@ -404,7 +510,9 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_pmx_geometry_skinning_modes_json(
    sized array ordered the same way PMX IK links are solved. iteration_count
    and limit_angle are the per-chain solve settings. bones and links are
    borrowed only for the call. Returns NULL if required arrays are NULL,
-   indices are out of range, values are non-finite, or counts are invalid. */
+   indices are out of range, values are non-finite, or counts are invalid.
+   Local-axis angle-limit frames are not provided by this entry point; use
+   mmd_runtime_ik_chain_create_v2 when localAxis data is available. */
 mmd_runtime_ik_chain_t* mmd_runtime_ik_chain_create(
     const mmd_runtime_ffi_rig_bone_t*    bones,
     size_t                               bone_count,
@@ -413,6 +521,23 @@ mmd_runtime_ik_chain_t* mmd_runtime_ik_chain_create(
     size_t                               link_count,
     uint32_t                             iteration_count,
     float                                limit_angle);
+
+/* Additive v2 IK-chain create with optional per-bone localAxis bases.
+   Same arguments as mmd_runtime_ik_chain_create, plus local_axes:
+   - local_axes may be NULL → identical to mmd_runtime_ik_chain_create.
+   - When non-NULL, local_axes must point to bone_count entries. Degenerate
+     axes (near-zero / parallel) are treated as no local axis for that bone.
+   Non-finite local-axis vectors cause NULL. Existing create/solve/free
+   contracts are otherwise unchanged. */
+mmd_runtime_ik_chain_t* mmd_runtime_ik_chain_create_v2(
+    const mmd_runtime_ffi_rig_bone_t*                 bones,
+    size_t                                            bone_count,
+    const mmd_runtime_ffi_rig_bone_local_axis_v2_t*  local_axes,
+    uint32_t                                          target_bone_slot,
+    const mmd_runtime_ffi_rig_ik_link_t*              links,
+    size_t                                            link_count,
+    uint32_t                                          iteration_count,
+    float                                             limit_angle);
 
 void mmd_runtime_ik_chain_free(
     mmd_runtime_ik_chain_t* chain);
@@ -708,6 +833,100 @@ bool mmd_runtime_instance_evaluate_clip_frame_with_ik_options(
     float                         ik_tolerance,
     uint32_t                      ik_max_iterations_cap);
 
+mmd_runtime_status_t mmd_runtime_instance_get_physics_mode(
+    const mmd_runtime_instance_t* instance,
+    mmd_runtime_physics_mode_t*   out_mode);
+
+mmd_runtime_status_t mmd_runtime_instance_set_physics_mode(
+    mmd_runtime_instance_t*      instance,
+    mmd_runtime_physics_mode_t   mode);
+
+mmd_runtime_status_t mmd_runtime_instance_get_physics_tick_config(
+    const mmd_runtime_instance_t*              instance,
+    mmd_runtime_ffi_physics_tick_config_t*     out_config);
+
+mmd_runtime_status_t mmd_runtime_instance_set_physics_tick_config(
+    mmd_runtime_instance_t*                    instance,
+    const mmd_runtime_ffi_physics_tick_config_t* config);
+
+mmd_runtime_status_t mmd_runtime_instance_reset_physics_tick(
+    mmd_runtime_instance_t* instance);
+
+mmd_runtime_status_t mmd_runtime_instance_evaluate_clip_frame_before_physics(
+    mmd_runtime_instance_t*   instance,
+    const mmd_runtime_clip_t* clip,
+    float                     frame);
+
+mmd_runtime_status_t mmd_runtime_instance_evaluate_clip_frame_before_physics_with_ik_options(
+    mmd_runtime_instance_t*   instance,
+    const mmd_runtime_clip_t* clip,
+    float                     frame,
+    float                     ik_tolerance,
+    uint32_t                  ik_max_iterations_cap);
+
+mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_before_physics(
+    mmd_runtime_instance_t* instance);
+
+mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_after_physics(
+    mmd_runtime_instance_t* instance);
+
+mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_after_physics_with_ik_options(
+    mmd_runtime_instance_t* instance,
+    float                   ik_tolerance,
+    uint32_t                ik_max_iterations_cap);
+
+mmd_runtime_status_t mmd_runtime_instance_advance_physics_tick_clock(
+    mmd_runtime_instance_t*                   instance,
+    float                                     dt_seconds,
+    mmd_runtime_ffi_physics_step_stats_t*     out_stats);
+
+mmd_runtime_status_t mmd_runtime_instance_apply_physics_world_matrices(
+    mmd_runtime_instance_t* instance,
+    const float*            physics_world_matrices_f32,
+    size_t                  physics_world_matrices_f32_len,
+    const uint8_t*          physics_world_matrix_mask_u8,
+    size_t                  physics_world_matrix_mask_u8_len,
+    size_t*                 out_updated_bone_count);
+
+mmd_runtime_status_t mmd_runtime_physics_world_create(
+    const mmd_runtime_ffi_physics_rigidbody_desc_t* rigidbodies,
+    size_t                                          rigidbody_count,
+    const mmd_runtime_ffi_physics_joint_desc_t*     joints,
+    size_t                                          joint_count,
+    mmd_runtime_physics_world_t**                   out_world);
+
+mmd_runtime_status_t mmd_runtime_physics_world_create_from_pmx_bytes(
+    const uint8_t*                  pmx_data,
+    size_t                          pmx_len,
+    mmd_runtime_physics_world_t**   out_world);
+
+void mmd_runtime_physics_world_free(
+    mmd_runtime_physics_world_t* world);
+
+/* Successful reset reseeds from the runtime pose and arms seed-only behavior
+   for the next mmd_runtime_physics_world_bake_clip_frames sample. */
+mmd_runtime_status_t mmd_runtime_physics_world_reset(
+    mmd_runtime_physics_world_t* world,
+    mmd_runtime_instance_t*      instance,
+    size_t*                      out_seeded_rigidbody_count);
+
+/* Successful explicit step disarms bake seed-only state so the next bake
+   sample advances physics normally. */
+mmd_runtime_status_t mmd_runtime_physics_world_step_runtime(
+    mmd_runtime_physics_world_t*                      world,
+    mmd_runtime_instance_t*                           instance,
+    float                                             dt_seconds,
+    mmd_runtime_ffi_physics_world_step_report_t*      out_report);
+
+mmd_runtime_status_t mmd_runtime_physics_world_rigidbody_count(
+    const mmd_runtime_physics_world_t* world,
+    size_t*                            out_rigidbody_count);
+
+mmd_runtime_status_t mmd_runtime_physics_world_copy_rigidbody_states(
+    const mmd_runtime_physics_world_t* world,
+    float*                             out_transforms_f32,
+    size_t                             out_transforms_f32_len);
+
 bool mmd_runtime_instance_evaluate_clip_frame_without_ik(
     mmd_runtime_instance_t*       instance,
     const mmd_runtime_clip_t*     clip,
@@ -737,6 +956,31 @@ bool mmd_runtime_instance_evaluate_clip_frame_batch(
     size_t                        out_world_matrices_f32_len,
     float*                        out_morph_weights_f32,
     size_t                        out_morph_weights_f32_len);
+
+/* Stateful sequential physics bake.
+   After world creation or a successful mmd_runtime_physics_world_reset, the
+   first bake sample is seed-only: evaluate_clip_frame_before_physics at that
+   sample, reset/reseed Bullet from the evaluated pose (physics tick reset
+   included), copy world/morph outputs, and do NOT step physics. Later samples
+   use evaluate -> step -> copy. A continuation bake without another successful
+   reset does not skip its first sample. frame_count == 0 does not consume the
+   seed-only state. A successful mmd_runtime_physics_world_step_runtime also
+   disarms seed-only. out_last_report for a one-sample seed-only bake remains
+   the default zero report; multi-sample bakes report the final actual step.
+   Layout matches evaluate_clip_frame_batch: [frame][bone][16] and [frame][morph]. */
+mmd_runtime_status_t mmd_runtime_physics_world_bake_clip_frames(
+    mmd_runtime_physics_world_t*                      world,
+    mmd_runtime_instance_t*                           instance,
+    const mmd_runtime_clip_t*                         clip,
+    float                                             start_frame,
+    float                                             frame_step,
+    float                                             dt_seconds,
+    size_t                                            frame_count,
+    float*                                            out_world_matrices_f32,
+    size_t                                            out_world_matrices_f32_len,
+    float*                                            out_morph_weights_f32,
+    size_t                                            out_morph_weights_f32_len,
+    mmd_runtime_ffi_physics_world_step_report_t*      out_last_report);
 
 /* ------------------------------------------------------------------ */
 /*  Output: world matrices                                             */

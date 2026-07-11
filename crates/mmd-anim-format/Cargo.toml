@@ -10,12 +10,16 @@ keywords.workspace = true
 categories.workspace = true
 description = "MMD format parser and exporter for mmd-anim"
 
+[features]
+fbx = ["dep:fbxcel", "fbxcel/tree", "fbxcel/writer"]
+
 [dependencies]
 mmd-anim-runtime.workspace = true
 glam.workspace = true
 thiserror.workspace = true
 encoding_rs.workspace = true
 serde.workspace = true
+fbxcel = { version = "0.9", optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true

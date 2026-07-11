@@ -14,6 +14,17 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class Tolerances:
     max_abs_error_tolerance: float = 0.0
+    translation_max_error_tolerance: float = 0.0
+    translation_rms_error_tolerance: float = 0.0
+    rotation_max_angle_rad_tolerance: float = 0.0
+    rotation_rms_angle_rad_tolerance: float = 0.0
+    penetration_max_depth_tolerance: float = 0.0
+    bullet_penetration_max_depth_tolerance: float = 0.0
+    penetrating_pair_count_tolerance: int = 0
+    severe_pair_count_tolerance: int = 0
+    penetrating_contact_count_tolerance: int = 0
+    rigid_body_position_tolerance: float = 0.0
+    rigid_body_rotation_tolerance: float = 0.0
     mismatch_count_tolerance: int = 0
     missing_tolerance: int = 0
     import_error_tolerance: int = 0
@@ -23,6 +34,12 @@ class Tolerances:
 class GateOptions:
     allow_count_changes: bool = False
     allow_skipped_target_changes: bool = False
+    required_physics_backend: str | None = None
+    max_allowed_penetration_depth: float | None = None
+    max_allowed_bullet_penetration_depth: float | None = None
+    max_allowed_penetrating_pair_count: int | None = None
+    max_allowed_severe_pair_count: int | None = None
+    max_allowed_penetrating_contact_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -32,6 +49,11 @@ class GoldenGateConfig:
     baseline: Path | None
     report_dir: Path | None
     mmd_anim_bin: Path | None
+    physics_penetration: bool
+    diagnose_case: str | None
+    diagnose_frame: str | None
+    diagnose_bone: str | None
+    diagnose_eval_frame: str | None
     tolerances: Tolerances
     options: GateOptions
 
@@ -43,6 +65,13 @@ class GoldenGateConfig:
             missing.append("baseline")
         if missing:
             raise ConfigError(f"missing required config value(s): {', '.join(missing)}")
+        if self.physics_penetration and (self.diagnose_case is None or self.diagnose_frame is None):
+            raise ConfigError("physics_penetration requires diagnose_case and diagnose_frame")
+        if not self.physics_penetration and any(
+            value is not None
+            for value in (self.diagnose_case, self.diagnose_frame, self.diagnose_bone, self.diagnose_eval_frame)
+        ):
+            raise ConfigError("diagnose_* config values require physics_penetration")
         report_dir = self.report_dir
         if report_dir is None and self.baseline is not None:
             report_dir = self.baseline.parent
@@ -74,12 +103,124 @@ def resolve_config(args: Any) -> GoldenGateConfig:
         _choose("mmd_anim_bin", getattr(args, "mmd_anim_bin", None), "MMD_ANIM_BIN", raw_config),
         base=config_base,
     )
+    physics_penetration = _bool_value(
+        "physics_penetration",
+        getattr(args, "physics_penetration", None),
+        "MMD_ANIM_GOLDEN_PHYSICS_PENETRATION",
+        raw_config,
+        False,
+    )
+    diagnose_case = _optional_scalar_string_value(
+        "diagnose_case",
+        getattr(args, "diagnose_case", None),
+        "MMD_ANIM_GOLDEN_DIAGNOSE_CASE",
+        raw_config,
+        None,
+    )
+    diagnose_frame = _optional_scalar_string_value(
+        "diagnose_frame",
+        getattr(args, "diagnose_frame", None),
+        "MMD_ANIM_GOLDEN_DIAGNOSE_FRAME",
+        raw_config,
+        None,
+    )
+    diagnose_bone = _optional_scalar_string_value(
+        "diagnose_bone",
+        getattr(args, "diagnose_bone", None),
+        "MMD_ANIM_GOLDEN_DIAGNOSE_BONE",
+        raw_config,
+        None,
+    )
+    diagnose_eval_frame = _optional_scalar_string_value(
+        "diagnose_eval_frame",
+        getattr(args, "diagnose_eval_frame", None),
+        "MMD_ANIM_GOLDEN_DIAGNOSE_EVAL_FRAME",
+        raw_config,
+        None,
+    )
 
     tolerances = Tolerances(
         max_abs_error_tolerance=_float_value(
             "max_abs_error_tolerance",
             getattr(args, "max_abs_error_tolerance", None),
             "MMD_ANIM_GOLDEN_MAX_ABS_ERROR_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        translation_max_error_tolerance=_float_value(
+            "translation_max_error_tolerance",
+            getattr(args, "translation_max_error_tolerance", None),
+            "MMD_ANIM_GOLDEN_TRANSLATION_MAX_ERROR_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        translation_rms_error_tolerance=_float_value(
+            "translation_rms_error_tolerance",
+            getattr(args, "translation_rms_error_tolerance", None),
+            "MMD_ANIM_GOLDEN_TRANSLATION_RMS_ERROR_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        rotation_max_angle_rad_tolerance=_float_value(
+            "rotation_max_angle_rad_tolerance",
+            getattr(args, "rotation_max_angle_rad_tolerance", None),
+            "MMD_ANIM_GOLDEN_ROTATION_MAX_ANGLE_RAD_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        rotation_rms_angle_rad_tolerance=_float_value(
+            "rotation_rms_angle_rad_tolerance",
+            getattr(args, "rotation_rms_angle_rad_tolerance", None),
+            "MMD_ANIM_GOLDEN_ROTATION_RMS_ANGLE_RAD_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        penetration_max_depth_tolerance=_float_value(
+            "penetration_max_depth_tolerance",
+            getattr(args, "penetration_max_depth_tolerance", None),
+            "MMD_ANIM_GOLDEN_PENETRATION_MAX_DEPTH_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        bullet_penetration_max_depth_tolerance=_float_value(
+            "bullet_penetration_max_depth_tolerance",
+            getattr(args, "bullet_penetration_max_depth_tolerance", None),
+            "MMD_ANIM_GOLDEN_BULLET_PENETRATION_MAX_DEPTH_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        penetrating_pair_count_tolerance=_int_value(
+            "penetrating_pair_count_tolerance",
+            getattr(args, "penetrating_pair_count_tolerance", None),
+            "MMD_ANIM_GOLDEN_PENETRATING_PAIR_COUNT_TOLERANCE",
+            raw_config,
+            0,
+        ),
+        severe_pair_count_tolerance=_int_value(
+            "severe_pair_count_tolerance",
+            getattr(args, "severe_pair_count_tolerance", None),
+            "MMD_ANIM_GOLDEN_SEVERE_PAIR_COUNT_TOLERANCE",
+            raw_config,
+            0,
+        ),
+        penetrating_contact_count_tolerance=_int_value(
+            "penetrating_contact_count_tolerance",
+            getattr(args, "penetrating_contact_count_tolerance", None),
+            "MMD_ANIM_GOLDEN_PENETRATING_CONTACT_COUNT_TOLERANCE",
+            raw_config,
+            0,
+        ),
+        rigid_body_position_tolerance=_float_value(
+            "rigid_body_position_tolerance",
+            getattr(args, "rigid_body_position_tolerance", None),
+            "MMD_ANIM_GOLDEN_RIGID_BODY_POSITION_TOLERANCE",
+            raw_config,
+            0.0,
+        ),
+        rigid_body_rotation_tolerance=_float_value(
+            "rigid_body_rotation_tolerance",
+            getattr(args, "rigid_body_rotation_tolerance", None),
+            "MMD_ANIM_GOLDEN_RIGID_BODY_ROTATION_TOLERANCE",
             raw_config,
             0.0,
         ),
@@ -120,6 +261,48 @@ def resolve_config(args: Any) -> GoldenGateConfig:
             raw_config,
             False,
         ),
+        required_physics_backend=_optional_string_value(
+            "required_physics_backend",
+            getattr(args, "required_physics_backend", None),
+            "MMD_ANIM_GOLDEN_REQUIRED_PHYSICS_BACKEND",
+            raw_config,
+            None,
+        ),
+        max_allowed_penetration_depth=_optional_float_value(
+            "max_allowed_penetration_depth",
+            getattr(args, "max_allowed_penetration_depth", None),
+            "MMD_ANIM_GOLDEN_MAX_ALLOWED_PENETRATION_DEPTH",
+            raw_config,
+            None,
+        ),
+        max_allowed_bullet_penetration_depth=_optional_float_value(
+            "max_allowed_bullet_penetration_depth",
+            getattr(args, "max_allowed_bullet_penetration_depth", None),
+            "MMD_ANIM_GOLDEN_MAX_ALLOWED_BULLET_PENETRATION_DEPTH",
+            raw_config,
+            None,
+        ),
+        max_allowed_penetrating_pair_count=_optional_int_value(
+            "max_allowed_penetrating_pair_count",
+            getattr(args, "max_allowed_penetrating_pair_count", None),
+            "MMD_ANIM_GOLDEN_MAX_ALLOWED_PENETRATING_PAIR_COUNT",
+            raw_config,
+            None,
+        ),
+        max_allowed_severe_pair_count=_optional_int_value(
+            "max_allowed_severe_pair_count",
+            getattr(args, "max_allowed_severe_pair_count", None),
+            "MMD_ANIM_GOLDEN_MAX_ALLOWED_SEVERE_PAIR_COUNT",
+            raw_config,
+            None,
+        ),
+        max_allowed_penetrating_contact_count=_optional_int_value(
+            "max_allowed_penetrating_contact_count",
+            getattr(args, "max_allowed_penetrating_contact_count", None),
+            "MMD_ANIM_GOLDEN_MAX_ALLOWED_PENETRATING_CONTACT_COUNT",
+            raw_config,
+            None,
+        ),
     )
 
     return GoldenGateConfig(
@@ -128,6 +311,11 @@ def resolve_config(args: Any) -> GoldenGateConfig:
         baseline=baseline,
         report_dir=report_dir,
         mmd_anim_bin=mmd_anim_bin,
+        physics_penetration=physics_penetration,
+        diagnose_case=diagnose_case,
+        diagnose_frame=diagnose_frame,
+        diagnose_bone=diagnose_bone,
+        diagnose_eval_frame=diagnose_eval_frame,
         tolerances=tolerances,
         options=options,
     )
@@ -176,7 +364,16 @@ def _choose(key: str, cli_value: Any, env_name: str, raw_config: dict[str, Any])
         return raw_config[key]
     if key.endswith("_tolerance"):
         return raw_config.get("tolerances", {}).get(key)
-    if key in {"allow_count_changes", "allow_skipped_target_changes"}:
+    if key in {
+        "allow_count_changes",
+        "allow_skipped_target_changes",
+        "required_physics_backend",
+        "max_allowed_penetration_depth",
+        "max_allowed_bullet_penetration_depth",
+        "max_allowed_penetrating_pair_count",
+        "max_allowed_severe_pair_count",
+        "max_allowed_penetrating_contact_count",
+    }:
         return raw_config.get("options", {}).get(key)
     return None
 
@@ -230,3 +427,82 @@ def _bool_value(key: str, cli_value: Any, env_name: str, raw_config: dict[str, A
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ConfigError(f"{key} must be a boolean")
+
+
+def _optional_string_value(
+    key: str,
+    cli_value: Any,
+    env_name: str,
+    raw_config: dict[str, Any],
+    default: str | None,
+) -> str | None:
+    if cli_value is not None:
+        value = cli_value
+    elif env_name in os.environ:
+        value = os.environ.get(env_name)
+    elif key in raw_config:
+        value = raw_config[key]
+    else:
+        value = raw_config.get("options", {}).get(key)
+    if value is None:
+        return default
+    if value == "":
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"{key} must be a string")
+    return value
+
+
+def _optional_scalar_string_value(
+    key: str,
+    cli_value: Any,
+    env_name: str,
+    raw_config: dict[str, Any],
+    default: str | None,
+) -> str | None:
+    value = _choose(key, cli_value, env_name, raw_config)
+    if value is None:
+        return default
+    if value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ConfigError(f"{key} must be a string or number")
+    return str(value)
+
+
+def _optional_float_value(
+    key: str,
+    cli_value: Any,
+    env_name: str,
+    raw_config: dict[str, Any],
+    default: float | None,
+) -> float | None:
+    value = _choose(key, cli_value, env_name, raw_config)
+    if value in (None, ""):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"{key} must be a number") from error
+    if parsed < 0:
+        raise ConfigError(f"{key} must be non-negative")
+    return parsed
+
+
+def _optional_int_value(
+    key: str,
+    cli_value: Any,
+    env_name: str,
+    raw_config: dict[str, Any],
+    default: int | None,
+) -> int | None:
+    value = _choose(key, cli_value, env_name, raw_config)
+    if value in (None, ""):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"{key} must be an integer") from error
+    if parsed < 0:
+        raise ConfigError(f"{key} must be non-negative")
+    return parsed

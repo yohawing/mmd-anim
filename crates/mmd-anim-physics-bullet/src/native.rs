@@ -483,10 +483,8 @@ mod ffi {
             world: *const World,
             out_gravity_xyz: *mut f32,
         ) -> i32;
-        pub fn mmd_anim_bullet_world_set_gravity(
-            world: *mut World,
-            gravity_xyz: *const f32,
-        ) -> i32;
+        pub fn mmd_anim_bullet_world_set_gravity(world: *mut World, gravity_xyz: *const f32)
+        -> i32;
     }
 }
 

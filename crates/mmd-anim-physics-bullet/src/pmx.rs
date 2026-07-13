@@ -137,7 +137,7 @@ impl PmxBulletWorld {
             .iter()
             .filter_map(|b| b.bone_index)
             .max()
-            .map_or(0, |max_idx| max_idx + 1)
+            .map_or(0, |max_idx| max_idx.saturating_add(1))
     }
 }
 

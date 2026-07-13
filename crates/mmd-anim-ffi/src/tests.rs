@@ -5380,6 +5380,13 @@ fn evaluate_host_frame_step_rejects_physics_mode_off() {
     };
     let mut report = zero_physics_step_report();
 
+    // Capture world matrices before the rejected call.
+    let mat_len = unsafe { mmd_runtime_instance_world_matrix_f32_len(instance) };
+    let mut matrices_before = vec![0.0f32; mat_len];
+    unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, matrices_before.as_mut_ptr(), mat_len);
+    }
+
     let off_status = unsafe {
         mmd_runtime_evaluate_host_frame(
             instance,
@@ -5393,6 +5400,16 @@ fn evaluate_host_frame_step_rejects_physics_mode_off() {
         )
     };
     assert_eq!(off_status, MmdRuntimeStatus::InvalidInput);
+
+    // Pose must not have been mutated by the rejected call.
+    let mut matrices_after = vec![0.0f32; mat_len];
+    unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, matrices_after.as_mut_ptr(), mat_len);
+    }
+    assert_eq!(
+        matrices_before, matrices_after,
+        "pose must not change on mode-Off rejection"
+    );
 
     assert_eq!(
         unsafe {
@@ -5458,6 +5475,12 @@ fn evaluate_host_frame_rejects_incompatible_world() {
     };
     let mut report = zero_physics_step_report();
 
+    let mat_len = unsafe { mmd_runtime_instance_world_matrix_f32_len(instance) };
+    let mut matrices_before = vec![0.0f32; mat_len];
+    unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, matrices_before.as_mut_ptr(), mat_len);
+    }
+
     let status = unsafe {
         mmd_runtime_evaluate_host_frame(
             instance,
@@ -5475,6 +5498,15 @@ fn evaluate_host_frame_rejects_incompatible_world() {
     assert_eq!(
         message.to_bytes(),
         b"physics world requires more bones than the instance provides"
+    );
+
+    let mut matrices_after = vec![0.0f32; mat_len];
+    unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, matrices_after.as_mut_ptr(), mat_len);
+    }
+    assert_eq!(
+        matrices_before, matrices_after,
+        "pose must not change on bone-count incompatibility rejection"
     );
 
     unsafe {
@@ -5506,7 +5538,7 @@ fn physics_driven_bone_mask_rejects_short_buffer() {
     let status = unsafe {
         mmd_runtime_physics_world_physics_driven_bone_mask(world, mask.as_mut_ptr(), mask.len())
     };
-    assert_eq!(status, MmdRuntimeStatus::InvalidInput);
+    assert_eq!(status, MmdRuntimeStatus::BufferTooSmall);
 
     unsafe {
         mmd_runtime_physics_world_free(world);

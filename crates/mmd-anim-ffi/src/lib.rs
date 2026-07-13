@@ -4151,6 +4151,12 @@ pub unsafe extern "C" fn mmd_runtime_evaluate_host_frame(
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
         }
 
+        // Validate physics preconditions before mutating pose.
+        let pre_status = validate_host_frame_physics_impl(world, instance, action);
+        if pre_status != MmdRuntimeStatus::Ok {
+            return pre_status;
+        }
+
         let status = apply_host_pose_impl(instance, pose);
         if status != MmdRuntimeStatus::Ok {
             return status;
@@ -4327,6 +4333,43 @@ fn physics_world_step_runtime_impl(
     _instance: *mut MmdRuntimeInstance,
     _dt_seconds: f32,
     _out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn validate_host_frame_physics_impl(
+    world: *mut MmdRuntimePhysicsWorld,
+    instance: &MmdRuntimeInstance,
+    action: MmdRuntimePhysicsFrameAction,
+) -> MmdRuntimeStatus {
+    let Some(world) = (unsafe { world.as_ref() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let instance_bone_count = instance.runtime.world_matrices().len();
+    let required = world.world.required_bone_count();
+    if required > instance_bone_count {
+        return status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "physics world requires more bones than the instance provides",
+        );
+    }
+    if action == MmdRuntimePhysicsFrameAction::Step
+        && !instance.runtime.physics_mode().steps_backend()
+    {
+        return status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "physics mode is Off; set Trace or Live before stepping",
+        );
+    }
+    MmdRuntimeStatus::Ok
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn validate_host_frame_physics_impl(
+    _world: *mut MmdRuntimePhysicsWorld,
+    _instance: &MmdRuntimeInstance,
+    _action: MmdRuntimePhysicsFrameAction,
 ) -> MmdRuntimeStatus {
     status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
 }
@@ -4555,18 +4598,9 @@ fn evaluate_host_frame_physics_impl(
 ) -> MmdRuntimeStatus {
     use mmd_anim_physics_bullet::RuntimePhysicsBridgeExt;
 
-    let Some(world) = (unsafe { world.as_mut() }) else {
-        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-    };
-
-    let instance_bone_count = instance.runtime.world_matrices().len();
-    let required = world.world.required_bone_count();
-    if required > instance_bone_count {
-        return status_failure(
-            MmdRuntimeStatus::InvalidInput,
-            "physics world requires more bones than the instance provides",
-        );
-    }
+    // Safety: world was validated non-null and compatible by
+    // validate_host_frame_physics_impl before pose was applied.
+    let world = unsafe { &mut *world };
 
     match action {
         MmdRuntimePhysicsFrameAction::Seed => {
@@ -4604,12 +4638,6 @@ fn evaluate_host_frame_physics_impl(
             }
         }
         MmdRuntimePhysicsFrameAction::Step => {
-            if !instance.runtime.physics_mode().steps_backend() {
-                return status_failure(
-                    MmdRuntimeStatus::InvalidInput,
-                    "physics mode is Off; set Trace or Live before stepping",
-                );
-            }
             match world.world.step_runtime_physics_with_runtime_clock_options(
                 &mut instance.runtime,
                 dt_seconds,
@@ -4737,7 +4765,7 @@ fn physics_world_physics_driven_bone_mask_impl(
     let required = world.world.required_bone_count();
     if bone_count < required {
         return status_failure(
-            MmdRuntimeStatus::InvalidInput,
+            MmdRuntimeStatus::BufferTooSmall,
             "bone mask buffer too short for physics world bindings",
         );
     }

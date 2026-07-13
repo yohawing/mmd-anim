@@ -18,6 +18,12 @@ use crate::{
     vmd::{VmdParsedAnimation, VmdParsedBoneFrame, VmdParsedMorphFrame},
 };
 
+mod skin_diff;
+pub use skin_diff::{
+    FbxSkinBoneDiff, FbxSkinClusterData, FbxSkinDiffOptions, FbxSkinDiffReport, FbxSkinReadError,
+    FbxSkinVertexWeight, FbxSkinWeightDiff, diff_fbx_skin_clusters, read_fbx_skin_clusters,
+};
+
 const ROOT_NODE_ID: i64 = 0;
 const DOCUMENT_ID: i64 = 100;
 const MODEL_ID: i64 = 200;
@@ -2285,12 +2291,16 @@ fn collect_bone_skin_data(
     let mut indices = Vec::new();
     let mut weights = Vec::new();
     for vertex_index in 0..vertex_count {
+        let mut merged_weight = 0.0f64;
         for slot in 0..4 {
             let skin_offset = vertex_index * 4 + slot;
             if skin_indices[skin_offset] as usize == bone_index && skin_weights[skin_offset] > 0.0 {
-                indices.push(vertex_index as i32);
-                weights.push(skin_weights[skin_offset] as f64);
+                merged_weight += skin_weights[skin_offset] as f64;
             }
+        }
+        if merged_weight > 0.0 {
+            indices.push(vertex_index as i32);
+            weights.push(merged_weight);
         }
     }
     (indices, weights)

@@ -16,6 +16,60 @@ extern "C" {
 #define MMD_RUNTIME_ABI_VERSION 2
 
 /* ------------------------------------------------------------------ */
+/*  Host physics FFI surface contract                                 */
+/* ------------------------------------------------------------------ */
+/*
+   Capability detection
+   ---------------------
+   mmd_runtime_feature_flags() returns a bitmask describing what this build
+   supports: bit 0 (MMD_RUNTIME_FEATURE_SPLIT_PHYSICS_EVALUATION) is set when
+   the before/after-physics split evaluation API is available; bit 1
+   (MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE) is set when the native Bullet
+   physics world is available. Check the relevant bit before calling any
+   physics_world_* or evaluate_host_frame function; when the bit is unset
+   those functions return MMD_RUNTIME_STATUS_UNSUPPORTED.
+
+   Handle ownership
+   ----------------
+   mmd_runtime_model_t* is shared and read-only after creation (Arc-backed).
+   The same model may be used to create any number of instances and physics
+   worlds simultaneously.
+   mmd_runtime_instance_t* and mmd_runtime_physics_world_t* are each
+   exclusively owned by the caller and must be released with
+   mmd_runtime_instance_free / mmd_runtime_physics_world_free respectively.
+   Free order: release instances and physics worlds before releasing the
+   model they were created from. Freeing a model while instances or worlds
+   still reference it is safe (the model's storage stays alive via Arc), but
+   using an instance or world handle after it has been freed is undefined
+   behavior.
+
+   Thread safety
+   -------------
+   Individual handles are not thread-safe: do not call FFI functions on the
+   same instance or physics world from more than one thread at a time.
+   Independent (model, instance, world) triples that share no handle may be
+   driven concurrently from different threads. mmd_runtime_last_error_message
+   is thread-local; the returned message is valid only until the next FFI
+   call made on that same thread.
+
+   Same-frame re-evaluation
+   -------------------------
+   mmd_runtime_evaluate_host_frame with action = STEP advances the physics
+   world's fixed-step clock. Calling it more than once for the same logical
+   frame accumulates physics time as if multiple frames had elapsed; the
+   caller must not double-step a frame. action = SEED never advances the
+   solver and may be called at any time to reseed physics state from the
+   current pose.
+
+   Error recovery
+   --------------
+   When any function returns a status other than MMD_RUNTIME_STATUS_OK, the
+   handles it was given remain valid and may be used in subsequent calls,
+   which may succeed. The only functions that never fail are the handle-free
+   functions.
+*/
+
+/* ------------------------------------------------------------------ */
 /*  Opaque handle types                                               */
 /* ------------------------------------------------------------------ */
 
@@ -957,8 +1011,10 @@ mmd_runtime_status_t mmd_runtime_physics_world_step_runtime(
 /* Applies a validated host pose, evaluates the before-physics phase, seeds or
    steps the physics world (per `action`), and evaluates the after-physics
    phase, all as a single atomic call. On failure applying the host pose, no
-   mutation occurs. For MMD_RUNTIME_PHYSICS_FRAME_ACTION_SEED, dt_seconds is
-   ignored and out_report (when non-null) is zeroed. */
+   mutation occurs. For SEED, dt_seconds is ignored and out_report (when
+   non-null) is zeroed. For STEP, dt_seconds must be finite and >= 0.
+   Unknown action values return MMD_RUNTIME_STATUS_INVALID_INPUT.
+   IK options apply to the before-physics phase; after-physics uses defaults. */
 mmd_runtime_status_t mmd_runtime_evaluate_host_frame(
     mmd_runtime_instance_t*                     instance,
     mmd_runtime_physics_world_t*                world,

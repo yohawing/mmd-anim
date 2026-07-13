@@ -4846,6 +4846,7 @@ fn host_frame_pose_view(offset_x: f32) -> ([f32; 9], [f32; 12], [f32; 9]) {
     (positions, rotations, scales)
 }
 
+#[cfg(feature = "physics-bullet-native")]
 #[test]
 fn evaluate_host_frame_rejects_null_pointers() {
     let (model, instance) = two_bone_host_pose_fixture();
@@ -4886,7 +4887,7 @@ fn evaluate_host_frame_rejects_null_pointers() {
                 ptr::null_mut(),
                 world,
                 &view,
-                MmdRuntimePhysicsFrameAction::Seed,
+                MmdRuntimePhysicsFrameAction::Seed as u32,
                 1.0 / 60.0,
                 1.0e-3,
                 0,
@@ -4901,7 +4902,7 @@ fn evaluate_host_frame_rejects_null_pointers() {
                 instance,
                 ptr::null_mut(),
                 &view,
-                MmdRuntimePhysicsFrameAction::Seed,
+                MmdRuntimePhysicsFrameAction::Seed as u32,
                 1.0 / 60.0,
                 1.0e-3,
                 0,
@@ -4916,7 +4917,7 @@ fn evaluate_host_frame_rejects_null_pointers() {
                 instance,
                 world,
                 ptr::null(),
-                MmdRuntimePhysicsFrameAction::Seed,
+                MmdRuntimePhysicsFrameAction::Seed as u32,
                 1.0 / 60.0,
                 1.0e-3,
                 0,
@@ -4966,7 +4967,7 @@ fn evaluate_host_frame_seed_evaluates_pose() {
             instance,
             world,
             &view,
-            MmdRuntimePhysicsFrameAction::Seed,
+            MmdRuntimePhysicsFrameAction::Seed as u32,
             1.0 / 60.0,
             1.0e-3,
             0,
@@ -5032,7 +5033,7 @@ fn evaluate_host_frame_step_produces_report() {
                 instance,
                 world,
                 &view,
-                MmdRuntimePhysicsFrameAction::Seed,
+                MmdRuntimePhysicsFrameAction::Seed as u32,
                 0.0,
                 1.0e-3,
                 0,
@@ -5047,7 +5048,7 @@ fn evaluate_host_frame_step_produces_report() {
             instance,
             world,
             &view,
-            MmdRuntimePhysicsFrameAction::Step,
+            MmdRuntimePhysicsFrameAction::Step as u32,
             1.0 / 60.0,
             1.0e-3,
             0,
@@ -5059,6 +5060,203 @@ fn evaluate_host_frame_step_produces_report() {
         report.kinematic_rigidbodies_fed > 0 || report.bones_written_back > 0,
         "expected step to feed or write back at least one rigidbody: {report:?}"
     );
+
+    unsafe {
+        mmd_runtime_physics_world_free(world);
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+/// Two independent (model, instance, world) triples must never share mutable
+/// state: driving one with `mmd_runtime_evaluate_host_frame` must not leak
+/// into the other's evaluated pose, even when both are seeded and stepped
+/// interleaved on the same thread.
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn two_independent_worlds_do_not_cross_contaminate() {
+    let (model_a, instance_a, world_a) = host_frame_fixture();
+    let (model_b, instance_b, world_b) = host_frame_fixture();
+
+    let (positions_a, rotations_a, scales_a) = host_frame_pose_view(0.3);
+    let view_a = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: positions_a.as_ptr(),
+        local_rotation_xyzw: rotations_a.as_ptr(),
+        local_scales_xyz: scales_a.as_ptr(),
+        bone_count: 3,
+        morph_weights: ptr::null(),
+        morph_count: 0,
+        ik_enabled: ptr::null(),
+        ik_count: 0,
+    };
+    let (positions_b, rotations_b, scales_b) = host_frame_pose_view(-0.7);
+    let view_b = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: positions_b.as_ptr(),
+        local_rotation_xyzw: rotations_b.as_ptr(),
+        local_scales_xyz: scales_b.as_ptr(),
+        bone_count: 3,
+        morph_weights: ptr::null(),
+        morph_count: 0,
+        ik_enabled: ptr::null(),
+        ik_count: 0,
+    };
+
+    let mut report = zero_physics_step_report();
+
+    assert_eq!(
+        unsafe {
+            mmd_runtime_evaluate_host_frame(
+                instance_a,
+                world_a,
+                &view_a,
+                MmdRuntimePhysicsFrameAction::Seed as u32,
+                1.0 / 60.0,
+                1.0e-3,
+                0,
+                &mut report,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_evaluate_host_frame(
+                instance_b,
+                world_b,
+                &view_b,
+                MmdRuntimePhysicsFrameAction::Seed as u32,
+                1.0 / 60.0,
+                1.0e-3,
+                0,
+                &mut report,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_evaluate_host_frame(
+                instance_a,
+                world_a,
+                &view_a,
+                MmdRuntimePhysicsFrameAction::Step as u32,
+                1.0 / 60.0,
+                1.0e-3,
+                0,
+                &mut report,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_evaluate_host_frame(
+                instance_b,
+                world_b,
+                &view_b,
+                MmdRuntimePhysicsFrameAction::Step as u32,
+                1.0 / 60.0,
+                1.0e-3,
+                0,
+                &mut report,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+
+    // Bone 0 (`root`) is unbound to any rigidbody, so its world position
+    // directly reflects the host pose offset injected for that world only.
+    let mut matrices_a = [0.0f32; 48];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            instance_a,
+            matrices_a.as_mut_ptr(),
+            matrices_a.len(),
+        )
+    });
+    assert_near(matrices_a[12], 0.3, 1e-4);
+    assert_near(matrices_a[13], 0.0, 1e-4);
+    assert_near(matrices_a[14], 0.0, 1e-4);
+
+    let mut matrices_b = [0.0f32; 48];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            instance_b,
+            matrices_b.as_mut_ptr(),
+            matrices_b.len(),
+        )
+    });
+    assert_near(matrices_b[12], -0.7, 1e-4);
+    assert_near(matrices_b[13], 0.0, 1e-4);
+    assert_near(matrices_b[14], 0.0, 1e-4);
+
+    unsafe {
+        mmd_runtime_physics_world_free(world_a);
+        mmd_runtime_instance_free(instance_a);
+        mmd_runtime_model_free(model_a);
+        mmd_runtime_physics_world_free(world_b);
+        mmd_runtime_instance_free(instance_b);
+        mmd_runtime_model_free(model_b);
+    }
+}
+
+/// A call that fails validation (here, a NULL pose) must leave the instance
+/// and world handles fully usable: the very next call with valid arguments
+/// must succeed and produce the expected pose, proving error recovery holds.
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn invalid_call_does_not_prevent_subsequent_valid_call() {
+    let (model, instance, world) = host_frame_fixture();
+
+    let mut report = zero_physics_step_report();
+
+    let invalid_status = unsafe {
+        mmd_runtime_evaluate_host_frame(
+            instance,
+            world,
+            ptr::null(),
+            MmdRuntimePhysicsFrameAction::Seed as u32,
+            1.0 / 60.0,
+            1.0e-3,
+            0,
+            &mut report,
+        )
+    };
+    assert_eq!(invalid_status, MmdRuntimeStatus::InvalidInput);
+
+    let (positions, rotations, scales) = host_frame_pose_view(0.42);
+    let view = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: positions.as_ptr(),
+        local_rotation_xyzw: rotations.as_ptr(),
+        local_scales_xyz: scales.as_ptr(),
+        bone_count: 3,
+        morph_weights: ptr::null(),
+        morph_count: 0,
+        ik_enabled: ptr::null(),
+        ik_count: 0,
+    };
+
+    let valid_status = unsafe {
+        mmd_runtime_evaluate_host_frame(
+            instance,
+            world,
+            &view,
+            MmdRuntimePhysicsFrameAction::Seed as u32,
+            1.0 / 60.0,
+            1.0e-3,
+            0,
+            &mut report,
+        )
+    };
+    assert_eq!(valid_status, MmdRuntimeStatus::Ok);
+
+    let mut matrices = [0.0f32; 48];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, matrices.as_mut_ptr(), matrices.len())
+    });
+    assert_near(matrices[12], 0.42, 1e-4);
+    assert_near(matrices[13], 0.0, 1e-4);
+    assert_near(matrices[14], 0.0, 1e-4);
 
     unsafe {
         mmd_runtime_physics_world_free(world);

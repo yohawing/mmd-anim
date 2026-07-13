@@ -4108,13 +4108,24 @@ pub unsafe extern "C" fn mmd_runtime_evaluate_host_frame(
     instance: *mut MmdRuntimeInstance,
     world: *mut MmdRuntimePhysicsWorld,
     pose: *const MmdRuntimeFfiHostPoseView,
-    action: MmdRuntimePhysicsFrameAction,
+    action: u32,
     dt_seconds: f32,
     ik_tolerance: f32,
     ik_max_iterations_cap: u32,
     out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
+        let action = match action {
+            0 => MmdRuntimePhysicsFrameAction::Seed,
+            1 => MmdRuntimePhysicsFrameAction::Step,
+            _ => {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "unknown physics frame action",
+                );
+            }
+        };
+
         let Some(instance) = (unsafe { instance.as_mut() }) else {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
         };
@@ -4127,12 +4138,19 @@ pub unsafe extern "C" fn mmd_runtime_evaluate_host_frame(
         if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
         }
+        if action == MmdRuntimePhysicsFrameAction::Step
+            && (!dt_seconds.is_finite() || dt_seconds < 0.0)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
 
         let status = apply_host_pose_impl(instance, pose);
         if status != MmdRuntimeStatus::Ok {
             return status;
         }
 
+        // IK options apply to the before-physics phase only; the bridge
+        // functions (reset/step) evaluate after-physics with defaults.
         let ik_options = IkSolveOptions {
             tolerance: ik_tolerance,
             max_iterations_cap: if ik_max_iterations_cap == 0 {
@@ -4555,9 +4573,6 @@ fn evaluate_host_frame_physics_impl(
             }
         }
         MmdRuntimePhysicsFrameAction::Step => {
-            if !dt_seconds.is_finite() || dt_seconds < 0.0 {
-                return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-            }
             match world.world.step_runtime_physics_with_runtime_clock_options(
                 &mut instance.runtime,
                 dt_seconds,

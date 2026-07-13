@@ -4280,7 +4280,7 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_copy_rigidbody_bindings(
 /// A bone is physics-driven if any rigidbody with `writes_back_to_bone()` mode
 /// (Dynamic or DynamicBone) is bound to it.
 ///
-/// Returns `INVALID_INPUT` when `bone_count` is smaller than the physics
+/// Returns `BUFFER_TOO_SMALL` when `bone_count` is smaller than the physics
 /// world's required bone count (the highest bound bone index plus one),
 /// since the mask could not represent all bindings in that case.
 ///

@@ -1063,7 +1063,7 @@ mmd_runtime_status_t mmd_runtime_physics_world_copy_rigidbody_bindings(
     size_t capacity,
     size_t *out_count);
 
-/* Returns MMD_RUNTIME_STATUS_INVALID_INPUT when bone_count is smaller than
+/* Returns MMD_RUNTIME_STATUS_BUFFER_TOO_SMALL when bone_count is smaller than
    the physics world's required bone count (the highest bound bone index
    plus one), rather than silently ignoring out-of-range bindings. */
 mmd_runtime_status_t mmd_runtime_physics_world_physics_driven_bone_mask(

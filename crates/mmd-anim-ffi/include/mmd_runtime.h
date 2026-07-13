@@ -32,16 +32,20 @@ extern "C" {
    Handle ownership
    ----------------
    mmd_runtime_model_t* is shared and read-only after creation (Arc-backed).
-   The same model may be used to create any number of instances and physics
-   worlds simultaneously.
-   mmd_runtime_instance_t* and mmd_runtime_physics_world_t* are each
-   exclusively owned by the caller and must be released with
-   mmd_runtime_instance_free / mmd_runtime_physics_world_free respectively.
-   Free order: release instances and physics worlds before releasing the
-   model they were created from. Freeing a model while instances or worlds
-   still reference it is safe (the model's storage stays alive via Arc), but
-   using an instance or world handle after it has been freed is undefined
-   behavior.
+   The same model may be used to create any number of instances.
+   mmd_runtime_instance_t* is exclusively owned by the caller and must be
+   released with mmd_runtime_instance_free.
+   mmd_runtime_physics_world_t* is exclusively owned and created
+   independently from PMX bytes or rigidbody/joint descriptors — it does
+   not hold a reference to the model handle. The caller is responsible for
+   ensuring that the bone indices used by the physics world match those of
+   the instance it is paired with; index mismatches within bounds silently
+   drive the wrong bones.
+   Free order: release instances before releasing the model they were
+   created from. Physics worlds may be freed in any order relative to
+   models. Freeing a model while instances still reference it is safe (Arc
+   keeps storage alive), but using any handle after it has been freed is
+   undefined behavior.
 
    Thread safety
    -------------
@@ -57,9 +61,11 @@ extern "C" {
    mmd_runtime_evaluate_host_frame with action = STEP advances the physics
    world's fixed-step clock. Calling it more than once for the same logical
    frame accumulates physics time as if multiple frames had elapsed; the
-   caller must not double-step a frame. action = SEED never advances the
-   solver and may be called at any time to reseed physics state from the
-   current pose.
+   caller must not double-step a frame. action = SEED reseeds rigid bodies
+   from the evaluated pose and runs a brief solver settle (one 1/60 s
+   step), so the resulting pose includes the settle delta — it is not a
+   pure identity re-projection of the input. SEED may be called at any
+   time to reinitialize physics state.
 
    Error recovery
    --------------

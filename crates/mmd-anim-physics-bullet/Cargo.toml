@@ -9,6 +9,18 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Optional Bullet physics backend for mmd-anim"
+include = [
+    "Cargo.toml",
+    "build.rs",
+    "native/**",
+    "src/**",
+    "vendor/bullet3/LICENSE.txt",
+    "vendor/bullet3/README.md",
+    "vendor/bullet3/src/*.h",
+    "vendor/bullet3/src/LinearMath/**",
+    "vendor/bullet3/src/BulletCollision/**",
+    "vendor/bullet3/src/BulletDynamics/**",
+]
 
 [features]
 default = []

@@ -14,12 +14,13 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let bullet_dir = env::var_os("MMD_ANIM_BULLET3_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir.join("../../../bullet3"));
+        .unwrap_or_else(|| manifest_dir.join("vendor/bullet3"));
     let bullet_src = bullet_dir.join("src");
+    println!("cargo:rerun-if-changed={}", bullet_src.display());
 
     if !bullet_src.is_dir() {
         panic!(
-            "Bullet sources not found at {}. Set MMD_ANIM_BULLET3_DIR to a bullet3 checkout.",
+            "Bullet sources not found at {}. Restore vendor/bullet3 or set MMD_ANIM_BULLET3_DIR to a Bullet3 checkout.",
             bullet_dir.display()
         );
     }

@@ -23,7 +23,9 @@ frozen yet, and breaking changes may happen before 1.0. Feedback is welcome.
 - Interpolate between keyframes with MMD-style Bezier interpolation for translation and rotation.
 - An optional MMD physics backend using Bullet Physics, available to
   `mmd-anim-cli` and `mmd-anim-ffi` builds through their
-  `physics-bullet-native` feature.
+  `physics-bullet-native` feature. The required Bullet3 modules are vendored
+  and compiled for the consumer's target; no separate Bullet installation is
+  required.
 
 ## Test Foundation
 

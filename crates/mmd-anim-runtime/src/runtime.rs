@@ -192,6 +192,7 @@ impl RuntimeInstance {
 
     pub fn new_with_counts(model: Arc<ModelArena>, morph_count: usize, ik_count: usize) -> Self {
         let morph_count = morph_count.max(model.morph_count() as usize);
+        let ik_count = ik_count.max(model.ik_count());
         let pose = PoseArena::new_with_counts(model.bone_count(), morph_count, ik_count);
         let ik_scratch = IkScratch::new(&model);
         let morph_scratch = MorphScratch::new(morph_count);

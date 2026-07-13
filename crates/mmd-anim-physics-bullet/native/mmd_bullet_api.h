@@ -114,6 +114,15 @@ mmd_anim_bullet_world_collect_contacts(
     int32_t capacity,
     int32_t *out_count);
 
+MMD_ANIM_BULLET_API mmd_anim_bullet_status
+mmd_anim_bullet_world_get_gravity(
+    const mmd_anim_bullet_world *world,
+    float out_gravity_xyz[3]);
+MMD_ANIM_BULLET_API mmd_anim_bullet_status
+mmd_anim_bullet_world_set_gravity(
+    mmd_anim_bullet_world *world,
+    const float gravity_xyz[3]);
+
 #ifdef __cplusplus
 }
 #endif

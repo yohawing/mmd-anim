@@ -431,4 +431,29 @@ mmd_anim_bullet_status mmd_anim_bullet_world_collect_contacts(
     return MMD_ANIM_BULLET_OK;
 }
 
+mmd_anim_bullet_status mmd_anim_bullet_world_get_gravity(
+    const mmd_anim_bullet_world *world,
+    float out_gravity_xyz[3]) {
+    if (!world || !out_gravity_xyz) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world or out_gravity_xyz is null");
+    }
+    btVector3 gravity = world->dynamics_world->getGravity();
+    out_gravity_xyz[0] = gravity.x();
+    out_gravity_xyz[1] = gravity.y();
+    out_gravity_xyz[2] = gravity.z();
+    g_last_error.clear();
+    return MMD_ANIM_BULLET_OK;
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_set_gravity(
+    mmd_anim_bullet_world *world,
+    const float gravity_xyz[3]) {
+    if (!world || !gravity_xyz) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world or gravity_xyz is null");
+    }
+    world->dynamics_world->setGravity(btVector3(gravity_xyz[0], gravity_xyz[1], gravity_xyz[2]));
+    g_last_error.clear();
+    return MMD_ANIM_BULLET_OK;
+}
+
 }

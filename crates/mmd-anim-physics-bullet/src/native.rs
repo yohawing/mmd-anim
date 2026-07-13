@@ -355,6 +355,20 @@ impl BulletWorld {
             })
             .collect())
     }
+
+    pub fn gravity(&self) -> Result<[f32; 3], BulletError> {
+        let mut gravity = [0.0f32; 3];
+        check(unsafe {
+            ffi::mmd_anim_bullet_world_get_gravity(self.raw.as_ptr(), gravity.as_mut_ptr())
+        })?;
+        Ok(gravity)
+    }
+
+    pub fn set_gravity(&mut self, gravity: [f32; 3]) -> Result<(), BulletError> {
+        check(unsafe {
+            ffi::mmd_anim_bullet_world_set_gravity(self.raw.as_ptr(), gravity.as_ptr())
+        })
+    }
 }
 
 impl Drop for BulletWorld {
@@ -464,6 +478,14 @@ mod ffi {
             out_contacts: *mut ContactPoint,
             capacity: i32,
             out_count: *mut i32,
+        ) -> i32;
+        pub fn mmd_anim_bullet_world_get_gravity(
+            world: *const World,
+            out_gravity_xyz: *mut f32,
+        ) -> i32;
+        pub fn mmd_anim_bullet_world_set_gravity(
+            world: *mut World,
+            gravity_xyz: *const f32,
         ) -> i32;
     }
 }
@@ -785,5 +807,33 @@ mod tests {
         let settled = world.rigidbody_transform(body).unwrap();
 
         assert!((settled.position[1] - 20.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn gravity_defaults_to_mmd_convention() {
+        let world = BulletWorld::new().unwrap();
+        let gravity = world.gravity().unwrap();
+        assert!((gravity[0]).abs() < 1.0e-4);
+        assert!((gravity[1] - (-98.0)).abs() < 1.0e-4);
+        assert!((gravity[2]).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn set_gravity_changes_simulation() {
+        let mut world = BulletWorld::new().unwrap();
+        let body = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(1.0, [0.0, 10.0, 0.0], 1.0))
+            .unwrap();
+
+        world.set_gravity([0.0, 98.0, 0.0]).unwrap();
+        world.step(1.0 / 30.0, 10).unwrap();
+        let after = world.rigidbody_transform(body).unwrap();
+
+        assert!(
+            after.position[1] > 10.0,
+            "expected upward gravity to push body up: {after:?}"
+        );
+        let gravity = world.gravity().unwrap();
+        assert!((gravity[1] - 98.0).abs() < 1.0e-4);
     }
 }

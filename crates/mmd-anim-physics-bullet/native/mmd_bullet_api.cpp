@@ -2,6 +2,7 @@
 
 #include <btBulletDynamicsCommon.h>
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -195,15 +196,22 @@ mmd_anim_bullet_status mmd_anim_bullet_world_settle_to_current(mmd_anim_bullet_w
     return MMD_ANIM_BULLET_OK;
 }
 
-mmd_anim_bullet_status mmd_anim_bullet_world_step(mmd_anim_bullet_world *world, float delta_time, int32_t max_sub_steps) {
+mmd_anim_bullet_status mmd_anim_bullet_world_step(
+    mmd_anim_bullet_world *world,
+    float delta_time,
+    int32_t max_sub_steps,
+    float fixed_substep_seconds) {
     if (!world) {
         return fail(MMD_ANIM_BULLET_NULL_POINTER, "world is null");
     }
-    if (delta_time < 0.0f || max_sub_steps < 0) {
-        return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "delta_time and max_sub_steps must be non-negative");
+    if (!std::isfinite(delta_time) || delta_time < 0.0f || max_sub_steps < 0 ||
+        !std::isfinite(fixed_substep_seconds) || fixed_substep_seconds <= 0.0f) {
+        return fail(
+            MMD_ANIM_BULLET_INVALID_ARGUMENT,
+            "delta_time and max_sub_steps must be non-negative and fixed_substep_seconds must be positive");
     }
 
-    world->dynamics_world->stepSimulation(delta_time, max_sub_steps, 1.0f / 120.0f);
+    world->dynamics_world->stepSimulation(delta_time, max_sub_steps, fixed_substep_seconds);
     g_last_error.clear();
     return MMD_ANIM_BULLET_OK;
 }

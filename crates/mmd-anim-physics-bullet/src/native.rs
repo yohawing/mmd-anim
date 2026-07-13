@@ -226,8 +226,22 @@ impl BulletWorld {
     }
 
     pub fn step(&mut self, delta_time: f32, max_sub_steps: i32) -> Result<(), BulletError> {
+        self.step_with_fixed_substep(delta_time, max_sub_steps, 1.0 / 120.0)
+    }
+
+    pub fn step_with_fixed_substep(
+        &mut self,
+        delta_time: f32,
+        max_sub_steps: i32,
+        fixed_substep_seconds: f32,
+    ) -> Result<(), BulletError> {
         check(unsafe {
-            ffi::mmd_anim_bullet_world_step(self.raw.as_ptr(), delta_time, max_sub_steps)
+            ffi::mmd_anim_bullet_world_step(
+                self.raw.as_ptr(),
+                delta_time,
+                max_sub_steps,
+                fixed_substep_seconds,
+            )
         })
     }
 
@@ -419,6 +433,7 @@ mod ffi {
             world: *mut World,
             delta_time: f32,
             max_sub_steps: i32,
+            fixed_substep_seconds: f32,
         ) -> i32;
         pub fn mmd_anim_bullet_world_add_rigidbody(
             world: *mut World,
@@ -472,6 +487,26 @@ mod tests {
         assert!(
             after.position[1] < before.position[1],
             "expected y to decrease: before={before:?}, after={after:?}"
+        );
+    }
+
+    #[test]
+    fn custom_fixed_substep_is_used_by_bullet() {
+        let mut world = BulletWorld::new().unwrap();
+        let body = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(1.0, [0.0, 10.0, 0.0], 1.0))
+            .unwrap();
+
+        for _ in 0..2 {
+            world
+                .step_with_fixed_substep(1.0 / 60.0, 1, 1.0 / 60.0)
+                .unwrap();
+        }
+        let after = world.rigidbody_transform(body).unwrap();
+
+        assert!(
+            after.position[1] < 9.999,
+            "1/60 fixed step should consume the full interval: {after:?}"
         );
     }
 

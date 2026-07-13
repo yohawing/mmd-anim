@@ -112,8 +112,8 @@ pub struct MmdRuntimePhysicsWorld {
     #[cfg(feature = "physics-bullet-native")]
     world: mmd_anim_physics_bullet::PmxBulletWorld,
     /// When true, the next bake sample reseeds the Bullet world from the
-    /// evaluated pose and copies outputs without advancing the normal forward
-    /// physics clock. Reset's fixed settle still runs while reseeding.
+    /// evaluated pose and copies outputs without advancing either the solver or
+    /// the normal forward physics clock.
     ///
     /// Armed on world creation and on a successful
     /// `mmd_runtime_physics_world_reset`. Disarmed after the seed-only bake
@@ -3883,8 +3883,8 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_free(world: *mut MmdRuntimePh
 ///
 /// A successful reset also arms seed-only behavior for the next
 /// `mmd_runtime_physics_world_bake_clip_frames` sample: that sample evaluates,
-/// reseeds (including reset's fixed settle), and copies without advancing the
-/// normal forward physics clock.
+/// reseeds without a solver step, and copies without advancing the normal
+/// forward physics clock.
 ///
 /// # Safety
 ///
@@ -3903,7 +3903,7 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_reset(
 
 /// Steps a physics world using the runtime's fixed-step physics clock.
 ///
-/// This Unity-facing path feeds static bodies before the step. DynamicBone
+/// This live-evaluation path feeds static bodies before the step. DynamicBone
 /// bodies are seeded during reset but remain solver-owned during forward steps.
 ///
 /// A successful step disarms bake seed-only state: the next
@@ -4623,8 +4623,8 @@ fn evaluate_clip_frame_batch_chunk(
 /// After physics world creation or a successful
 /// `mmd_runtime_physics_world_reset`, the next bake sample is **seed-only**:
 /// the clip frame is evaluated, the Bullet world is reset/reseeded from that
-/// pose (physics tick reset and one fixed 1/60 reset settle included), outputs
-/// are copied, and the normal forward physics clock is **not** advanced. That
+/// pose (including a physics tick reset, but no solver settle), outputs are
+/// copied, and the normal forward physics clock is **not** advanced. That
 /// sample disarms the seed-only state. Later samples in
 /// the same or subsequent bake calls use evaluate → step → copy.
 ///
@@ -4775,10 +4775,13 @@ fn physics_world_bake_clip_frames_impl(
             .evaluate_clip_frame_before_physics(&clip.clip, frame);
 
         if world.next_bake_sample_is_seed_only {
-            // Initial seed-only sample: reseed Bullet from the evaluated pose
-            // (including reset settle) and reset the physics tick, then copy
-            // without advancing the normal forward physics clock.
-            if let Err(err) = world.world.reset_runtime_physics(&mut instance.runtime) {
+            // Initial seed-only sample: reset/reseed Bullet from the evaluated
+            // pose and reset the physics tick, then copy without advancing the
+            // solver or the normal forward physics clock.
+            if let Err(err) = world
+                .world
+                .initialize_runtime_physics_bake(&mut instance.runtime)
+            {
                 return status_failure(MmdRuntimeStatus::Error, err.to_string().as_str());
             }
             world.next_bake_sample_is_seed_only = false;

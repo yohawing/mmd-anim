@@ -963,9 +963,9 @@ bool mmd_runtime_instance_evaluate_clip_frame_batch(
 /* Stateful sequential physics bake.
    After world creation or a successful mmd_runtime_physics_world_reset, the
    first bake sample is seed-only: evaluate_clip_frame_before_physics at that
-   sample, reset/reseed Bullet from the evaluated pose (physics tick reset and
-   one fixed 1/60 reset settle included), copy world/morph outputs, and do NOT
-   advance the normal forward-step clock. Later samples
+   sample, reset/reseed Bullet from the evaluated pose (physics tick reset, no
+   solver settle), copy world/morph outputs, and do NOT advance the solver or
+   normal forward-step clock. Later samples
    use evaluate -> step -> copy. A continuation bake without another successful
    reset does not skip its first sample. frame_count == 0 does not consume the
    seed-only state. A successful mmd_runtime_physics_world_step_runtime also

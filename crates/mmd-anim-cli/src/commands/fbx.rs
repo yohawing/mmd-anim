@@ -296,7 +296,7 @@ impl mmd_anim_format::fbx::FbxPoseSource for PhysicsBakePoseSource<'_> {
             self.runtime
                 .evaluate_clip_frame_before_physics(self.clip, 0.0);
             self.bullet
-                .seed_runtime_physics(&self.runtime)
+                .initialize_runtime_physics_bake(&mut self.runtime)
                 .map_err(|error| error.to_string())?;
             self.runtime.set_physics_mode(PhysicsMode::Live);
         } else {

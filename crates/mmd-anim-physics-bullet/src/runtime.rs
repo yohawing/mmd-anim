@@ -23,6 +23,14 @@ pub trait RuntimePhysicsBridgeExt {
 
     fn seed_runtime_physics(&mut self, runtime: &RuntimeInstance) -> Result<usize, BulletError>;
 
+    /// Starts an offline bake from the current evaluated pose without advancing
+    /// the solver. This is the shared first-sample contract for CLI and FFI
+    /// bakes.
+    fn initialize_runtime_physics_bake(
+        &mut self,
+        runtime: &mut RuntimeInstance,
+    ) -> Result<usize, BulletError>;
+
     fn feed_runtime_kinematic_rigidbodies(
         &mut self,
         runtime: &RuntimeInstance,
@@ -102,6 +110,15 @@ impl RuntimePhysicsBridgeExt for PmxBulletWorld {
         Ok(fed)
     }
 
+    fn initialize_runtime_physics_bake(
+        &mut self,
+        runtime: &mut RuntimeInstance,
+    ) -> Result<usize, BulletError> {
+        runtime.reset_physics_tick();
+        self.world.reset()?;
+        self.seed_runtime_physics(runtime)
+    }
+
     fn feed_runtime_kinematic_rigidbodies(
         &mut self,
         runtime: &RuntimeInstance,
@@ -177,7 +194,11 @@ impl RuntimePhysicsBridgeExt for PmxBulletWorld {
         if tick.substeps > 0 {
             let simulated_dt =
                 runtime.physics_tick_config().fixed_substep_seconds * tick.substeps as f32;
-            self.world.step(simulated_dt, tick.substeps as i32)?;
+            self.world.step_with_fixed_substep(
+                simulated_dt,
+                tick.substeps as i32,
+                runtime.physics_tick_config().fixed_substep_seconds,
+            )?;
         }
 
         let bones_written_back = self.apply_readback_to_runtime(runtime)?;

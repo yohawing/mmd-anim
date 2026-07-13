@@ -1423,7 +1423,8 @@ fn physics_world_bake_clip_frames_matches_manual_sequential_loop() {
         kinematic_rigidbodies_fed: 0,
         bones_written_back: 0,
     };
-    // Matches bake seed-only-first: sample 0 reseeds without stepping; later samples step.
+    // Matches bake seed-only-first: sample 0 uses the shared offline-bake
+    // initializer without stepping; later samples step through the public API.
     for frame_index in 0..3 {
         assert_eq!(
             unsafe {
@@ -1436,10 +1437,16 @@ fn physics_world_bake_clip_frames_matches_manual_sequential_loop() {
             MmdRuntimeStatus::Ok
         );
         if frame_index == 0 {
-            assert_eq!(
-                unsafe { mmd_runtime_physics_world_reset(manual_world, manual, ptr::null_mut()) },
-                MmdRuntimeStatus::Ok
-            );
+            use mmd_anim_physics_bullet::RuntimePhysicsBridgeExt;
+
+            let manual_world = unsafe { &mut *manual_world };
+            let manual = unsafe { &mut *manual };
+            manual_world
+                .world
+                .initialize_runtime_physics_bake(&mut manual.runtime)
+                .unwrap();
+            manual_world.next_bake_sample_is_seed_only = false;
+            manual.refresh_matrix_caches();
         } else {
             assert_eq!(
                 unsafe {
@@ -1647,8 +1654,8 @@ fn physics_world_bake_clip_frames_seed_only_state_contract() {
     );
     assert_zero_physics_step_report(&report);
 
-    // First real sample after create is seed-only: zero forward-step report,
-    // with the reset settle already reflected in both body and bone outputs.
+    // First real sample after create is seed-only: zero forward-step report and
+    // the evaluated pose copied exactly, with no reset settle.
     report = zero_physics_step_report();
     assert_eq!(
         unsafe {
@@ -1682,7 +1689,7 @@ fn physics_world_bake_clip_frames_seed_only_state_contract() {
         MmdRuntimeStatus::Ok
     );
     assert_near(world_out[13], seed_only_states[1], 1.0e-4);
-    assert!(seed_only_states[1] < 8.0);
+    assert_near(seed_only_states[1], 8.0, 1.0e-4);
     let seed_only_y = world_out[13];
 
     // Continuation chunk without reset: first sample steps normally.
@@ -1770,7 +1777,7 @@ fn physics_world_bake_clip_frames_seed_only_state_contract() {
     );
     assert_eq!(report.bones_written_back, 1);
     assert!(report.tick.substeps > 0);
-    // Seed-only first sample exposes the deterministic reset-settled pose.
+    // Seed-only first sample exposes the deterministic evaluated pose.
     assert_near(multi_out[13], seed_only_y, 1.0e-4);
 
     // Explicit step_runtime disarms seed-only so the next bake sample steps.

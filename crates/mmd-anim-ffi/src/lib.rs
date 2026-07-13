@@ -351,6 +351,13 @@ pub struct MmdRuntimeFfiPhysicsWorldStepReport {
     pub bones_written_back: usize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmdRuntimeFfiPhysicsRigidBodyBinding {
+    pub bone_index: i32,
+    pub mode: u32,
+}
+
 const APPEND_FLAG_ROTATION: u32 = 1;
 const APPEND_FLAG_TRANSLATION: u32 = 1 << 1;
 const APPEND_FLAG_LOCAL: u32 = 1 << 2;
@@ -3941,6 +3948,50 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_rigidbody_count(
     })
 }
 
+/// Returns a physics world's current gravity vector.
+///
+/// # Safety
+///
+/// `world` must be a valid handle and `out_gravity_xyz` must be valid for
+/// writes of 3 `f32` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_world_get_gravity(
+    world: *const MmdRuntimePhysicsWorld,
+    out_gravity_xyz: *mut f32,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(world) = (unsafe { world.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if out_gravity_xyz.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        physics_world_get_gravity_impl(world, out_gravity_xyz)
+    })
+}
+
+/// Sets a physics world's gravity vector.
+///
+/// # Safety
+///
+/// `world` must be a valid handle and `gravity_xyz` must be valid for reads
+/// of 3 `f32` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_world_set_gravity(
+    world: *mut MmdRuntimePhysicsWorld,
+    gravity_xyz: *const f32,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(world) = (unsafe { world.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if gravity_xyz.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        physics_world_set_gravity_impl(world, gravity_xyz)
+    })
+}
+
 /// Copies rigid body diagnostics as `[body][position_xyz, rotation_xyzw]`.
 ///
 /// # Safety
@@ -3955,6 +4006,43 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_copy_rigidbody_states(
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
         physics_world_copy_rigidbody_states_impl(world, out_transforms_f32, out_transforms_f32_len)
+    })
+}
+
+/// Copies rigidbody-to-bone binding metadata into a caller-owned buffer.
+///
+/// # Safety
+///
+/// `out_bindings` must point to at least `capacity` writable elements.
+/// `out_count` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_world_copy_rigidbody_bindings(
+    world: *const MmdRuntimePhysicsWorld,
+    out_bindings: *mut MmdRuntimeFfiPhysicsRigidBodyBinding,
+    capacity: usize,
+    out_count: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        physics_world_copy_rigidbody_bindings_impl(world, out_bindings, capacity, out_count)
+    })
+}
+
+/// Writes a per-bone mask where non-zero entries indicate bones driven by physics.
+///
+/// A bone is physics-driven if any rigidbody with `writes_back_to_bone()` mode
+/// (Dynamic or DynamicBone) is bound to it.
+///
+/// # Safety
+///
+/// `out_mask` must point to at least `bone_count` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_world_physics_driven_bone_mask(
+    world: *const MmdRuntimePhysicsWorld,
+    out_mask: *mut u8,
+    bone_count: usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        physics_world_physics_driven_bone_mask_impl(world, out_mask, bone_count)
     })
 }
 
@@ -4012,6 +4100,41 @@ fn physics_world_copy_rigidbody_states_impl(
     _out_transforms_f32_len: usize,
 ) -> MmdRuntimeStatus {
     status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_world_copy_rigidbody_bindings_impl(
+    _world: *const MmdRuntimePhysicsWorld,
+    _out_bindings: *mut MmdRuntimeFfiPhysicsRigidBodyBinding,
+    _capacity: usize,
+    _out_count: *mut usize,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_world_physics_driven_bone_mask_impl(
+    _world: *const MmdRuntimePhysicsWorld,
+    _out_mask: *mut u8,
+    _bone_count: usize,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_world_get_gravity_impl(
+    _world: &MmdRuntimePhysicsWorld,
+    _out_gravity_xyz: *mut f32,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics feature not enabled")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_world_set_gravity_impl(
+    _world: &mut MmdRuntimePhysicsWorld,
+    _gravity_xyz: *const f32,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics feature not enabled")
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -4206,6 +4329,115 @@ fn physics_world_copy_rigidbody_states_impl(
         out[start + 3..start + 7].copy_from_slice(&transform.rotation_xyzw);
     }
     MmdRuntimeStatus::Ok
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_copy_rigidbody_bindings_impl(
+    world: *const MmdRuntimePhysicsWorld,
+    out_bindings: *mut MmdRuntimeFfiPhysicsRigidBodyBinding,
+    capacity: usize,
+    out_count: *mut usize,
+) -> MmdRuntimeStatus {
+    let Some(world) = (unsafe { world.as_ref() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let bindings = &world.world.rigidbody_bindings;
+    if !out_count.is_null() {
+        unsafe {
+            *out_count = bindings.len();
+        }
+    }
+    if bindings.len() > capacity {
+        return status_failure(MmdRuntimeStatus::BufferTooSmall, FFI_ERR_INVALID_INPUT);
+    }
+    if capacity > 0 {
+        if out_bindings.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let out = unsafe { slice::from_raw_parts_mut(out_bindings, bindings.len()) };
+        for (slot, binding) in out.iter_mut().zip(bindings.iter()) {
+            *slot = MmdRuntimeFfiPhysicsRigidBodyBinding {
+                bone_index: binding.bone_index.map(|i| i as i32).unwrap_or(-1),
+                mode: rigidbody_mode_to_ffi(binding.mode),
+            };
+        }
+    }
+    MmdRuntimeStatus::Ok
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_physics_driven_bone_mask_impl(
+    world: *const MmdRuntimePhysicsWorld,
+    out_mask: *mut u8,
+    bone_count: usize,
+) -> MmdRuntimeStatus {
+    let Some(world) = (unsafe { world.as_ref() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    if bone_count == 0 {
+        return MmdRuntimeStatus::Ok;
+    }
+    if out_mask.is_null() {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    }
+    let out = unsafe { slice::from_raw_parts_mut(out_mask, bone_count) };
+    out.fill(0);
+    for binding in &world.world.rigidbody_bindings {
+        if !binding.mode.writes_back_to_bone() {
+            continue;
+        }
+        let Some(bone_index) = binding.bone_index else {
+            continue;
+        };
+        if bone_index < bone_count {
+            out[bone_index] = 1;
+        }
+    }
+    MmdRuntimeStatus::Ok
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn rigidbody_mode_to_ffi(mode: mmd_anim_physics_bullet::PmxRigidBodyMode) -> u32 {
+    use mmd_anim_physics_bullet::PmxRigidBodyMode;
+
+    match mode {
+        PmxRigidBodyMode::Static => 0,
+        PmxRigidBodyMode::Dynamic => 1,
+        PmxRigidBodyMode::DynamicBone => 2,
+        PmxRigidBodyMode::Unknown => 3,
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_get_gravity_impl(
+    world: &MmdRuntimePhysicsWorld,
+    out_gravity_xyz: *mut f32,
+) -> MmdRuntimeStatus {
+    match world.world.world.gravity() {
+        Ok(gravity) => {
+            unsafe {
+                let out = slice::from_raw_parts_mut(out_gravity_xyz, 3);
+                out.copy_from_slice(&gravity);
+            }
+            MmdRuntimeStatus::Ok
+        }
+        Err(e) => status_failure(MmdRuntimeStatus::Error, &e.to_string()),
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_set_gravity_impl(
+    world: &mut MmdRuntimePhysicsWorld,
+    gravity_xyz: *const f32,
+) -> MmdRuntimeStatus {
+    let gravity = unsafe { slice::from_raw_parts(gravity_xyz, 3) };
+    if !all_finite(gravity) {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    }
+    match world.world.world.set_gravity([gravity[0], gravity[1], gravity[2]]) {
+        Ok(()) => MmdRuntimeStatus::Ok,
+        Err(e) => status_failure(MmdRuntimeStatus::Error, &e.to_string()),
+    }
 }
 
 #[cfg(feature = "physics-bullet-native")]

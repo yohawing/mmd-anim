@@ -1009,6 +1009,23 @@ fn physics_world_abi_exports_unsupported_stubs_when_feature_is_off() {
         },
         MmdRuntimeStatus::Unsupported
     );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_copy_rigidbody_bindings(
+                ptr::null(),
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+            )
+        },
+        MmdRuntimeStatus::Unsupported
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_physics_driven_bone_mask(ptr::null(), ptr::null_mut(), 0)
+        },
+        MmdRuntimeStatus::Unsupported
+    );
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -1265,6 +1282,108 @@ fn physics_world_descriptor_abi_static_mode_forces_zero_mass() {
         mmd_runtime_physics_world_free(world);
         mmd_runtime_instance_free(instance);
         mmd_runtime_model_free(model);
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_world_copy_rigidbody_bindings_and_physics_driven_bone_mask() {
+    let static_body = MmdRuntimeFfiPhysicsRigidBodyDesc {
+        bone_index: 0,
+        ..static_physics_body_desc_with_nonzero_input_mass()
+    };
+    let dynamic_body = MmdRuntimeFfiPhysicsRigidBodyDesc {
+        bone_index: 1,
+        ..dynamic_physics_body_desc()
+    };
+    let unbound_body = MmdRuntimeFfiPhysicsRigidBodyDesc {
+        bone_index: -1,
+        ..dynamic_bone_physics_body_desc()
+    };
+    let bodies = [static_body, dynamic_body, unbound_body];
+    let mut world = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create(
+                bodies.as_ptr(),
+                bodies.len(),
+                ptr::null(),
+                0,
+                &mut world,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(!world.is_null());
+
+    let mut count = 0usize;
+    let mut bindings = [MmdRuntimeFfiPhysicsRigidBodyBinding {
+        bone_index: -2,
+        mode: u32::MAX,
+    }; 3];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_copy_rigidbody_bindings(
+                world,
+                bindings.as_mut_ptr(),
+                bindings.len(),
+                &mut count,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(count, 3);
+    assert_eq!(
+        bindings[0],
+        MmdRuntimeFfiPhysicsRigidBodyBinding {
+            bone_index: 0,
+            mode: MmdRuntimeFfiPhysicsRigidBodyMode::Static as u32,
+        }
+    );
+    assert_eq!(
+        bindings[1],
+        MmdRuntimeFfiPhysicsRigidBodyBinding {
+            bone_index: 1,
+            mode: MmdRuntimeFfiPhysicsRigidBodyMode::Dynamic as u32,
+        }
+    );
+    assert_eq!(
+        bindings[2],
+        MmdRuntimeFfiPhysicsRigidBodyBinding {
+            bone_index: -1,
+            mode: MmdRuntimeFfiPhysicsRigidBodyMode::DynamicBone as u32,
+        }
+    );
+
+    let mut too_small = [MmdRuntimeFfiPhysicsRigidBodyBinding {
+        bone_index: -2,
+        mode: u32::MAX,
+    }; 1];
+    let mut small_count = 0usize;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_copy_rigidbody_bindings(
+                world,
+                too_small.as_mut_ptr(),
+                too_small.len(),
+                &mut small_count,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(small_count, 3);
+
+    let mut mask = [0xffu8; 2];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_physics_driven_bone_mask(world, mask.as_mut_ptr(), mask.len())
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(mask, [0u8, 1u8]);
+
+    unsafe {
+        mmd_runtime_physics_world_free(world);
     }
 }
 

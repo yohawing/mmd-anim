@@ -251,6 +251,11 @@ typedef struct mmd_runtime_ffi_physics_world_step_report {
     size_t bones_written_back;
 } mmd_runtime_ffi_physics_world_step_report_t;
 
+typedef struct mmd_runtime_ffi_physics_rigidbody_binding {
+    int32_t  bone_index;  /* -1 if unbound */
+    uint32_t mode;        /* mmd_runtime_physics_rigidbody_mode_t values */
+} mmd_runtime_ffi_physics_rigidbody_binding_t;
+
 /* ------------------------------------------------------------------ */
 /*  Model lifecycle                                                   */
 /* ------------------------------------------------------------------ */
@@ -925,10 +930,29 @@ mmd_runtime_status_t mmd_runtime_physics_world_rigidbody_count(
     const mmd_runtime_physics_world_t* world,
     size_t*                            out_rigidbody_count);
 
+mmd_runtime_status_t mmd_runtime_physics_world_get_gravity(
+    const mmd_runtime_physics_world_t* world,
+    float                               out_gravity_xyz[3]);
+
+mmd_runtime_status_t mmd_runtime_physics_world_set_gravity(
+    mmd_runtime_physics_world_t* world,
+    const float                   gravity_xyz[3]);
+
 mmd_runtime_status_t mmd_runtime_physics_world_copy_rigidbody_states(
     const mmd_runtime_physics_world_t* world,
     float*                             out_transforms_f32,
     size_t                             out_transforms_f32_len);
+
+mmd_runtime_status_t mmd_runtime_physics_world_copy_rigidbody_bindings(
+    const mmd_runtime_physics_world_t *world,
+    mmd_runtime_ffi_physics_rigidbody_binding_t *out_bindings,
+    size_t capacity,
+    size_t *out_count);
+
+mmd_runtime_status_t mmd_runtime_physics_world_physics_driven_bone_mask(
+    const mmd_runtime_physics_world_t *world,
+    uint8_t *out_mask,
+    size_t bone_count);
 
 bool mmd_runtime_instance_evaluate_clip_frame_without_ik(
     mmd_runtime_instance_t*       instance,

@@ -11,10 +11,10 @@ use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
     AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, FlatAppendTransformInput,
     FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput, FlatIkLinkInput, FlatIkSolverInput,
-    IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver,
-    IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack,
-    MovableBoneKeyframe, MovableBoneTrack, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
-    PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
+    HostPoseView, IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput,
+    IkChainSolver, IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe,
+    MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PhysicsMode, PhysicsStepStats,
+    PhysicsTickConfig, PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
     build_append_transforms_from_flat_iter, build_bones_from_flat, build_ik_solvers_from_flat_iter,
     build_morph_init_from_flat_iter, solve_append_transform,
 };
@@ -356,6 +356,19 @@ pub struct MmdRuntimeFfiPhysicsWorldStepReport {
 pub struct MmdRuntimeFfiPhysicsRigidBodyBinding {
     pub bone_index: i32,
     pub mode: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MmdRuntimeFfiHostPoseView {
+    pub local_position_offsets_xyz: *const f32,
+    pub local_rotation_xyzw: *const f32,
+    pub local_scales_xyz: *const f32,
+    pub bone_count: usize,
+    pub morph_weights: *const f32,
+    pub morph_count: usize,
+    pub ik_enabled: *const u8,
+    pub ik_count: usize,
 }
 
 const APPEND_FLAG_ROTATION: u32 = 1;
@@ -3662,6 +3675,127 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_current_pose_before_physi
     })
 }
 
+/// Applies a host-provided local pose to the runtime instance.
+///
+/// Validates counts, finiteness, and applies atomically - no partial
+/// mutation on failure. After success the pose is set but world matrices
+/// are NOT yet evaluated; call evaluate_current_pose_before_physics next.
+///
+/// # Safety
+///
+/// `instance` must be a valid instance handle. `view` must be a valid
+/// pointer to a `MmdRuntimeFfiHostPoseView` whose data pointers are valid
+/// for reads of the indicated counts.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_apply_host_pose(
+    instance: *mut MmdRuntimeInstance,
+    view: *const MmdRuntimeFfiHostPoseView,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(view) = (unsafe { view.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        apply_host_pose_impl(instance, view)
+    })
+}
+
+/// Applies a host pose and evaluates the before-physics phase in one call.
+///
+/// Equivalent to apply_host_pose followed by
+/// evaluate_current_pose_before_physics. On failure, neither the pose nor
+/// the evaluation is applied.
+///
+/// # Safety
+///
+/// Same as `mmd_runtime_instance_apply_host_pose`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(
+    instance: *mut MmdRuntimeInstance,
+    view: *const MmdRuntimeFfiHostPoseView,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(view) = (unsafe { view.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let status = apply_host_pose_impl(instance, view);
+        if status != MmdRuntimeStatus::Ok {
+            return status;
+        }
+        instance.runtime.evaluate_current_pose_before_physics();
+        instance.refresh_matrix_caches();
+        MmdRuntimeStatus::Ok
+    })
+}
+
+fn apply_host_pose_impl(
+    instance: &mut MmdRuntimeInstance,
+    view: &MmdRuntimeFfiHostPoseView,
+) -> MmdRuntimeStatus {
+    let bone_count = view.bone_count;
+
+    let Some(position_len) = bone_count.checked_mul(3) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(rotation_len) = bone_count.checked_mul(4) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(scale_len) = bone_count.checked_mul(3) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+
+    let Some(position_f32) =
+        (unsafe { checked_slice(view.local_position_offsets_xyz, position_len) })
+    else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(rotation_f32) = (unsafe { checked_slice(view.local_rotation_xyzw, rotation_len) })
+    else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(scale_f32) = (unsafe { checked_slice(view.local_scales_xyz, scale_len) }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(morph_weights) = (unsafe { checked_slice(view.morph_weights, view.morph_count) })
+    else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(ik_enabled) = (unsafe { checked_slice(view.ik_enabled, view.ik_count) }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+
+    let local_position_offsets: Vec<glam::Vec3A> = position_f32
+        .chunks_exact(3)
+        .map(|p| glam::Vec3A::new(p[0], p[1], p[2]))
+        .collect();
+    let local_rotations: Vec<glam::Quat> = rotation_f32
+        .chunks_exact(4)
+        .map(|q| glam::Quat::from_xyzw(q[0], q[1], q[2], q[3]))
+        .collect();
+    let local_scales: Vec<glam::Vec3A> = scale_f32
+        .chunks_exact(3)
+        .map(|s| glam::Vec3A::new(s[0], s[1], s[2]))
+        .collect();
+
+    let host_pose = HostPoseView {
+        local_position_offsets: &local_position_offsets,
+        local_rotations: &local_rotations,
+        local_scales: &local_scales,
+        morph_weights,
+        ik_enabled,
+    };
+
+    match instance.runtime.apply_host_pose(&host_pose) {
+        Ok(()) => MmdRuntimeStatus::Ok,
+        Err(err) => status_failure(MmdRuntimeStatus::InvalidInput, &err.to_string()),
+    }
+}
+
 /// Evaluates the current pose through the post-physics phase.
 ///
 /// # Safety
@@ -4434,7 +4568,11 @@ fn physics_world_set_gravity_impl(
     if !all_finite(gravity) {
         return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
     }
-    match world.world.world.set_gravity([gravity[0], gravity[1], gravity[2]]) {
+    match world
+        .world
+        .world
+        .set_gravity([gravity[0], gravity[1], gravity[2]])
+    {
         Ok(()) => MmdRuntimeStatus::Ok,
         Err(e) => status_failure(MmdRuntimeStatus::Error, &e.to_string()),
     }

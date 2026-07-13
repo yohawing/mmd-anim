@@ -4592,3 +4592,153 @@ fn pmx_skinning_modes_json_uses_parser_recorded_mode() {
     let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
     assert_eq!(v["skinningModes"][0], "bdef2");
 }
+
+fn two_bone_host_pose_fixture() -> (*mut MmdRuntimeModel, *mut MmdRuntimeInstance) {
+    let parents = [-1, 0];
+    let rest_positions = [1.0, 0.0, 0.0, 0.0, 2.0, 0.0];
+    let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 2) };
+    assert!(!model.is_null());
+    let instance = unsafe { mmd_runtime_instance_create(model, 1) };
+    assert!(!instance.is_null());
+    (model, instance)
+}
+
+#[test]
+fn apply_host_pose_rejects_null_instance_and_view() {
+    let (model, instance) = two_bone_host_pose_fixture();
+
+    let positions = [0.0f32; 6];
+    let rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let scales = [1.0f32; 6];
+    let morph_weights = [0.0f32];
+    let view = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: positions.as_ptr(),
+        local_rotation_xyzw: rotations.as_ptr(),
+        local_scales_xyz: scales.as_ptr(),
+        bone_count: 2,
+        morph_weights: morph_weights.as_ptr(),
+        morph_count: 1,
+        ik_enabled: ptr::null(),
+        ik_count: 0,
+    };
+
+    assert_eq!(
+        unsafe { mmd_runtime_instance_apply_host_pose(ptr::null_mut(), &view) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_instance_apply_host_pose(instance, ptr::null()) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(ptr::null_mut(), &view)
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(instance, ptr::null())
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    unsafe {
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[test]
+fn apply_host_pose_and_evaluate_before_physics_updates_world_matrices_and_morphs() {
+    let (model, instance) = two_bone_host_pose_fixture();
+
+    let positions = [0.5, 0.0, 0.0, 0.0, 0.0, 1.0];
+    let rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let scales = [1.0f32; 6];
+    let morph_weights = [0.75f32];
+    let view = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: positions.as_ptr(),
+        local_rotation_xyzw: rotations.as_ptr(),
+        local_scales_xyz: scales.as_ptr(),
+        bone_count: 2,
+        morph_weights: morph_weights.as_ptr(),
+        morph_count: 1,
+        ik_enabled: ptr::null(),
+        ik_count: 0,
+    };
+
+    let status = unsafe {
+        mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(instance, &view)
+    };
+    assert_eq!(status, MmdRuntimeStatus::Ok);
+
+    let mut matrices = [0.0f32; 32];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, matrices.as_mut_ptr(), matrices.len())
+    });
+    // bone0 world position: rest (1,0,0) + offset (0.5,0,0) = (1.5,0,0)
+    assert_near(matrices[12], 1.5, 1e-6);
+    assert_near(matrices[13], 0.0, 1e-6);
+    assert_near(matrices[14], 0.0, 1e-6);
+    // bone1 world position: bone0 world (1.5,0,0) + rest (0,2,0) + offset (0,0,1.0)
+    assert_near(matrices[16 + 12], 1.5, 1e-6);
+    assert_near(matrices[16 + 13], 2.0, 1e-6);
+    assert_near(matrices[16 + 14], 1.0, 1e-6);
+
+    let mut copied_morphs = [0.0f32; 1];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_morph_weights(
+            instance,
+            copied_morphs.as_mut_ptr(),
+            copied_morphs.len(),
+        )
+    });
+    assert_near(copied_morphs[0], 0.75, 1e-6);
+
+    unsafe {
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[test]
+fn apply_host_pose_bone_count_mismatch_returns_invalid_input() {
+    let (model, instance) = two_bone_host_pose_fixture();
+
+    let positions = [0.0f32; 3];
+    let rotations = [0.0, 0.0, 0.0, 1.0];
+    let scales = [1.0f32; 3];
+    let morph_weights = [0.0f32];
+    let view = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: positions.as_ptr(),
+        local_rotation_xyzw: rotations.as_ptr(),
+        local_scales_xyz: scales.as_ptr(),
+        bone_count: 1,
+        morph_weights: morph_weights.as_ptr(),
+        morph_count: 1,
+        ik_enabled: ptr::null(),
+        ik_count: 0,
+    };
+
+    let status = unsafe { mmd_runtime_instance_apply_host_pose(instance, &view) };
+    assert_eq!(status, MmdRuntimeStatus::InvalidInput);
+    let message = last_error_cstr().expect("expected host pose error message");
+    assert!(message.to_bytes().starts_with(b"bone count mismatch"));
+
+    // A failed apply must not mutate the pose: rest-pose evaluation should
+    // still produce the model's untouched rest positions.
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    let mut matrices = [0.0f32; 32];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, matrices.as_mut_ptr(), matrices.len())
+    });
+    assert_near(matrices[12], 1.0, 1e-6);
+    assert_near(matrices[16 + 12], 1.0, 1e-6);
+    assert_near(matrices[16 + 13], 2.0, 1e-6);
+
+    unsafe {
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}

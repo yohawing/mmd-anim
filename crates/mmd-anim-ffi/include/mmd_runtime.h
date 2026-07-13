@@ -256,6 +256,17 @@ typedef struct mmd_runtime_ffi_physics_rigidbody_binding {
     uint32_t mode;        /* mmd_runtime_physics_rigidbody_mode_t values */
 } mmd_runtime_ffi_physics_rigidbody_binding_t;
 
+typedef struct mmd_runtime_ffi_host_pose_view {
+    const float*   local_position_offsets_xyz;
+    const float*   local_rotation_xyzw;
+    const float*   local_scales_xyz;
+    size_t         bone_count;
+    const float*   morph_weights;
+    size_t         morph_count;
+    const uint8_t* ik_enabled;
+    size_t         ik_count;
+} mmd_runtime_ffi_host_pose_view_t;
+
 /* ------------------------------------------------------------------ */
 /*  Model lifecycle                                                   */
 /* ------------------------------------------------------------------ */
@@ -871,6 +882,14 @@ mmd_runtime_status_t mmd_runtime_instance_evaluate_clip_frame_before_physics_wit
 
 mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_before_physics(
     mmd_runtime_instance_t* instance);
+
+mmd_runtime_status_t mmd_runtime_instance_apply_host_pose(
+    mmd_runtime_instance_t *instance,
+    const mmd_runtime_ffi_host_pose_view_t *view);
+
+mmd_runtime_status_t mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(
+    mmd_runtime_instance_t *instance,
+    const mmd_runtime_ffi_host_pose_view_t *view);
 
 mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_after_physics(
     mmd_runtime_instance_t* instance);

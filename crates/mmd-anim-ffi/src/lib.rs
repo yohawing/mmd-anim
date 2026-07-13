@@ -4098,6 +4098,13 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_step_runtime(
 /// `out_report` (when non-null) is zeroed, since a seed does not advance the
 /// solver and produces no meaningful step statistics.
 ///
+/// `MmdRuntimePhysicsFrameAction::Step` requires the instance's physics mode
+/// to be `Trace` or `Live`; it returns `INVALID_INPUT` when the mode is
+/// `Off`.
+///
+/// Returns `INVALID_INPUT` when the physics world's rigidbody bindings
+/// reference bone indices outside the instance's bone range.
+///
 /// # Safety
 ///
 /// `instance` and `world` must be valid handles. `pose` must be a valid
@@ -4266,6 +4273,10 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_copy_rigidbody_bindings(
 ///
 /// A bone is physics-driven if any rigidbody with `writes_back_to_bone()` mode
 /// (Dynamic or DynamicBone) is bound to it.
+///
+/// Returns `INVALID_INPUT` when `bone_count` is smaller than the physics
+/// world's required bone count (the highest bound bone index plus one),
+/// since the mask could not represent all bindings in that case.
 ///
 /// # Safety
 ///
@@ -4526,10 +4537,14 @@ fn physics_world_step_runtime_impl(
 /// Seeds or steps the physics world as part of an atomic host frame
 /// evaluation.
 ///
-/// `reset_runtime_physics` and `step_runtime_physics_with_runtime_clock_options`
-/// each already evaluate the runtime's after-physics phase internally (with
-/// the default, non-IK-option evaluation), so this function must not
-/// double-evaluate after-physics on top of them.
+/// Seed uses `initialize_runtime_physics_bake` (reset tick, reset world, seed
+/// rigidbodies from bones, settle) followed by a manual readback and
+/// after-physics evaluation; it never advances the Bullet solver. Step
+/// requires the runtime's physics mode to be `Trace` or `Live` and uses
+/// `step_runtime_physics_with_runtime_clock_options`, which already evaluates
+/// the runtime's after-physics phase internally (with the default,
+/// non-IK-option evaluation), so this function must not double-evaluate
+/// after-physics on top of it.
 #[cfg(feature = "physics-bullet-native")]
 fn evaluate_host_frame_physics_impl(
     world: *mut MmdRuntimePhysicsWorld,
@@ -4544,11 +4559,27 @@ fn evaluate_host_frame_physics_impl(
         return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
     };
 
+    let instance_bone_count = instance.runtime.world_matrices().len();
+    let required = world.world.required_bone_count();
+    if required > instance_bone_count {
+        return status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "physics world requires more bones than the instance provides",
+        );
+    }
+
     match action {
         MmdRuntimePhysicsFrameAction::Seed => {
-            match world.world.reset_runtime_physics(&mut instance.runtime) {
+            match world
+                .world
+                .initialize_runtime_physics_bake(&mut instance.runtime)
+            {
                 Ok(_seeded) => {
-                    // Successful reset re-arms seed-only behavior for the next bake sample.
+                    if let Err(err) = world.world.apply_readback_to_runtime(&mut instance.runtime) {
+                        return status_failure(MmdRuntimeStatus::Error, err.to_string().as_str());
+                    }
+                    instance.runtime.evaluate_current_pose_after_physics();
+                    // Successful seed re-arms seed-only behavior for the next bake sample.
                     world.next_bake_sample_is_seed_only = true;
                     instance.refresh_matrix_caches();
                     // A seed does not advance the solver, so the step report
@@ -4573,6 +4604,12 @@ fn evaluate_host_frame_physics_impl(
             }
         }
         MmdRuntimePhysicsFrameAction::Step => {
+            if !instance.runtime.physics_mode().steps_backend() {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "physics mode is Off; set Trace or Live before stepping",
+                );
+            }
             match world.world.step_runtime_physics_with_runtime_clock_options(
                 &mut instance.runtime,
                 dt_seconds,
@@ -4697,6 +4734,13 @@ fn physics_world_physics_driven_bone_mask_impl(
     let Some(world) = (unsafe { world.as_ref() }) else {
         return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
     };
+    let required = world.world.required_bone_count();
+    if bone_count < required {
+        return status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "bone mask buffer too short for physics world bindings",
+        );
+    }
     if bone_count == 0 {
         return MmdRuntimeStatus::Ok;
     }

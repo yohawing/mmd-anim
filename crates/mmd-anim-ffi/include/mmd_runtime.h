@@ -61,11 +61,12 @@ extern "C" {
    mmd_runtime_evaluate_host_frame with action = STEP advances the physics
    world's fixed-step clock. Calling it more than once for the same logical
    frame accumulates physics time as if multiple frames had elapsed; the
-   caller must not double-step a frame. action = SEED reseeds rigid bodies
-   from the evaluated pose and runs a brief solver settle (one 1/60 s
-   step), so the resulting pose includes the settle delta — it is not a
-   pure identity re-projection of the input. SEED may be called at any
-   time to reinitialize physics state.
+   caller must not double-step a frame. STEP requires the instance's physics
+   mode to be Trace or Live; it returns MMD_RUNTIME_STATUS_INVALID_INPUT
+   when the mode is Off. action = SEED resets rigid bodies to their
+   bone-derived positions, zeroes velocities, and evaluates after-physics —
+   it does not advance the solver. SEED may be called at any time to
+   reinitialize physics state.
 
    Error recovery
    --------------
@@ -149,8 +150,10 @@ typedef enum mmd_runtime_physics_joint_kind {
 
 /* Selects the physics action performed by
    mmd_runtime_evaluate_host_frame: reseed the Bullet world from the
-   evaluated pose without advancing the solver, or advance the runtime's
-   fixed-step physics clock forward. */
+   evaluated pose without advancing the solver (SEED places all bodies at
+   their bone-derived positions and zeroes velocities), or advance the
+   runtime's fixed-step physics clock forward (STEP requires physics mode
+   Trace or Live; returns INVALID_INPUT when mode is Off). */
 typedef enum mmd_runtime_physics_frame_action {
     MMD_RUNTIME_PHYSICS_FRAME_ACTION_SEED = 0,
     MMD_RUNTIME_PHYSICS_FRAME_ACTION_STEP = 1
@@ -1018,9 +1021,15 @@ mmd_runtime_status_t mmd_runtime_physics_world_step_runtime(
    steps the physics world (per `action`), and evaluates the after-physics
    phase, all as a single atomic call. On failure applying the host pose, no
    mutation occurs. For SEED, dt_seconds is ignored and out_report (when
-   non-null) is zeroed. For STEP, dt_seconds must be finite and >= 0.
+   non-null) is zeroed, since a seed resets rigid bodies to their
+   bone-derived positions without advancing the solver. For STEP, dt_seconds
+   must be finite and >= 0, and the instance's physics mode must be Trace or
+   Live; MMD_RUNTIME_STATUS_INVALID_INPUT is returned when the mode is Off.
    Unknown action values return MMD_RUNTIME_STATUS_INVALID_INPUT.
-   IK options apply to the before-physics phase; after-physics uses defaults. */
+   MMD_RUNTIME_STATUS_INVALID_INPUT is also returned when the physics
+   world's rigidbody bindings reference bone indices outside the instance's
+   bone range. IK options apply to the before-physics phase; after-physics
+   uses defaults. */
 mmd_runtime_status_t mmd_runtime_evaluate_host_frame(
     mmd_runtime_instance_t*                     instance,
     mmd_runtime_physics_world_t*                world,
@@ -1054,6 +1063,9 @@ mmd_runtime_status_t mmd_runtime_physics_world_copy_rigidbody_bindings(
     size_t capacity,
     size_t *out_count);
 
+/* Returns MMD_RUNTIME_STATUS_INVALID_INPUT when bone_count is smaller than
+   the physics world's required bone count (the highest bound bone index
+   plus one), rather than silently ignoring out-of-range bindings. */
 mmd_runtime_status_t mmd_runtime_physics_world_physics_driven_bone_mask(
     const mmd_runtime_physics_world_t *world,
     uint8_t *out_mask,

@@ -5264,3 +5264,251 @@ fn invalid_call_does_not_prevent_subsequent_valid_call() {
         mmd_runtime_model_free(model);
     }
 }
+
+/// SEED must reseed rigid bodies from the evaluated pose without advancing
+/// the Bullet solver. Seeding the same host pose twice in a row must
+/// therefore produce byte-identical dynamic-bone world matrices, since there
+/// is no solver integration between the two calls to introduce drift.
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn evaluate_host_frame_seed_does_not_advance_solver() {
+    let (model, instance, world) = host_frame_fixture();
+
+    let (positions, rotations, scales) = host_frame_pose_view(0.0);
+    let view = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: positions.as_ptr(),
+        local_rotation_xyzw: rotations.as_ptr(),
+        local_scales_xyz: scales.as_ptr(),
+        bone_count: 3,
+        morph_weights: ptr::null(),
+        morph_count: 0,
+        ik_enabled: ptr::null(),
+        ik_count: 0,
+    };
+
+    let mut report = zero_physics_step_report();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_evaluate_host_frame(
+                instance,
+                world,
+                &view,
+                MmdRuntimePhysicsFrameAction::Seed as u32,
+                1.0 / 60.0,
+                1.0e-3,
+                0,
+                &mut report,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(report.tick.substeps, 0);
+
+    let mut matrices_first = [0.0f32; 48];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            instance,
+            matrices_first.as_mut_ptr(),
+            matrices_first.len(),
+        )
+    });
+
+    let status = unsafe {
+        mmd_runtime_evaluate_host_frame(
+            instance,
+            world,
+            &view,
+            MmdRuntimePhysicsFrameAction::Seed as u32,
+            1.0 / 60.0,
+            1.0e-3,
+            0,
+            &mut report,
+        )
+    };
+    assert_eq!(status, MmdRuntimeStatus::Ok);
+    assert_eq!(report.tick.substeps, 0);
+
+    let mut matrices_second = [0.0f32; 48];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            instance,
+            matrices_second.as_mut_ptr(),
+            matrices_second.len(),
+        )
+    });
+
+    // Bone 2 (`physics`, dynamic) world translation must match exactly across
+    // both seeds: no solver step ran between them.
+    assert_eq!(
+        matrices_first[2 * 16 + 12..2 * 16 + 15],
+        matrices_second[2 * 16 + 12..2 * 16 + 15]
+    );
+
+    unsafe {
+        mmd_runtime_physics_world_free(world);
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+/// STEP must be rejected while the instance's physics mode is `Off` (the
+/// default), and must succeed once the mode is switched to `Trace`.
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn evaluate_host_frame_step_rejects_physics_mode_off() {
+    let (model, instance) = two_bone_host_pose_fixture();
+    let mut world = ptr::null_mut();
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_create(ptr::null(), 0, ptr::null(), 0, &mut world) },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(!world.is_null());
+
+    let positions = [0.0f32; 6];
+    let rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let scales = [1.0f32; 6];
+    let morph_weights = [0.0f32];
+    let view = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: positions.as_ptr(),
+        local_rotation_xyzw: rotations.as_ptr(),
+        local_scales_xyz: scales.as_ptr(),
+        bone_count: 2,
+        morph_weights: morph_weights.as_ptr(),
+        morph_count: 1,
+        ik_enabled: ptr::null(),
+        ik_count: 0,
+    };
+    let mut report = zero_physics_step_report();
+
+    let off_status = unsafe {
+        mmd_runtime_evaluate_host_frame(
+            instance,
+            world,
+            &view,
+            MmdRuntimePhysicsFrameAction::Step as u32,
+            1.0 / 60.0,
+            1.0e-3,
+            0,
+            &mut report,
+        )
+    };
+    assert_eq!(off_status, MmdRuntimeStatus::InvalidInput);
+
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_set_physics_mode(instance, MmdRuntimeFfiPhysicsMode::Trace as u32)
+        },
+        MmdRuntimeStatus::Ok
+    );
+
+    let trace_status = unsafe {
+        mmd_runtime_evaluate_host_frame(
+            instance,
+            world,
+            &view,
+            MmdRuntimePhysicsFrameAction::Step as u32,
+            1.0 / 60.0,
+            1.0e-3,
+            0,
+            &mut report,
+        )
+    };
+    assert_eq!(trace_status, MmdRuntimeStatus::Ok);
+
+    unsafe {
+        mmd_runtime_physics_world_free(world);
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+/// `mmd_runtime_evaluate_host_frame` must reject a physics world whose
+/// rigidbody bindings reference bone indices outside the instance's bone
+/// range, rather than silently reading or writing out of bounds.
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn evaluate_host_frame_rejects_incompatible_world() {
+    let (model, instance) = two_bone_host_pose_fixture();
+
+    // `host_frame_pmx_bytes` binds rigidbodies to bone indices 1 and 2,
+    // requiring at least 3 bones; the instance above only has 2.
+    let bytes = host_frame_pmx_bytes();
+    let mut world = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create_from_pmx_bytes(bytes.as_ptr(), bytes.len(), &mut world)
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(!world.is_null());
+
+    let positions = [0.0f32; 6];
+    let rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let scales = [1.0f32; 6];
+    let morph_weights = [0.0f32];
+    let view = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: positions.as_ptr(),
+        local_rotation_xyzw: rotations.as_ptr(),
+        local_scales_xyz: scales.as_ptr(),
+        bone_count: 2,
+        morph_weights: morph_weights.as_ptr(),
+        morph_count: 1,
+        ik_enabled: ptr::null(),
+        ik_count: 0,
+    };
+    let mut report = zero_physics_step_report();
+
+    let status = unsafe {
+        mmd_runtime_evaluate_host_frame(
+            instance,
+            world,
+            &view,
+            MmdRuntimePhysicsFrameAction::Seed as u32,
+            1.0 / 60.0,
+            1.0e-3,
+            0,
+            &mut report,
+        )
+    };
+    assert_eq!(status, MmdRuntimeStatus::InvalidInput);
+    let message = last_error_cstr().expect("expected bone-count mismatch error message");
+    assert_eq!(
+        message.to_bytes(),
+        b"physics world requires more bones than the instance provides"
+    );
+
+    unsafe {
+        mmd_runtime_physics_world_free(world);
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+/// The bone-mask query must reject a caller buffer shorter than the physics
+/// world's required bone count rather than silently ignoring out-of-range
+/// bindings.
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_driven_bone_mask_rejects_short_buffer() {
+    // `host_frame_pmx_bytes` binds rigidbodies to bone indices 1 and 2,
+    // so the world requires at least 3 bones.
+    let bytes = host_frame_pmx_bytes();
+    let mut world = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create_from_pmx_bytes(bytes.as_ptr(), bytes.len(), &mut world)
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(!world.is_null());
+
+    let mut mask = [0xffu8; 1];
+    let status = unsafe {
+        mmd_runtime_physics_world_physics_driven_bone_mask(world, mask.as_mut_ptr(), mask.len())
+    };
+    assert_eq!(status, MmdRuntimeStatus::InvalidInput);
+
+    unsafe {
+        mmd_runtime_physics_world_free(world);
+    }
+}

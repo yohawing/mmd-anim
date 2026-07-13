@@ -3006,10 +3006,7 @@ fn host_pose_rejects_non_normalized_rotation() {
     let err = runtime.apply_host_pose(&view).unwrap_err();
     assert_eq!(
         err,
-        crate::HostPoseError::NonFiniteValue {
-            field: "local_rotations",
-            index: 2
-        }
+        crate::HostPoseError::NonNormalizedQuaternion { index: 2 }
     );
 }
 

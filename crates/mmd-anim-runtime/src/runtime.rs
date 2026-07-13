@@ -125,6 +125,7 @@ pub enum HostPoseError {
     MorphCountMismatch { expected: usize, got: usize },
     IkCountMismatch { expected: usize, got: usize },
     NonFiniteValue { field: &'static str, index: usize },
+    NonNormalizedQuaternion { index: usize },
 }
 
 impl std::fmt::Display for HostPoseError {
@@ -141,6 +142,9 @@ impl std::fmt::Display for HostPoseError {
             }
             HostPoseError::NonFiniteValue { field, index } => {
                 write!(f, "non-finite value in {field} at index {index}")
+            }
+            Self::NonNormalizedQuaternion { index } => {
+                write!(f, "non-normalized quaternion at local_rotations[{index}]")
             }
         }
     }
@@ -424,10 +428,7 @@ impl RuntimeInstance {
                 });
             }
             if (q.length_squared() - 1.0).abs() > 1e-3 {
-                return Err(HostPoseError::NonFiniteValue {
-                    field: "local_rotations",
-                    index: i,
-                });
+                return Err(HostPoseError::NonNormalizedQuaternion { index: i });
             }
         }
         for (i, v) in view.local_scales.iter().enumerate() {

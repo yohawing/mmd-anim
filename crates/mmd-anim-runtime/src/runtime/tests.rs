@@ -2834,3 +2834,182 @@ fn scratch_morph_capacity_stable_after_repeated_clip_frame() {
         cap_expanded
     );
 }
+
+fn build_host_pose_model() -> Arc<ModelArena> {
+    Arc::new(
+        ModelArena::new_with_morphs(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::new(1.0, 0.0, 0.0)),
+                BoneInit::new(None, Vec3A::new(0.0, 1.0, 0.0)),
+                BoneInit::new(Some(BoneIndex(1)), Vec3A::new(0.0, 0.0, 1.0)),
+            ],
+            vec![crate::IkSolverInit {
+                ik_bone: BoneIndex(2),
+                target_bone: BoneIndex(1),
+                links: vec![IkLinkInit::new(BoneIndex(0))],
+                iteration_count: 1,
+                limit_angle: 0.0,
+            }],
+            Vec::new(),
+            crate::MorphInit {
+                morph_count: 1,
+                bone_offsets: vec![crate::BoneMorphOffset {
+                    target_bone: BoneIndex(3),
+                    position_offset: Vec3A::new(0.0, 0.0, 2.0),
+                    rotation_offset: Quat::IDENTITY,
+                }],
+                bone_spans: vec![crate::MorphOffsetSpan { start: 0, count: 1 }],
+                group_offsets: vec![],
+                group_spans: vec![crate::MorphOffsetSpan::default()],
+                ..crate::MorphInit::default()
+            },
+        )
+        .unwrap(),
+    )
+}
+
+fn build_host_pose_clip() -> AnimationClip {
+    AnimationClip::new_with_morphs(
+        vec![BoneAnimationBinding {
+            bone: BoneIndex(3),
+            track: MovableBoneTrack::from_keyframes(vec![
+                MovableBoneKeyframe::new(0, Vec3A::ZERO, Quat::IDENTITY),
+                MovableBoneKeyframe::new(
+                    10,
+                    Vec3A::new(0.0, 0.0, 4.0),
+                    Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+                ),
+            ]),
+        }],
+        vec![crate::MorphAnimationBinding {
+            morph: crate::MorphIndex(0),
+            track: crate::MorphTrack::from_keyframes(vec![
+                crate::MorphKeyframe::new(0, 0.0),
+                crate::MorphKeyframe::new(10, 1.0),
+            ]),
+        }],
+    )
+}
+
+#[test]
+fn host_pose_round_trip_matches_clip_evaluation() {
+    let model = build_host_pose_model();
+    let clip = build_host_pose_clip();
+
+    let mut source = RuntimeInstance::new_with_morph_count(model.clone(), 1);
+    source
+        .pose_mut()
+        .set_local_scale(BoneIndex(3), Vec3A::new(1.5, 1.0, 1.0));
+    source.evaluate_clip_frame_before_physics(&clip, 5.0);
+
+    let view = crate::HostPoseView {
+        local_position_offsets: source.pose().local_position_offsets(),
+        local_rotations: source.pose().local_rotations(),
+        local_scales: source.pose().local_scales(),
+        morph_weights: source.pose().morph_weights(),
+        ik_enabled: source.pose().ik_enabled(),
+    };
+
+    let mut target = RuntimeInstance::new_with_morph_count(model, 1);
+    target.evaluate_rest_pose();
+    target.apply_host_pose(&view).unwrap();
+    target.evaluate_current_pose_before_physics();
+
+    for (actual, expected) in target
+        .world_matrices()
+        .iter()
+        .zip(source.world_matrices().iter())
+    {
+        assert_eq!(actual.to_cols_array(), expected.to_cols_array());
+    }
+    assert_eq!(target.morph_weights(), source.morph_weights());
+    assert_eq!(target.ik_enabled(), source.ik_enabled());
+}
+
+#[test]
+fn host_pose_rejects_bone_count_mismatch() {
+    let model = build_host_pose_model();
+    let mut runtime = RuntimeInstance::new_with_morph_count(model, 1);
+
+    let position_offsets = vec![Vec3A::ZERO; 3];
+    let rotations = vec![Quat::IDENTITY; 4];
+    let scales = vec![Vec3A::ONE; 4];
+    let morph_weights = vec![0.0; 1];
+    let ik_enabled = vec![1u8; 1];
+    let view = crate::HostPoseView {
+        local_position_offsets: &position_offsets,
+        local_rotations: &rotations,
+        local_scales: &scales,
+        morph_weights: &morph_weights,
+        ik_enabled: &ik_enabled,
+    };
+
+    let err = runtime.apply_host_pose(&view).unwrap_err();
+    assert_eq!(
+        err,
+        crate::HostPoseError::BoneCountMismatch {
+            expected: 4,
+            got: 3
+        }
+    );
+}
+
+#[test]
+fn host_pose_rejects_non_finite_values() {
+    let model = build_host_pose_model();
+    let mut runtime = RuntimeInstance::new_with_morph_count(model, 1);
+
+    let mut rotations = vec![Quat::IDENTITY; 4];
+    rotations[2] = Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0);
+    let position_offsets = vec![Vec3A::ZERO; 4];
+    let scales = vec![Vec3A::ONE; 4];
+    let morph_weights = vec![0.0; 1];
+    let ik_enabled = vec![1u8; 1];
+    let view = crate::HostPoseView {
+        local_position_offsets: &position_offsets,
+        local_rotations: &rotations,
+        local_scales: &scales,
+        morph_weights: &morph_weights,
+        ik_enabled: &ik_enabled,
+    };
+
+    let err = runtime.apply_host_pose(&view).unwrap_err();
+    assert_eq!(
+        err,
+        crate::HostPoseError::NonFiniteValue {
+            field: "local_rotations",
+            index: 2
+        }
+    );
+}
+
+#[test]
+fn host_pose_no_mutation_on_error() {
+    let model = build_host_pose_model();
+    let mut runtime = RuntimeInstance::new_with_morph_count(model, 1);
+
+    let known_offset = Vec3A::new(0.0, 0.0, 4.0);
+    runtime
+        .pose_mut()
+        .set_local_position_offset(BoneIndex(3), known_offset);
+
+    let position_offsets = vec![Vec3A::ZERO; 3];
+    let rotations = vec![Quat::IDENTITY; 4];
+    let scales = vec![Vec3A::ONE; 4];
+    let morph_weights = vec![0.0; 1];
+    let ik_enabled = vec![1u8; 1];
+    let view = crate::HostPoseView {
+        local_position_offsets: &position_offsets,
+        local_rotations: &rotations,
+        local_scales: &scales,
+        morph_weights: &morph_weights,
+        ik_enabled: &ik_enabled,
+    };
+
+    assert!(runtime.apply_host_pose(&view).is_err());
+    assert_vec3a_near(
+        runtime.pose().local_position_offset(BoneIndex(3)),
+        known_offset,
+    );
+}

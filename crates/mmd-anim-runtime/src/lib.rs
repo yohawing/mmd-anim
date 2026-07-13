@@ -36,6 +36,6 @@ pub use model::{
 };
 pub use pose::PoseArena;
 pub use runtime::{
-    IkSolveOptions, IkSolverRuntimeStats, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
-    RuntimeInstance,
+    HostPoseError, HostPoseView, IkSolveOptions, IkSolverRuntimeStats, PhysicsMode,
+    PhysicsStepStats, PhysicsTickConfig, RuntimeInstance,
 };

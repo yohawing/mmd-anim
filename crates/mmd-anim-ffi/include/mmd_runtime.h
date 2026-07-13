@@ -903,15 +903,18 @@ mmd_runtime_status_t mmd_runtime_physics_world_create_from_pmx_bytes(
 void mmd_runtime_physics_world_free(
     mmd_runtime_physics_world_t* world);
 
-/* Successful reset reseeds from the runtime pose and arms seed-only behavior
-   for the next mmd_runtime_physics_world_bake_clip_frames sample. */
+/* Successful reset reseeds every bound body from the runtime pose, performs
+   one fixed 1/60 solver settle, re-pins static bodies, cleans transient state,
+   writes the settled dynamic bodies back to the runtime pose, and arms
+   seed-only behavior for the next bake sample. */
 mmd_runtime_status_t mmd_runtime_physics_world_reset(
     mmd_runtime_physics_world_t* world,
     mmd_runtime_instance_t*      instance,
     size_t*                      out_seeded_rigidbody_count);
 
-/* Successful explicit step disarms bake seed-only state so the next bake
-   sample advances physics normally. */
+/* Forward steps feed static bodies only; DynamicBone bodies are seeded by
+   reset and remain solver-owned. A successful explicit step disarms bake
+   seed-only state so the next bake sample advances physics normally. */
 mmd_runtime_status_t mmd_runtime_physics_world_step_runtime(
     mmd_runtime_physics_world_t*                      world,
     mmd_runtime_instance_t*                           instance,
@@ -960,8 +963,9 @@ bool mmd_runtime_instance_evaluate_clip_frame_batch(
 /* Stateful sequential physics bake.
    After world creation or a successful mmd_runtime_physics_world_reset, the
    first bake sample is seed-only: evaluate_clip_frame_before_physics at that
-   sample, reset/reseed Bullet from the evaluated pose (physics tick reset
-   included), copy world/morph outputs, and do NOT step physics. Later samples
+   sample, reset/reseed Bullet from the evaluated pose (physics tick reset and
+   one fixed 1/60 reset settle included), copy world/morph outputs, and do NOT
+   advance the normal forward-step clock. Later samples
    use evaluate -> step -> copy. A continuation bake without another successful
    reset does not skip its first sample. frame_count == 0 does not consume the
    seed-only state. A successful mmd_runtime_physics_world_step_runtime also

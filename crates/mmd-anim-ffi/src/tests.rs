@@ -1035,6 +1035,14 @@ fn dynamic_physics_body_desc() -> MmdRuntimeFfiPhysicsRigidBodyDesc {
 }
 
 #[cfg(feature = "physics-bullet-native")]
+fn dynamic_bone_physics_body_desc() -> MmdRuntimeFfiPhysicsRigidBodyDesc {
+    MmdRuntimeFfiPhysicsRigidBodyDesc {
+        mode: MmdRuntimeFfiPhysicsRigidBodyMode::DynamicBone as u32,
+        ..dynamic_physics_body_desc()
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
 fn static_physics_body_desc_with_nonzero_input_mass() -> MmdRuntimeFfiPhysicsRigidBodyDesc {
     MmdRuntimeFfiPhysicsRigidBodyDesc {
         shape: MmdRuntimeFfiPhysicsRigidBodyShape::Sphere as u32,
@@ -1059,7 +1067,7 @@ fn static_physics_body_desc_with_nonzero_input_mass() -> MmdRuntimeFfiPhysicsRig
 
 #[cfg(feature = "physics-bullet-native")]
 #[test]
-fn physics_world_descriptor_abi_steps_runtime_and_reports_state() {
+fn physics_world_descriptor_abi_keeps_dynamic_bone_solver_owned_on_forward_step() {
     assert_eq!(
         mmd_runtime_feature_flags() & FEATURE_PHYSICS_BULLET_NATIVE,
         FEATURE_PHYSICS_BULLET_NATIVE
@@ -1079,7 +1087,7 @@ fn physics_world_descriptor_abi_steps_runtime_and_reports_state() {
         MmdRuntimeStatus::Ok
     );
 
-    let bodies = [dynamic_physics_body_desc()];
+    let bodies = [dynamic_bone_physics_body_desc()];
     let mut world = ptr::null_mut();
     assert_eq!(
         unsafe {
@@ -1109,6 +1117,31 @@ fn physics_world_descriptor_abi_steps_runtime_and_reports_state() {
     );
     assert_eq!(seeded, 1);
 
+    let mut reset_states = [0.0f32; 7];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_copy_rigidbody_states(
+                world,
+                reset_states.as_mut_ptr(),
+                reset_states.len(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(
+        reset_states[1] < 8.0,
+        "reset must include a solver settle: {reset_states:?}"
+    );
+    let mut reset_matrices = [0.0f32; 16];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            instance,
+            reset_matrices.as_mut_ptr(),
+            reset_matrices.len(),
+        )
+    });
+    assert_near(reset_matrices[13], reset_states[1], 1.0e-4);
+
     let mut report = MmdRuntimeFfiPhysicsWorldStepReport {
         tick: MmdRuntimeFfiPhysicsStepStats {
             input_dt_seconds: 0.0,
@@ -1124,6 +1157,7 @@ fn physics_world_descriptor_abi_steps_runtime_and_reports_state() {
         MmdRuntimeStatus::Ok
     );
     assert_eq!(report.tick.substeps, 2);
+    assert_eq!(report.kinematic_rigidbodies_fed, 0);
     assert_eq!(report.bones_written_back, 1);
 
     let mut states = [0.0f32; 7];
@@ -1144,6 +1178,25 @@ fn physics_world_descriptor_abi_steps_runtime_and_reports_state() {
         mmd_runtime_instance_copy_world_matrices(instance, matrices.as_mut_ptr(), matrices.len())
     });
     assert!(matrices[13] < 8.0, "runtime bone should receive readback");
+
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_reset(world, instance, &mut seeded) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(seeded, 1);
+    let mut repeated_reset_states = [0.0f32; 7];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_copy_rigidbody_states(
+                world,
+                repeated_reset_states.as_mut_ptr(),
+                repeated_reset_states.len(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_slice_near(&repeated_reset_states, &reset_states, 1.0e-5);
 
     unsafe {
         mmd_runtime_physics_world_free(world);
@@ -1322,7 +1375,7 @@ fn physics_world_bake_clip_frames_matches_manual_sequential_loop() {
     let clip = create_physics_bake_clip();
     assert!(!clip.is_null());
 
-    let bodies = [dynamic_physics_body_desc()];
+    let bodies = [dynamic_bone_physics_body_desc()];
     let mut manual_world = ptr::null_mut();
     let mut bake_world = ptr::null_mut();
     assert_eq!(
@@ -1457,6 +1510,8 @@ fn physics_world_bake_clip_frames_matches_manual_sequential_loop() {
         baked_report.bones_written_back,
         manual_report.bones_written_back
     );
+    assert_eq!(manual_report.kinematic_rigidbodies_fed, 0);
+    assert_eq!(baked_report.kinematic_rigidbodies_fed, 0);
     assert_eq!(baked_report.bones_written_back, 1);
 
     assert_eq!(
@@ -1592,7 +1647,8 @@ fn physics_world_bake_clip_frames_seed_only_state_contract() {
     );
     assert_zero_physics_step_report(&report);
 
-    // First real sample after create is seed-only: zero report, no gravity fall.
+    // First real sample after create is seed-only: zero forward-step report,
+    // with the reset settle already reflected in both body and bone outputs.
     report = zero_physics_step_report();
     assert_eq!(
         unsafe {
@@ -1614,7 +1670,20 @@ fn physics_world_bake_clip_frames_seed_only_state_contract() {
         MmdRuntimeStatus::Ok
     );
     assert_zero_physics_step_report(&report);
-    assert_near(world_out[13], 8.0, 1.0e-4);
+    let mut seed_only_states = [0.0f32; 7];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_copy_rigidbody_states(
+                world,
+                seed_only_states.as_mut_ptr(),
+                seed_only_states.len(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_near(world_out[13], seed_only_states[1], 1.0e-4);
+    assert!(seed_only_states[1] < 8.0);
+    let seed_only_y = world_out[13];
 
     // Continuation chunk without reset: first sample steps normally.
     report = zero_physics_step_report();
@@ -1670,7 +1739,7 @@ fn physics_world_bake_clip_frames_seed_only_state_contract() {
         MmdRuntimeStatus::Ok
     );
     assert_zero_physics_step_report(&report);
-    assert_near(world_out[13], 8.0, 1.0e-4);
+    assert_near(world_out[13], seed_only_y, 1.0e-4);
 
     // Multi-sample after re-arm: first seed-only, second steps; last report is the step.
     assert_eq!(
@@ -1701,8 +1770,8 @@ fn physics_world_bake_clip_frames_seed_only_state_contract() {
     );
     assert_eq!(report.bones_written_back, 1);
     assert!(report.tick.substeps > 0);
-    // Seed-only first sample keeps rest height; second sample can fall under gravity.
-    assert_near(multi_out[13], 8.0, 1.0e-4);
+    // Seed-only first sample exposes the deterministic reset-settled pose.
+    assert_near(multi_out[13], seed_only_y, 1.0e-4);
 
     // Explicit step_runtime disarms seed-only so the next bake sample steps.
     assert_eq!(

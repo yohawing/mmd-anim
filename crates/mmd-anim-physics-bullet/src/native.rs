@@ -836,4 +836,11 @@ mod tests {
         let gravity = world.gravity().unwrap();
         assert!((gravity[1] - 98.0).abs() < 1.0e-4);
     }
+
+    #[test]
+    fn set_gravity_rejects_nan() {
+        let mut world = BulletWorld::new().unwrap();
+        let result = world.set_gravity([f32::NAN, -9.8, 0.0]);
+        assert!(result.is_err());
+    }
 }

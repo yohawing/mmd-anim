@@ -451,6 +451,9 @@ mmd_anim_bullet_status mmd_anim_bullet_world_set_gravity(
     if (!world || !gravity_xyz) {
         return fail(MMD_ANIM_BULLET_NULL_POINTER, "world or gravity_xyz is null");
     }
+    if (!std::isfinite(gravity_xyz[0]) || !std::isfinite(gravity_xyz[1]) || !std::isfinite(gravity_xyz[2])) {
+        return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "gravity_xyz must be finite");
+    }
     world->dynamics_world->setGravity(btVector3(gravity_xyz[0], gravity_xyz[1], gravity_xyz[2]));
     g_last_error.clear();
     return MMD_ANIM_BULLET_OK;

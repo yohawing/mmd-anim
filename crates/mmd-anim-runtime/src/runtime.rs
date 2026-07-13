@@ -423,6 +423,12 @@ impl RuntimeInstance {
                     index: i,
                 });
             }
+            if (q.length_squared() - 1.0).abs() > 1e-3 {
+                return Err(HostPoseError::NonFiniteValue {
+                    field: "local_rotations",
+                    index: i,
+                });
+            }
         }
         for (i, v) in view.local_scales.iter().enumerate() {
             if !v.is_finite() {

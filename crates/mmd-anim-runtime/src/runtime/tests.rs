@@ -2985,6 +2985,35 @@ fn host_pose_rejects_non_finite_values() {
 }
 
 #[test]
+fn host_pose_rejects_non_normalized_rotation() {
+    let model = build_host_pose_model();
+    let mut runtime = RuntimeInstance::new_with_morph_count(model, 1);
+
+    let mut rotations = vec![Quat::IDENTITY; 4];
+    rotations[2] = Quat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+    let position_offsets = vec![Vec3A::ZERO; 4];
+    let scales = vec![Vec3A::ONE; 4];
+    let morph_weights = vec![0.0; 1];
+    let ik_enabled = vec![1u8; 1];
+    let view = crate::HostPoseView {
+        local_position_offsets: &position_offsets,
+        local_rotations: &rotations,
+        local_scales: &scales,
+        morph_weights: &morph_weights,
+        ik_enabled: &ik_enabled,
+    };
+
+    let err = runtime.apply_host_pose(&view).unwrap_err();
+    assert_eq!(
+        err,
+        crate::HostPoseError::NonFiniteValue {
+            field: "local_rotations",
+            index: 2
+        }
+    );
+}
+
+#[test]
 fn host_pose_no_mutation_on_error() {
     let model = build_host_pose_model();
     let mut runtime = RuntimeInstance::new_with_morph_count(model, 1);

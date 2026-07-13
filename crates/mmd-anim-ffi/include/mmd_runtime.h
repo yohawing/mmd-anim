@@ -87,6 +87,15 @@ typedef enum mmd_runtime_physics_joint_kind {
     MMD_RUNTIME_PHYSICS_JOINT_KIND_UNSUPPORTED = 1
 } mmd_runtime_physics_joint_kind_t;
 
+/* Selects the physics action performed by
+   mmd_runtime_evaluate_host_frame: reseed the Bullet world from the
+   evaluated pose without advancing the solver, or advance the runtime's
+   fixed-step physics clock forward. */
+typedef enum mmd_runtime_physics_frame_action {
+    MMD_RUNTIME_PHYSICS_FRAME_ACTION_SEED = 0,
+    MMD_RUNTIME_PHYSICS_FRAME_ACTION_STEP = 1
+} mmd_runtime_physics_frame_action_t;
+
 /* ------------------------------------------------------------------ */
 /*  Descriptor structs                                                */
 /* ------------------------------------------------------------------ */
@@ -944,6 +953,21 @@ mmd_runtime_status_t mmd_runtime_physics_world_step_runtime(
     mmd_runtime_instance_t*                           instance,
     float                                             dt_seconds,
     mmd_runtime_ffi_physics_world_step_report_t*      out_report);
+
+/* Applies a validated host pose, evaluates the before-physics phase, seeds or
+   steps the physics world (per `action`), and evaluates the after-physics
+   phase, all as a single atomic call. On failure applying the host pose, no
+   mutation occurs. For MMD_RUNTIME_PHYSICS_FRAME_ACTION_SEED, dt_seconds is
+   ignored and out_report (when non-null) is zeroed. */
+mmd_runtime_status_t mmd_runtime_evaluate_host_frame(
+    mmd_runtime_instance_t*                     instance,
+    mmd_runtime_physics_world_t*                world,
+    const mmd_runtime_ffi_host_pose_view_t*     pose,
+    mmd_runtime_physics_frame_action_t          action,
+    float                                       dt_seconds,
+    float                                       ik_tolerance,
+    uint32_t                                    ik_max_iterations_cap,
+    mmd_runtime_ffi_physics_world_step_report_t* out_report);
 
 mmd_runtime_status_t mmd_runtime_physics_world_rigidbody_count(
     const mmd_runtime_physics_world_t* world,

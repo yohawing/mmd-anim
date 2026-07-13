@@ -289,6 +289,17 @@ pub enum MmdRuntimeFfiPhysicsJointKind {
     Unsupported = 1,
 }
 
+/// Selects the physics action performed by
+/// `mmd_runtime_evaluate_host_frame`: reseed the Bullet world from the
+/// evaluated pose without advancing the solver, or advance the runtime's
+/// fixed-step physics clock forward.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MmdRuntimePhysicsFrameAction {
+    Seed = 0,
+    Step = 1,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MmdRuntimeFfiPhysicsTickConfig {
@@ -4066,6 +4077,78 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_step_runtime(
     })
 }
 
+/// Evaluates one atomic host frame: applies a validated host pose, evaluates
+/// the before-physics phase, seeds or steps the physics world, and evaluates
+/// the after-physics phase.
+///
+/// This combines the sequence a host would otherwise chain across
+/// `mmd_runtime_instance_apply_host_pose`,
+/// `mmd_runtime_instance_evaluate_current_pose_before_physics_with_ik_options`,
+/// either `mmd_runtime_physics_world_reset` or
+/// `mmd_runtime_physics_world_step_runtime`, and
+/// `mmd_runtime_instance_evaluate_current_pose_after_physics_with_ik_options`
+/// into a single call, guaranteeing the correct ordering.
+///
+/// On failure applying the host pose, no mutation occurs (fail-atomic). Once
+/// the pose has been applied, before-physics evaluation and the physics
+/// action always run; a physics failure still leaves the applied pose and its
+/// before-physics evaluation in place.
+///
+/// For `MmdRuntimePhysicsFrameAction::Seed`, `dt_seconds` is ignored and
+/// `out_report` (when non-null) is zeroed, since a seed does not advance the
+/// solver and produces no meaningful step statistics.
+///
+/// # Safety
+///
+/// `instance` and `world` must be valid handles. `pose` must be a valid
+/// pointer to a `MmdRuntimeFfiHostPoseView` whose data pointers are valid for
+/// reads of the indicated counts. `out_report` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_evaluate_host_frame(
+    instance: *mut MmdRuntimeInstance,
+    world: *mut MmdRuntimePhysicsWorld,
+    pose: *const MmdRuntimeFfiHostPoseView,
+    action: MmdRuntimePhysicsFrameAction,
+    dt_seconds: f32,
+    ik_tolerance: f32,
+    ik_max_iterations_cap: u32,
+    out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if world.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+
+        let status = apply_host_pose_impl(instance, pose);
+        if status != MmdRuntimeStatus::Ok {
+            return status;
+        }
+
+        let ik_options = IkSolveOptions {
+            tolerance: ik_tolerance,
+            max_iterations_cap: if ik_max_iterations_cap == 0 {
+                None
+            } else {
+                Some(ik_max_iterations_cap)
+            },
+        };
+        instance
+            .runtime
+            .evaluate_current_pose_before_physics_with_ik_options(ik_options);
+
+        evaluate_host_frame_physics_impl(world, instance, action, dt_seconds, out_report)
+    })
+}
+
 /// Returns the number of rigid bodies in a physics world.
 ///
 /// # Safety
@@ -4213,6 +4296,17 @@ fn physics_world_reset_impl(
 fn physics_world_step_runtime_impl(
     _world: *mut MmdRuntimePhysicsWorld,
     _instance: *mut MmdRuntimeInstance,
+    _dt_seconds: f32,
+    _out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn evaluate_host_frame_physics_impl(
+    _world: *mut MmdRuntimePhysicsWorld,
+    _instance: &mut MmdRuntimeInstance,
+    _action: MmdRuntimePhysicsFrameAction,
     _dt_seconds: f32,
     _out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
 ) -> MmdRuntimeStatus {
@@ -4408,6 +4502,86 @@ fn physics_world_step_runtime_impl(
             MmdRuntimeStatus::Ok
         }
         Err(err) => status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
+    }
+}
+
+/// Seeds or steps the physics world as part of an atomic host frame
+/// evaluation.
+///
+/// `reset_runtime_physics` and `step_runtime_physics_with_runtime_clock_options`
+/// each already evaluate the runtime's after-physics phase internally (with
+/// the default, non-IK-option evaluation), so this function must not
+/// double-evaluate after-physics on top of them.
+#[cfg(feature = "physics-bullet-native")]
+fn evaluate_host_frame_physics_impl(
+    world: *mut MmdRuntimePhysicsWorld,
+    instance: &mut MmdRuntimeInstance,
+    action: MmdRuntimePhysicsFrameAction,
+    dt_seconds: f32,
+    out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    use mmd_anim_physics_bullet::RuntimePhysicsBridgeExt;
+
+    let Some(world) = (unsafe { world.as_mut() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+
+    match action {
+        MmdRuntimePhysicsFrameAction::Seed => {
+            match world.world.reset_runtime_physics(&mut instance.runtime) {
+                Ok(_seeded) => {
+                    // Successful reset re-arms seed-only behavior for the next bake sample.
+                    world.next_bake_sample_is_seed_only = true;
+                    instance.refresh_matrix_caches();
+                    // A seed does not advance the solver, so the step report
+                    // carries no meaningful statistics.
+                    if !out_report.is_null() {
+                        unsafe {
+                            *out_report = MmdRuntimeFfiPhysicsWorldStepReport {
+                                tick: MmdRuntimeFfiPhysicsStepStats {
+                                    input_dt_seconds: 0.0,
+                                    clamped_dt_seconds: 0.0,
+                                    substeps: 0,
+                                    accumulator_seconds: 0.0,
+                                },
+                                kinematic_rigidbodies_fed: 0,
+                                bones_written_back: 0,
+                            };
+                        }
+                    }
+                    MmdRuntimeStatus::Ok
+                }
+                Err(err) => status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
+            }
+        }
+        MmdRuntimePhysicsFrameAction::Step => {
+            if !dt_seconds.is_finite() || dt_seconds < 0.0 {
+                return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+            }
+            match world.world.step_runtime_physics_with_runtime_clock_options(
+                &mut instance.runtime,
+                dt_seconds,
+                false,
+            ) {
+                Ok(report) => {
+                    // Explicit physics advance disarms seed-only so the next
+                    // bake sample steps.
+                    world.next_bake_sample_is_seed_only = false;
+                    instance.refresh_matrix_caches();
+                    if !out_report.is_null() {
+                        unsafe {
+                            *out_report = MmdRuntimeFfiPhysicsWorldStepReport {
+                                tick: physics_step_stats_to_ffi(report.tick),
+                                kinematic_rigidbodies_fed: report.kinematic_rigidbodies_fed,
+                                bones_written_back: report.bones_written_back,
+                            };
+                        }
+                    }
+                    MmdRuntimeStatus::Ok
+                }
+                Err(err) => status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
+            }
+        }
     }
 }
 

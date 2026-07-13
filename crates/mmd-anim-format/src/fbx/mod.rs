@@ -10,6 +10,7 @@ use fbxcel::{
     low::{FbxVersion, v7400::ArrayAttributeEncoding},
     writer::v7400::binary::{AttributesWriter, FbxFooter, Writer},
 };
+use glam::Mat4;
 use mmd_anim_runtime::{AnimationClip, BoneIndex, ModelArena, MorphIndex, RuntimeInstance};
 
 use crate::{
@@ -108,6 +109,33 @@ pub enum FbxExportError {
     },
     #[error("FBX writer error: {0}")]
     Writer(#[from] fbxcel::writer::v7400::binary::Error),
+    #[error("FBX pose source failed at frame {frame}: {message}")]
+    PoseSource { frame: u32, message: String },
+    #[error(
+        "FBX pose source returned {actual} bones at frame {frame}, expected at least {expected}"
+    )]
+    PoseBoneCount {
+        frame: u32,
+        expected: usize,
+        actual: usize,
+    },
+}
+
+/// Supplies one evaluated set of runtime bone world matrices per FBX frame.
+pub trait FbxPoseSource {
+    fn world_matrices(&mut self, frame: u32) -> Result<&[Mat4], String>;
+}
+
+struct RuntimeBakePoseSource<'a> {
+    runtime: RuntimeInstance,
+    clip: &'a AnimationClip,
+}
+
+impl FbxPoseSource for RuntimeBakePoseSource<'_> {
+    fn world_matrices(&mut self, frame: u32) -> Result<&[Mat4], String> {
+        self.runtime.evaluate_clip_frame(self.clip, frame as f32);
+        Ok(self.runtime.world_matrices())
+    }
 }
 
 /// Exports a PMX model to FBX 7.4 binary.
@@ -139,13 +167,43 @@ pub fn export_pmx_fbx_binary_with_runtime_bake(
     last_frame: u32,
     options: &FbxExportOptions,
 ) -> Result<Vec<u8>, FbxExportError> {
-    let animation = Some(FbxAnimationData::from_runtime_bake(
+    let mut pose_source = RuntimeBakePoseSource {
+        runtime: RuntimeInstance::new(Arc::clone(&runtime_model)),
+        clip,
+    };
+    export_pmx_fbx_binary_with_pose_source(
         model,
         runtime_model,
         clip,
         last_frame,
         options,
-    ));
+        &mut pose_source,
+    )
+}
+
+/// Exports runtime-baked animation using caller-supplied world matrices.
+///
+/// The source is called exactly once for every integer frame in `0..=last_frame`.
+/// This keeps FBX conversion independent from a particular physics backend.
+pub fn export_pmx_fbx_binary_with_pose_source<P>(
+    model: &PmxParsedModel,
+    runtime_model: Arc<ModelArena>,
+    clip: &AnimationClip,
+    last_frame: u32,
+    options: &FbxExportOptions,
+    pose_source: &mut P,
+) -> Result<Vec<u8>, FbxExportError>
+where
+    P: FbxPoseSource,
+{
+    let animation = Some(FbxAnimationData::from_pose_source(
+        model,
+        runtime_model,
+        clip,
+        last_frame,
+        options,
+        pose_source,
+    )?);
     export_pmx_fbx_binary_with_animation(model, animation, options)
 }
 
@@ -463,14 +521,32 @@ struct SortedKeyframe {
 }
 
 impl FbxAnimationData {
-    fn from_runtime_bake(
+    fn from_pose_source<P>(
         model: &PmxParsedModel,
         runtime_model: Arc<ModelArena>,
         clip: &AnimationClip,
         max_frame: u32,
         options: &FbxExportOptions,
-    ) -> Self {
+        pose_source: &mut P,
+    ) -> Result<Self, FbxExportError>
+    where
+        P: FbxPoseSource,
+    {
         let bone_count = model.skeleton.bones.len().min(runtime_model.bone_count());
+        let required_matrix_count = (0..bone_count)
+            .flat_map(|index| {
+                let bone = BoneIndex(index as u32);
+                [
+                    index,
+                    runtime_model
+                        .parent_index(bone)
+                        .map(BoneIndex::as_usize)
+                        .unwrap_or(index),
+                ]
+            })
+            .max()
+            .map(|index| index + 1)
+            .unwrap_or(0);
         let frame_count = max_frame as usize + 1;
         let frame_times: Vec<i64> = (0..=max_frame)
             .map(|frame| frame as i64 * FBX_FRAME_DURATION)
@@ -481,11 +557,18 @@ impl FbxAnimationData {
         let mut tracks: Vec<RuntimeBakeTrack> = (0..bone_count)
             .map(|index| RuntimeBakeTrack::new(index, frame_count))
             .collect();
-        let mut runtime = RuntimeInstance::new(Arc::clone(&runtime_model));
 
         for frame in 0..=max_frame {
-            runtime.evaluate_clip_frame(clip, frame as f32);
-            let world_matrices = runtime.world_matrices();
+            let world_matrices = pose_source
+                .world_matrices(frame)
+                .map_err(|message| FbxExportError::PoseSource { frame, message })?;
+            if world_matrices.len() < required_matrix_count {
+                return Err(FbxExportError::PoseBoneCount {
+                    frame,
+                    expected: required_matrix_count,
+                    actual: world_matrices.len(),
+                });
+            }
 
             for track in &mut tracks {
                 let bone = BoneIndex(track.bone_index as u32);
@@ -550,11 +633,11 @@ impl FbxAnimationData {
             collect_runtime_bake_morph_tracks(model, clip, max_frame, &frame_times)
         };
 
-        Self {
+        Ok(Self {
             max_frame,
             tracks,
             morph_tracks,
-        }
+        })
     }
 
     fn from_vmd(
@@ -1732,6 +1815,28 @@ fn bone_world_transform(bone: &PmxParsedBone, options: &FbxExportOptions) -> [f6
     ]
 }
 
+fn bone_world_transform_inverse(bone: &PmxParsedBone, options: &FbxExportOptions) -> [f64; 16] {
+    let position = converted_bone_position(bone, options);
+    [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        -position[0],
+        -position[1],
+        -position[2],
+        1.0,
+    ]
+}
+
 fn build_bone_names(bones: &[PmxParsedBone], policy: FbxBoneNamePolicy) -> Vec<String> {
     build_bone_name_map(bones, policy)
         .into_iter()
@@ -2154,7 +2259,14 @@ fn write_cluster_deformer<W: Write + Seek>(
         write_arr_i32_node(writer, "Indexes", &indices)?;
         write_arr_f64_node(writer, "Weights", &weights)?;
     }
-    write_arr_f64_node(writer, "Transform", &identity_matrix())?;
+    // Maya imports Cluster Transform as the inverse bind matrix. Keeping this
+    // as identity makes every bindPreMatrix identity and applies the bind-joint
+    // translation to already model-space PMX vertices a second time.
+    write_arr_f64_node(
+        writer,
+        "Transform",
+        &bone_world_transform_inverse(bone, options),
+    )?;
     write_arr_f64_node(
         writer,
         "TransformLink",
@@ -2886,6 +2998,120 @@ mod tests {
         (model, fbx)
     }
 
+    #[test]
+    fn pose_source_seam_preserves_non_physics_runtime_bake_bytes() {
+        struct RecordingPoseSource<'a> {
+            runtime: RuntimeInstance,
+            clip: &'a AnimationClip,
+            frames: Vec<u32>,
+            matrix_buffer_address: Option<usize>,
+        }
+
+        impl FbxPoseSource for RecordingPoseSource<'_> {
+            fn world_matrices(&mut self, frame: u32) -> Result<&[Mat4], String> {
+                self.frames.push(frame);
+                self.runtime.evaluate_clip_frame(self.clip, frame as f32);
+                let matrices = self.runtime.world_matrices();
+                let address = matrices.as_ptr() as usize;
+                assert_eq!(*self.matrix_buffer_address.get_or_insert(address), address);
+                Ok(matrices)
+            }
+        }
+
+        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
+        let vmd_data = include_bytes!("../../fixtures/vmd/ik_multi_bone_nondefault.vmd");
+        let model = crate::parse_pmx_model(pmx_data).unwrap();
+        let runtime_import = crate::import_pmx_runtime(pmx_data).unwrap();
+        let runtime_motion = crate::import_vmd_motion(vmd_data).unwrap();
+        let clip = crate::build_pair_clip(
+            &runtime_motion,
+            &runtime_import.bone_name_to_index,
+            &runtime_import.morph_name_to_index,
+            &runtime_import.ik_solver_bone_name_to_index,
+            runtime_import.model.ik_count(),
+        );
+        let runtime_model = Arc::new(runtime_import.model);
+        let expected = export_fbx_with_runtime_bake(
+            &model,
+            Arc::clone(&runtime_model),
+            &clip,
+            2,
+            &FbxExportOptions::default(),
+        )
+        .unwrap();
+        let mut pose_source = RecordingPoseSource {
+            runtime: RuntimeInstance::new(Arc::clone(&runtime_model)),
+            clip: &clip,
+            frames: Vec::new(),
+            matrix_buffer_address: None,
+        };
+        let actual = export_pmx_fbx_binary_with_pose_source(
+            &model,
+            runtime_model,
+            &clip,
+            2,
+            &FbxExportOptions::default(),
+            &mut pose_source,
+        )
+        .unwrap();
+
+        assert_eq!(pose_source.frames, vec![0, 1, 2]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn pose_source_validates_parent_matrix_outside_exported_bone_subset() {
+        use mmd_anim_runtime::BoneInit;
+
+        struct ShortPoseSource {
+            matrices: Vec<Mat4>,
+        }
+
+        impl FbxPoseSource for ShortPoseSource {
+            fn world_matrices(&mut self, _frame: u32) -> Result<&[Mat4], String> {
+                Ok(&self.matrices)
+            }
+        }
+
+        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
+        let mut model = crate::parse_pmx_model(pmx_data).unwrap();
+        model.skeleton.bones.truncate(1);
+        let runtime_model = Arc::new(
+            ModelArena::new(vec![
+                BoneInit::new(Some(BoneIndex(1)), glam::Vec3A::ZERO),
+                BoneInit::new(None, glam::Vec3A::ZERO),
+            ])
+            .unwrap(),
+        );
+        let clip = AnimationClip::new(Vec::new());
+        let mut source = ShortPoseSource {
+            matrices: vec![Mat4::IDENTITY],
+        };
+        let options = FbxExportOptions {
+            bones_only: true,
+            ..FbxExportOptions::default()
+        };
+
+        let error = export_pmx_fbx_binary_with_pose_source(
+            &model,
+            runtime_model,
+            &clip,
+            0,
+            &options,
+            &mut source,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FbxExportError::PoseBoneCount {
+                frame: 0,
+                expected: 2,
+                actual: 1,
+            }
+        ));
+    }
+
     fn load_tree(bytes: &[u8]) -> fbxcel::tree::v7400::Tree {
         match AnyTree::from_seekable_reader(Cursor::new(bytes)).expect("FBX should parse") {
             AnyTree::V7400(version, tree, footer) => {
@@ -3052,7 +3278,6 @@ mod tests {
             animation_curve_nodes
         );
 
-        let identity = identity_matrix().to_vec();
         let clusters: Vec<_> = objects
             .children_by_name("Deformer")
             .filter(|node| {
@@ -3064,12 +3289,24 @@ mod tests {
             .collect();
         assert_eq!(clusters.len(), model.skeleton.bones.len());
         for cluster in clusters {
+            let cluster_id = cluster
+                .attributes()
+                .first()
+                .and_then(AttributeValue::get_i64)
+                .expect("Cluster should have an object id");
+            let bone_index = usize::try_from(cluster_id - CLUSTER_ID_BASE)
+                .expect("Cluster id should map to a bone index");
+            let bone = &model.skeleton.bones[bone_index];
             assert_eq!(
                 child_arr_f64(cluster, "Transform"),
-                identity,
-                "Cluster Transform should be mesh bind matrix"
+                bone_world_transform_inverse(bone, &FbxExportOptions::default()),
+                "Cluster Transform should be the inverse bone bind matrix"
             );
-            assert_eq!(child_arr_f64(cluster, "TransformLink").len(), 16);
+            assert_eq!(
+                child_arr_f64(cluster, "TransformLink"),
+                bone_world_transform(bone, &FbxExportOptions::default()),
+                "Cluster TransformLink should be the bone bind matrix"
+            );
         }
 
         let pose = objects

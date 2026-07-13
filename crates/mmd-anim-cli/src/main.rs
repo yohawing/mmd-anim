@@ -287,6 +287,9 @@ enum Commands {
         /// Optional inclusive maximum frame for FBX runtime bake smoke checks
         #[arg(long)]
         max_frame: Option<u32>,
+        /// Bake native Bullet physics into the exported bone animation (requires --vmd)
+        #[arg(long, requires = "vmd")]
+        physics_bake: bool,
         /// Copy PMX diffuse textures next to the FBX and rewrite FBX texture paths
         #[arg(long)]
         copy_diffuse_textures: bool,
@@ -484,6 +487,7 @@ fn main() -> ExitCode {
             output,
             vmd,
             max_frame,
+            physics_bake,
             copy_diffuse_textures,
             bones_only,
             readable_bone_names,
@@ -495,6 +499,7 @@ fn main() -> ExitCode {
             vmd.as_deref(),
             commands::fbx::ConvertFbxOptions {
                 max_frame,
+                physics_bake,
                 copy_diffuse_textures,
                 bones_only,
                 readable_bone_names,

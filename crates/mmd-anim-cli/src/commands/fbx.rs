@@ -15,6 +15,7 @@ pub(crate) struct ConvertFbxJsonReport<'a> {
     pub output: &'a Path,
     pub vmd: Option<&'a Path>,
     pub bones_only: bool,
+    pub physics_bake: bool,
     pub readable_bone_names: bool,
     pub bone_name_map: Option<&'a Path>,
     pub physics_params: Option<&'a Path>,
@@ -26,13 +27,16 @@ pub(crate) struct ConvertFbxJsonReport<'a> {
 }
 
 pub(crate) fn convert_fbx_json(report: ConvertFbxJsonReport<'_>) -> serde_json::Value {
-    let mode = match (report.vmd.is_some(), report.bones_only) {
-        (true, true) => "pmx-vmd-bake-bones-only",
-        (false, true) => "pmx-bones-only",
-        (true, false) => "pmx-vmd-bake",
-        (false, false) => "pmx-to-fbx",
+    let mode = match (report.physics_bake, report.vmd.is_some(), report.bones_only) {
+        (true, true, true) => "pmx-vmd-physics-bake-bones-only",
+        (true, true, false) => "pmx-vmd-physics-bake",
+        (false, true, true) => "pmx-vmd-bake-bones-only",
+        (false, false, true) => "pmx-bones-only",
+        (false, true, false) => "pmx-vmd-bake",
+        (false, false, false) => "pmx-to-fbx",
+        (true, false, _) => unreachable!("physics bake requires VMD"),
     };
-    json!({
+    let mut value = json!({
         "status": "ok",
         "command": "convert-fbx",
         "mode": mode,
@@ -60,13 +64,18 @@ pub(crate) fn convert_fbx_json(report: ConvertFbxJsonReport<'_>) -> serde_json::
             "blendShapes": report.exported_blend_shapes,
         },
         "copiedDiffuseTextures": report.copied_diffuse_textures,
-    })
+    });
+    if report.physics_bake {
+        value["physicsBake"] = json!(true);
+    }
+    value
 }
 
 pub(crate) struct ConvertFbxOptions {
     pub max_frame: Option<u32>,
     pub copy_diffuse_textures: bool,
     pub bones_only: bool,
+    pub physics_bake: bool,
     pub readable_bone_names: bool,
     pub write_physics_params: bool,
     pub use_json: bool,
@@ -78,6 +87,13 @@ pub(crate) fn convert_pmx_to_fbx(
     vmd: Option<&Path>,
     convert_options: ConvertFbxOptions,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if convert_options.physics_bake && vmd.is_none() {
+        return Err("convert-fbx --physics-bake requires --vmd".into());
+    }
+    #[cfg(not(feature = "physics-bullet-native"))]
+    if convert_options.physics_bake {
+        return Err("convert-fbx --physics-bake requires the physics-bullet-native feature".into());
+    }
     let data = read_file(input)?;
     let model = mmd_anim_format::parse_pmx_model(&data).map_err(|error| {
         parse_failure_error(
@@ -169,13 +185,18 @@ pub(crate) fn convert_pmx_to_fbx(
             );
         }
         baked_max_frame = Some(last_frame);
-        mmd_anim_format::fbx::export_fbx_with_runtime_bake(
-            &model,
-            Arc::new(runtime_import.model),
-            &clip,
-            last_frame,
-            &options,
-        )?
+        let runtime_model = Arc::new(runtime_import.model);
+        if convert_options.physics_bake {
+            export_fbx_with_physics_bake(&model, runtime_model, &clip, last_frame, &options)?
+        } else {
+            mmd_anim_format::fbx::export_fbx_with_runtime_bake(
+                &model,
+                runtime_model,
+                &clip,
+                last_frame,
+                &options,
+            )?
+        }
     } else {
         mmd_anim_format::fbx::export_fbx(&model, None, &options)?
     };
@@ -197,6 +218,7 @@ pub(crate) fn convert_pmx_to_fbx(
             output,
             vmd,
             bones_only: convert_options.bones_only,
+            physics_bake: convert_options.physics_bake,
             readable_bone_names: convert_options.readable_bone_names,
             bone_name_map: bone_name_map.as_deref(),
             physics_params: physics_params.as_deref(),
@@ -208,13 +230,19 @@ pub(crate) fn convert_pmx_to_fbx(
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
+        let physics_bake_text = if convert_options.physics_bake {
+            " physicsBake=true"
+        } else {
+            ""
+        };
         println!(
-            "FBX export: ok input={} output={} vmd={} bonesOnly={} readableBoneNames={} bakedMaxFrame={} bytesOut={} vertices={} faces={} materials={} bones={} exportedGeometry={} exportedMaterials={} exportedSkinClusters={} exportedBlendShapes={}",
+            "FBX export: ok input={} output={} vmd={} bonesOnly={}{} readableBoneNames={} bakedMaxFrame={} bytesOut={} vertices={} faces={} materials={} bones={} exportedGeometry={} exportedMaterials={} exportedSkinClusters={} exportedBlendShapes={}",
             input.display(),
             output.display(),
             vmd.map(|path| path.display().to_string())
                 .unwrap_or_else(|| "-".to_owned()),
             convert_options.bones_only,
+            physics_bake_text,
             convert_options.readable_bone_names,
             baked_max_frame
                 .map(|frame| frame.to_string())
@@ -248,6 +276,77 @@ pub(crate) fn convert_pmx_to_fbx(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(feature = "physics-bullet-native")]
+struct PhysicsBakePoseSource<'a> {
+    runtime: mmd_anim_runtime::RuntimeInstance,
+    bullet: mmd_anim_physics_bullet::PmxBulletWorld,
+    clip: &'a mmd_anim_runtime::AnimationClip,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+impl mmd_anim_format::fbx::FbxPoseSource for PhysicsBakePoseSource<'_> {
+    fn world_matrices(&mut self, frame: u32) -> Result<&[glam::Mat4], String> {
+        use mmd_anim_physics_bullet::RuntimePhysicsBridgeExt;
+        use mmd_anim_runtime::PhysicsMode;
+
+        if frame == 0 {
+            self.runtime.set_physics_mode(PhysicsMode::Off);
+            self.runtime
+                .evaluate_clip_frame_before_physics(self.clip, 0.0);
+            self.bullet
+                .seed_runtime_physics(&self.runtime)
+                .map_err(|error| error.to_string())?;
+            self.runtime.set_physics_mode(PhysicsMode::Live);
+        } else {
+            self.runtime
+                .evaluate_clip_frame_before_physics(self.clip, frame as f32);
+            self.bullet
+                .step_runtime_physics_with_runtime_clock_options(
+                    &mut self.runtime,
+                    1.0 / 30.0,
+                    false,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(self.runtime.world_matrices())
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn export_fbx_with_physics_bake(
+    model: &mmd_anim_format::PmxParsedModel,
+    runtime_model: Arc<mmd_anim_runtime::ModelArena>,
+    clip: &mmd_anim_runtime::AnimationClip,
+    last_frame: u32,
+    options: &mmd_anim_format::fbx::FbxExportOptions,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut pose_source = PhysicsBakePoseSource {
+        runtime: mmd_anim_runtime::RuntimeInstance::new(Arc::clone(&runtime_model)),
+        bullet: mmd_anim_physics_bullet::build_bullet_world_from_pmx(model)?,
+        clip,
+    };
+    let bytes = mmd_anim_format::fbx::export_pmx_fbx_binary_with_pose_source(
+        model,
+        runtime_model,
+        clip,
+        last_frame,
+        options,
+        &mut pose_source,
+    )?;
+    Ok(bytes)
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn export_fbx_with_physics_bake(
+    _model: &mmd_anim_format::PmxParsedModel,
+    _runtime_model: Arc<mmd_anim_runtime::ModelArena>,
+    _clip: &mmd_anim_runtime::AnimationClip,
+    _last_frame: u32,
+    _options: &mmd_anim_format::fbx::FbxExportOptions,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    Err("convert-fbx --physics-bake requires the physics-bullet-native feature".into())
 }
 
 fn configure_diffuse_texture_paths(
@@ -703,6 +802,7 @@ mod tests {
             output: Path::new("model.fbx"),
             vmd: Some(Path::new("motion.vmd")),
             bones_only: true,
+            physics_bake: false,
             readable_bone_names: false,
             bone_name_map: None,
             physics_params: None,
@@ -715,6 +815,7 @@ mod tests {
 
         assert_eq!(report["mode"], "pmx-vmd-bake-bones-only");
         assert_eq!(report["bonesOnly"], true);
+        assert!(report.get("physicsBake").is_none());
         assert_eq!(report["readableBoneNames"], false);
         assert_eq!(report["counts"]["bones"], 7);
         assert_eq!(report["exportedCounts"]["geometry"], 0);
@@ -723,6 +824,63 @@ mod tests {
         assert_eq!(report["exportedCounts"]["skinClusters"], 0);
         assert_eq!(report["exportedCounts"]["bindPoses"], 0);
         assert_eq!(report["exportedCounts"]["blendShapes"], 0);
+    }
+
+    #[test]
+    fn convert_fbx_json_identifies_physics_bake() {
+        let counts = mmd_anim_format::pmx::PmxParsedCounts {
+            vertices: 0,
+            faces: 0,
+            materials: 0,
+            bones: 1,
+            morphs: 0,
+            display_frames: 0,
+            rigid_bodies: 1,
+            joints: 0,
+            soft_bodies: 0,
+        };
+        let report = convert_fbx_json(ConvertFbxJsonReport {
+            input: Path::new("model.pmx"),
+            output: Path::new("model.fbx"),
+            vmd: Some(Path::new("motion.vmd")),
+            bones_only: false,
+            physics_bake: true,
+            readable_bone_names: false,
+            bone_name_map: None,
+            physics_params: None,
+            baked_max_frame: Some(2),
+            bytes_out: 42,
+            counts: &counts,
+            exported_blend_shapes: 0,
+            copied_diffuse_textures: 0,
+        });
+
+        assert_eq!(report["mode"], "pmx-vmd-physics-bake");
+        assert_eq!(report["physicsBake"], true);
+    }
+
+    #[cfg(not(feature = "physics-bullet-native"))]
+    #[test]
+    fn physics_bake_without_feature_returns_explicit_error_before_io() {
+        let error = convert_pmx_to_fbx(
+            Path::new("missing-model.pmx"),
+            Path::new("unused.fbx"),
+            Some(Path::new("missing-motion.vmd")),
+            ConvertFbxOptions {
+                max_frame: None,
+                copy_diffuse_textures: false,
+                bones_only: false,
+                physics_bake: true,
+                readable_bone_names: false,
+                write_physics_params: false,
+                use_json: false,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "convert-fbx --physics-bake requires the physics-bullet-native feature"
+        );
     }
 
     #[test]
@@ -743,6 +901,7 @@ mod tests {
             output: Path::new("model.fbx"),
             vmd: None,
             bones_only: false,
+            physics_bake: false,
             readable_bone_names: true,
             bone_name_map: Some(Path::new("model.bone-map.json")),
             physics_params: None,
@@ -775,6 +934,7 @@ mod tests {
             output: Path::new("model.fbx"),
             vmd: None,
             bones_only: false,
+            physics_bake: false,
             readable_bone_names: false,
             bone_name_map: None,
             physics_params: Some(Path::new("model.physics-params.json")),

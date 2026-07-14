@@ -55,7 +55,6 @@ static void configure_spring_axis(btGeneric6DofSpringConstraint &constraint, int
     if (stiffness > 0.0f) {
         constraint.enableSpring(axis, true);
         constraint.setStiffness(axis, stiffness);
-        constraint.setEquilibriumPoint(axis);
     }
 }
 
@@ -155,7 +154,10 @@ mmd_anim_bullet_status mmd_anim_bullet_world_reset(mmd_anim_bullet_world *world)
         entry.body->setInterpolationWorldTransform(entry.initial_transform);
         entry.body->setLinearVelocity(btVector3(0.0f, 0.0f, 0.0f));
         entry.body->setAngularVelocity(btVector3(0.0f, 0.0f, 0.0f));
+        entry.body->setInterpolationLinearVelocity(btVector3(0.0f, 0.0f, 0.0f));
+        entry.body->setInterpolationAngularVelocity(btVector3(0.0f, 0.0f, 0.0f));
         entry.body->clearForces();
+        entry.body->activate(true);
         if (entry.motion_state) {
             entry.motion_state->setWorldTransform(entry.initial_transform);
         }
@@ -358,6 +360,7 @@ mmd_anim_bullet_status mmd_anim_bullet_world_add_6dof_spring_joint(
             configure_spring_axis(*constraint, axis, desc->spring_translation_factor[axis]);
             configure_spring_axis(*constraint, axis + 3, desc->spring_rotation_factor[axis]);
         }
+        constraint->setEquilibriumPoint();
 
         world->dynamics_world->addConstraint(constraint.get(), true);
         world->constraints.push_back(std::move(constraint));

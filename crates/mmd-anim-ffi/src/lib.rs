@@ -9,14 +9,16 @@ use std::{ptr, slice, str, sync::Arc};
 
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, FlatAppendTransformInput,
-    FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput, FlatIkLinkInput, FlatIkSolverInput,
-    HostPoseView, IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput,
-    IkChainSolver, IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe,
-    MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PhysicsMode, PhysicsStepStats,
-    PhysicsTickConfig, PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
-    build_append_transforms_from_flat_iter, build_bones_from_flat, build_ik_solvers_from_flat_iter,
-    build_morph_init_from_flat_iter, solve_append_transform,
+    AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, DensePoseSequenceView,
+    FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
+    FlatIkLinkInput, FlatIkSolverInput, HostPoseView, IkAngleLimit, IkChainDefinition,
+    IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkSolveOptions, MorphAnimationBinding,
+    MorphIndex, MorphInit, MorphKeyframe, MorphTrack, MovableBoneKeyframe, MovableBoneTrack,
+    PhysicsMode, PhysicsStepStats, PhysicsTickConfig, PoseReductionReport,
+    PropertyAnimationBinding, PropertyKeyframe, ReducedPoseSequence, ReductionTarget,
+    ReductionTolerances, RuntimeInstance, SkeletonSnapshot, build_append_transforms_from_flat_iter,
+    build_bones_from_flat, build_ik_solvers_from_flat_iter, build_morph_init_from_flat_iter,
+    solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 2;
@@ -68,6 +70,10 @@ fn flatten_matrices_into_slice(dst: &mut [f32], matrices: &[glam::Mat4]) {
 
 pub struct MmdRuntimeClip {
     clip: AnimationClip,
+}
+
+pub struct MmdRuntimeReducedPose {
+    sequence: ReducedPoseSequence,
 }
 
 pub struct MmdRuntimeVmdCameraTrack {
@@ -245,6 +251,30 @@ pub struct MmdRuntimeFfiGroupMorphOffset {
 pub struct MmdRuntimeFfiByteBuffer {
     pub data: *mut u8,
     pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MmdRuntimeFfiReductionTolerances {
+    pub local_position: f32,
+    pub local_rotation_radians: f32,
+    pub world_position: f32,
+    pub world_rotation_radians: f32,
+    pub morph_weight: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiPoseReductionReport {
+    pub source_bone_key_count: usize,
+    pub reduced_bone_key_count: usize,
+    pub source_morph_key_count: usize,
+    pub reduced_morph_key_count: usize,
+    pub max_local_position_error: f32,
+    pub max_local_rotation_error_radians: f32,
+    pub max_world_position_error: f32,
+    pub max_world_rotation_error_radians: f32,
+    pub max_morph_weight_error: f32,
 }
 
 #[repr(C)]
@@ -5194,6 +5224,266 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_batch(
             }
             true
         })
+    })
+}
+
+fn reduction_target_from_u32(value: u32) -> Option<ReductionTarget> {
+    match value {
+        0 => Some(ReductionTarget::LinearSlerp),
+        1 => Some(ReductionTarget::VmdBezier),
+        2 => Some(ReductionTarget::DccCubic),
+        _ => None,
+    }
+}
+
+fn ffi_reduction_report(report: PoseReductionReport) -> MmdRuntimeFfiPoseReductionReport {
+    MmdRuntimeFfiPoseReductionReport {
+        source_bone_key_count: report.source_bone_key_count,
+        reduced_bone_key_count: report.reduced_bone_key_count,
+        source_morph_key_count: report.source_morph_key_count,
+        reduced_morph_key_count: report.reduced_morph_key_count,
+        max_local_position_error: report.max_local_position_error,
+        max_local_rotation_error_radians: report.max_local_rotation_error_radians,
+        max_world_position_error: report.max_world_position_error,
+        max_world_rotation_error_radians: report.max_world_rotation_error_radians,
+        max_morph_weight_error: report.max_morph_weight_error,
+    }
+}
+
+/// Reduces caller-owned dense batch output into an opaque sparse pose handle.
+///
+/// `world_matrices_f32` uses `[frame][bone][16]` column-major layout and
+/// `morph_weights_f32` uses `[frame][morph]`. The model supplies the immutable
+/// skeleton snapshot. On failure `*out_reduced_pose` is set to null.
+///
+/// # Safety
+///
+/// All non-empty input regions must be readable for their declared lengths.
+/// `out_reduced_pose` must point to writable handle storage. The returned
+/// handle must be released with `mmd_runtime_reduced_pose_free`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_create_from_dense(
+    model: *const MmdRuntimeModel,
+    model_identity: u64,
+    world_matrices_f32: *const f32,
+    world_matrices_f32_len: usize,
+    morph_weights_f32: *const f32,
+    morph_weights_f32_len: usize,
+    frame_count: usize,
+    start_frame: f32,
+    frame_step: f32,
+    target: u32,
+    tolerances: MmdRuntimeFfiReductionTolerances,
+    out_reduced_pose: *mut *mut MmdRuntimeReducedPose,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(out_reduced_pose) = (unsafe { out_reduced_pose.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        *out_reduced_pose = ptr::null_mut();
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(target) = reduction_target_from_u32(target) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let bone_count = model.model.bone_count();
+        if frame_count == 0 || !morph_weights_f32_len.is_multiple_of(frame_count) {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let morph_count = morph_weights_f32_len / frame_count;
+        let Some(required_world_len) = frame_count
+            .checked_mul(bone_count)
+            .and_then(|len| len.checked_mul(16))
+        else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(required_morph_len) = frame_count.checked_mul(morph_count) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if world_matrices_f32_len != required_world_len
+            || morph_weights_f32_len != required_morph_len
+            || (required_world_len > 0 && world_matrices_f32.is_null())
+            || (required_morph_len > 0 && morph_weights_f32.is_null())
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let world_values = if required_world_len == 0 {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(world_matrices_f32, required_world_len) }
+        };
+        let morph_weights = if required_morph_len == 0 {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(morph_weights_f32, required_morph_len) }
+        };
+        let world_matrices = world_values
+            .chunks_exact(16)
+            .map(glam::Mat4::from_cols_slice)
+            .collect::<Vec<_>>();
+        let snapshot = match SkeletonSnapshot::from_model_with_morph_count(
+            &model.model,
+            model_identity,
+            morph_count,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
+            }
+        };
+        let dense = match DensePoseSequenceView::new(
+            &world_matrices,
+            morph_weights,
+            frame_count,
+            bone_count,
+            morph_count,
+            start_frame,
+            frame_step,
+        ) {
+            Ok(dense) => dense,
+            Err(error) => {
+                return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
+            }
+        };
+        let tolerances = ReductionTolerances {
+            local_position: tolerances.local_position,
+            local_rotation_radians: tolerances.local_rotation_radians,
+            world_position: tolerances.world_position,
+            world_rotation_radians: tolerances.world_rotation_radians,
+            morph_weight: tolerances.morph_weight,
+        };
+        let sequence =
+            match mmd_anim_runtime::reduce_dense_pose_sequence(dense, snapshot, tolerances, target)
+            {
+                Ok(sequence) => sequence,
+                Err(error) => {
+                    return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
+                }
+            };
+        *out_reduced_pose = Box::into_raw(Box::new(MmdRuntimeReducedPose { sequence }));
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Releases a reduced-pose handle. Null is accepted.
+///
+/// # Safety
+///
+/// `pose` must be null or a live handle returned by the create function, and
+/// each non-null handle may be freed exactly once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_free(pose: *mut MmdRuntimeReducedPose) {
+    ffi_guard_void(|| {
+        if !pose.is_null() {
+            drop(unsafe { Box::from_raw(pose) });
+        }
+    });
+}
+
+/// Returns the reduced pose bone count, or zero for null.
+///
+/// # Safety
+///
+/// `pose` must be null or a live reduced-pose handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_bone_count(
+    pose: *const MmdRuntimeReducedPose,
+) -> usize {
+    ffi_guard(0, || {
+        unsafe { pose.as_ref() }
+            .map(|pose| pose.sequence.snapshot().bone_count())
+            .unwrap_or(0)
+    })
+}
+
+/// Returns the reduced pose morph count, or zero for null.
+///
+/// # Safety
+///
+/// `pose` must be null or a live reduced-pose handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_morph_count(
+    pose: *const MmdRuntimeReducedPose,
+) -> usize {
+    ffi_guard(0, || {
+        unsafe { pose.as_ref() }
+            .map(|pose| pose.sequence.snapshot().morph_count())
+            .unwrap_or(0)
+    })
+}
+
+/// Copies the immutable reduction report.
+///
+/// # Safety
+///
+/// `pose` must be a live reduced-pose handle and `out_report` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_report(
+    pose: *const MmdRuntimeReducedPose,
+    out_report: *mut MmdRuntimeFfiPoseReductionReport,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(out_report) = (unsafe { out_report.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        *out_report = ffi_reduction_report(pose.sequence.report());
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Samples a reduced pose into caller-owned world-matrix and morph buffers.
+///
+/// # Safety
+///
+/// `pose` must be a live reduced-pose handle. Non-empty output regions must
+/// be writable for their declared lengths and must not alias.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_sample(
+    pose: *const MmdRuntimeReducedPose,
+    frame: f32,
+    out_world_matrices_f32: *mut f32,
+    out_world_matrices_f32_len: usize,
+    out_morph_weights_f32: *mut f32,
+    out_morph_weights_f32_len: usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let required_world_len = pose.sequence.snapshot().bone_count() * 16;
+        let required_morph_len = pose.sequence.snapshot().morph_count();
+        if out_world_matrices_f32_len < required_world_len
+            || out_morph_weights_f32_len < required_morph_len
+        {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+        if (required_world_len > 0 && out_world_matrices_f32.is_null())
+            || (required_morph_len > 0 && out_morph_weights_f32.is_null())
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let sample = match pose.sequence.sample(frame) {
+            Ok(sample) => sample,
+            Err(error) => {
+                return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
+            }
+        };
+        if required_world_len > 0 {
+            let out_world =
+                unsafe { slice::from_raw_parts_mut(out_world_matrices_f32, required_world_len) };
+            flatten_matrices_into_slice(out_world, &sample.world_matrices);
+        }
+        if required_morph_len > 0 {
+            let out_morph =
+                unsafe { slice::from_raw_parts_mut(out_morph_weights_f32, required_morph_len) };
+            out_morph.copy_from_slice(&sample.morph_weights);
+        }
+        MmdRuntimeStatus::Ok
     })
 }
 

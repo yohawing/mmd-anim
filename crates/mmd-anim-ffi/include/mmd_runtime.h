@@ -92,6 +92,7 @@ typedef struct mmd_runtime_vmd_camera_track_t mmd_runtime_vmd_camera_track_t;
 typedef struct mmd_runtime_vmd_light_track_t mmd_runtime_vmd_light_track_t;
 typedef struct mmd_runtime_vmd_self_shadow_track_t mmd_runtime_vmd_self_shadow_track_t;
 typedef struct mmd_runtime_physics_world_t mmd_runtime_physics_world_t;
+typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 
 /* ------------------------------------------------------------------ */
 /*  Flag constants                                                    */
@@ -123,6 +124,32 @@ typedef enum mmd_runtime_status {
     MMD_RUNTIME_STATUS_BUFFER_TOO_SMALL = 3,
     MMD_RUNTIME_STATUS_ERROR = 4
 } mmd_runtime_status_t;
+
+typedef enum mmd_runtime_reduction_target {
+    MMD_RUNTIME_REDUCTION_TARGET_LINEAR_SLERP = 0,
+    MMD_RUNTIME_REDUCTION_TARGET_VMD_BEZIER = 1,
+    MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC = 2
+} mmd_runtime_reduction_target_t;
+
+typedef struct mmd_runtime_ffi_reduction_tolerances {
+    float local_position;
+    float local_rotation_radians;
+    float world_position;
+    float world_rotation_radians;
+    float morph_weight;
+} mmd_runtime_ffi_reduction_tolerances_t;
+
+typedef struct mmd_runtime_ffi_pose_reduction_report {
+    size_t source_bone_key_count;
+    size_t reduced_bone_key_count;
+    size_t source_morph_key_count;
+    size_t reduced_morph_key_count;
+    float max_local_position_error;
+    float max_local_rotation_error_radians;
+    float max_world_position_error;
+    float max_world_rotation_error_radians;
+    float max_morph_weight_error;
+} mmd_runtime_ffi_pose_reduction_report_t;
 
 typedef enum mmd_runtime_physics_mode {
     MMD_RUNTIME_PHYSICS_MODE_OFF = 0,
@@ -1100,6 +1127,39 @@ bool mmd_runtime_instance_evaluate_clip_frame_batch(
     size_t                        out_world_matrices_f32_len,
     float*                        out_morph_weights_f32,
     size_t                        out_morph_weights_f32_len);
+
+/* Reduces dense batch output into an owned opaque sparse-pose handle.
+   Dense layouts match evaluate_clip_frame_batch. On failure, *out_reduced_pose
+   is set to NULL. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_create_from_dense(
+    const mmd_runtime_model_t*                     model,
+    uint64_t                                       model_identity,
+    const float*                                   world_matrices_f32,
+    size_t                                         world_matrices_f32_len,
+    const float*                                   morph_weights_f32,
+    size_t                                         morph_weights_f32_len,
+    size_t                                         frame_count,
+    float                                          start_frame,
+    float                                          frame_step,
+    uint32_t                                       target,
+    mmd_runtime_ffi_reduction_tolerances_t         tolerances,
+    mmd_runtime_reduced_pose_t**                   out_reduced_pose);
+
+void mmd_runtime_reduced_pose_free(mmd_runtime_reduced_pose_t* pose);
+size_t mmd_runtime_reduced_pose_bone_count(const mmd_runtime_reduced_pose_t* pose);
+size_t mmd_runtime_reduced_pose_morph_count(const mmd_runtime_reduced_pose_t* pose);
+mmd_runtime_status_t mmd_runtime_reduced_pose_report(
+    const mmd_runtime_reduced_pose_t*               pose,
+    mmd_runtime_ffi_pose_reduction_report_t*        out_report);
+
+/* Samples [bone][16] column-major world matrices and [morph] weights. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_sample(
+    const mmd_runtime_reduced_pose_t* pose,
+    float                             frame,
+    float*                            out_world_matrices_f32,
+    size_t                            out_world_matrices_f32_len,
+    float*                            out_morph_weights_f32,
+    size_t                            out_morph_weights_f32_len);
 
 /* Stateful sequential physics bake.
    After world creation or a successful mmd_runtime_physics_world_reset, the

@@ -79,6 +79,115 @@ fn assert_slice_near(actual: &[f32], expected: &[f32], tolerance: f32) {
     }
 }
 
+#[test]
+fn reduced_pose_handle_samples_after_model_free_and_rejects_short_buffer() {
+    let parents = [-1_i32];
+    let rest = [0.0_f32, 0.0, 0.0];
+    let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest.as_ptr(), 1) };
+    assert!(!model.is_null());
+
+    let mut dense_world = Vec::new();
+    for x in [0.0_f32, 1.0, 2.0] {
+        dense_world
+            .extend_from_slice(&glam::Mat4::from_translation(glam::Vec3::X * x).to_cols_array());
+    }
+    let dense_morph = [0.0_f32, 0.5, 1.0];
+    let tolerances = MmdRuntimeFfiReductionTolerances {
+        local_position: 1.0e-4,
+        local_rotation_radians: 1.0e-4,
+        world_position: 1.0e-4,
+        world_rotation_radians: 1.0e-4,
+        morph_weight: 1.0e-4,
+    };
+    let mut reduced = ptr::null_mut();
+    let status = unsafe {
+        mmd_runtime_reduced_pose_create_from_dense(
+            model,
+            42,
+            dense_world.as_ptr(),
+            dense_world.len(),
+            dense_morph.as_ptr(),
+            dense_morph.len(),
+            3,
+            0.0,
+            30.0,
+            0,
+            tolerances,
+            &mut reduced,
+        )
+    };
+    assert_eq!(status, MmdRuntimeStatus::Ok);
+    assert!(!reduced.is_null());
+
+    let mut invalid = std::ptr::NonNull::<MmdRuntimeReducedPose>::dangling().as_ptr();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_create_from_dense(
+                model,
+                42,
+                dense_world.as_ptr(),
+                dense_world.len(),
+                dense_morph.as_ptr(),
+                dense_morph.len(),
+                3,
+                0.0,
+                30.0,
+                99,
+                tolerances,
+                &mut invalid,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert!(invalid.is_null());
+    unsafe { mmd_runtime_model_free(model) };
+
+    let mut report = MmdRuntimeFfiPoseReductionReport::default();
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_report(reduced, &mut report) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(report.source_bone_key_count, 3);
+    assert_eq!(report.reduced_bone_key_count, 2);
+    assert_eq!(report.source_morph_key_count, 3);
+    assert_eq!(report.reduced_morph_key_count, 2);
+
+    let mut short_world = [0.0_f32; 15];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_sample(
+                reduced,
+                30.0,
+                short_world.as_mut_ptr(),
+                short_world.len(),
+                ptr::null_mut(),
+                0,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+
+    let mut world = [0.0_f32; 16];
+    let mut morph = [0.0_f32; 1];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_sample(
+                reduced,
+                30.0,
+                world.as_mut_ptr(),
+                world.len(),
+                morph.as_mut_ptr(),
+                morph.len(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_near(world[12], 1.0, 1.0e-5);
+    assert_near(morph[0], 0.5, 1.0e-5);
+    unsafe { mmd_runtime_reduced_pose_free(reduced) };
+    unsafe { mmd_runtime_reduced_pose_free(ptr::null_mut()) };
+}
+
 fn simple_ik_chain() -> *mut MmdRuntimeIkChain {
     let bones = [
         MmdRuntimeFfiRigBone {

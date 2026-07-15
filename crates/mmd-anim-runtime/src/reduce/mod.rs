@@ -155,6 +155,14 @@ impl SkeletonSnapshot {
     }
 
     pub fn from_model(model: &ModelArena, model_identity: u64) -> Result<Self, PoseReductionError> {
+        Self::from_model_with_morph_count(model, model_identity, model.morph_count() as usize)
+    }
+
+    pub fn from_model_with_morph_count(
+        model: &ModelArena,
+        model_identity: u64,
+        morph_count: usize,
+    ) -> Result<Self, PoseReductionError> {
         let mut parents = Vec::with_capacity(model.bone_count());
         let mut translations = Vec::with_capacity(model.bone_count());
         for bone in 0..model.bone_count() {
@@ -168,7 +176,7 @@ impl SkeletonSnapshot {
             parents,
             translations,
             vec![Quat::IDENTITY; model.bone_count()],
-            model.morph_count() as usize,
+            morph_count,
             model_identity,
         )
     }

@@ -687,6 +687,76 @@ fn vmd_bezier_world_rotation_gate_handles_near_pi_motion() {
 }
 
 #[test]
+fn quaternion_angle_is_stable_for_identical_and_small_rotations() {
+    let rotation = normalize_quat(Quat::from_xyzw(
+        0.182_574_18,
+        -0.365_148_37,
+        0.547_722_6,
+        0.730_296_73,
+    ));
+    assert_eq!(quat_angle(rotation, rotation), 0.0);
+    assert_eq!(quat_angle(rotation, -rotation), 0.0);
+
+    let delta = 1.0e-5;
+    let shifted = normalize_quat(rotation * Quat::from_rotation_y(delta));
+    assert!((quat_angle(rotation, shifted) - delta).abs() <= 1.0e-6);
+}
+
+#[test]
+fn tight_rotation_tolerance_handles_rabbit_hole_like_dense_chain() {
+    const FRAME_COUNT: usize = 301;
+    const BONE_COUNT: usize = 12;
+    let parents = (0..BONE_COUNT)
+        .map(|bone| if bone == 0 { -1 } else { bone as i32 - 1 })
+        .collect::<Vec<_>>();
+    let rest_translations = (0..BONE_COUNT)
+        .map(|bone| if bone == 0 { Vec3A::ZERO } else { Vec3A::Y })
+        .collect::<Vec<_>>();
+    let rest_rotations = vec![Quat::IDENTITY; BONE_COUNT];
+    let snapshot = SkeletonSnapshot::new(
+        parents,
+        rest_translations.clone(),
+        rest_rotations,
+        0,
+        0x5241_4242_4954,
+    )
+    .unwrap();
+    let mut world = Vec::with_capacity(FRAME_COUNT * BONE_COUNT);
+    for frame in 0..FRAME_COUNT {
+        let time = frame as f32 / 30.0;
+        let mut frame_world = [Mat4::IDENTITY; BONE_COUNT];
+        for bone in 0..BONE_COUNT {
+            let phase = time * (0.7 + bone as f32 * 0.11) + bone as f32 * 0.37;
+            let rotation = normalize_quat(
+                Quat::from_rotation_x(phase.sin() * 1.2)
+                    * Quat::from_rotation_y((phase * 0.83).cos() * 1.0)
+                    * Quat::from_rotation_z((phase * 1.17).sin() * 0.8),
+            );
+            let local = Mat4::from_rotation_translation(rotation, rest_translations[bone].into());
+            frame_world[bone] = if bone == 0 {
+                local
+            } else {
+                frame_world[bone - 1] * local
+            };
+        }
+        world.extend_from_slice(&frame_world);
+    }
+    let reduced = reduce_dense_pose_sequence(
+        DensePoseSequenceView::new(&world, &[], FRAME_COUNT, BONE_COUNT, 0, 0.0, 1.0).unwrap(),
+        snapshot,
+        ReductionTolerances {
+            local_rotation_radians: 1.0e-4,
+            world_rotation_radians: 1.0e-4,
+            ..Default::default()
+        },
+        ReductionTarget::DccCubic,
+    )
+    .unwrap();
+    assert!(reduced.report().max_local_rotation_error_radians <= 1.0e-4);
+    assert!(reduced.report().max_world_rotation_error_radians <= 1.0e-4);
+}
+
+#[test]
 fn dcc_hermite_matches_independent_reference_equation() {
     let start = -2.0;
     let end = 3.0;

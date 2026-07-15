@@ -2354,7 +2354,16 @@ fn quat_is_finite(value: Quat) -> bool {
 }
 
 fn quat_angle(a: Quat, b: Quat) -> f32 {
-    2.0 * a.dot(b).abs().clamp(-1.0, 1.0).acos()
+    let a = normalize_quat(a);
+    let mut b = normalize_quat(b);
+    if a.dot(b) < 0.0 {
+        b = -b;
+    }
+    // For unit quaternions, the hemisphere-aligned chord length is
+    // `2 * sin(theta / 4)`. Unlike `acos(dot)`, this remains stable for tiny
+    // angles and returns exactly zero for identical f32 quaternions.
+    let half_chord = ((a - b).length() * 0.5).clamp(0.0, 1.0);
+    4.0 * half_chord.asin()
 }
 
 fn normalized_error(error: f32, tolerance: f32) -> f32 {

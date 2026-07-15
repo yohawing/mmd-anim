@@ -44,6 +44,10 @@ Write-Host "  OK" -ForegroundColor Green
 # --- 4. Dumpbin symbol check (optional) ------------------------------
 Write-Host "`n[4/4] Cross-referencing exports against header..." -ForegroundColor Yellow
 $header = Get-Content "$FfiDir\include\mmd_runtime.h" -Raw
+if ($header -match "\bmmd_runtime_reduced_pose_sample\b") {
+    Write-Host "  FAIL: dense reduced-pose sampling remains in the public header." -ForegroundColor Red
+    exit 1
+}
 
 # Expected function export names (no-mangle C symbols from lib.rs)
 $expectedExports = @(
@@ -83,6 +87,11 @@ $expectedExports = @(
     "mmd_runtime_clip_create_from_vmd_bytes_for_model"
     "mmd_runtime_clip_frame_range"
     "mmd_runtime_clip_free"
+    "mmd_runtime_reduced_pose_create_from_dense"
+    "mmd_runtime_reduced_pose_free"
+    "mmd_runtime_reduced_pose_bone_count"
+    "mmd_runtime_reduced_pose_morph_count"
+    "mmd_runtime_reduced_pose_report"
     "mmd_runtime_reduced_pose_unity_curve_count"
     "mmd_runtime_reduced_pose_unity_curve_descriptor"
     "mmd_runtime_reduced_pose_unity_curve_keys"
@@ -110,6 +119,10 @@ if (-not $dumpbin) {
 } else {
     Write-Host "  dumpbin found; checking binary exports..." -ForegroundColor Yellow
     $exports = @(& dumpbin /EXPORTS $cdylib.FullName 2>&1 | Where-Object { $_ -match '^\s+\d+\s+\w+\s+\w+\s+(\w+)' } | ForEach-Object { $matches[1] })
+    if ("mmd_runtime_reduced_pose_sample" -in $exports) {
+        Write-Host "  FAIL: dense reduced-pose sampling remains in the binary exports." -ForegroundColor Red
+        exit 1
+    }
     $missingFromBinary = $expectedExports | Where-Object { $_ -notin $exports }
     if ($missingFromBinary.Count -gt 0) {
         Write-Host "  FAIL: $($missingFromBinary.Count) export(s) missing from binary:" -ForegroundColor Red

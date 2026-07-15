@@ -425,7 +425,7 @@ fn reduced_pose_unity_curve_cache_invalidates_for_fps_and_flip_z() {
 }
 
 #[test]
-fn reduced_pose_handle_samples_after_model_free_and_rejects_short_buffer() {
+fn reduced_pose_handle_reports_and_enumerates_sparse_curves_after_model_free() {
     let parents = [-1_i32];
     let rest = [0.0_f32, 0.0, 0.0];
     let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest.as_ptr(), 1) };
@@ -456,7 +456,7 @@ fn reduced_pose_handle_samples_after_model_free_and_rejects_short_buffer() {
             3,
             0.0,
             30.0,
-            0,
+            2,
             tolerances,
             &mut reduced,
         )
@@ -497,38 +497,18 @@ fn reduced_pose_handle_samples_after_model_free_and_rejects_short_buffer() {
     assert_eq!(report.source_morph_key_count, 3);
     assert_eq!(report.reduced_morph_key_count, 2);
 
-    let mut short_world = [0.0_f32; 15];
+    let mut curve_count = 0;
     assert_eq!(
         unsafe {
-            mmd_runtime_reduced_pose_sample(
-                reduced,
-                30.0,
-                short_world.as_mut_ptr(),
-                short_world.len(),
-                ptr::null_mut(),
-                0,
-            )
-        },
-        MmdRuntimeStatus::BufferTooSmall
-    );
-
-    let mut world = [0.0_f32; 16];
-    let mut morph = [0.0_f32; 1];
-    assert_eq!(
-        unsafe {
-            mmd_runtime_reduced_pose_sample(
-                reduced,
-                30.0,
-                world.as_mut_ptr(),
-                world.len(),
-                morph.as_mut_ptr(),
-                morph.len(),
-            )
+            mmd_runtime_reduced_pose_unity_curve_count(reduced, 30.0, false, &mut curve_count)
         },
         MmdRuntimeStatus::Ok
     );
-    assert_near(world[12], 1.0, 1.0e-5);
-    assert_near(morph[0], 0.5, 1.0e-5);
+    assert_eq!(curve_count, 7);
+    let morph_keys = copy_unity_curve_keys(reduced, 30.0, false, curve_count - 1);
+    assert_eq!(morph_keys.len(), 2);
+    assert_near(morph_keys[0].value, 0.0, 1.0e-5);
+    assert_near(morph_keys[1].value, 100.0, 1.0e-5);
     unsafe { mmd_runtime_reduced_pose_free(reduced) };
     unsafe { mmd_runtime_reduced_pose_free(ptr::null_mut()) };
 }

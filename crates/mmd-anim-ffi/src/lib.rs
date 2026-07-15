@@ -5710,57 +5710,6 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_keys(
     })
 }
 
-/// Samples a reduced pose into caller-owned world-matrix and morph buffers.
-///
-/// # Safety
-///
-/// `pose` must be a live reduced-pose handle. Non-empty output regions must
-/// be writable for their declared lengths and must not alias.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mmd_runtime_reduced_pose_sample(
-    pose: *const MmdRuntimeReducedPose,
-    frame: f32,
-    out_world_matrices_f32: *mut f32,
-    out_world_matrices_f32_len: usize,
-    out_morph_weights_f32: *mut f32,
-    out_morph_weights_f32_len: usize,
-) -> MmdRuntimeStatus {
-    ffi_guard(MmdRuntimeStatus::Error, || {
-        let Some(pose) = (unsafe { pose.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let required_world_len = pose.sequence.snapshot().bone_count() * 16;
-        let required_morph_len = pose.sequence.snapshot().morph_count();
-        if out_world_matrices_f32_len < required_world_len
-            || out_morph_weights_f32_len < required_morph_len
-        {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-        if (required_world_len > 0 && out_world_matrices_f32.is_null())
-            || (required_morph_len > 0 && out_morph_weights_f32.is_null())
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        let sample = match pose.sequence.sample(frame) {
-            Ok(sample) => sample,
-            Err(error) => {
-                return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
-            }
-        };
-        if required_world_len > 0 {
-            let out_world =
-                unsafe { slice::from_raw_parts_mut(out_world_matrices_f32, required_world_len) };
-            flatten_matrices_into_slice(out_world, &sample.world_matrices);
-        }
-        if required_morph_len > 0 {
-            let out_morph =
-                unsafe { slice::from_raw_parts_mut(out_morph_weights_f32, required_morph_len) };
-            out_morph.copy_from_slice(&sample.morph_weights);
-        }
-        MmdRuntimeStatus::Ok
-    })
-}
-
 fn resolve_batch_worker_count(requested_worker_count: u32, frame_count: usize) -> usize {
     let requested = requested_worker_count as usize;
     let default_workers = std::thread::available_parallelism()

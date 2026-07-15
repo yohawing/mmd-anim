@@ -1213,15 +1213,6 @@ mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_keys(
     size_t                            out_key_capacity,
     size_t*                           out_required_count);
 
-/* Samples [bone][16] column-major world matrices and [morph] weights. */
-mmd_runtime_status_t mmd_runtime_reduced_pose_sample(
-    const mmd_runtime_reduced_pose_t* pose,
-    float                             frame,
-    float*                            out_world_matrices_f32,
-    size_t                            out_world_matrices_f32_len,
-    float*                            out_morph_weights_f32,
-    size_t                            out_morph_weights_f32_len);
-
 /* Stateful sequential physics bake.
    After world creation or a successful mmd_runtime_physics_world_reset, the
    first bake sample is seed-only: evaluate_clip_frame_before_physics at that

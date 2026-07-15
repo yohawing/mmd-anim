@@ -15,6 +15,10 @@ RUST_NO_MANGLE_RE = re.compile(r"#\[\s*(?:unsafe\s*\(\s*)?no_mangle\s*\)?\s*\]")
 RUST_FN_RE = re.compile(r"fn\s+(mmd_runtime_\w+)\s*\(")
 HEADER_FN_RE = re.compile(r"\b(mmd_runtime_\w+)\s*\(")
 
+FORBIDDEN_DENSE_REDUCED_POSE_SYMBOLS = {
+    "mmd_runtime_reduced_pose_sample",
+}
+
 UNITY_CONSTANTS = {
     "MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION": 0,
     "MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER": 1,
@@ -252,9 +256,11 @@ def main() -> int:
 
     missing_in_header = sorted(rust_symbols - header_symbols)
     missing_in_rust = sorted(header_symbols - rust_symbols)
+    forbidden_in_rust = sorted(FORBIDDEN_DENSE_REDUCED_POSE_SYMBOLS & rust_symbols)
+    forbidden_in_header = sorted(FORBIDDEN_DENSE_REDUCED_POSE_SYMBOLS & header_symbols)
     shape_errors = check_unity_abi_shapes(rust_text, header_text)
 
-    if missing_in_header or missing_in_rust or shape_errors:
+    if missing_in_header or missing_in_rust or forbidden_in_rust or forbidden_in_header or shape_errors:
         print("FFI header symbol mismatch detected.", file=sys.stderr)
         if missing_in_header:
             print("\nExported in Rust but missing from mmd_runtime.h:", file=sys.stderr)
@@ -263,6 +269,10 @@ def main() -> int:
         if missing_in_rust:
             print("\nDeclared in mmd_runtime.h but missing from Rust exports:", file=sys.stderr)
             for symbol in missing_in_rust:
+                print(f"  - {symbol}", file=sys.stderr)
+        if forbidden_in_rust or forbidden_in_header:
+            print("\nDense reduced-pose output must not be public:", file=sys.stderr)
+            for symbol in sorted(set(forbidden_in_rust + forbidden_in_header)):
                 print(f"  - {symbol}", file=sys.stderr)
         if shape_errors:
             print("\nUnity reduced-curve ABI shape drift:", file=sys.stderr)

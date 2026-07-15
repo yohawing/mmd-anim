@@ -10,4 +10,5 @@ pub(crate) mod parse;
 pub(crate) mod patch;
 pub(crate) mod rig;
 pub(crate) mod skin_check;
+pub(crate) mod vmd_reduce;
 pub(crate) mod vmd_sample;

@@ -272,6 +272,37 @@ enum Commands {
         json: bool,
     },
 
+    /// Reduce dense VMD bone and morph tracks into sparse linear VMD curves.
+    #[command(
+        name = "reduce-vmd",
+        long_about = "Reduce dense VMD bone and morph keyframes into sparse linear/slerp curves while preserving camera, light, self-shadow, and property tracks.\nThe reducer samples integer VMD frames and validates local position, rotation, and morph errors before writing the sparse VMD.",
+        after_help = "Examples:\n  mmd-anim reduce-vmd dense.vmd sparse.vmd\n  mmd-anim reduce-vmd dense.vmd sparse.vmd --position-tolerance 0.001 --rotation-tolerance 0.001 --morph-tolerance 0.001 --json"
+    )]
+    ReduceVmd {
+        /// Path to the dense input VMD file
+        input: PathBuf,
+        /// Path to the reduced output VMD file
+        output: PathBuf,
+        /// Maximum local translation error in MMD units
+        #[arg(long, default_value_t = 1.0e-4)]
+        position_tolerance: f32,
+        /// Maximum local rotation error in radians
+        #[arg(long, default_value_t = 1.0e-4)]
+        rotation_tolerance: f32,
+        /// Maximum morph weight error
+        #[arg(long, default_value_t = 1.0e-4)]
+        morph_tolerance: f32,
+        /// Curve fitting mode; vmd-bezier is substantially slower
+        #[arg(long, value_enum, default_value = "linear")]
+        curve_mode: commands::vmd_reduce::VmdReductionCurveMode,
+        /// Refuse motions requiring more sampled frames unless explicitly raised
+        #[arg(long, default_value_t = 100_000)]
+        max_sampled_frames: usize,
+        /// Output reduction report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Build a PMM scene from a model and motion.
     #[command(
         name = "build-pmm",
@@ -539,6 +570,27 @@ fn main() -> ExitCode {
             from_json,
             json,
         }) => dispatch_export(&input, &output, from_json, json),
+        Some(Commands::ReduceVmd {
+            input,
+            output,
+            position_tolerance,
+            rotation_tolerance,
+            morph_tolerance,
+            curve_mode,
+            max_sampled_frames,
+            json,
+        }) => commands::vmd_reduce::reduce_vmd(
+            &input,
+            &output,
+            commands::vmd_reduce::ReduceVmdOptions {
+                position_tolerance,
+                rotation_tolerance,
+                morph_tolerance,
+                curve_mode,
+                max_sampled_frames,
+                use_json: json,
+            },
+        ),
         Some(Commands::BuildPmm {
             model,
             motion,

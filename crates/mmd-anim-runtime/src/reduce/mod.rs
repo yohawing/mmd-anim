@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use glam::{EulerRot, Mat3, Mat4, Quat, Vec3, Vec3A};
 #[cfg(not(target_family = "wasm"))]
+#[cfg(not(target_family = "wasm"))]
 use rayon::prelude::*;
 #[cfg(not(target_family = "wasm"))]
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -366,6 +367,8 @@ pub struct PoseReductionReport {
 pub struct ReductionWorkStats {
     pub global_validation_passes: usize,
     pub candidate_rebuilds: usize,
+    pub candidate_bone_track_rebuilds: usize,
+    pub candidate_morph_track_rebuilds: usize,
     pub local_prefit_bone_segment_fits: usize,
     pub local_prefit_morph_segment_fits: usize,
     pub local_prefit_bone_key_additions: usize,
@@ -377,10 +380,69 @@ pub struct ReductionWorkStats {
     pub bone_samples: usize,
     pub morph_samples: usize,
     pub world_rebuilds: usize,
+    /// Number of cached candidate world transforms recomputed during validation.
+    pub world_bone_recomputes: usize,
     pub world_rotation_decompositions: usize,
     pub normal_key_additions: usize,
     pub ancestor_key_additions: usize,
     pub added_keys_per_pass: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidationMode {
+    Incremental,
+    FullScan,
+}
+
+#[derive(Debug, Clone)]
+struct DirtyRanges {
+    bone_local: Vec<Vec<std::ops::RangeInclusive<usize>>>,
+    morph: Vec<Vec<std::ops::RangeInclusive<usize>>>,
+}
+
+impl DirtyRanges {
+    fn full(frame_count: usize, bone_count: usize, morph_count: usize) -> Self {
+        let range = || vec![0..=frame_count.saturating_sub(1)];
+        Self {
+            bone_local: (0..bone_count).map(|_| range()).collect(),
+            morph: (0..morph_count).map(|_| range()).collect(),
+        }
+    }
+
+    fn empty(bone_count: usize, morph_count: usize) -> Self {
+        Self {
+            bone_local: vec![Vec::new(); bone_count],
+            morph: vec![Vec::new(); morph_count],
+        }
+    }
+
+    fn mark_bone(&mut self, bone: usize, range: std::ops::RangeInclusive<usize>) {
+        insert_dirty_range(&mut self.bone_local[bone], range);
+    }
+
+    fn mark_morph(&mut self, morph: usize, range: std::ops::RangeInclusive<usize>) {
+        insert_dirty_range(&mut self.morph[morph], range);
+    }
+}
+
+fn insert_dirty_range(
+    target: &mut Vec<std::ops::RangeInclusive<usize>>,
+    range: std::ops::RangeInclusive<usize>,
+) {
+    target.push(range);
+    target.sort_by_key(|value| *value.start());
+    let mut merged: Vec<std::ops::RangeInclusive<usize>> = Vec::with_capacity(target.len());
+    for current in target.drain(..) {
+        if let Some(previous) = merged.last_mut()
+            && *current.start() <= previous.end().saturating_add(1)
+        {
+            let start = *previous.start();
+            *previous = start..=(*previous.end()).max(*current.end());
+        } else {
+            merged.push(current);
+        }
+    }
+    *target = merged;
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -596,6 +658,24 @@ pub fn reduce_dense_pose_sequence_with_worker_count(
     target: ReductionTarget,
     worker_count: usize,
 ) -> Result<ReducedPoseSequence, PoseReductionError> {
+    reduce_dense_pose_sequence_internal(
+        input,
+        snapshot,
+        tolerances,
+        target,
+        worker_count,
+        ValidationMode::Incremental,
+    )
+}
+
+fn reduce_dense_pose_sequence_internal(
+    input: DensePoseSequenceView<'_>,
+    snapshot: SkeletonSnapshot,
+    tolerances: ReductionTolerances,
+    target: ReductionTarget,
+    worker_count: usize,
+    validation_mode: ValidationMode,
+) -> Result<ReducedPoseSequence, PoseReductionError> {
     let tolerances = tolerances.validate()?;
     if input.bone_count != snapshot.bone_count() || input.morph_count != snapshot.morph_count() {
         return Err(PoseReductionError::SnapshotMismatch);
@@ -663,30 +743,54 @@ pub fn reduce_dense_pose_sequence_with_worker_count(
         }
     }
 
+    let mut candidate: Option<ReducedPoseSequence> = None;
+    let mut dirty = DirtyRanges::full(input.frame_count, input.bone_count, input.morph_count);
+    let mut validation_cache =
+        ValidationCache::new(input.frame_count, input.bone_count, input.morph_count);
     loop {
         work_stats.global_validation_passes += 1;
         work_stats.candidate_rebuilds += 1;
+        if candidate.is_some() && matches!(validation_mode, ValidationMode::FullScan) {
+            dirty = DirtyRanges::full(input.frame_count, input.bone_count, input.morph_count);
+        }
         let candidate_started = Instant::now();
-        let candidate = build_sequence(
-            &snapshot,
-            target,
-            input,
-            DenseLocalPose {
-                translations: &local_translations,
-                rotations: &local_rotations,
-                euler_xyz: &local_euler_xyz,
-            },
-            &bone_key_indices,
-            &morph_key_indices,
-            ReductionInstrumentation {
-                work_stats: &mut work_stats,
-                timings: &mut timings,
-            },
-        );
+        let local_pose = DenseLocalPose {
+            translations: &local_translations,
+            rotations: &local_rotations,
+            euler_xyz: &local_euler_xyz,
+        };
+        if let Some(sequence) = candidate.as_mut() {
+            rebuild_dirty_tracks(
+                sequence,
+                target,
+                input,
+                local_pose,
+                &bone_key_indices,
+                &morph_key_indices,
+                &dirty,
+                ReductionInstrumentation {
+                    work_stats: &mut work_stats,
+                    timings: &mut timings,
+                },
+            );
+        } else {
+            candidate = Some(build_sequence(
+                &snapshot,
+                target,
+                input,
+                local_pose,
+                &bone_key_indices,
+                &morph_key_indices,
+                ReductionInstrumentation {
+                    work_stats: &mut work_stats,
+                    timings: &mut timings,
+                },
+            ));
+        }
         timings.candidate_build += candidate_started.elapsed();
         let error_measure_started = Instant::now();
-        let (report, worst_by_track) = measure_error(
-            &candidate,
+        let (report, worst_by_track) = measure_error_cached(
+            candidate.as_ref().expect("candidate initialized"),
             input,
             DenseValidationPose {
                 translations: &local_translations,
@@ -696,6 +800,8 @@ pub fn reduce_dense_pose_sequence_with_worker_count(
             },
             tolerances,
             &mut work_stats,
+            &dirty,
+            &mut validation_cache,
             worker_pool.as_ref(),
             worker_count,
         )?;
@@ -708,7 +814,7 @@ pub fn reduce_dense_pose_sequence_with_worker_count(
         failing.sort_by(compare_worst_errors);
         if failing.is_empty() {
             work_stats.added_keys_per_pass.push(0);
-            let mut result = candidate;
+            let mut result = candidate.expect("candidate initialized");
             result.report = PoseReductionReport {
                 source_bone_key_count: input.frame_count * input.bone_count,
                 reduced_bone_key_count: result
@@ -730,6 +836,7 @@ pub fn reduce_dense_pose_sequence_with_worker_count(
         }
         let mut inserted = false;
         let mut added_this_pass = 0;
+        let mut next_dirty = DirtyRanges::empty(input.bone_count, input.morph_count);
         let first_failure_frame = failing[0].frame;
         for worst in failing {
             match worst.track {
@@ -737,9 +844,13 @@ pub fn reduce_dense_pose_sequence_with_worker_count(
                     let mut cursor = Some(bone);
                     let mut is_origin = true;
                     while let Some(index) = cursor {
-                        if insert_key(&mut bone_key_indices[index], worst.frame) {
+                        if let Some(range) = insert_key_with_affected_range(
+                            &mut bone_key_indices[index],
+                            worst.frame,
+                        ) {
                             inserted = true;
                             added_this_pass += 1;
+                            next_dirty.mark_bone(index, range);
                             if is_origin {
                                 work_stats.normal_key_additions += 1;
                             } else {
@@ -752,9 +863,12 @@ pub fn reduce_dense_pose_sequence_with_worker_count(
                     }
                 }
                 ErrorTrack::Morph(morph) => {
-                    if insert_key(&mut morph_key_indices[morph], worst.frame) {
+                    if let Some(range) =
+                        insert_key_with_affected_range(&mut morph_key_indices[morph], worst.frame)
+                    {
                         inserted = true;
                         added_this_pass += 1;
+                        next_dirty.mark_morph(morph, range);
                         work_stats.normal_key_additions += 1;
                     }
                 }
@@ -766,6 +880,7 @@ pub fn reduce_dense_pose_sequence_with_worker_count(
                 frame: first_failure_frame,
             });
         }
+        dirty = next_dirty;
     }
 }
 
@@ -1093,6 +1208,17 @@ fn insert_key(keys: &mut Vec<usize>, frame: usize) -> bool {
     }
 }
 
+fn insert_key_with_affected_range(
+    keys: &mut Vec<usize>,
+    frame: usize,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    let position = keys.binary_search(&frame).err()?;
+    let start = keys[position.saturating_sub(1)];
+    let end = keys[position.min(keys.len() - 1)];
+    keys.insert(position, frame);
+    Some(start..=end)
+}
+
 #[derive(Clone, Copy)]
 struct DenseLocalPose<'a> {
     translations: &'a [Vec3A],
@@ -1128,52 +1254,13 @@ fn build_sequence(
             .map(|indices| indices.len().saturating_sub(1))
             .sum::<usize>();
     }
+    work_stats.candidate_bone_track_rebuilds += bone_key_indices.len();
+    work_stats.candidate_morph_track_rebuilds += morph_key_indices.len();
     let dcc_bone_started = (target == ReductionTarget::DccCubic).then(Instant::now);
     let bone_tracks = bone_key_indices
         .iter()
         .enumerate()
-        .map(|(bone, indices)| ReducedBoneTrack {
-            keys: indices
-                .iter()
-                .enumerate()
-                .map(|(key_position, &frame)| {
-                    let index = frame * input.bone_count + bone;
-                    let vmd_interpolation =
-                        if target == ReductionTarget::VmdBezier && key_position > 0 {
-                            fit_vmd_bone_interpolation(
-                                input,
-                                bone,
-                                indices[key_position - 1],
-                                frame,
-                                local_pose.translations,
-                                local_pose.rotations,
-                            )
-                        } else {
-                            VmdBoneInterpolation::LINEAR
-                        };
-                    let dcc_segment = if target == ReductionTarget::DccCubic && key_position > 0 {
-                        fit_dcc_bone_segment(
-                            input,
-                            bone,
-                            indices[key_position - 1],
-                            frame,
-                            local_pose.translations,
-                            local_pose.euler_xyz,
-                        )
-                    } else {
-                        DccCubicSegment::default()
-                    };
-                    ReducedBoneKey {
-                        sample_index: frame,
-                        translation: local_pose.translations[index],
-                        rotation: local_pose.rotations[index],
-                        vmd_interpolation,
-                        dcc_segment,
-                    }
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        })
+        .map(|(bone, indices)| build_bone_track(target, input, local_pose, bone, indices))
         .collect::<Vec<_>>()
         .into_boxed_slice();
     if let Some(started) = dcc_bone_started {
@@ -1183,27 +1270,7 @@ fn build_sequence(
     let morph_tracks = morph_key_indices
         .iter()
         .enumerate()
-        .map(|(morph, indices)| ReducedMorphTrack {
-            keys: indices
-                .iter()
-                .enumerate()
-                .map(|(key_position, &frame)| ReducedMorphKey {
-                    sample_index: frame,
-                    weight: input.morph_weight(frame, morph),
-                    dcc_segment: if target == ReductionTarget::DccCubic && key_position > 0 {
-                        fit_dcc_scalar_segment(
-                            indices[key_position - 1],
-                            frame,
-                            |sample| input.morph_weight(sample, morph),
-                            |sample| input.sample_frame(sample),
-                        )
-                    } else {
-                        DccScalarSegment::default()
-                    },
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        })
+        .map(|(morph, indices)| build_morph_track(target, input, morph, indices))
         .collect::<Vec<_>>()
         .into_boxed_slice();
     if let Some(started) = dcc_morph_started {
@@ -1227,6 +1294,126 @@ fn build_sequence(
     }
 }
 
+fn build_bone_track(
+    target: ReductionTarget,
+    input: DensePoseSequenceView<'_>,
+    local_pose: DenseLocalPose<'_>,
+    bone: usize,
+    indices: &[usize],
+) -> ReducedBoneTrack {
+    ReducedBoneTrack {
+        keys: indices
+            .iter()
+            .enumerate()
+            .map(|(key_position, &frame)| {
+                let index = frame * input.bone_count + bone;
+                ReducedBoneKey {
+                    sample_index: frame,
+                    translation: local_pose.translations[index],
+                    rotation: local_pose.rotations[index],
+                    vmd_interpolation: if target == ReductionTarget::VmdBezier && key_position > 0 {
+                        fit_vmd_bone_interpolation(
+                            input,
+                            bone,
+                            indices[key_position - 1],
+                            frame,
+                            local_pose.translations,
+                            local_pose.rotations,
+                        )
+                    } else {
+                        VmdBoneInterpolation::LINEAR
+                    },
+                    dcc_segment: if target == ReductionTarget::DccCubic && key_position > 0 {
+                        fit_dcc_bone_segment(
+                            input,
+                            bone,
+                            indices[key_position - 1],
+                            frame,
+                            local_pose.translations,
+                            local_pose.euler_xyz,
+                        )
+                    } else {
+                        DccCubicSegment::default()
+                    },
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    }
+}
+
+fn build_morph_track(
+    target: ReductionTarget,
+    input: DensePoseSequenceView<'_>,
+    morph: usize,
+    indices: &[usize],
+) -> ReducedMorphTrack {
+    ReducedMorphTrack {
+        keys: indices
+            .iter()
+            .enumerate()
+            .map(|(key_position, &frame)| ReducedMorphKey {
+                sample_index: frame,
+                weight: input.morph_weight(frame, morph),
+                dcc_segment: if target == ReductionTarget::DccCubic && key_position > 0 {
+                    fit_dcc_scalar_segment(
+                        indices[key_position - 1],
+                        frame,
+                        |sample| input.morph_weight(sample, morph),
+                        |sample| input.sample_frame(sample),
+                    )
+                } else {
+                    DccScalarSegment::default()
+                },
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rebuild_dirty_tracks(
+    sequence: &mut ReducedPoseSequence,
+    target: ReductionTarget,
+    input: DensePoseSequenceView<'_>,
+    local_pose: DenseLocalPose<'_>,
+    bone_key_indices: &[Vec<usize>],
+    morph_key_indices: &[Vec<usize>],
+    dirty: &DirtyRanges,
+    instrumentation: ReductionInstrumentation<'_>,
+) {
+    let ReductionInstrumentation {
+        work_stats,
+        timings,
+    } = instrumentation;
+    let dcc_started = (target == ReductionTarget::DccCubic).then(Instant::now);
+    for (bone, range) in dirty.bone_local.iter().enumerate() {
+        if range.is_empty() {
+            continue;
+        }
+        let indices = &bone_key_indices[bone];
+        work_stats.candidate_bone_track_rebuilds += 1;
+        if target == ReductionTarget::DccCubic {
+            work_stats.dcc_bone_segment_fits += indices.len().saturating_sub(1);
+        }
+        sequence.bone_tracks[bone] = build_bone_track(target, input, local_pose, bone, indices);
+    }
+    for (morph, range) in dirty.morph.iter().enumerate() {
+        if range.is_empty() {
+            continue;
+        }
+        let indices = &morph_key_indices[morph];
+        work_stats.candidate_morph_track_rebuilds += 1;
+        if target == ReductionTarget::DccCubic {
+            work_stats.dcc_morph_segment_fits += indices.len().saturating_sub(1);
+        }
+        sequence.morph_tracks[morph] = build_morph_track(target, input, morph, indices);
+    }
+    if let Some(started) = dcc_started {
+        timings.dcc_fit += started.elapsed();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ErrorTrack {
     Bone(usize),
@@ -1240,26 +1427,6 @@ struct WorstError {
     track: ErrorTrack,
 }
 
-fn measure_error(
-    sequence: &ReducedPoseSequence,
-    input: DensePoseSequenceView<'_>,
-    dense: DenseValidationPose<'_>,
-    tolerances: ReductionTolerances,
-    work_stats: &mut ReductionWorkStats,
-    worker_pool: Option<&ReductionThreadPool>,
-    worker_count: usize,
-) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
-    measure_error_with_tolerances(
-        sequence,
-        input,
-        dense,
-        tolerances,
-        work_stats,
-        worker_pool,
-        worker_count,
-    )
-}
-
 #[derive(Clone, Copy)]
 struct DenseValidationPose<'a> {
     translations: &'a [Vec3A],
@@ -1268,25 +1435,61 @@ struct DenseValidationPose<'a> {
     world_rotations: &'a [Quat],
 }
 
-struct FrameErrorResult {
-    report: PoseReductionReport,
-    worst: Vec<Option<WorstError>>,
+#[derive(Clone, Copy, Default)]
+struct BoneErrorCell {
+    local_position: f32,
+    local_rotation: f32,
+    world_position: f32,
+    world_rotation: f32,
 }
 
-fn measure_error_with_tolerances(
+struct ValidationCache {
+    local_translations: Vec<Vec3A>,
+    local_rotations: Vec<Quat>,
+    world_matrices: Vec<Mat4>,
+    world_rotations: Vec<Quat>,
+    morph_weights: Vec<f32>,
+    bone_errors: Vec<BoneErrorCell>,
+    morph_errors: Vec<f32>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+struct ValidationCacheChunk {
+    start_frame: usize,
+    local_translations: Vec<Vec3A>,
+    local_rotations: Vec<Quat>,
+    world_matrices: Vec<Mat4>,
+    world_rotations: Vec<Quat>,
+    morph_weights: Vec<f32>,
+    bone_errors: Vec<BoneErrorCell>,
+    morph_errors: Vec<f32>,
+}
+
+impl ValidationCache {
+    fn new(frame_count: usize, bone_count: usize, morph_count: usize) -> Self {
+        Self {
+            local_translations: vec![Vec3A::ZERO; frame_count * bone_count],
+            local_rotations: vec![Quat::IDENTITY; frame_count * bone_count],
+            world_matrices: vec![Mat4::IDENTITY; frame_count * bone_count],
+            world_rotations: vec![Quat::IDENTITY; frame_count * bone_count],
+            morph_weights: vec![0.0; frame_count * morph_count],
+            bone_errors: vec![BoneErrorCell::default(); frame_count * bone_count],
+            morph_errors: vec![0.0; frame_count * morph_count],
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[allow(clippy::too_many_arguments)]
+fn refresh_full_validation_cache_parallel(
     sequence: &ReducedPoseSequence,
     input: DensePoseSequenceView<'_>,
     dense: DenseValidationPose<'_>,
-    tolerances: ReductionTolerances,
+    cache: &mut ValidationCache,
     work_stats: &mut ReductionWorkStats,
-    worker_pool: Option<&ReductionThreadPool>,
+    worker_pool: &ReductionThreadPool,
     worker_count: usize,
-) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
-    work_stats.bone_samples += input.frame_count * input.bone_count;
-    work_stats.morph_samples += input.frame_count * input.morph_count;
-    work_stats.world_rebuilds += input.frame_count;
-    work_stats.world_rotation_decompositions += input.frame_count * input.bone_count;
-
+) -> Result<(), PoseReductionError> {
     let chunk_size = input.frame_count.div_ceil(worker_count);
     let ranges = (0..worker_count)
         .map(|worker| {
@@ -1295,121 +1498,265 @@ fn measure_error_with_tolerances(
         })
         .filter(|range| !range.is_empty())
         .collect::<Vec<_>>();
-    #[cfg(not(target_family = "wasm"))]
-    let results = if let Some(pool) = worker_pool {
-        pool.install(|| {
-            ranges
-                .par_iter()
-                .map(|range| {
-                    measure_error_range(sequence, input, dense, tolerances, range.start, range.end)
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })?
-    } else {
-        vec![measure_error_range(
-            sequence,
-            input,
-            dense,
-            tolerances,
-            0,
-            input.frame_count,
-        )?]
-    };
-    #[cfg(target_family = "wasm")]
-    let results = {
-        let _ = (worker_pool, ranges);
-        vec![measure_error_range(
-            sequence,
-            input,
-            dense,
-            tolerances,
-            0,
-            input.frame_count,
-        )?]
-    };
+    let chunks = worker_pool.install(|| {
+        ranges
+            .par_iter()
+            .map(|range| {
+                let frame_count = range.end - range.start;
+                let mut chunk = ValidationCacheChunk {
+                    start_frame: range.start,
+                    local_translations: Vec::with_capacity(frame_count * input.bone_count),
+                    local_rotations: Vec::with_capacity(frame_count * input.bone_count),
+                    world_matrices: Vec::with_capacity(frame_count * input.bone_count),
+                    world_rotations: Vec::with_capacity(frame_count * input.bone_count),
+                    morph_weights: Vec::with_capacity(frame_count * input.morph_count),
+                    bone_errors: Vec::with_capacity(frame_count * input.bone_count),
+                    morph_errors: Vec::with_capacity(frame_count * input.morph_count),
+                };
+                let mut scratch = ReducedPoseScratch::default();
+                scratch.prepare(input.bone_count, input.morph_count);
+                for frame in range.clone() {
+                    sequence.sample_into(input.sample_frame(frame), &mut scratch)?;
+                    chunk
+                        .local_translations
+                        .extend_from_slice(&scratch.local_translations);
+                    chunk
+                        .local_rotations
+                        .extend_from_slice(&scratch.local_rotations);
+                    chunk
+                        .world_matrices
+                        .extend_from_slice(&scratch.world_matrices);
+                    for bone in 0..input.bone_count {
+                        let index = frame * input.bone_count + bone;
+                        let world_rotation =
+                            decompose_rigid(scratch.world_matrices[bone], frame, bone)?.1;
+                        chunk.world_rotations.push(world_rotation);
+                        chunk.bone_errors.push(BoneErrorCell {
+                            local_position: dense.translations[index]
+                                .distance(scratch.local_translations[bone]),
+                            local_rotation: quat_angle(
+                                dense.rotations[index],
+                                scratch.local_rotations[bone],
+                            ),
+                            world_position: dense.world_positions[index].distance(Vec3A::from(
+                                scratch.world_matrices[bone].w_axis.truncate(),
+                            )),
+                            world_rotation: quat_angle(
+                                dense.world_rotations[index],
+                                world_rotation,
+                            ),
+                        });
+                    }
+                    chunk
+                        .morph_weights
+                        .extend_from_slice(&scratch.morph_weights);
+                    for morph in 0..input.morph_count {
+                        chunk.morph_errors.push(
+                            (input.morph_weight(frame, morph) - scratch.morph_weights[morph]).abs(),
+                        );
+                    }
+                }
+                Ok(chunk)
+            })
+            .collect::<Result<Vec<_>, PoseReductionError>>()
+    })?;
 
-    let mut report = PoseReductionReport::default();
-    let mut worst = vec![None; input.bone_count + input.morph_count];
-    for result in results {
-        merge_reduction_report(&mut report, result.report);
-        for (merged, candidate) in worst.iter_mut().zip(result.worst) {
-            if let Some(candidate) = candidate {
-                update_worst_candidate(merged, candidate);
-            }
-        }
+    for chunk in chunks {
+        let bone_start = chunk.start_frame * input.bone_count;
+        let bone_end = bone_start + chunk.local_translations.len();
+        cache.local_translations[bone_start..bone_end].copy_from_slice(&chunk.local_translations);
+        cache.local_rotations[bone_start..bone_end].copy_from_slice(&chunk.local_rotations);
+        cache.world_matrices[bone_start..bone_end].copy_from_slice(&chunk.world_matrices);
+        cache.world_rotations[bone_start..bone_end].copy_from_slice(&chunk.world_rotations);
+        cache.bone_errors[bone_start..bone_end].copy_from_slice(&chunk.bone_errors);
+        let morph_start = chunk.start_frame * input.morph_count;
+        let morph_end = morph_start + chunk.morph_weights.len();
+        cache.morph_weights[morph_start..morph_end].copy_from_slice(&chunk.morph_weights);
+        cache.morph_errors[morph_start..morph_end].copy_from_slice(&chunk.morph_errors);
     }
-    Ok((report, worst))
+    work_stats.bone_samples += input.frame_count * input.bone_count;
+    work_stats.morph_samples += input.frame_count * input.morph_count;
+    work_stats.world_rebuilds += input.frame_count;
+    work_stats.world_bone_recomputes += input.frame_count * input.bone_count;
+    work_stats.world_rotation_decompositions += input.frame_count * input.bone_count;
+    Ok(())
 }
 
-fn measure_error_range(
+#[allow(clippy::too_many_arguments)]
+fn measure_error_cached(
     sequence: &ReducedPoseSequence,
     input: DensePoseSequenceView<'_>,
     dense: DenseValidationPose<'_>,
     tolerances: ReductionTolerances,
-    start_frame: usize,
-    end_frame: usize,
-) -> Result<FrameErrorResult, PoseReductionError> {
-    let mut report = PoseReductionReport::default();
-    let mut worst = vec![None; input.bone_count + input.morph_count];
-    let mut scratch = ReducedPoseScratch::default();
-    scratch.prepare(input.bone_count, input.morph_count);
-    for frame in start_frame..end_frame {
-        sequence.sample_into(input.sample_frame(frame), &mut scratch)?;
-        for (bone, bone_worst) in worst[..input.bone_count].iter_mut().enumerate() {
-            let index = frame * input.bone_count + bone;
-            let local_position =
-                dense.translations[index].distance(scratch.local_translations[bone]);
-            let local_rotation = quat_angle(dense.rotations[index], scratch.local_rotations[bone]);
-            let world_position = dense.world_positions[index]
-                .distance(Vec3A::from(scratch.world_matrices[bone].w_axis.truncate()));
-            let sampled_world_rotation =
-                decompose_rigid(scratch.world_matrices[bone], frame, bone)?.1;
-            let world_rotation = quat_angle(dense.world_rotations[index], sampled_world_rotation);
-            report.max_local_position_error = report.max_local_position_error.max(local_position);
-            report.max_local_rotation_error_radians =
-                report.max_local_rotation_error_radians.max(local_rotation);
-            report.max_world_position_error = report.max_world_position_error.max(world_position);
-            report.max_world_rotation_error_radians =
-                report.max_world_rotation_error_radians.max(world_rotation);
-            for normalized in [
-                normalized_error(local_position, tolerances.local_position),
-                normalized_error(local_rotation, tolerances.local_rotation_radians),
-                normalized_error(world_position, tolerances.world_position),
-                normalized_error(world_rotation, tolerances.world_rotation_radians),
-            ] {
-                update_worst(bone_worst, normalized, frame, ErrorTrack::Bone(bone));
+    work_stats: &mut ReductionWorkStats,
+    dirty: &DirtyRanges,
+    cache: &mut ValidationCache,
+    worker_pool: Option<&ReductionThreadPool>,
+    worker_count: usize,
+) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
+    let full_dirty = dirty_ranges_are_full(
+        dirty,
+        input.frame_count,
+        input.bone_count,
+        input.morph_count,
+    );
+    #[cfg(not(target_family = "wasm"))]
+    let refreshed_in_parallel = if full_dirty && worker_count > 1 {
+        refresh_full_validation_cache_parallel(
+            sequence,
+            input,
+            dense,
+            cache,
+            work_stats,
+            worker_pool.expect("multi-worker reduction has a pool"),
+            worker_count,
+        )?;
+        true
+    } else {
+        false
+    };
+    #[cfg(target_family = "wasm")]
+    let refreshed_in_parallel = {
+        let _ = (full_dirty, worker_pool, worker_count);
+        false
+    };
+
+    let mut world_dirty = dirty.bone_local.clone();
+    for &bone in sequence.snapshot.evaluation_order.iter() {
+        let parent = sequence.snapshot.parent_indices[bone];
+        if parent >= 0 {
+            for range in world_dirty[parent as usize].clone() {
+                insert_dirty_range(&mut world_dirty[bone], range);
             }
         }
-        for morph in 0..input.morph_count {
-            let error = (input.morph_weight(frame, morph) - scratch.morph_weights[morph]).abs();
+    }
+
+    if !refreshed_in_parallel {
+        for (bone, ranges) in dirty.bone_local.iter().enumerate() {
+            for range in ranges {
+                for frame in range.clone() {
+                    let index = frame * input.bone_count + bone;
+                    let (translation, rotation) = sample_bone_track(
+                        &sequence.bone_tracks[bone],
+                        &sequence.sample_frames,
+                        input.sample_frame(frame),
+                        sequence.target,
+                    );
+                    cache.local_translations[index] = translation;
+                    cache.local_rotations[index] = rotation;
+                    let cell = &mut cache.bone_errors[index];
+                    cell.local_position = dense.translations[index].distance(translation);
+                    cell.local_rotation = quat_angle(dense.rotations[index], rotation);
+                    work_stats.bone_samples += 1;
+                }
+            }
+        }
+        for (morph, ranges) in dirty.morph.iter().enumerate() {
+            for range in ranges {
+                for frame in range.clone() {
+                    let index = frame * input.morph_count + morph;
+                    let sampled = sample_morph_track(
+                        &sequence.morph_tracks[morph],
+                        &sequence.sample_frames,
+                        input.sample_frame(frame),
+                        sequence.target,
+                    );
+                    cache.morph_weights[index] = sampled;
+                    cache.morph_errors[index] = (input.morph_weight(frame, morph) - sampled).abs();
+                    work_stats.morph_samples += 1;
+                }
+            }
+        }
+
+        let mut rebuilt_frames = vec![false; input.frame_count];
+        for &bone in sequence.snapshot.evaluation_order.iter() {
+            for range in &world_dirty[bone] {
+                for frame in range.clone() {
+                    rebuilt_frames[frame] = true;
+                    let index = frame * input.bone_count + bone;
+                    let local = Mat4::from_rotation_translation(
+                        cache.local_rotations[index],
+                        cache.local_translations[index].into(),
+                    );
+                    let parent = sequence.snapshot.parent_indices[bone];
+                    cache.world_matrices[index] = if parent < 0 {
+                        local
+                    } else {
+                        cache.world_matrices[frame * input.bone_count + parent as usize] * local
+                    };
+                    cache.world_rotations[index] =
+                        decompose_rigid(cache.world_matrices[index], frame, bone)?.1;
+                    let cell = &mut cache.bone_errors[index];
+                    cell.world_position = dense.world_positions[index]
+                        .distance(Vec3A::from(cache.world_matrices[index].w_axis.truncate()));
+                    cell.world_rotation =
+                        quat_angle(dense.world_rotations[index], cache.world_rotations[index]);
+                    work_stats.world_bone_recomputes += 1;
+                    work_stats.world_rotation_decompositions += 1;
+                }
+            }
+        }
+        work_stats.world_rebuilds += rebuilt_frames
+            .into_iter()
+            .filter(|rebuilt| *rebuilt)
+            .count();
+    }
+
+    let mut report = PoseReductionReport::default();
+    let mut worst = vec![None; input.bone_count + input.morph_count];
+    for frame in 0..input.frame_count {
+        let (bone_worst, morph_worst) = worst.split_at_mut(input.bone_count);
+        for (bone, worst) in bone_worst.iter_mut().enumerate() {
+            let index = frame * input.bone_count + bone;
+            let cell = cache.bone_errors[index];
+            report.max_local_position_error =
+                report.max_local_position_error.max(cell.local_position);
+            report.max_local_rotation_error_radians = report
+                .max_local_rotation_error_radians
+                .max(cell.local_rotation);
+            report.max_world_position_error =
+                report.max_world_position_error.max(cell.world_position);
+            report.max_world_rotation_error_radians = report
+                .max_world_rotation_error_radians
+                .max(cell.world_rotation);
+            for normalized in [
+                normalized_error(cell.local_position, tolerances.local_position),
+                normalized_error(cell.local_rotation, tolerances.local_rotation_radians),
+                normalized_error(cell.world_position, tolerances.world_position),
+                normalized_error(cell.world_rotation, tolerances.world_rotation_radians),
+            ] {
+                update_worst(worst, normalized, frame, ErrorTrack::Bone(bone));
+            }
+        }
+        for (morph, morph_worst) in morph_worst.iter_mut().enumerate() {
+            let error = cache.morph_errors[frame * input.morph_count + morph];
             report.max_morph_weight_error = report.max_morph_weight_error.max(error);
             update_worst(
-                &mut worst[input.bone_count + morph],
+                morph_worst,
                 normalized_error(error, tolerances.morph_weight),
                 frame,
                 ErrorTrack::Morph(morph),
             );
         }
     }
-    Ok(FrameErrorResult { report, worst })
+    Ok((report, worst))
 }
 
-fn merge_reduction_report(report: &mut PoseReductionReport, candidate: PoseReductionReport) {
-    report.max_local_position_error = report
-        .max_local_position_error
-        .max(candidate.max_local_position_error);
-    report.max_local_rotation_error_radians = report
-        .max_local_rotation_error_radians
-        .max(candidate.max_local_rotation_error_radians);
-    report.max_world_position_error = report
-        .max_world_position_error
-        .max(candidate.max_world_position_error);
-    report.max_world_rotation_error_radians = report
-        .max_world_rotation_error_radians
-        .max(candidate.max_world_rotation_error_radians);
-    report.max_morph_weight_error = report
-        .max_morph_weight_error
-        .max(candidate.max_morph_weight_error);
+fn dirty_ranges_are_full(
+    dirty: &DirtyRanges,
+    frame_count: usize,
+    bone_count: usize,
+    morph_count: usize,
+) -> bool {
+    let is_full = |ranges: &[std::ops::RangeInclusive<usize>]| {
+        ranges.len() == 1
+            && *ranges[0].start() == 0
+            && *ranges[0].end() == frame_count.saturating_sub(1)
+    };
+    dirty.bone_local.len() == bone_count
+        && dirty.morph.len() == morph_count
+        && dirty.bone_local.iter().all(|ranges| is_full(ranges))
+        && dirty.morph.iter().all(|ranges| is_full(ranges))
 }
 
 fn update_worst(worst: &mut Option<WorstError>, normalized: f32, frame: usize, track: ErrorTrack) {

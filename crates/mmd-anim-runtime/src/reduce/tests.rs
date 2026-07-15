@@ -220,15 +220,107 @@ fn reduction_work_stats_are_deterministic_and_separate_from_quality_report() {
     );
     assert_eq!(stats.local_prefit_bone_segment_fits, 0);
     assert_eq!(stats.local_prefit_morph_segment_fits, 0);
-    assert_eq!(stats.bone_samples, stats.global_validation_passes * 7 * 2);
-    assert_eq!(stats.morph_samples, stats.global_validation_passes * 7);
-    assert_eq!(stats.world_rebuilds, stats.global_validation_passes * 7);
+    assert!(stats.bone_samples < stats.global_validation_passes * 7 * 2);
+    assert!(stats.morph_samples < stats.global_validation_passes * 7);
+    assert!(stats.world_rebuilds <= stats.global_validation_passes * 7);
     assert_eq!(
         stats.world_rotation_decompositions,
-        (stats.global_validation_passes + 1) * 7 * 2
+        7 * 2 + stats.world_bone_recomputes
     );
     assert!(stats.dcc_bone_segment_fits > 0);
     assert!(stats.dcc_morph_segment_fits > 0);
+}
+
+#[test]
+fn incremental_validation_matches_full_scan_on_branching_sequence() {
+    let frame_count = 97;
+    let parents = vec![-1, 0, 0, 1, 1];
+    let snapshot = SkeletonSnapshot::new(
+        parents.clone(),
+        vec![Vec3A::ZERO; parents.len()],
+        vec![Quat::IDENTITY; parents.len()],
+        2,
+        314,
+    )
+    .unwrap();
+    let mut world = Vec::with_capacity(frame_count * parents.len());
+    for frame in 0..frame_count {
+        let time = frame as f32;
+        let mut frame_world = vec![Mat4::IDENTITY; parents.len()];
+        for bone in 0..parents.len() {
+            let local = Mat4::from_rotation_translation(
+                Quat::from_rotation_z((time * (0.017 + bone as f32 * 0.009)).sin() * 0.35),
+                Vec3::new(
+                    bone as f32 * 0.3 + (time * (0.031 + bone as f32 * 0.004)).sin(),
+                    (time * (0.023 + bone as f32 * 0.006)).cos() * 0.4,
+                    0.0,
+                ),
+            );
+            frame_world[bone] = if parents[bone] < 0 {
+                local
+            } else {
+                frame_world[parents[bone] as usize] * local
+            };
+        }
+        world.extend(frame_world);
+    }
+    let morphs = (0..frame_count)
+        .flat_map(|frame| {
+            let time = frame as f32;
+            [
+                (time * 0.071).sin() * 0.5 + 0.5,
+                (time * 0.113).cos() * 0.5 + 0.5,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let input =
+        DensePoseSequenceView::new(&world, &morphs, frame_count, parents.len(), 2, 0.0, 1.0)
+            .unwrap();
+    let tolerances = ReductionTolerances {
+        local_position: 0.05,
+        local_rotation_radians: 0.05,
+        world_position: 0.002,
+        world_rotation_radians: 0.002,
+        morph_weight: 0.05,
+    };
+    let incremental_with_workers = |workers| {
+        reduce_dense_pose_sequence_internal(
+            input,
+            snapshot.clone(),
+            tolerances,
+            ReductionTarget::DccCubic,
+            workers,
+            ValidationMode::Incremental,
+        )
+        .unwrap()
+    };
+    let incremental = incremental_with_workers(1);
+    let incremental_two = incremental_with_workers(2);
+    let incremental_four = incremental_with_workers(4);
+    let full = reduce_dense_pose_sequence_internal(
+        input,
+        snapshot,
+        tolerances,
+        ReductionTarget::DccCubic,
+        1,
+        ValidationMode::FullScan,
+    )
+    .unwrap();
+
+    assert_eq!(incremental, incremental_two);
+    assert_eq!(incremental, incremental_four);
+    assert_eq!(incremental.bone_tracks(), full.bone_tracks());
+    assert_eq!(incremental.morph_tracks(), full.morph_tracks());
+    assert_eq!(incremental.report(), full.report());
+    assert_eq!(
+        incremental.work_stats().added_keys_per_pass,
+        full.work_stats().added_keys_per_pass
+    );
+    assert!(incremental.work_stats().bone_samples < full.work_stats().bone_samples);
+    assert!(
+        incremental.work_stats().world_bone_recomputes < full.work_stats().world_bone_recomputes
+    );
+    assert!(incremental.work_stats().morph_samples < full.work_stats().morph_samples);
 }
 
 #[test]

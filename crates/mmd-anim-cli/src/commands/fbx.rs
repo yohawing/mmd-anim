@@ -294,6 +294,8 @@ pub(crate) fn convert_pmx_to_fbx(
             report["poseReduction"]["workStats"] = json!({
                 "globalValidationPasses": work.global_validation_passes,
                 "candidateRebuilds": work.candidate_rebuilds,
+                "candidateBoneTrackRebuilds": work.candidate_bone_track_rebuilds,
+                "candidateMorphTrackRebuilds": work.candidate_morph_track_rebuilds,
                 "localPrefitBoneSegmentFits": work.local_prefit_bone_segment_fits,
                 "localPrefitMorphSegmentFits": work.local_prefit_morph_segment_fits,
                 "localPrefitBoneKeyAdditions": work.local_prefit_bone_key_additions,
@@ -305,6 +307,7 @@ pub(crate) fn convert_pmx_to_fbx(
                 "boneSamples": work.bone_samples,
                 "morphSamples": work.morph_samples,
                 "worldRebuilds": work.world_rebuilds,
+                "worldBoneRecomputes": work.world_bone_recomputes,
                 "worldRotationDecompositions": work.world_rotation_decompositions,
                 "normalKeyAdditions": work.normal_key_additions,
                 "ancestorKeyAdditions": work.ancestor_key_additions,

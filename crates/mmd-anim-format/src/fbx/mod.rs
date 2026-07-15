@@ -3580,6 +3580,7 @@ mod tests {
             report: PoseReductionReport::default(),
             work_stats: ReductionWorkStats::default(),
             timings: ReductionTimings {
+                local_prefit: Duration::from_millis(3),
                 candidate_build: Duration::from_millis(1),
                 error_measure: Duration::from_millis(2),
                 dcc_fit: Duration::from_millis(1),
@@ -3587,6 +3588,7 @@ mod tests {
         };
         let mut second = first.clone();
         second.timings = ReductionTimings {
+            local_prefit: Duration::from_secs(3),
             candidate_build: Duration::from_secs(1),
             error_measure: Duration::from_secs(2),
             dcc_fit: Duration::from_secs(1),

@@ -294,6 +294,12 @@ pub(crate) fn convert_pmx_to_fbx(
             report["poseReduction"]["workStats"] = json!({
                 "globalValidationPasses": work.global_validation_passes,
                 "candidateRebuilds": work.candidate_rebuilds,
+                "localPrefitBoneSegmentFits": work.local_prefit_bone_segment_fits,
+                "localPrefitMorphSegmentFits": work.local_prefit_morph_segment_fits,
+                "localPrefitBoneKeyAdditions": work.local_prefit_bone_key_additions,
+                "localPrefitMorphKeyAdditions": work.local_prefit_morph_key_additions,
+                "localPrefitBoneSamples": work.local_prefit_bone_samples,
+                "localPrefitMorphSamples": work.local_prefit_morph_samples,
                 "dccBoneSegmentFits": work.dcc_bone_segment_fits,
                 "dccMorphSegmentFits": work.dcc_morph_segment_fits,
                 "boneSamples": work.bone_samples,
@@ -307,6 +313,7 @@ pub(crate) fn convert_pmx_to_fbx(
         }
         if let Some(timings) = reduction_timings {
             report["poseReduction"]["timingsMs"] = json!({
+                "localPrefit": timings.local_prefit.as_secs_f64() * 1000.0,
                 "candidateBuild": timings.candidate_build.as_secs_f64() * 1000.0,
                 "errorMeasure": timings.error_measure.as_secs_f64() * 1000.0,
                 "dccFit": timings.dcc_fit.as_secs_f64() * 1000.0,

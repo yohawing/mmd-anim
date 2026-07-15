@@ -11,6 +11,8 @@ use thiserror::Error;
 use crate::{BoneIndex, InterpolationScalar, ModelArena};
 
 const AFFINE_EPSILON: f32 = 1.0e-4;
+// Below this point the one-time prefit costs more than the global passes it removes.
+const DCC_LOCAL_PREFIT_MIN_FRAMES: usize = 90;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DensePoseSequenceView<'a> {
@@ -364,6 +366,12 @@ pub struct PoseReductionReport {
 pub struct ReductionWorkStats {
     pub global_validation_passes: usize,
     pub candidate_rebuilds: usize,
+    pub local_prefit_bone_segment_fits: usize,
+    pub local_prefit_morph_segment_fits: usize,
+    pub local_prefit_bone_key_additions: usize,
+    pub local_prefit_morph_key_additions: usize,
+    pub local_prefit_bone_samples: usize,
+    pub local_prefit_morph_samples: usize,
     pub dcc_bone_segment_fits: usize,
     pub dcc_morph_segment_fits: usize,
     pub bone_samples: usize,
@@ -377,6 +385,7 @@ pub struct ReductionWorkStats {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReductionTimings {
+    pub local_prefit: Duration,
     pub candidate_build: Duration,
     pub error_measure: Duration,
     pub dcc_fit: Duration,
@@ -613,7 +622,30 @@ pub fn reduce_dense_pose_sequence_with_worker_count(
     let mut bone_key_indices = vec![endpoint_indices(input.frame_count); input.bone_count];
     let mut morph_key_indices = vec![endpoint_indices(input.frame_count); input.morph_count];
 
-    if target == ReductionTarget::LinearSlerp {
+    if target == ReductionTarget::DccCubic && input.frame_count >= DCC_LOCAL_PREFIT_MIN_FRAMES {
+        let dcc_prefit_started = Instant::now();
+        for (bone, keys) in bone_key_indices.iter_mut().enumerate() {
+            let prefit = split_dcc_bone_track(
+                keys,
+                input,
+                bone,
+                &local_translations,
+                &local_rotations,
+                &local_euler_xyz,
+                tolerances,
+            );
+            work_stats.local_prefit_bone_segment_fits += prefit.segment_fits;
+            work_stats.local_prefit_bone_key_additions += prefit.key_additions;
+            work_stats.local_prefit_bone_samples += prefit.samples;
+        }
+        for (morph, keys) in morph_key_indices.iter_mut().enumerate() {
+            let prefit = split_dcc_morph_track(keys, input, morph, tolerances.morph_weight);
+            work_stats.local_prefit_morph_segment_fits += prefit.segment_fits;
+            work_stats.local_prefit_morph_key_additions += prefit.key_additions;
+            work_stats.local_prefit_morph_samples += prefit.samples;
+        }
+        timings.local_prefit += dcc_prefit_started.elapsed();
+    } else if target == ReductionTarget::LinearSlerp {
         for (bone, keys) in bone_key_indices.iter_mut().enumerate() {
             split_bone_track(
                 keys,
@@ -888,6 +920,133 @@ fn split_bone_track(
             stack.push((start, frame));
         }
     }
+}
+
+#[derive(Default)]
+struct LocalPrefitStats {
+    segment_fits: usize,
+    key_additions: usize,
+    samples: usize,
+}
+
+fn split_dcc_bone_track(
+    keys: &mut Vec<usize>,
+    input: DensePoseSequenceView<'_>,
+    bone: usize,
+    translations: &[Vec3A],
+    rotations: &[Quat],
+    euler_xyz: &[Vec3A],
+    tolerances: ReductionTolerances,
+) -> LocalPrefitStats {
+    if input.frame_count <= 2 {
+        return LocalPrefitStats::default();
+    }
+    let bone_count = input.bone_count;
+    let mut stats = LocalPrefitStats::default();
+    let mut stack = vec![(0usize, input.frame_count - 1)];
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+        let segment = fit_dcc_bone_segment(input, bone, start, end, translations, euler_xyz);
+        stats.segment_fits += 1;
+        let start_index = start * bone_count + bone;
+        let end_index = end * bone_count + bone;
+        let duration = input.sample_frame(end) - input.sample_frame(start);
+        let mut worst: Option<(f32, usize)> = None;
+        for frame in start + 1..end {
+            stats.samples += 1;
+            let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
+            let translation = sample_dcc_vec3(
+                translations[start_index],
+                translations[end_index],
+                segment.translation_out_tangent,
+                segment.translation_in_tangent,
+                duration,
+                amount,
+            );
+            let euler = sample_dcc_vec3(
+                segment.rotation_start_euler_xyz,
+                segment.rotation_end_euler_xyz,
+                segment.rotation_out_tangent,
+                segment.rotation_in_tangent,
+                duration,
+                amount,
+            );
+            let rotation =
+                normalize_quat(Quat::from_euler(EulerRot::XYZ, euler.x, euler.y, euler.z));
+            let index = frame * bone_count + bone;
+            let normalized = normalized_error(
+                translations[index].distance(translation),
+                tolerances.local_position,
+            )
+            .max(normalized_error(
+                quat_angle(rotations[index], rotation),
+                tolerances.local_rotation_radians,
+            ));
+            if is_worse(worst, normalized, frame) {
+                worst = Some((normalized, frame));
+            }
+        }
+        if let Some((_, frame)) = worst.filter(|value| value.0 > 1.0) {
+            stats.key_additions += usize::from(insert_key(keys, frame));
+            stack.push((frame, end));
+            stack.push((start, frame));
+        }
+    }
+    stats
+}
+
+fn split_dcc_morph_track(
+    keys: &mut Vec<usize>,
+    input: DensePoseSequenceView<'_>,
+    morph: usize,
+    tolerance: f32,
+) -> LocalPrefitStats {
+    if input.frame_count <= 2 {
+        return LocalPrefitStats::default();
+    }
+    let mut stats = LocalPrefitStats::default();
+    let mut stack = vec![(0usize, input.frame_count - 1)];
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+        let segment = fit_dcc_scalar_segment(
+            start,
+            end,
+            |sample| input.morph_weight(sample, morph),
+            |sample| input.sample_frame(sample),
+        );
+        stats.segment_fits += 1;
+        let duration = input.sample_frame(end) - input.sample_frame(start);
+        let mut worst: Option<(f32, usize)> = None;
+        for frame in start + 1..end {
+            stats.samples += 1;
+            let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
+            let expected = sample_hermite(
+                input.morph_weight(start, morph),
+                input.morph_weight(end, morph),
+                segment.out_tangent,
+                segment.in_tangent,
+                duration,
+                amount,
+            );
+            let normalized = normalized_error(
+                (input.morph_weight(frame, morph) - expected).abs(),
+                tolerance,
+            );
+            if is_worse(worst, normalized, frame) {
+                worst = Some((normalized, frame));
+            }
+        }
+        if let Some((_, frame)) = worst.filter(|value| value.0 > 1.0) {
+            stats.key_additions += usize::from(insert_key(keys, frame));
+            stack.push((frame, end));
+            stack.push((start, frame));
+        }
+    }
+    stats
 }
 
 fn split_morph_track(
@@ -1634,6 +1793,21 @@ fn sample_hermite(
 ) -> f32 {
     let (h00, h10, h01, h11) = hermite_basis(t);
     h00 * start + h10 * duration * out_tangent + h01 * end + h11 * duration * in_tangent
+}
+
+fn sample_dcc_vec3(
+    start: Vec3A,
+    end: Vec3A,
+    out_tangent: Vec3A,
+    in_tangent: Vec3A,
+    duration: f32,
+    t: f32,
+) -> Vec3A {
+    Vec3A::new(
+        sample_hermite(start.x, end.x, out_tangent.x, in_tangent.x, duration, t),
+        sample_hermite(start.y, end.y, out_tangent.y, in_tangent.y, duration, t),
+        sample_hermite(start.z, end.z, out_tangent.z, in_tangent.z, duration, t),
+    )
 }
 
 fn sample_bone_track(

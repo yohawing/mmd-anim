@@ -218,6 +218,8 @@ fn reduction_work_stats_are_deterministic_and_separate_from_quality_report() {
         stats.normal_key_additions + stats.ancestor_key_additions,
         stats.added_keys_per_pass.iter().sum::<usize>()
     );
+    assert_eq!(stats.local_prefit_bone_segment_fits, 0);
+    assert_eq!(stats.local_prefit_morph_segment_fits, 0);
     assert_eq!(stats.bone_samples, stats.global_validation_passes * 7 * 2);
     assert_eq!(stats.morph_samples, stats.global_validation_passes * 7);
     assert_eq!(stats.world_rebuilds, stats.global_validation_passes * 7);
@@ -230,14 +232,44 @@ fn reduction_work_stats_are_deterministic_and_separate_from_quality_report() {
 }
 
 #[test]
+fn dcc_local_prefit_records_separate_work_for_long_sequences() {
+    let frame_count = 97;
+    let world = dense_world(frame_count);
+    let morphs = (0..frame_count)
+        .map(|frame| ((frame as f32 * 0.37).sin() * 0.5 + 0.5).clamp(0.0, 1.0))
+        .collect::<Vec<_>>();
+    let reduced = reduce_dense_pose_sequence(
+        DensePoseSequenceView::new(&world, &morphs, frame_count, 2, 1, 0.0, 1.0).unwrap(),
+        snapshot(),
+        ReductionTolerances {
+            local_position: 0.01,
+            local_rotation_radians: 0.01,
+            world_position: 0.01,
+            world_rotation_radians: 0.01,
+            morph_weight: 0.01,
+        },
+        ReductionTarget::DccCubic,
+    )
+    .unwrap();
+    let stats = reduced.work_stats();
+
+    assert!(stats.local_prefit_bone_segment_fits > 0);
+    assert!(stats.local_prefit_morph_segment_fits > 0);
+    assert!(stats.local_prefit_morph_key_additions > 0);
+    assert!(stats.local_prefit_bone_samples > 0);
+    assert!(stats.local_prefit_morph_samples > 0);
+}
+
+#[test]
 fn frame_validation_is_deterministic_across_worker_counts() {
-    let world = dense_world(17);
-    let morphs = (0..17)
+    let frame_count = 97;
+    let world = dense_world(frame_count);
+    let morphs = (0..frame_count)
         .map(|frame| ((frame as f32 * 0.73).sin() * 0.5 + 0.5).clamp(0.0, 1.0))
         .collect::<Vec<_>>();
     let reduce = |workers| {
         reduce_dense_pose_sequence_with_worker_count(
-            DensePoseSequenceView::new(&world, &morphs, 17, 2, 1, 0.0, 1.0).unwrap(),
+            DensePoseSequenceView::new(&world, &morphs, frame_count, 2, 1, 0.0, 1.0).unwrap(),
             snapshot(),
             ReductionTolerances {
                 local_position: 0.01,

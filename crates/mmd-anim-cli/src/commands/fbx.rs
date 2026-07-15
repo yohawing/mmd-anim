@@ -150,6 +150,8 @@ pub(crate) fn convert_pmx_to_fbx(
 
     let mut baked_max_frame = None;
     let mut reduction_report = None;
+    let mut reduction_work_stats = None;
+    let mut reduction_timings = None;
     let fbx = if let Some(vmd_path) = vmd {
         let motion_data = read_file(vmd_path)?;
         let motion = mmd_anim_format::parse_vmd_animation(&motion_data).map_err(|error| {
@@ -215,6 +217,8 @@ pub(crate) fn convert_pmx_to_fbx(
                 pose_reduction_tolerances(&convert_options),
             )?;
             reduction_report = Some(export.report);
+            reduction_work_stats = Some(export.work_stats);
+            reduction_timings = Some(export.timings);
             export.bytes
         } else if convert_options.physics_bake {
             export_fbx_with_physics_bake(&model, runtime_model, &clip, last_frame, &options)?
@@ -228,6 +232,8 @@ pub(crate) fn convert_pmx_to_fbx(
                 &options,
             )?;
             reduction_report = Some(export.report);
+            reduction_work_stats = Some(export.work_stats);
+            reduction_timings = Some(export.timings);
             export.bytes
         } else {
             mmd_anim_format::fbx::export_fbx_with_runtime_bake(
@@ -282,6 +288,28 @@ pub(crate) fn convert_pmx_to_fbx(
                 "maxWorldPositionError": reduction.max_world_position_error,
                 "maxWorldRotationErrorRadians": reduction.max_world_rotation_error_radians,
                 "maxMorphWeightError": reduction.max_morph_weight_error,
+            });
+        }
+        if let Some(work) = reduction_work_stats {
+            report["poseReduction"]["workStats"] = json!({
+                "globalValidationPasses": work.global_validation_passes,
+                "candidateRebuilds": work.candidate_rebuilds,
+                "dccBoneSegmentFits": work.dcc_bone_segment_fits,
+                "dccMorphSegmentFits": work.dcc_morph_segment_fits,
+                "boneSamples": work.bone_samples,
+                "morphSamples": work.morph_samples,
+                "worldRebuilds": work.world_rebuilds,
+                "worldRotationDecompositions": work.world_rotation_decompositions,
+                "normalKeyAdditions": work.normal_key_additions,
+                "ancestorKeyAdditions": work.ancestor_key_additions,
+                "addedKeysPerPass": work.added_keys_per_pass,
+            });
+        }
+        if let Some(timings) = reduction_timings {
+            report["poseReduction"]["timingsMs"] = json!({
+                "candidateBuild": timings.candidate_build.as_secs_f64() * 1000.0,
+                "errorMeasure": timings.error_measure.as_secs_f64() * 1000.0,
+                "dccFit": timings.dcc_fit.as_secs_f64() * 1000.0,
             });
         }
         println!("{}", serde_json::to_string_pretty(&report)?);

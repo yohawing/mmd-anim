@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::time::{Duration, Instant};
 
 use glam::{EulerRot, Mat3, Mat4, Quat, Vec3, Vec3A};
 use thiserror::Error;
@@ -355,7 +356,29 @@ pub struct PoseReductionReport {
     pub max_morph_weight_error: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReductionWorkStats {
+    pub global_validation_passes: usize,
+    pub candidate_rebuilds: usize,
+    pub dcc_bone_segment_fits: usize,
+    pub dcc_morph_segment_fits: usize,
+    pub bone_samples: usize,
+    pub morph_samples: usize,
+    pub world_rebuilds: usize,
+    pub world_rotation_decompositions: usize,
+    pub normal_key_additions: usize,
+    pub ancestor_key_additions: usize,
+    pub added_keys_per_pass: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReductionTimings {
+    pub candidate_build: Duration,
+    pub error_measure: Duration,
+    pub dcc_fit: Duration,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReducedPoseSequence {
     snapshot: SkeletonSnapshot,
     target: ReductionTarget,
@@ -366,6 +389,23 @@ pub struct ReducedPoseSequence {
     bone_tracks: Box<[ReducedBoneTrack]>,
     morph_tracks: Box<[ReducedMorphTrack]>,
     report: PoseReductionReport,
+    work_stats: ReductionWorkStats,
+    timings: ReductionTimings,
+}
+
+impl PartialEq for ReducedPoseSequence {
+    fn eq(&self, other: &Self) -> bool {
+        self.snapshot == other.snapshot
+            && self.target == other.target
+            && self.start_frame == other.start_frame
+            && self.frame_step == other.frame_step
+            && self.frame_count == other.frame_count
+            && self.sample_frames == other.sample_frames
+            && self.bone_tracks == other.bone_tracks
+            && self.morph_tracks == other.morph_tracks
+            && self.report == other.report
+            && self.work_stats == other.work_stats
+    }
 }
 
 impl ReducedPoseSequence {
@@ -395,6 +435,12 @@ impl ReducedPoseSequence {
     }
     pub fn report(&self) -> PoseReductionReport {
         self.report
+    }
+    pub fn work_stats(&self) -> &ReductionWorkStats {
+        &self.work_stats
+    }
+    pub fn timings(&self) -> ReductionTimings {
+        self.timings
     }
 
     pub fn sample(&self, frame: f32) -> Result<ReducedPoseSample, PoseReductionError> {
@@ -526,6 +572,11 @@ pub fn reduce_dense_pose_sequence(
 
     let (local_translations, local_rotations) = decompose_dense_pose(input, &snapshot)?;
     let (world_positions, world_rotations) = cache_dense_world_components(input)?;
+    let mut work_stats = ReductionWorkStats {
+        world_rotation_decompositions: input.frame_count * input.bone_count,
+        ..Default::default()
+    };
+    let mut timings = ReductionTimings::default();
     let local_euler_xyz = unwrap_euler_xyz(&local_rotations, input.frame_count, input.bone_count);
     for frame in 0..input.frame_count {
         for morph in 0..input.morph_count {
@@ -557,6 +608,9 @@ pub fn reduce_dense_pose_sequence(
     }
 
     loop {
+        work_stats.global_validation_passes += 1;
+        work_stats.candidate_rebuilds += 1;
+        let candidate_started = Instant::now();
         let candidate = build_sequence(
             &snapshot,
             target,
@@ -568,22 +622,33 @@ pub fn reduce_dense_pose_sequence(
             },
             &bone_key_indices,
             &morph_key_indices,
+            ReductionInstrumentation {
+                work_stats: &mut work_stats,
+                timings: &mut timings,
+            },
         );
+        timings.candidate_build += candidate_started.elapsed();
+        let error_measure_started = Instant::now();
         let (report, worst_by_track) = measure_error(
             &candidate,
             input,
-            &local_translations,
-            &local_rotations,
-            &world_positions,
-            &world_rotations,
+            DenseValidationPose {
+                translations: &local_translations,
+                rotations: &local_rotations,
+                world_positions: &world_positions,
+                world_rotations: &world_rotations,
+            },
             tolerances,
+            &mut work_stats,
         )?;
+        timings.error_measure += error_measure_started.elapsed();
         let failing = worst_by_track
             .into_iter()
             .flatten()
             .filter(|worst| worst.normalized_error > 1.0)
             .collect::<Vec<_>>();
         if failing.is_empty() {
+            work_stats.added_keys_per_pass.push(0);
             let mut result = candidate;
             result.report = PoseReductionReport {
                 source_bone_key_count: input.frame_count * input.bone_count,
@@ -600,25 +665,43 @@ pub fn reduce_dense_pose_sequence(
                     .sum(),
                 ..report
             };
+            result.work_stats = work_stats;
+            result.timings = timings;
             return Ok(result);
         }
         let mut inserted = false;
+        let mut added_this_pass = 0;
         let first_failure_frame = failing[0].frame;
         for worst in failing {
             match worst.track {
                 ErrorTrack::Bone(bone) => {
                     let mut cursor = Some(bone);
+                    let mut is_origin = true;
                     while let Some(index) = cursor {
-                        inserted |= insert_key(&mut bone_key_indices[index], worst.frame);
+                        if insert_key(&mut bone_key_indices[index], worst.frame) {
+                            inserted = true;
+                            added_this_pass += 1;
+                            if is_origin {
+                                work_stats.normal_key_additions += 1;
+                            } else {
+                                work_stats.ancestor_key_additions += 1;
+                            }
+                        }
                         let parent = snapshot.parent_indices[index];
                         cursor = (parent >= 0).then_some(parent as usize);
+                        is_origin = false;
                     }
                 }
                 ErrorTrack::Morph(morph) => {
-                    inserted |= insert_key(&mut morph_key_indices[morph], worst.frame);
+                    if insert_key(&mut morph_key_indices[morph], worst.frame) {
+                        inserted = true;
+                        added_this_pass += 1;
+                        work_stats.normal_key_additions += 1;
+                    }
                 }
             }
         }
+        work_stats.added_keys_per_pass.push(added_this_pass);
         if !inserted {
             return Err(PoseReductionError::ToleranceUnattainable {
                 frame: first_failure_frame,
@@ -831,6 +914,11 @@ struct DenseLocalPose<'a> {
     euler_xyz: &'a [Vec3A],
 }
 
+struct ReductionInstrumentation<'a> {
+    work_stats: &'a mut ReductionWorkStats,
+    timings: &'a mut ReductionTimings,
+}
+
 fn build_sequence(
     snapshot: &SkeletonSnapshot,
     target: ReductionTarget,
@@ -838,7 +926,23 @@ fn build_sequence(
     local_pose: DenseLocalPose<'_>,
     bone_key_indices: &[Vec<usize>],
     morph_key_indices: &[Vec<usize>],
+    instrumentation: ReductionInstrumentation<'_>,
 ) -> ReducedPoseSequence {
+    let ReductionInstrumentation {
+        work_stats,
+        timings,
+    } = instrumentation;
+    if target == ReductionTarget::DccCubic {
+        work_stats.dcc_bone_segment_fits += bone_key_indices
+            .iter()
+            .map(|indices| indices.len().saturating_sub(1))
+            .sum::<usize>();
+        work_stats.dcc_morph_segment_fits += morph_key_indices
+            .iter()
+            .map(|indices| indices.len().saturating_sub(1))
+            .sum::<usize>();
+    }
+    let dcc_bone_started = (target == ReductionTarget::DccCubic).then(Instant::now);
     let bone_tracks = bone_key_indices
         .iter()
         .enumerate()
@@ -886,6 +990,10 @@ fn build_sequence(
         })
         .collect::<Vec<_>>()
         .into_boxed_slice();
+    if let Some(started) = dcc_bone_started {
+        timings.dcc_fit += started.elapsed();
+    }
+    let dcc_morph_started = (target == ReductionTarget::DccCubic).then(Instant::now);
     let morph_tracks = morph_key_indices
         .iter()
         .enumerate()
@@ -912,6 +1020,9 @@ fn build_sequence(
         })
         .collect::<Vec<_>>()
         .into_boxed_slice();
+    if let Some(started) = dcc_morph_started {
+        timings.dcc_fit += started.elapsed();
+    }
     ReducedPoseSequence {
         snapshot: snapshot.clone(),
         target,
@@ -925,6 +1036,8 @@ fn build_sequence(
         bone_tracks,
         morph_tracks,
         report: PoseReductionReport::default(),
+        work_stats: ReductionWorkStats::default(),
+        timings: ReductionTimings::default(),
     }
 }
 
@@ -944,31 +1057,27 @@ struct WorstError {
 fn measure_error(
     sequence: &ReducedPoseSequence,
     input: DensePoseSequenceView<'_>,
-    translations: &[Vec3A],
-    rotations: &[Quat],
-    world_positions: &[Vec3A],
-    world_rotations: &[Quat],
+    dense: DenseValidationPose<'_>,
     tolerances: ReductionTolerances,
+    work_stats: &mut ReductionWorkStats,
 ) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
-    measure_error_with_tolerances(
-        sequence,
-        input,
-        translations,
-        rotations,
-        world_positions,
-        world_rotations,
-        tolerances,
-    )
+    measure_error_with_tolerances(sequence, input, dense, tolerances, work_stats)
+}
+
+#[derive(Clone, Copy)]
+struct DenseValidationPose<'a> {
+    translations: &'a [Vec3A],
+    rotations: &'a [Quat],
+    world_positions: &'a [Vec3A],
+    world_rotations: &'a [Quat],
 }
 
 fn measure_error_with_tolerances(
     sequence: &ReducedPoseSequence,
     input: DensePoseSequenceView<'_>,
-    translations: &[Vec3A],
-    rotations: &[Quat],
-    world_positions: &[Vec3A],
-    world_rotations: &[Quat],
+    dense: DenseValidationPose<'_>,
     tolerances: ReductionTolerances,
+    work_stats: &mut ReductionWorkStats,
 ) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
     let mut report = PoseReductionReport::default();
     let mut worst = vec![None; input.bone_count + input.morph_count];
@@ -976,15 +1085,20 @@ fn measure_error_with_tolerances(
     scratch.prepare(input.bone_count, input.morph_count);
     for frame in 0..input.frame_count {
         sequence.sample_into(input.sample_frame(frame), &mut scratch)?;
+        work_stats.bone_samples += input.bone_count;
+        work_stats.morph_samples += input.morph_count;
+        work_stats.world_rebuilds += 1;
+        work_stats.world_rotation_decompositions += input.bone_count;
         for (bone, bone_worst) in worst[..input.bone_count].iter_mut().enumerate() {
             let index = frame * input.bone_count + bone;
-            let local_position = translations[index].distance(scratch.local_translations[bone]);
-            let local_rotation = quat_angle(rotations[index], scratch.local_rotations[bone]);
-            let world_position = world_positions[index]
+            let local_position =
+                dense.translations[index].distance(scratch.local_translations[bone]);
+            let local_rotation = quat_angle(dense.rotations[index], scratch.local_rotations[bone]);
+            let world_position = dense.world_positions[index]
                 .distance(Vec3A::from(scratch.world_matrices[bone].w_axis.truncate()));
             let sampled_world_rotation =
                 decompose_rigid(scratch.world_matrices[bone], frame, bone)?.1;
-            let world_rotation = quat_angle(world_rotations[index], sampled_world_rotation);
+            let world_rotation = quat_angle(dense.world_rotations[index], sampled_world_rotation);
             report.max_local_position_error = report.max_local_position_error.max(local_position);
             report.max_local_rotation_error_radians =
                 report.max_local_rotation_error_radians.max(local_rotation);

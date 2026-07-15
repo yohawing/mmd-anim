@@ -184,6 +184,52 @@ fn sample_into_reuses_scratch_without_allocating_and_matches_sample() {
 }
 
 #[test]
+fn reduction_work_stats_are_deterministic_and_separate_from_quality_report() {
+    let world = dense_world(7);
+    let morphs = [0.0, 0.2, 0.8, 0.3, 0.7, 0.9, 1.0];
+    let reduce = || {
+        reduce_dense_pose_sequence(
+            DensePoseSequenceView::new(&world, &morphs, 7, 2, 1, 0.0, 1.0).unwrap(),
+            snapshot(),
+            ReductionTolerances {
+                local_position: 0.01,
+                local_rotation_radians: 0.01,
+                world_position: 0.01,
+                world_rotation_radians: 0.01,
+                morph_weight: 0.01,
+            },
+            ReductionTarget::DccCubic,
+        )
+        .unwrap()
+    };
+
+    let first = reduce();
+    let second = reduce();
+    let stats = first.work_stats();
+    assert_eq!(stats, second.work_stats());
+    assert_eq!(first.report(), second.report());
+    assert_eq!(stats.candidate_rebuilds, stats.global_validation_passes);
+    assert_eq!(
+        stats.added_keys_per_pass.len(),
+        stats.global_validation_passes
+    );
+    assert_eq!(stats.added_keys_per_pass.last(), Some(&0));
+    assert_eq!(
+        stats.normal_key_additions + stats.ancestor_key_additions,
+        stats.added_keys_per_pass.iter().sum::<usize>()
+    );
+    assert_eq!(stats.bone_samples, stats.global_validation_passes * 7 * 2);
+    assert_eq!(stats.morph_samples, stats.global_validation_passes * 7);
+    assert_eq!(stats.world_rebuilds, stats.global_validation_passes * 7);
+    assert_eq!(
+        stats.world_rotation_decompositions,
+        (stats.global_validation_passes + 1) * 7 * 2
+    );
+    assert!(stats.dcc_bone_segment_fits > 0);
+    assert!(stats.dcc_morph_segment_fits > 0);
+}
+
+#[test]
 fn rejects_non_finite_scale_shear_and_invalid_time_base_atomically() {
     let mut non_finite = Mat4::IDENTITY;
     non_finite.x_axis.x = f32::NAN;

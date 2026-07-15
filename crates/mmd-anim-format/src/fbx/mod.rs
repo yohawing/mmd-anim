@@ -14,7 +14,8 @@ use glam::Mat4;
 use mmd_anim_runtime::{
     AnimationClip, BoneIndex, DensePoseSequenceView, ModelArena, MorphIndex, PoseReductionError,
     PoseReductionReport, ReducedBoneKey, ReducedMorphKey, ReducedPoseSequence, ReductionTarget,
-    ReductionTolerances, RuntimeInstance, SkeletonSnapshot, reduce_dense_pose_sequence,
+    ReductionTimings, ReductionTolerances, ReductionWorkStats, RuntimeInstance, SkeletonSnapshot,
+    reduce_dense_pose_sequence,
 };
 
 use crate::{
@@ -139,10 +140,20 @@ pub enum FbxExportError {
     PoseReduction(#[from] PoseReductionError),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct FbxReducedPoseExport {
     pub bytes: Vec<u8>,
     pub report: PoseReductionReport,
+    pub work_stats: ReductionWorkStats,
+    pub timings: ReductionTimings,
+}
+
+impl PartialEq for FbxReducedPoseExport {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+            && self.report == other.report
+            && self.work_stats == other.work_stats
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -360,8 +371,15 @@ where
         ReductionTarget::DccCubic,
     )?;
     let report = reduced.report();
+    let work_stats = reduced.work_stats().clone();
+    let timings = reduced.timings();
     let bytes = export_pmx_fbx_binary_with_reduced_pose(model, &reduced, model_identity, options)?;
-    Ok(FbxReducedPoseExport { bytes, report })
+    Ok(FbxReducedPoseExport {
+        bytes,
+        report,
+        work_stats,
+        timings,
+    })
 }
 
 /// Exports a target-native sparse DCC pose result as FBX user/broken tangent curves.
@@ -3545,6 +3563,7 @@ fn write_property_color<W: Write + Seek>(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use fbxcel::{low::v7400::AttributeValue, tree::any::AnyTree};
     use glam::Vec3;
@@ -3553,6 +3572,27 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn reduced_export_equality_ignores_nondeterministic_timings() {
+        let first = FbxReducedPoseExport {
+            bytes: vec![1, 2, 3],
+            report: PoseReductionReport::default(),
+            work_stats: ReductionWorkStats::default(),
+            timings: ReductionTimings {
+                candidate_build: Duration::from_millis(1),
+                error_measure: Duration::from_millis(2),
+                dcc_fit: Duration::from_millis(1),
+            },
+        };
+        let mut second = first.clone();
+        second.timings = ReductionTimings {
+            candidate_build: Duration::from_secs(1),
+            error_measure: Duration::from_secs(2),
+            dcc_fit: Duration::from_secs(1),
+        };
+        assert_eq!(first, second);
+    }
 
     fn runtime_baked_fixture_fbx() -> (PmxParsedModel, Vec<u8>) {
         let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");

@@ -131,6 +131,19 @@ typedef enum mmd_runtime_reduction_target {
     MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC = 2
 } mmd_runtime_reduction_target_t;
 
+typedef enum mmd_runtime_unity_curve_semantic {
+    MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION = 0,
+    MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER = 1,
+    MMD_RUNTIME_UNITY_CURVE_MORPH_WEIGHT = 2
+} mmd_runtime_unity_curve_semantic_t;
+
+typedef enum mmd_runtime_unity_curve_axis {
+    MMD_RUNTIME_UNITY_CURVE_AXIS_X = 0,
+    MMD_RUNTIME_UNITY_CURVE_AXIS_Y = 1,
+    MMD_RUNTIME_UNITY_CURVE_AXIS_Z = 2,
+    MMD_RUNTIME_UNITY_CURVE_AXIS_NONE = 3
+} mmd_runtime_unity_curve_axis_t;
+
 typedef struct mmd_runtime_ffi_reduction_tolerances {
     float local_position;
     float local_rotation_radians;
@@ -150,6 +163,20 @@ typedef struct mmd_runtime_ffi_pose_reduction_report {
     float max_world_rotation_error_radians;
     float max_morph_weight_error;
 } mmd_runtime_ffi_pose_reduction_report_t;
+
+typedef struct mmd_runtime_ffi_unity_curve_descriptor {
+    uint32_t semantic;    /* mmd_runtime_unity_curve_semantic_t */
+    uint32_t target_index; /* bone index or morph index */
+    uint32_t axis;        /* mmd_runtime_unity_curve_axis_t */
+    size_t   key_count;
+} mmd_runtime_ffi_unity_curve_descriptor_t;
+
+typedef struct mmd_runtime_ffi_unity_curve_key {
+    float time_seconds;
+    float value;
+    float in_tangent;
+    float out_tangent;
+} mmd_runtime_ffi_unity_curve_key_t;
 
 typedef enum mmd_runtime_physics_mode {
     MMD_RUNTIME_PHYSICS_MODE_OFF = 0,
@@ -1151,6 +1178,40 @@ size_t mmd_runtime_reduced_pose_morph_count(const mmd_runtime_reduced_pose_t* po
 mmd_runtime_status_t mmd_runtime_reduced_pose_report(
     const mmd_runtime_reduced_pose_t*               pose,
     mmd_runtime_ffi_pose_reduction_report_t*        out_report);
+
+/* Enumerates target-native Unity scalar curves from a DCC_CUBIC reduced pose.
+   Curves are translation XYZ then local Euler XYZ for each bone, followed by
+   one weight curve for each morph. frames_per_second must be finite and > 0;
+   flip_z selects Unity handedness conversion. LINEAR_SLERP and VMD_BEZIER
+   reduced poses return MMD_RUNTIME_STATUS_UNSUPPORTED rather than being
+   silently converted to Hermite curves. The reduced handle owns its skeleton
+   snapshot, so these calls remain valid after the source model is freed. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_count(
+    const mmd_runtime_reduced_pose_t* pose,
+    float                             frames_per_second,
+    bool                              flip_z,
+    size_t*                           out_curve_count);
+
+mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_descriptor(
+    const mmd_runtime_reduced_pose_t*             pose,
+    float                                         frames_per_second,
+    bool                                          flip_z,
+    size_t                                        curve_index,
+    mmd_runtime_ffi_unity_curve_descriptor_t*     out_descriptor);
+
+/* Two-call caller-owned retrieval. Pass out_keys = NULL and capacity = 0 to
+   receive MMD_RUNTIME_STATUS_BUFFER_TOO_SMALL plus out_required_count, then
+   allocate that many keys and call again. Any short buffer returns the same
+   status and required count. Euler filtering, degree conversion, and
+   per-second tangent conversion are already applied by Rust. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_keys(
+    const mmd_runtime_reduced_pose_t* pose,
+    float                             frames_per_second,
+    bool                              flip_z,
+    size_t                            curve_index,
+    mmd_runtime_ffi_unity_curve_key_t* out_keys,
+    size_t                            out_key_capacity,
+    size_t*                           out_required_count);
 
 /* Samples [bone][16] column-major world matrices and [morph] weights. */
 mmd_runtime_status_t mmd_runtime_reduced_pose_sample(

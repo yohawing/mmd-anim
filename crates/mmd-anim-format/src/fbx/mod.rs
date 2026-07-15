@@ -136,6 +136,14 @@ pub enum FbxExportError {
     ReducedPoseBinding,
     #[error("reduced pose frame {frame} cannot be represented as FBX time")]
     ReducedPoseTime { frame: f32 },
+    #[error("frames per second must be finite and greater than zero")]
+    InvalidFramesPerSecond,
+    #[error("Unity curve {curve_index} key {key_index} has non-finite {field}")]
+    NonFiniteUnityKey {
+        curve_index: usize,
+        key_index: usize,
+        field: &'static str,
+    },
     #[error("pose reduction failed: {0}")]
     PoseReduction(#[from] PoseReductionError),
 }
@@ -402,6 +410,23 @@ pub fn reduced_pose_to_unity_animation_clip(
     bindings: &UnityReducedPoseBindings,
     flip_z: bool,
 ) -> Result<UnityAnimationClipDto, FbxExportError> {
+    reduced_pose_to_unity_animation_clip_with_fps(reduced, bindings, 30.0, flip_z)
+}
+
+/// Projects a sparse DCC pose result into flat Unity `AnimationCurve` bindings
+/// using an explicit host frame rate.
+///
+/// Times and Hermite tangents are converted to seconds here so native callers
+/// do not need to duplicate the reducer's target-specific conversion rules.
+pub fn reduced_pose_to_unity_animation_clip_with_fps(
+    reduced: &ReducedPoseSequence,
+    bindings: &UnityReducedPoseBindings,
+    frames_per_second: f32,
+    flip_z: bool,
+) -> Result<UnityAnimationClipDto, FbxExportError> {
+    if !frames_per_second.is_finite() || frames_per_second <= 0.0 {
+        return Err(FbxExportError::InvalidFramesPerSecond);
+    }
     validate_reduced_pose(
         reduced,
         bindings.model_identity,
@@ -422,11 +447,12 @@ pub fn reduced_pose_to_unity_animation_clip(
                 .iter()
                 .map(|key| key.translation.to_array()[axis] * sign)
                 .collect::<Vec<_>>();
-            let tangents = bone_segment_tangents(track.keys(), axis, false, sign);
+            let tangents =
+                bone_segment_tangents(track.keys(), axis, false, sign, frames_per_second);
             curves.push(UnityAnimationCurveDto {
                 path: bindings.bone_paths[bone].clone(),
                 property: format!("localPosition.{}", axis_name(axis)),
-                keys: unity_keys(reduced, track.keys(), &values, &tangents)?,
+                keys: unity_keys(reduced, track.keys(), &values, &tangents, frames_per_second)?,
             });
         }
         let mut previous = None;
@@ -455,11 +481,11 @@ pub fn reduced_pose_to_unity_animation_clip(
                 .iter()
                 .map(|value| value[axis] as f32)
                 .collect::<Vec<_>>();
-            let tangents = bone_segment_tangents(track.keys(), axis, true, sign);
+            let tangents = bone_segment_tangents(track.keys(), axis, true, sign, frames_per_second);
             curves.push(UnityAnimationCurveDto {
                 path: bindings.bone_paths[bone].clone(),
                 property: format!("localEulerAnglesRaw.{}", axis_name(axis)),
-                keys: unity_keys(reduced, track.keys(), &values, &tangents)?,
+                keys: unity_keys(reduced, track.keys(), &values, &tangents, frames_per_second)?,
             });
         }
     }
@@ -472,16 +498,34 @@ pub fn reduced_pose_to_unity_animation_clip(
             .iter()
             .map(|key| key.weight * 100.0)
             .collect::<Vec<_>>();
-        let tangents = morph_segment_tangents(track.keys());
+        let tangents = morph_segment_tangents(track.keys(), frames_per_second);
         curves.push(UnityAnimationCurveDto {
             path: binding.path.clone(),
             property: binding.property.clone(),
-            keys: unity_morph_keys(reduced, track.keys(), &values, &tangents)?,
+            keys: unity_morph_keys(reduced, track.keys(), &values, &tangents, frames_per_second)?,
         });
+    }
+    for (curve_index, curve) in curves.iter().enumerate() {
+        for (key_index, key) in curve.keys.iter().enumerate() {
+            for (field, value) in [
+                ("time_seconds", key.time_seconds),
+                ("value", key.value),
+                ("in_tangent", key.in_tangent),
+                ("out_tangent", key.out_tangent),
+            ] {
+                if !value.is_finite() {
+                    return Err(FbxExportError::NonFiniteUnityKey {
+                        curve_index,
+                        key_index,
+                        field,
+                    });
+                }
+            }
+        }
     }
     let report = reduced.report();
     Ok(UnityAnimationClipDto {
-        frame_rate: 30.0,
+        frame_rate: frames_per_second,
         curves,
         source_key_count: report.source_bone_key_count + report.source_morph_key_count,
         reduced_key_count: report.reduced_bone_key_count + report.reduced_morph_key_count,
@@ -875,6 +919,7 @@ impl FbxAnimationData {
                     axis,
                     true,
                     rotation_sign[axis],
+                    30.0,
                 )))
             });
             let translation_attributes = std::array::from_fn(|axis| {
@@ -883,6 +928,7 @@ impl FbxAnimationData {
                     axis,
                     false,
                     position_sign[axis],
+                    30.0,
                 )))
             });
             tracks.push(FbxAnimationTrack {
@@ -918,7 +964,10 @@ impl FbxAnimationData {
                     .map(|key| reduced_key_time(reduced, key.sample_index))
                     .collect::<Result<Vec<_>, _>>()?;
                 let weight_values = track.keys().iter().map(|key| key.weight * 100.0).collect();
-                let attributes = Some(curve_attributes(&morph_segment_tangents(track.keys())));
+                let attributes = Some(curve_attributes(&morph_segment_tangents(
+                    track.keys(),
+                    30.0,
+                )));
                 morph_tracks.push(FbxMorphAnimationTrack {
                     export_index,
                     frame_times,
@@ -1184,6 +1233,7 @@ fn bone_segment_tangents(
     axis: usize,
     rotation: bool,
     sign: f32,
+    frames_per_second: f32,
 ) -> Vec<SegmentTangents> {
     (0..keys.len())
         .map(|key| {
@@ -1198,13 +1248,13 @@ fn bone_segment_tangents(
                 (
                     segment.rotation_out_tangent.to_array()[axis],
                     segment.rotation_in_tangent.to_array()[axis],
-                    sign * 30.0 * 180.0 / std::f32::consts::PI,
+                    sign * frames_per_second * 180.0 / std::f32::consts::PI,
                 )
             } else {
                 (
                     segment.translation_out_tangent.to_array()[axis],
                     segment.translation_in_tangent.to_array()[axis],
-                    sign * 30.0,
+                    sign * frames_per_second,
                 )
             };
             SegmentTangents {
@@ -1215,7 +1265,11 @@ fn bone_segment_tangents(
         .collect()
 }
 
-fn morph_segment_tangents(keys: &[ReducedMorphKey]) -> Vec<SegmentTangents> {
+fn morph_segment_tangents(
+    keys: &[ReducedMorphKey],
+    frames_per_second: f32,
+) -> Vec<SegmentTangents> {
+    let tangent_scale = frames_per_second * 100.0;
     (0..keys.len())
         .map(|key| {
             let Some(next) = keys.get(key + 1) else {
@@ -1225,8 +1279,8 @@ fn morph_segment_tangents(keys: &[ReducedMorphKey]) -> Vec<SegmentTangents> {
                 };
             };
             SegmentTangents {
-                out_tangent: next.dcc_segment.out_tangent * 3_000.0,
-                next_in_tangent: next.dcc_segment.in_tangent * 3_000.0,
+                out_tangent: next.dcc_segment.out_tangent * tangent_scale,
+                next_in_tangent: next.dcc_segment.in_tangent * tangent_scale,
             }
         })
         .collect()
@@ -1263,12 +1317,14 @@ fn unity_keys(
     source_keys: &[ReducedBoneKey],
     values: &[f32],
     tangents: &[SegmentTangents],
+    frames_per_second: f32,
 ) -> Result<Vec<UnityAnimationKeyDto>, FbxExportError> {
     unity_keys_from_indices(
         reduced,
         source_keys.iter().map(|key| key.sample_index),
         values,
         tangents,
+        frames_per_second,
     )
 }
 
@@ -1277,12 +1333,14 @@ fn unity_morph_keys(
     source_keys: &[ReducedMorphKey],
     values: &[f32],
     tangents: &[SegmentTangents],
+    frames_per_second: f32,
 ) -> Result<Vec<UnityAnimationKeyDto>, FbxExportError> {
     unity_keys_from_indices(
         reduced,
         source_keys.iter().map(|key| key.sample_index),
         values,
         tangents,
+        frames_per_second,
     )
 }
 
@@ -1291,6 +1349,7 @@ fn unity_keys_from_indices(
     sample_indices: impl Iterator<Item = usize>,
     values: &[f32],
     tangents: &[SegmentTangents],
+    frames_per_second: f32,
 ) -> Result<Vec<UnityAnimationKeyDto>, FbxExportError> {
     sample_indices
         .enumerate()
@@ -1300,7 +1359,7 @@ fn unity_keys_from_indices(
                 return Err(FbxExportError::ReducedPoseTime { frame });
             }
             Ok(UnityAnimationKeyDto {
-                time_seconds: frame / 30.0,
+                time_seconds: frame / frames_per_second,
                 value: values[index],
                 in_tangent: index
                     .checked_sub(1)
@@ -3802,6 +3861,55 @@ mod tests {
             key.in_tangent.is_finite() && key.out_tangent.is_finite() && key.value.is_finite()
         }));
         assert!(dto.reduced_key_count < dto.source_key_count);
+
+        let sixty_fps = reduced_pose_to_unity_animation_clip_with_fps(
+            &reduced,
+            &UnityReducedPoseBindings {
+                model_identity: 123,
+                bone_paths: (0..reduced.snapshot().bone_count())
+                    .map(|bone| format!("root/bone{bone}"))
+                    .collect(),
+                morph_bindings: vec![None; reduced.snapshot().morph_count()],
+            },
+            60.0,
+            false,
+        )
+        .unwrap();
+        let sixty_curve = &sixty_fps.curves[root * 6];
+        assert_eq!(sixty_fps.frame_rate, 60.0);
+        assert_eq!(sixty_curve.keys[2].time_seconds, 8.0 / 60.0);
+        assert_eq!(
+            sixty_curve.keys[0].out_tangent,
+            curve.keys[0].out_tangent * 2.0
+        );
+        assert!(matches!(
+            reduced_pose_to_unity_animation_clip_with_fps(
+                &reduced,
+                &UnityReducedPoseBindings {
+                    model_identity: 123,
+                    bone_paths: vec![String::new(); reduced.snapshot().bone_count()],
+                    morph_bindings: vec![None; reduced.snapshot().morph_count()],
+                },
+                f32::NAN,
+                false,
+            ),
+            Err(FbxExportError::InvalidFramesPerSecond)
+        ));
+        for frames_per_second in [f32::MAX, f32::from_bits(1)] {
+            assert!(matches!(
+                reduced_pose_to_unity_animation_clip_with_fps(
+                    &reduced,
+                    &UnityReducedPoseBindings {
+                        model_identity: 123,
+                        bone_paths: vec![String::new(); reduced.snapshot().bone_count()],
+                        morph_bindings: vec![None; reduced.snapshot().morph_count()],
+                    },
+                    frames_per_second,
+                    false,
+                ),
+                Err(FbxExportError::NonFiniteUnityKey { .. })
+            ));
+        }
     }
 
     #[test]

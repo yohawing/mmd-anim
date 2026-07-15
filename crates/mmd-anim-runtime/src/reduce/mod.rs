@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 use glam::{EulerRot, Mat3, Mat4, Quat, Vec3, Vec3A};
 #[cfg(not(target_family = "wasm"))]
-#[cfg(not(target_family = "wasm"))]
 use rayon::prelude::*;
 #[cfg(not(target_family = "wasm"))]
 use rayon::{ThreadPool, ThreadPoolBuilder};

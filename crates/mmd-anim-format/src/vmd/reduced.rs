@@ -302,7 +302,12 @@ fn write_curve(block: &mut [u8; 16], channel: usize, curve: QuantizedBezier) {
 }
 
 fn rotation_error(a: glam::Quat, b: glam::Quat) -> f32 {
-    2.0 * a.dot(b).abs().clamp(-1.0, 1.0).acos()
+    let a = a.normalize();
+    let mut b = b.normalize();
+    if a.dot(b) < 0.0 {
+        b = -b;
+    }
+    4.0 * (((a - b).length() * 0.5).clamp(0.0, 1.0)).asin()
 }
 
 #[cfg(test)]

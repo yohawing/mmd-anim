@@ -62,6 +62,14 @@ fn bindings(morph_kind: VmdExportMorphKind) -> VmdPoseExportBindings {
 }
 
 #[test]
+fn static_track_rotation_comparison_is_exact_and_hemisphere_invariant() {
+    let rotation =
+        Quat::from_xyzw(0.182_574_18, -0.365_148_37, 0.547_722_6, 0.730_296_73).normalize();
+    assert_eq!(rotation_error(rotation, rotation), 0.0);
+    assert_eq!(rotation_error(rotation, -rotation), 0.0);
+}
+
+#[test]
 fn exports_quantized_64_byte_curves_ik_off_and_roundtrips() {
     let sequence = reduced(0.0, 1.0, &[0.0, 0.5, 1.0]);
     let exported =

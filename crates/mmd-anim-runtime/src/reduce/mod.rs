@@ -376,6 +376,9 @@ impl ReducedPoseSequence {
     pub fn frame_count(&self) -> usize {
         self.frame_count
     }
+    pub fn sample_frames(&self) -> &[f32] {
+        &self.sample_frames
+    }
     pub fn bone_tracks(&self) -> &[ReducedBoneTrack] {
         &self.bone_tracks
     }
@@ -530,14 +533,19 @@ pub fn reduce_dense_pose_sequence(
             &bone_key_indices,
             &morph_key_indices,
         );
-        let (report, worst) = measure_error(
+        let (report, worst_by_track) = measure_error(
             &candidate,
             input,
             &local_translations,
             &local_rotations,
             tolerances,
         )?;
-        let Some(worst) = worst.filter(|worst| worst.normalized_error > 1.0) else {
+        let failing = worst_by_track
+            .into_iter()
+            .flatten()
+            .filter(|worst| worst.normalized_error > 1.0)
+            .collect::<Vec<_>>();
+        if failing.is_empty() {
             let mut result = candidate;
             result.report = PoseReductionReport {
                 source_bone_key_count: input.frame_count * input.bone_count,
@@ -555,23 +563,28 @@ pub fn reduce_dense_pose_sequence(
                 ..report
             };
             return Ok(result);
-        };
+        }
         let mut inserted = false;
-        match worst.track {
-            ErrorTrack::Bone(bone) => {
-                let mut cursor = Some(bone);
-                while let Some(index) = cursor {
-                    inserted |= insert_key(&mut bone_key_indices[index], worst.frame);
-                    let parent = snapshot.parent_indices[index];
-                    cursor = (parent >= 0).then_some(parent as usize);
+        let first_failure_frame = failing[0].frame;
+        for worst in failing {
+            match worst.track {
+                ErrorTrack::Bone(bone) => {
+                    let mut cursor = Some(bone);
+                    while let Some(index) = cursor {
+                        inserted |= insert_key(&mut bone_key_indices[index], worst.frame);
+                        let parent = snapshot.parent_indices[index];
+                        cursor = (parent >= 0).then_some(parent as usize);
+                    }
                 }
-            }
-            ErrorTrack::Morph(morph) => {
-                inserted = insert_key(&mut morph_key_indices[morph], worst.frame);
+                ErrorTrack::Morph(morph) => {
+                    inserted |= insert_key(&mut morph_key_indices[morph], worst.frame);
+                }
             }
         }
         if !inserted {
-            return Err(PoseReductionError::ToleranceUnattainable { frame: worst.frame });
+            return Err(PoseReductionError::ToleranceUnattainable {
+                frame: first_failure_frame,
+            });
         }
     }
 }
@@ -880,7 +893,7 @@ fn measure_error(
     translations: &[Vec3A],
     rotations: &[Quat],
     tolerances: ReductionTolerances,
-) -> Result<(PoseReductionReport, Option<WorstError>), PoseReductionError> {
+) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
     measure_error_with_tolerances(sequence, input, translations, rotations, tolerances)
 }
 
@@ -890,12 +903,12 @@ fn measure_error_with_tolerances(
     translations: &[Vec3A],
     rotations: &[Quat],
     tolerances: ReductionTolerances,
-) -> Result<(PoseReductionReport, Option<WorstError>), PoseReductionError> {
+) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
     let mut report = PoseReductionReport::default();
-    let mut worst: Option<WorstError> = None;
+    let mut worst = vec![None; input.bone_count + input.morph_count];
     for frame in 0..input.frame_count {
         let sample = sequence.sample(input.sample_frame(frame))?;
-        for bone in 0..input.bone_count {
+        for (bone, bone_worst) in worst[..input.bone_count].iter_mut().enumerate() {
             let index = frame * input.bone_count + bone;
             let local_position = translations[index].distance(sample.local_translations[bone]);
             let local_rotation = quat_angle(rotations[index], sample.local_rotations[bone]);
@@ -918,14 +931,14 @@ fn measure_error_with_tolerances(
                 normalized_error(world_position, tolerances.world_position),
                 normalized_error(world_rotation, tolerances.world_rotation_radians),
             ] {
-                update_worst(&mut worst, normalized, frame, ErrorTrack::Bone(bone));
+                update_worst(bone_worst, normalized, frame, ErrorTrack::Bone(bone));
             }
         }
         for morph in 0..input.morph_count {
             let error = (input.morph_weight(frame, morph) - sample.morph_weights[morph]).abs();
             report.max_morph_weight_error = report.max_morph_weight_error.max(error);
             update_worst(
-                &mut worst,
+                &mut worst[input.bone_count + morph],
                 normalized_error(error, tolerances.morph_weight),
                 frame,
                 ErrorTrack::Morph(morph),

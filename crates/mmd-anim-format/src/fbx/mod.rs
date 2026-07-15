@@ -11,7 +11,11 @@ use fbxcel::{
     writer::v7400::binary::{AttributesWriter, FbxFooter, Writer},
 };
 use glam::Mat4;
-use mmd_anim_runtime::{AnimationClip, BoneIndex, ModelArena, MorphIndex, RuntimeInstance};
+use mmd_anim_runtime::{
+    AnimationClip, BoneIndex, DensePoseSequenceView, ModelArena, MorphIndex, PoseReductionError,
+    PoseReductionReport, ReducedBoneKey, ReducedMorphKey, ReducedPoseSequence, ReductionTarget,
+    ReductionTolerances, RuntimeInstance, SkeletonSnapshot, reduce_dense_pose_sequence,
+};
 
 use crate::{
     pmx::{PmxParsedBone, PmxParsedMaterial, PmxParsedModel, PmxParsedMorph},
@@ -125,11 +129,64 @@ pub enum FbxExportError {
         expected: usize,
         actual: usize,
     },
+    #[error("reduced pose must use the DccCubic target")]
+    ReducedPoseTarget,
+    #[error("reduced pose model identity or skeleton/morph counts do not match the FBX model")]
+    ReducedPoseBinding,
+    #[error("reduced pose frame {frame} cannot be represented as FBX time")]
+    ReducedPoseTime { frame: f32 },
+    #[error("pose reduction failed: {0}")]
+    PoseReduction(#[from] PoseReductionError),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FbxReducedPoseExport {
+    pub bytes: Vec<u8>,
+    pub report: PoseReductionReport,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnityReducedPoseBindings {
+    pub model_identity: u64,
+    pub bone_paths: Vec<String>,
+    pub morph_bindings: Vec<Option<UnityMorphBinding>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnityMorphBinding {
+    pub path: String,
+    pub property: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnityAnimationClipDto {
+    pub frame_rate: f32,
+    pub curves: Vec<UnityAnimationCurveDto>,
+    pub source_key_count: usize,
+    pub reduced_key_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnityAnimationCurveDto {
+    pub path: String,
+    pub property: String,
+    pub keys: Vec<UnityAnimationKeyDto>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnityAnimationKeyDto {
+    pub time_seconds: f32,
+    pub value: f32,
+    pub in_tangent: f32,
+    pub out_tangent: f32,
 }
 
 /// Supplies one evaluated set of runtime bone world matrices per FBX frame.
 pub trait FbxPoseSource {
     fn world_matrices(&mut self, frame: u32) -> Result<&[Mat4], String>;
+    fn morph_weights(&self) -> Option<&[f32]> {
+        None
+    }
 }
 
 struct RuntimeBakePoseSource<'a> {
@@ -141,6 +198,10 @@ impl FbxPoseSource for RuntimeBakePoseSource<'_> {
     fn world_matrices(&mut self, frame: u32) -> Result<&[Mat4], String> {
         self.runtime.evaluate_clip_frame(self.clip, frame as f32);
         Ok(self.runtime.world_matrices())
+    }
+
+    fn morph_weights(&self) -> Option<&[f32]> {
+        Some(self.runtime.morph_weights())
     }
 }
 
@@ -187,6 +248,29 @@ pub fn export_pmx_fbx_binary_with_runtime_bake(
     )
 }
 
+pub fn export_pmx_fbx_binary_with_reduced_runtime_bake(
+    model: &PmxParsedModel,
+    runtime_model: Arc<ModelArena>,
+    clip: &AnimationClip,
+    last_frame: u32,
+    tolerances: ReductionTolerances,
+    options: &FbxExportOptions,
+) -> Result<FbxReducedPoseExport, FbxExportError> {
+    let mut pose_source = RuntimeBakePoseSource {
+        runtime: RuntimeInstance::new(Arc::clone(&runtime_model)),
+        clip,
+    };
+    export_pmx_fbx_binary_with_reduced_pose_source(
+        model,
+        runtime_model,
+        last_frame,
+        0,
+        tolerances,
+        options,
+        &mut pose_source,
+    )
+}
+
 /// Exports runtime-baked animation using caller-supplied world matrices.
 ///
 /// The source is called exactly once for every integer frame in `0..=last_frame`.
@@ -211,6 +295,179 @@ where
         pose_source,
     )?);
     export_pmx_fbx_binary_with_animation(model, animation, options)
+}
+
+/// Collects a dense final-pose source, reduces it with `DccCubic`, and exports sparse FBX curves.
+pub fn export_pmx_fbx_binary_with_reduced_pose_source<P>(
+    model: &PmxParsedModel,
+    runtime_model: Arc<ModelArena>,
+    last_frame: u32,
+    model_identity: u64,
+    tolerances: ReductionTolerances,
+    options: &FbxExportOptions,
+    pose_source: &mut P,
+) -> Result<FbxReducedPoseExport, FbxExportError>
+where
+    P: FbxPoseSource,
+{
+    let frame_count = last_frame as usize + 1;
+    let bone_count = runtime_model.bone_count();
+    let morph_count = runtime_model.morph_count() as usize;
+    let mut world_matrices = Vec::with_capacity(frame_count.saturating_mul(bone_count));
+    let mut morph_weights = Vec::with_capacity(frame_count.saturating_mul(morph_count));
+    for frame in 0..=last_frame {
+        let matrices = pose_source
+            .world_matrices(frame)
+            .map_err(|message| FbxExportError::PoseSource { frame, message })?;
+        if matrices.len() < bone_count {
+            return Err(FbxExportError::PoseBoneCount {
+                frame,
+                expected: bone_count,
+                actual: matrices.len(),
+            });
+        }
+        world_matrices.extend_from_slice(&matrices[..bone_count]);
+        let weights = pose_source
+            .morph_weights()
+            .ok_or_else(|| FbxExportError::PoseSource {
+                frame,
+                message: "reduced pose source must expose morph weights".to_owned(),
+            })?;
+        if weights.len() < morph_count {
+            return Err(FbxExportError::PoseSource {
+                frame,
+                message: format!(
+                    "reduced pose source returned {} morphs, expected {morph_count}",
+                    weights.len()
+                ),
+            });
+        }
+        morph_weights.extend_from_slice(&weights[..morph_count]);
+    }
+    let snapshot = SkeletonSnapshot::from_model(&runtime_model, model_identity)?;
+    let reduced = reduce_dense_pose_sequence(
+        DensePoseSequenceView::new(
+            &world_matrices,
+            &morph_weights,
+            frame_count,
+            bone_count,
+            morph_count,
+            0.0,
+            1.0,
+        )?,
+        snapshot,
+        tolerances,
+        ReductionTarget::DccCubic,
+    )?;
+    let report = reduced.report();
+    let bytes = export_pmx_fbx_binary_with_reduced_pose(model, &reduced, model_identity, options)?;
+    Ok(FbxReducedPoseExport { bytes, report })
+}
+
+/// Exports a target-native sparse DCC pose result as FBX user/broken tangent curves.
+pub fn export_pmx_fbx_binary_with_reduced_pose(
+    model: &PmxParsedModel,
+    reduced: &ReducedPoseSequence,
+    model_identity: u64,
+    options: &FbxExportOptions,
+) -> Result<Vec<u8>, FbxExportError> {
+    let animation = FbxAnimationData::from_reduced_pose(model, reduced, model_identity, options)?;
+    export_pmx_fbx_binary_with_animation(model, Some(animation), options)
+}
+
+/// Projects a sparse DCC pose result into flat Unity `AnimationCurve` bindings.
+///
+/// Euler XYZ curves are emitted deliberately; quaternion-component and FBX-import
+/// resampling profiles are separate concerns and are not implied by this DTO.
+pub fn reduced_pose_to_unity_animation_clip(
+    reduced: &ReducedPoseSequence,
+    bindings: &UnityReducedPoseBindings,
+    flip_z: bool,
+) -> Result<UnityAnimationClipDto, FbxExportError> {
+    validate_reduced_pose(
+        reduced,
+        bindings.model_identity,
+        bindings.bone_paths.len(),
+        bindings.morph_bindings.len(),
+    )?;
+    let mut curves = Vec::new();
+    let position_sign = [1.0, 1.0, if flip_z { -1.0 } else { 1.0 }];
+    let rotation_sign = [
+        if flip_z { -1.0 } else { 1.0 },
+        if flip_z { -1.0 } else { 1.0 },
+        1.0,
+    ];
+    for (bone, track) in reduced.bone_tracks().iter().enumerate() {
+        for (axis, sign) in position_sign.iter().copied().enumerate() {
+            let values = track
+                .keys()
+                .iter()
+                .map(|key| key.translation.to_array()[axis] * sign)
+                .collect::<Vec<_>>();
+            let tangents = bone_segment_tangents(track.keys(), axis, false, sign);
+            curves.push(UnityAnimationCurveDto {
+                path: bindings.bone_paths[bone].clone(),
+                property: format!("localPosition.{}", axis_name(axis)),
+                keys: unity_keys(reduced, track.keys(), &values, &tangents)?,
+            });
+        }
+        let mut previous = None;
+        let euler_values = track
+            .keys()
+            .iter()
+            .map(|key| {
+                let q = key.rotation;
+                let converted = convert_quat_to_fbx(
+                    [q.x as f64, q.y as f64, q.z as f64, q.w as f64],
+                    &FbxExportOptions {
+                        flip_z,
+                        ..FbxExportOptions::default()
+                    },
+                );
+                let euler = quat_to_euler_xyz(converted);
+                let filtered = previous
+                    .map(|value| euler_filter(euler, value))
+                    .unwrap_or(euler);
+                previous = Some(filtered);
+                filtered
+            })
+            .collect::<Vec<_>>();
+        for (axis, sign) in rotation_sign.iter().copied().enumerate() {
+            let values = euler_values
+                .iter()
+                .map(|value| value[axis] as f32)
+                .collect::<Vec<_>>();
+            let tangents = bone_segment_tangents(track.keys(), axis, true, sign);
+            curves.push(UnityAnimationCurveDto {
+                path: bindings.bone_paths[bone].clone(),
+                property: format!("localEulerAnglesRaw.{}", axis_name(axis)),
+                keys: unity_keys(reduced, track.keys(), &values, &tangents)?,
+            });
+        }
+    }
+    for (morph, track) in reduced.morph_tracks().iter().enumerate() {
+        let Some(binding) = &bindings.morph_bindings[morph] else {
+            continue;
+        };
+        let values = track
+            .keys()
+            .iter()
+            .map(|key| key.weight * 100.0)
+            .collect::<Vec<_>>();
+        let tangents = morph_segment_tangents(track.keys());
+        curves.push(UnityAnimationCurveDto {
+            path: binding.path.clone(),
+            property: binding.property.clone(),
+            keys: unity_morph_keys(reduced, track.keys(), &values, &tangents)?,
+        });
+    }
+    let report = reduced.report();
+    Ok(UnityAnimationClipDto {
+        frame_rate: 30.0,
+        curves,
+        source_key_count: report.source_bone_key_count + report.source_morph_key_count,
+        reduced_key_count: report.reduced_bone_key_count + report.reduced_morph_key_count,
+    })
 }
 
 fn export_pmx_fbx_binary_with_animation(
@@ -477,12 +734,22 @@ struct FbxAnimationTrack {
     frame_times: Vec<i64>,
     rotation_values: [Vec<f32>; 3],
     translation_values: [Vec<f32>; 3],
+    rotation_attributes: [Option<FbxCurveAttributes>; 3],
+    translation_attributes: [Option<FbxCurveAttributes>; 3],
 }
 
 struct FbxMorphAnimationTrack {
     export_index: usize,
     frame_times: Vec<i64>,
     weight_values: Vec<f32>,
+    attributes: Option<FbxCurveAttributes>,
+}
+
+#[derive(Clone)]
+struct FbxCurveAttributes {
+    flags: Vec<i32>,
+    data: Vec<f32>,
+    ref_counts: Vec<i32>,
 }
 
 struct RuntimeBakeTrack {
@@ -527,6 +794,128 @@ struct SortedKeyframe {
 }
 
 impl FbxAnimationData {
+    fn from_reduced_pose(
+        model: &PmxParsedModel,
+        reduced: &ReducedPoseSequence,
+        model_identity: u64,
+        options: &FbxExportOptions,
+    ) -> Result<Self, FbxExportError> {
+        validate_reduced_pose(
+            reduced,
+            model_identity,
+            model.skeleton.bones.len(),
+            model.morphs.len(),
+        )?;
+        let last_frame = *reduced.sample_frames().last().unwrap();
+        if last_frame < 0.0 || last_frame > u32::MAX as f32 {
+            return Err(FbxExportError::ReducedPoseTime { frame: last_frame });
+        }
+        let position_sign = [1.0, 1.0, if options.flip_z { -1.0 } else { 1.0 }];
+        let rotation_sign = [
+            if options.flip_z { -1.0 } else { 1.0 },
+            if options.flip_z { -1.0 } else { 1.0 },
+            1.0,
+        ];
+        let mut tracks = Vec::new();
+        for (bone_index, track) in reduced.bone_tracks().iter().enumerate() {
+            let rest_translation = reduced.snapshot().rest_local_translations()[bone_index];
+            let rest_rotation = reduced.snapshot().rest_local_rotations()[bone_index];
+            if track.keys().iter().all(|key| {
+                key.translation.distance(rest_translation) <= STATIC_BONE_EPSILON
+                    && key.rotation.dot(rest_rotation).abs() >= 1.0 - STATIC_BONE_EPSILON
+            }) {
+                continue;
+            }
+            let frame_times = track
+                .keys()
+                .iter()
+                .map(|key| reduced_key_time(reduced, key.sample_index))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut translation_values: [Vec<f32>; 3] = std::array::from_fn(|_| Vec::new());
+            let mut rotation_values: [Vec<f32>; 3] = std::array::from_fn(|_| Vec::new());
+            let mut previous_euler = None;
+            for key in track.keys() {
+                for axis in 0..3 {
+                    translation_values[axis]
+                        .push(key.translation.to_array()[axis] * position_sign[axis]);
+                }
+                let q = key.rotation;
+                let converted =
+                    convert_quat_to_fbx([q.x as f64, q.y as f64, q.z as f64, q.w as f64], options);
+                let euler = quat_to_euler_xyz(converted);
+                let filtered = previous_euler
+                    .map(|previous| euler_filter(euler, previous))
+                    .unwrap_or(euler);
+                previous_euler = Some(filtered);
+                for axis in 0..3 {
+                    rotation_values[axis].push(filtered[axis] as f32);
+                }
+            }
+            let rotation_attributes = std::array::from_fn(|axis| {
+                Some(curve_attributes(&bone_segment_tangents(
+                    track.keys(),
+                    axis,
+                    true,
+                    rotation_sign[axis],
+                )))
+            });
+            let translation_attributes = std::array::from_fn(|axis| {
+                Some(curve_attributes(&bone_segment_tangents(
+                    track.keys(),
+                    axis,
+                    false,
+                    position_sign[axis],
+                )))
+            });
+            tracks.push(FbxAnimationTrack {
+                bone_index,
+                frame_times,
+                rotation_values,
+                translation_values,
+                rotation_attributes,
+                translation_attributes,
+            });
+        }
+
+        let exported_morphs = exported_vertex_morph_indices(model);
+        let mut morph_tracks = Vec::new();
+        if !options.bones_only {
+            for (morph_index, track) in reduced.morph_tracks().iter().enumerate() {
+                let Some(export_index) = exported_morphs
+                    .iter()
+                    .position(|candidate| *candidate == morph_index)
+                else {
+                    continue;
+                };
+                if !track
+                    .keys()
+                    .iter()
+                    .any(|key| key.weight.abs() > STATIC_BONE_EPSILON)
+                {
+                    continue;
+                }
+                let frame_times = track
+                    .keys()
+                    .iter()
+                    .map(|key| reduced_key_time(reduced, key.sample_index))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let weight_values = track.keys().iter().map(|key| key.weight * 100.0).collect();
+                let attributes = Some(curve_attributes(&morph_segment_tangents(track.keys())));
+                morph_tracks.push(FbxMorphAnimationTrack {
+                    export_index,
+                    frame_times,
+                    weight_values,
+                    attributes,
+                });
+            }
+        }
+        Ok(Self {
+            max_frame: last_frame.ceil() as u32,
+            tracks,
+            morph_tracks,
+        })
+    }
+
     fn from_pose_source<P>(
         model: &PmxParsedModel,
         runtime_model: Arc<ModelArena>,
@@ -631,6 +1020,8 @@ impl FbxAnimationData {
                 frame_times: frame_times.clone(),
                 rotation_values: track.rotation_values,
                 translation_values: track.translation_values,
+                rotation_attributes: [None, None, None],
+                translation_attributes: [None, None, None],
             })
             .collect();
         let morph_tracks = if options.bones_only {
@@ -719,6 +1110,8 @@ impl FbxAnimationData {
                 frame_times: frame_times.clone(),
                 rotation_values,
                 translation_values,
+                rotation_attributes: [None, None, None],
+                translation_attributes: [None, None, None],
             });
         }
 
@@ -732,6 +1125,176 @@ impl FbxAnimationData {
     fn last_time(&self) -> i64 {
         self.max_frame as i64 * FBX_FRAME_DURATION
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SegmentTangents {
+    out_tangent: f32,
+    next_in_tangent: f32,
+}
+
+fn validate_reduced_pose(
+    reduced: &ReducedPoseSequence,
+    model_identity: u64,
+    bone_count: usize,
+    morph_count: usize,
+) -> Result<(), FbxExportError> {
+    if reduced.target() != ReductionTarget::DccCubic {
+        return Err(FbxExportError::ReducedPoseTarget);
+    }
+    if !reduced.validate_model(model_identity, bone_count, morph_count) {
+        return Err(FbxExportError::ReducedPoseBinding);
+    }
+    Ok(())
+}
+
+fn reduced_key_time(
+    reduced: &ReducedPoseSequence,
+    sample_index: usize,
+) -> Result<i64, FbxExportError> {
+    let frame = reduced.sample_frames()[sample_index];
+    let time = frame as f64 * FBX_TIME_ONE_SECOND as f64 / 30.0;
+    if frame < 0.0 || !time.is_finite() || time < i64::MIN as f64 || time > i64::MAX as f64 {
+        Err(FbxExportError::ReducedPoseTime { frame })
+    } else {
+        Ok(time.round() as i64)
+    }
+}
+
+fn bone_segment_tangents(
+    keys: &[ReducedBoneKey],
+    axis: usize,
+    rotation: bool,
+    sign: f32,
+) -> Vec<SegmentTangents> {
+    (0..keys.len())
+        .map(|key| {
+            let Some(next) = keys.get(key + 1) else {
+                return SegmentTangents {
+                    out_tangent: 0.0,
+                    next_in_tangent: 0.0,
+                };
+            };
+            let segment = next.dcc_segment;
+            let (out_tangent, next_in_tangent, scale) = if rotation {
+                (
+                    segment.rotation_out_tangent.to_array()[axis],
+                    segment.rotation_in_tangent.to_array()[axis],
+                    sign * 30.0 * 180.0 / std::f32::consts::PI,
+                )
+            } else {
+                (
+                    segment.translation_out_tangent.to_array()[axis],
+                    segment.translation_in_tangent.to_array()[axis],
+                    sign * 30.0,
+                )
+            };
+            SegmentTangents {
+                out_tangent: out_tangent * scale,
+                next_in_tangent: next_in_tangent * scale,
+            }
+        })
+        .collect()
+}
+
+fn morph_segment_tangents(keys: &[ReducedMorphKey]) -> Vec<SegmentTangents> {
+    (0..keys.len())
+        .map(|key| {
+            let Some(next) = keys.get(key + 1) else {
+                return SegmentTangents {
+                    out_tangent: 0.0,
+                    next_in_tangent: 0.0,
+                };
+            };
+            SegmentTangents {
+                out_tangent: next.dcc_segment.out_tangent * 3_000.0,
+                next_in_tangent: next.dcc_segment.in_tangent * 3_000.0,
+            }
+        })
+        .collect()
+}
+
+fn curve_attributes(tangents: &[SegmentTangents]) -> FbxCurveAttributes {
+    const CUBIC_USER: i32 = 0x0000_0408;
+    const LINEAR_USER: i32 = 0x0000_0404;
+    const DEFAULT_WEIGHT_TOKEN: f32 = f32::from_bits(218_434_821);
+    let mut flags = Vec::with_capacity(tangents.len());
+    let mut data = Vec::with_capacity(tangents.len() * 4);
+    for (index, tangent) in tangents.iter().enumerate() {
+        flags.push(if index + 1 < tangents.len() {
+            CUBIC_USER
+        } else {
+            LINEAR_USER
+        });
+        data.extend_from_slice(&[
+            tangent.out_tangent,
+            tangent.next_in_tangent,
+            DEFAULT_WEIGHT_TOKEN,
+            0.0,
+        ]);
+    }
+    FbxCurveAttributes {
+        flags,
+        data,
+        ref_counts: vec![1; tangents.len()],
+    }
+}
+
+fn unity_keys(
+    reduced: &ReducedPoseSequence,
+    source_keys: &[ReducedBoneKey],
+    values: &[f32],
+    tangents: &[SegmentTangents],
+) -> Result<Vec<UnityAnimationKeyDto>, FbxExportError> {
+    unity_keys_from_indices(
+        reduced,
+        source_keys.iter().map(|key| key.sample_index),
+        values,
+        tangents,
+    )
+}
+
+fn unity_morph_keys(
+    reduced: &ReducedPoseSequence,
+    source_keys: &[ReducedMorphKey],
+    values: &[f32],
+    tangents: &[SegmentTangents],
+) -> Result<Vec<UnityAnimationKeyDto>, FbxExportError> {
+    unity_keys_from_indices(
+        reduced,
+        source_keys.iter().map(|key| key.sample_index),
+        values,
+        tangents,
+    )
+}
+
+fn unity_keys_from_indices(
+    reduced: &ReducedPoseSequence,
+    sample_indices: impl Iterator<Item = usize>,
+    values: &[f32],
+    tangents: &[SegmentTangents],
+) -> Result<Vec<UnityAnimationKeyDto>, FbxExportError> {
+    sample_indices
+        .enumerate()
+        .map(|(index, sample_index)| {
+            let frame = reduced.sample_frames()[sample_index];
+            if frame < 0.0 || !frame.is_finite() {
+                return Err(FbxExportError::ReducedPoseTime { frame });
+            }
+            Ok(UnityAnimationKeyDto {
+                time_seconds: frame / 30.0,
+                value: values[index],
+                in_tangent: index
+                    .checked_sub(1)
+                    .map_or(0.0, |previous| tangents[previous].next_in_tangent),
+                out_tangent: tangents[index].out_tangent,
+            })
+        })
+        .collect()
+}
+
+fn axis_name(axis: usize) -> char {
+    ['x', 'y', 'z'][axis]
 }
 
 fn translation_changed(translation: glam::Vec3, rest: glam::Vec3A) -> bool {
@@ -868,6 +1431,7 @@ fn collect_runtime_bake_morph_tracks(
             export_index,
             frame_times: frame_times.to_vec(),
             weight_values,
+            attributes: None,
         });
     }
     morph_tracks
@@ -913,6 +1477,7 @@ fn collect_vmd_morph_tracks(
             export_index,
             frame_times,
             weight_values,
+            attributes: None,
         });
     }
     morph_tracks.sort_by_key(|track| track.export_index);
@@ -2367,6 +2932,7 @@ fn write_animation<W: Write + Seek>(
                 animation_curve_id(track.bone_index, channel),
                 &track.frame_times,
                 &track.rotation_values[channel],
+                track.rotation_attributes[channel].as_ref(),
             )?;
         }
         for channel in 0..3 {
@@ -2375,6 +2941,7 @@ fn write_animation<W: Write + Seek>(
                 animation_curve_id(track.bone_index, channel + 3),
                 &track.frame_times,
                 &track.translation_values[channel],
+                track.translation_attributes[channel].as_ref(),
             )?;
         }
     }
@@ -2385,6 +2952,7 @@ fn write_animation<W: Write + Seek>(
             animation_curve_morph_id(track_index),
             &track.frame_times,
             &track.weight_values,
+            track.attributes.as_ref(),
         )?;
     }
     Ok(())
@@ -2465,6 +3033,7 @@ fn write_animation_curve<W: Write + Seek>(
     id: i64,
     frame_times: &[i64],
     values: &[f32],
+    attributes: Option<&FbxCurveAttributes>,
 ) -> Result<(), FbxExportError> {
     begin_node(writer, "AnimationCurve", |attrs| {
         attrs.append_i64(id)?;
@@ -2476,13 +3045,19 @@ fn write_animation_curve<W: Write + Seek>(
     write_i32_node(writer, "KeyVer", 4009)?;
     write_arr_i64_node(writer, "KeyTime", frame_times)?;
     write_arr_f32_node(writer, "KeyValueFloat", values)?;
-    write_arr_i32_node(writer, "KeyAttrFlags", &[0x00006108_i32])?;
-    write_arr_f32_node(
-        writer,
-        "KeyAttrDataFloat",
-        &[0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32],
-    )?;
-    write_arr_i32_node(writer, "KeyAttrRefCount", &[values.len() as i32])?;
+    if let Some(attributes) = attributes {
+        write_arr_i32_node(writer, "KeyAttrFlags", &attributes.flags)?;
+        write_arr_f32_node(writer, "KeyAttrDataFloat", &attributes.data)?;
+        write_arr_i32_node(writer, "KeyAttrRefCount", &attributes.ref_counts)?;
+    } else {
+        write_arr_i32_node(writer, "KeyAttrFlags", &[0x00006108_i32])?;
+        write_arr_f32_node(
+            writer,
+            "KeyAttrDataFloat",
+            &[0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32],
+        )?;
+        write_arr_i32_node(writer, "KeyAttrRefCount", &[values.len() as i32])?;
+    }
     writer.close_node()?;
     Ok(())
 }
@@ -2972,6 +3547,10 @@ mod tests {
     use std::sync::Arc;
 
     use fbxcel::{low::v7400::AttributeValue, tree::any::AnyTree};
+    use glam::Vec3;
+    use mmd_anim_runtime::{
+        DensePoseSequenceView, ReductionTolerances, SkeletonSnapshot, reduce_dense_pose_sequence,
+    };
 
     use super::*;
 
@@ -3006,6 +3585,181 @@ mod tests {
         )
         .expect("runtime-baked FBX should export");
         (model, fbx)
+    }
+
+    fn reduced_fbx_fixture() -> (PmxParsedModel, ReducedPoseSequence, usize) {
+        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
+        let model = crate::parse_pmx_model(pmx_data).unwrap();
+        let runtime = crate::import_pmx_runtime(pmx_data).unwrap().model;
+        let snapshot = SkeletonSnapshot::from_model(&runtime, 123).unwrap();
+        let root = snapshot
+            .parent_indices()
+            .iter()
+            .position(|parent| *parent < 0)
+            .unwrap();
+        let frame_count = 9;
+        let mut world = Vec::with_capacity(frame_count * snapshot.bone_count());
+        for frame in 0..frame_count {
+            let t = frame as f32 / (frame_count - 1) as f32;
+            let peak = 4.0 * t * (1.0 - t);
+            let mut frame_world = vec![Mat4::IDENTITY; snapshot.bone_count()];
+            let mut resolved = vec![false; snapshot.bone_count()];
+            fn resolve(
+                bone: usize,
+                root: usize,
+                peak: f32,
+                snapshot: &SkeletonSnapshot,
+                world: &mut [Mat4],
+                resolved: &mut [bool],
+            ) {
+                if resolved[bone] {
+                    return;
+                }
+                let parent = snapshot.parent_indices()[bone];
+                if parent >= 0 {
+                    resolve(parent as usize, root, peak, snapshot, world, resolved);
+                }
+                let mut translation = snapshot.rest_local_translations()[bone];
+                if bone == root {
+                    translation.x += peak;
+                }
+                let local = Mat4::from_rotation_translation(
+                    snapshot.rest_local_rotations()[bone],
+                    Vec3::from(translation),
+                );
+                world[bone] = if parent < 0 {
+                    local
+                } else {
+                    world[parent as usize] * local
+                };
+                resolved[bone] = true;
+            }
+            for bone in 0..snapshot.bone_count() {
+                resolve(bone, root, peak, &snapshot, &mut frame_world, &mut resolved);
+            }
+            world.extend(frame_world);
+        }
+        let morphs = vec![0.0; frame_count * snapshot.morph_count()];
+        let reduced = reduce_dense_pose_sequence(
+            DensePoseSequenceView::new(
+                &world,
+                &morphs,
+                frame_count,
+                snapshot.bone_count(),
+                snapshot.morph_count(),
+                0.0,
+                1.0,
+            )
+            .unwrap(),
+            snapshot,
+            ReductionTolerances {
+                local_position: 0.01,
+                world_position: 0.01,
+                ..Default::default()
+            },
+            ReductionTarget::DccCubic,
+        )
+        .unwrap();
+        (model, reduced, root)
+    }
+
+    #[test]
+    fn reduced_pose_writes_sparse_per_key_user_tangents_and_replays_samples() {
+        let (model, reduced, root) = reduced_fbx_fixture();
+        let fbx = export_pmx_fbx_binary_with_reduced_pose(
+            &model,
+            &reduced,
+            123,
+            &FbxExportOptions {
+                flip_z: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let tree = load_tree(&fbx);
+        let root_node = tree.root();
+        let objects = root_node.first_child_by_name("Objects").unwrap();
+        let curve = objects
+            .children_by_name("AnimationCurve")
+            .find(|node| {
+                node.attributes().first().and_then(AttributeValue::get_i64)
+                    == Some(animation_curve_id(root, 3))
+            })
+            .unwrap();
+        let times = child_arr_i64(curve, "KeyTime");
+        let values = child_arr_f32(curve, "KeyValueFloat");
+        let flags = child_arr_i32(curve, "KeyAttrFlags");
+        let data = child_arr_f32(curve, "KeyAttrDataFloat");
+        let refs = child_arr_i32(curve, "KeyAttrRefCount");
+        assert_eq!(times.len(), 3);
+        assert_eq!(times.len(), values.len());
+        assert_eq!(flags.len(), values.len());
+        assert_eq!(data.len(), values.len() * 4);
+        assert_eq!(refs, vec![1; values.len()]);
+        assert!(flags[..flags.len() - 1].iter().all(|flag| *flag == 0x408));
+        assert_eq!(flags[flags.len() - 1], 0x404);
+
+        for frame in 0..9 {
+            let time = frame as f32 / 30.0;
+            let upper = times
+                .partition_point(|key| (*key as f64 / FBX_TIME_ONE_SECOND as f64) <= time as f64);
+            let actual = if upper == 0 {
+                values[0]
+            } else if upper == values.len() {
+                values[values.len() - 1]
+            } else {
+                let left = upper - 1;
+                let right = upper;
+                let left_time = times[left] as f32 / FBX_TIME_ONE_SECOND as f32;
+                let right_time = times[right] as f32 / FBX_TIME_ONE_SECOND as f32;
+                let amount = (time - left_time) / (right_time - left_time);
+                let duration = right_time - left_time;
+                let t2 = amount * amount;
+                let t3 = t2 * amount;
+                (2.0 * t3 - 3.0 * t2 + 1.0) * values[left]
+                    + (t3 - 2.0 * t2 + amount) * duration * data[left * 4]
+                    + (-2.0 * t3 + 3.0 * t2) * values[right]
+                    + (t3 - t2) * duration * data[left * 4 + 1]
+            };
+            let t = frame as f32 / 8.0;
+            let expected =
+                reduced.snapshot().rest_local_translations()[root].x + 4.0 * t * (1.0 - t);
+            assert!(
+                (actual - expected).abs() <= 0.01,
+                "{frame}: {actual} {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn unity_direct_clip_dto_keeps_sparse_times_and_tangents_separate_from_fbx_import() {
+        let (_model, reduced, root) = reduced_fbx_fixture();
+        let mut bone_paths = (0..reduced.snapshot().bone_count())
+            .map(|bone| format!("root/bone{bone}"))
+            .collect::<Vec<_>>();
+        bone_paths[root] = "root/moving".to_owned();
+        let dto = reduced_pose_to_unity_animation_clip(
+            &reduced,
+            &UnityReducedPoseBindings {
+                model_identity: 123,
+                bone_paths,
+                morph_bindings: vec![None; reduced.snapshot().morph_count()],
+            },
+            false,
+        )
+        .unwrap();
+        let curve = dto
+            .curves
+            .iter()
+            .find(|curve| curve.path == "root/moving" && curve.property == "localPosition.x")
+            .unwrap();
+        assert_eq!(curve.keys.len(), 3);
+        assert_eq!(curve.keys[0].time_seconds, 0.0);
+        assert!((curve.keys[2].time_seconds - 8.0 / 30.0).abs() <= f32::EPSILON);
+        assert!(curve.keys.iter().all(|key| {
+            key.in_tangent.is_finite() && key.out_tangent.is_finite() && key.value.is_finite()
+        }));
+        assert!(dto.reduced_key_count < dto.source_key_count);
     }
 
     #[test]
@@ -3164,6 +3918,14 @@ mod tests {
             .and_then(AttributeValue::get_arr_i32)
             .map(|values| values.to_vec())
             .unwrap_or_else(|| panic!("missing i32 array child node {name}"))
+    }
+
+    fn child_arr_i64(node: fbxcel::tree::v7400::NodeHandle<'_>, name: &str) -> Vec<i64> {
+        node.first_child_by_name(name)
+            .and_then(|child| child.attributes().first())
+            .and_then(AttributeValue::get_arr_i64)
+            .map(|values| values.to_vec())
+            .unwrap_or_else(|| panic!("missing i64 array child node {name}"))
     }
 
     fn child_arr_f64(node: fbxcel::tree::v7400::NodeHandle<'_>, name: &str) -> Vec<f64> {

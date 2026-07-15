@@ -310,6 +310,18 @@ enum Commands {
         /// Bake native Bullet physics into the exported bone animation (requires --vmd)
         #[arg(long, requires = "vmd")]
         physics_bake: bool,
+        /// Reduce the final baked pose into sparse DCC cubic curves before FBX export
+        #[arg(long, requires = "vmd")]
+        reduce_pose: bool,
+        /// Local/world position error limit used by --reduce-pose
+        #[arg(long, requires = "reduce_pose", default_value_t = 0.1)]
+        pose_position_tolerance: f32,
+        /// Local/world rotation error limit in radians used by --reduce-pose
+        #[arg(long, requires = "reduce_pose", default_value_t = 0.05)]
+        pose_rotation_tolerance: f32,
+        /// Morph-weight error limit used by --reduce-pose
+        #[arg(long, requires = "reduce_pose", default_value_t = 0.001)]
+        pose_morph_tolerance: f32,
         /// Copy PMX diffuse textures next to the FBX and rewrite FBX texture paths
         #[arg(long)]
         copy_diffuse_textures: bool,
@@ -539,6 +551,10 @@ fn main() -> ExitCode {
             vmd,
             max_frame,
             physics_bake,
+            reduce_pose,
+            pose_position_tolerance,
+            pose_rotation_tolerance,
+            pose_morph_tolerance,
             copy_diffuse_textures,
             bones_only,
             readable_bone_names,
@@ -551,6 +567,10 @@ fn main() -> ExitCode {
             commands::fbx::ConvertFbxOptions {
                 max_frame,
                 physics_bake,
+                reduce_pose,
+                pose_position_tolerance,
+                pose_rotation_tolerance,
+                pose_morph_tolerance,
                 copy_diffuse_textures,
                 bones_only,
                 readable_bone_names,

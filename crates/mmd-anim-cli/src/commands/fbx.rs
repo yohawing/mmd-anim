@@ -16,6 +16,7 @@ pub(crate) struct ConvertFbxJsonReport<'a> {
     pub vmd: Option<&'a Path>,
     pub bones_only: bool,
     pub physics_bake: bool,
+    pub pose_reduced: bool,
     pub readable_bone_names: bool,
     pub bone_name_map: Option<&'a Path>,
     pub physics_params: Option<&'a Path>,
@@ -27,20 +28,30 @@ pub(crate) struct ConvertFbxJsonReport<'a> {
 }
 
 pub(crate) fn convert_fbx_json(report: ConvertFbxJsonReport<'_>) -> serde_json::Value {
-    let mode = match (report.physics_bake, report.vmd.is_some(), report.bones_only) {
-        (true, true, true) => "pmx-vmd-physics-bake-bones-only",
-        (true, true, false) => "pmx-vmd-physics-bake",
-        (false, true, true) => "pmx-vmd-bake-bones-only",
-        (false, false, true) => "pmx-bones-only",
-        (false, true, false) => "pmx-vmd-bake",
-        (false, false, false) => "pmx-to-fbx",
-        (true, false, _) => unreachable!("physics bake requires VMD"),
+    let mode = if report.pose_reduced {
+        match (report.physics_bake, report.bones_only) {
+            (true, true) => "pmx-vmd-physics-bake-reduced-bones-only",
+            (true, false) => "pmx-vmd-physics-bake-reduced",
+            (false, true) => "pmx-vmd-bake-reduced-bones-only",
+            (false, false) => "pmx-vmd-bake-reduced",
+        }
+    } else {
+        match (report.physics_bake, report.vmd.is_some(), report.bones_only) {
+            (true, true, true) => "pmx-vmd-physics-bake-bones-only",
+            (true, true, false) => "pmx-vmd-physics-bake",
+            (false, true, true) => "pmx-vmd-bake-bones-only",
+            (false, false, true) => "pmx-bones-only",
+            (false, true, false) => "pmx-vmd-bake",
+            (false, false, false) => "pmx-to-fbx",
+            (true, false, _) => unreachable!("physics bake requires VMD"),
+        }
     };
     let mut value = json!({
         "status": "ok",
         "command": "convert-fbx",
         "mode": mode,
         "bonesOnly": report.bones_only,
+        "poseReduced": report.pose_reduced,
         "readableBoneNames": report.readable_bone_names,
         "boneNameMap": report.bone_name_map.map(|path| path.display().to_string()),
         "physicsParams": report.physics_params.map(|path| path.display().to_string()),
@@ -76,6 +87,10 @@ pub(crate) struct ConvertFbxOptions {
     pub copy_diffuse_textures: bool,
     pub bones_only: bool,
     pub physics_bake: bool,
+    pub reduce_pose: bool,
+    pub pose_position_tolerance: f32,
+    pub pose_rotation_tolerance: f32,
+    pub pose_morph_tolerance: f32,
     pub readable_bone_names: bool,
     pub write_physics_params: bool,
     pub use_json: bool,
@@ -89,6 +104,9 @@ pub(crate) fn convert_pmx_to_fbx(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     if convert_options.physics_bake && vmd.is_none() {
         return Err("convert-fbx --physics-bake requires --vmd".into());
+    }
+    if convert_options.reduce_pose && vmd.is_none() {
+        return Err("convert-fbx --reduce-pose requires --vmd".into());
     }
     #[cfg(not(feature = "physics-bullet-native"))]
     if convert_options.physics_bake {
@@ -131,6 +149,7 @@ pub(crate) fn convert_pmx_to_fbx(
     };
 
     let mut baked_max_frame = None;
+    let mut reduction_report = None;
     let fbx = if let Some(vmd_path) = vmd {
         let motion_data = read_file(vmd_path)?;
         let motion = mmd_anim_format::parse_vmd_animation(&motion_data).map_err(|error| {
@@ -186,8 +205,30 @@ pub(crate) fn convert_pmx_to_fbx(
         }
         baked_max_frame = Some(last_frame);
         let runtime_model = Arc::new(runtime_import.model);
-        if convert_options.physics_bake {
+        if convert_options.physics_bake && convert_options.reduce_pose {
+            let export = export_reduced_fbx_with_physics_bake(
+                &model,
+                runtime_model,
+                &clip,
+                last_frame,
+                &options,
+                pose_reduction_tolerances(&convert_options),
+            )?;
+            reduction_report = Some(export.report);
+            export.bytes
+        } else if convert_options.physics_bake {
             export_fbx_with_physics_bake(&model, runtime_model, &clip, last_frame, &options)?
+        } else if convert_options.reduce_pose {
+            let export = mmd_anim_format::fbx::export_pmx_fbx_binary_with_reduced_runtime_bake(
+                &model,
+                runtime_model,
+                &clip,
+                last_frame,
+                pose_reduction_tolerances(&convert_options),
+                &options,
+            )?;
+            reduction_report = Some(export.report);
+            export.bytes
         } else {
             mmd_anim_format::fbx::export_fbx_with_runtime_bake(
                 &model,
@@ -219,6 +260,7 @@ pub(crate) fn convert_pmx_to_fbx(
             vmd,
             bones_only: convert_options.bones_only,
             physics_bake: convert_options.physics_bake,
+            pose_reduced: convert_options.reduce_pose,
             readable_bone_names: convert_options.readable_bone_names,
             bone_name_map: bone_name_map.as_deref(),
             physics_params: physics_params.as_deref(),
@@ -228,6 +270,20 @@ pub(crate) fn convert_pmx_to_fbx(
             exported_blend_shapes,
             copied_diffuse_textures,
         });
+        let mut report = report;
+        if let Some(reduction) = reduction_report {
+            report["poseReduction"] = json!({
+                "sourceBoneKeys": reduction.source_bone_key_count,
+                "reducedBoneKeys": reduction.reduced_bone_key_count,
+                "sourceMorphKeys": reduction.source_morph_key_count,
+                "reducedMorphKeys": reduction.reduced_morph_key_count,
+                "maxLocalPositionError": reduction.max_local_position_error,
+                "maxLocalRotationErrorRadians": reduction.max_local_rotation_error_radians,
+                "maxWorldPositionError": reduction.max_world_position_error,
+                "maxWorldRotationErrorRadians": reduction.max_world_rotation_error_radians,
+                "maxMorphWeightError": reduction.max_morph_weight_error,
+            });
+        }
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         let physics_bake_text = if convert_options.physics_bake {
@@ -312,6 +368,20 @@ impl mmd_anim_format::fbx::FbxPoseSource for PhysicsBakePoseSource<'_> {
         }
         Ok(self.runtime.world_matrices())
     }
+
+    fn morph_weights(&self) -> Option<&[f32]> {
+        Some(self.runtime.morph_weights())
+    }
+}
+
+fn pose_reduction_tolerances(options: &ConvertFbxOptions) -> mmd_anim_runtime::ReductionTolerances {
+    mmd_anim_runtime::ReductionTolerances {
+        local_position: options.pose_position_tolerance,
+        local_rotation_radians: options.pose_rotation_tolerance,
+        world_position: options.pose_position_tolerance,
+        world_rotation_radians: options.pose_rotation_tolerance,
+        morph_weight: options.pose_morph_tolerance,
+    }
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -338,6 +408,33 @@ fn export_fbx_with_physics_bake(
     Ok(bytes)
 }
 
+#[cfg(feature = "physics-bullet-native")]
+fn export_reduced_fbx_with_physics_bake(
+    model: &mmd_anim_format::PmxParsedModel,
+    runtime_model: Arc<mmd_anim_runtime::ModelArena>,
+    clip: &mmd_anim_runtime::AnimationClip,
+    last_frame: u32,
+    options: &mmd_anim_format::fbx::FbxExportOptions,
+    tolerances: mmd_anim_runtime::ReductionTolerances,
+) -> Result<mmd_anim_format::fbx::FbxReducedPoseExport, Box<dyn std::error::Error>> {
+    let mut pose_source = PhysicsBakePoseSource {
+        runtime: mmd_anim_runtime::RuntimeInstance::new(Arc::clone(&runtime_model)),
+        bullet: mmd_anim_physics_bullet::build_bullet_world_from_pmx(model)?,
+        clip,
+    };
+    Ok(
+        mmd_anim_format::fbx::export_pmx_fbx_binary_with_reduced_pose_source(
+            model,
+            runtime_model,
+            last_frame,
+            0,
+            tolerances,
+            options,
+            &mut pose_source,
+        )?,
+    )
+}
+
 #[cfg(not(feature = "physics-bullet-native"))]
 fn export_fbx_with_physics_bake(
     _model: &mmd_anim_format::PmxParsedModel,
@@ -346,6 +443,18 @@ fn export_fbx_with_physics_bake(
     _last_frame: u32,
     _options: &mmd_anim_format::fbx::FbxExportOptions,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    Err("convert-fbx --physics-bake requires the physics-bullet-native feature".into())
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn export_reduced_fbx_with_physics_bake(
+    _model: &mmd_anim_format::PmxParsedModel,
+    _runtime_model: Arc<mmd_anim_runtime::ModelArena>,
+    _clip: &mmd_anim_runtime::AnimationClip,
+    _last_frame: u32,
+    _options: &mmd_anim_format::fbx::FbxExportOptions,
+    _tolerances: mmd_anim_runtime::ReductionTolerances,
+) -> Result<mmd_anim_format::fbx::FbxReducedPoseExport, Box<dyn std::error::Error>> {
     Err("convert-fbx --physics-bake requires the physics-bullet-native feature".into())
 }
 
@@ -803,6 +912,7 @@ mod tests {
             vmd: Some(Path::new("motion.vmd")),
             bones_only: true,
             physics_bake: false,
+            pose_reduced: false,
             readable_bone_names: false,
             bone_name_map: None,
             physics_params: None,
@@ -845,6 +955,7 @@ mod tests {
             vmd: Some(Path::new("motion.vmd")),
             bones_only: false,
             physics_bake: true,
+            pose_reduced: false,
             readable_bone_names: false,
             bone_name_map: None,
             physics_params: None,
@@ -871,6 +982,10 @@ mod tests {
                 copy_diffuse_textures: false,
                 bones_only: false,
                 physics_bake: true,
+                reduce_pose: false,
+                pose_position_tolerance: 0.1,
+                pose_rotation_tolerance: 0.05,
+                pose_morph_tolerance: 0.001,
                 readable_bone_names: false,
                 write_physics_params: false,
                 use_json: false,
@@ -902,6 +1017,7 @@ mod tests {
             vmd: None,
             bones_only: false,
             physics_bake: false,
+            pose_reduced: false,
             readable_bone_names: true,
             bone_name_map: Some(Path::new("model.bone-map.json")),
             physics_params: None,
@@ -935,6 +1051,7 @@ mod tests {
             vmd: None,
             bones_only: false,
             physics_bake: false,
+            pose_reduced: false,
             readable_bone_names: false,
             bone_name_map: None,
             physics_params: Some(Path::new("model.physics-params.json")),

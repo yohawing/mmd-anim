@@ -281,3 +281,86 @@ fn custom_tolerance_changes_key_count_and_bounds_report() {
     assert!(strict.report().max_world_rotation_error_radians <= 1.0e-4);
     assert!(strict.report().max_morph_weight_error <= 1.0e-4);
 }
+
+#[test]
+fn vmd_bezier_target_fits_quantized_curve_and_samples_with_it() {
+    let source_curve = QuantizedBezier {
+        x1: 30,
+        y1: 10,
+        x2: 100,
+        y2: 120,
+    };
+    let frame_count = 17;
+    let fitted = fit_quantized_bezier(
+        0,
+        frame_count - 1,
+        |frame| source_curve.evaluate(frame as f32 / (frame_count - 1) as f32),
+        |frame| frame as f32,
+    );
+    let fit_error = (1..frame_count - 1)
+        .map(|frame| {
+            let time = frame as f32 / (frame_count - 1) as f32;
+            (fitted.evaluate(time) - source_curve.evaluate(time)).abs()
+        })
+        .fold(0.0f32, f32::max);
+    assert!(fit_error <= 0.005, "{fitted:?} {fit_error}");
+    let world = (0..frame_count)
+        .map(|frame| {
+            let time = frame as f32 / (frame_count - 1) as f32;
+            Mat4::from_translation(Vec3::new(source_curve.evaluate(time), 0.0, 0.0))
+        })
+        .collect::<Vec<_>>();
+    let input = DensePoseSequenceView::new(&world, &[], frame_count, 1, 0, 0.0, 1.0).unwrap();
+    let one =
+        SkeletonSnapshot::new(vec![-1], vec![Vec3A::ZERO], vec![Quat::IDENTITY], 0, 11).unwrap();
+    let reduced = reduce_dense_pose_sequence(
+        input,
+        one,
+        ReductionTolerances {
+            local_position: 0.005,
+            world_position: 0.005,
+            ..Default::default()
+        },
+        ReductionTarget::VmdBezier,
+    )
+    .unwrap();
+    let interpolation = reduced.bone_tracks()[0].keys()[1]
+        .vmd_interpolation
+        .translation[0];
+    assert_eq!(
+        reduced.bone_tracks()[0].keys().len(),
+        2,
+        "{interpolation:?}"
+    );
+    assert!(interpolation.x1 <= 127 && interpolation.y1 <= 127);
+    assert!(interpolation.x2 <= 127 && interpolation.y2 <= 127);
+    assert!(reduced.report().max_world_position_error <= 0.005);
+}
+
+#[test]
+fn vmd_bezier_world_rotation_gate_handles_near_pi_motion() {
+    let frame_count = 9;
+    let world = (0..frame_count)
+        .map(|frame| {
+            let amount = frame as f32 / (frame_count - 1) as f32;
+            Mat4::from_quat(Quat::from_rotation_y(
+                (std::f32::consts::PI - 0.01) * amount,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let input = DensePoseSequenceView::new(&world, &[], frame_count, 1, 0, 0.0, 1.0).unwrap();
+    let one =
+        SkeletonSnapshot::new(vec![-1], vec![Vec3A::ZERO], vec![Quat::IDENTITY], 0, 12).unwrap();
+    let reduced = reduce_dense_pose_sequence(
+        input,
+        one,
+        ReductionTolerances {
+            local_rotation_radians: 0.002,
+            world_rotation_radians: 0.002,
+            ..Default::default()
+        },
+        ReductionTarget::VmdBezier,
+    )
+    .unwrap();
+    assert!(reduced.report().max_world_rotation_error_radians <= 0.002);
+}

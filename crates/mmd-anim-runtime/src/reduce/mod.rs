@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use glam::{Mat3, Mat4, Quat, Vec3, Vec3A};
 use thiserror::Error;
 
-use crate::{BoneIndex, ModelArena};
+use crate::{BoneIndex, InterpolationScalar, ModelArena};
 
 const AFFINE_EPSILON: f32 = 1.0e-4;
 
@@ -196,6 +196,47 @@ impl SkeletonSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReductionTarget {
     LinearSlerp,
+    VmdBezier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuantizedBezier {
+    pub x1: u8,
+    pub y1: u8,
+    pub x2: u8,
+    pub y2: u8,
+}
+
+impl QuantizedBezier {
+    pub const LINEAR: Self = Self {
+        x1: 20,
+        y1: 20,
+        x2: 107,
+        y2: 107,
+    };
+
+    pub fn evaluate(self, time: f32) -> f32 {
+        InterpolationScalar {
+            x1: self.x1.min(127),
+            y1: self.y1.min(127),
+            x2: self.x2.min(127),
+            y2: self.y2.min(127),
+        }
+        .evaluate(time)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmdBoneInterpolation {
+    pub translation: [QuantizedBezier; 3],
+    pub rotation: QuantizedBezier,
+}
+
+impl VmdBoneInterpolation {
+    pub const LINEAR: Self = Self {
+        translation: [QuantizedBezier::LINEAR; 3],
+        rotation: QuantizedBezier::LINEAR,
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -243,6 +284,7 @@ pub struct ReducedBoneKey {
     pub sample_index: usize,
     pub translation: Vec3A,
     pub rotation: Quat,
+    pub vmd_interpolation: VmdBoneInterpolation,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -332,12 +374,12 @@ impl ReducedPoseSequence {
         let local_translations = self
             .bone_tracks
             .iter()
-            .map(|track| sample_bone_track(track, &self.sample_frames, frame).0)
+            .map(|track| sample_bone_track(track, &self.sample_frames, frame, self.target).0)
             .collect::<Vec<_>>();
         let local_rotations = self
             .bone_tracks
             .iter()
-            .map(|track| sample_bone_track(track, &self.sample_frames, frame).1)
+            .map(|track| sample_bone_track(track, &self.sample_frames, frame, self.target).1)
             .collect::<Vec<_>>();
         let morph_weights = self
             .morph_tracks
@@ -437,15 +479,17 @@ pub fn reduce_dense_pose_sequence(
     let mut bone_key_indices = vec![endpoint_indices(input.frame_count); input.bone_count];
     let mut morph_key_indices = vec![endpoint_indices(input.frame_count); input.morph_count];
 
-    for (bone, keys) in bone_key_indices.iter_mut().enumerate() {
-        split_bone_track(
-            keys,
-            input,
-            bone,
-            &local_translations,
-            &local_rotations,
-            tolerances,
-        );
+    if target == ReductionTarget::LinearSlerp {
+        for (bone, keys) in bone_key_indices.iter_mut().enumerate() {
+            split_bone_track(
+                keys,
+                input,
+                bone,
+                &local_translations,
+                &local_rotations,
+                tolerances,
+            );
+        }
     }
     for (morph, keys) in morph_key_indices.iter_mut().enumerate() {
         split_morph_track(keys, input, morph, tolerances.morph_weight);
@@ -703,12 +747,27 @@ fn build_sequence(
         .map(|(bone, indices)| ReducedBoneTrack {
             keys: indices
                 .iter()
-                .map(|&frame| {
+                .enumerate()
+                .map(|(key_position, &frame)| {
                     let index = frame * input.bone_count + bone;
+                    let vmd_interpolation =
+                        if target == ReductionTarget::VmdBezier && key_position > 0 {
+                            fit_vmd_bone_interpolation(
+                                input,
+                                bone,
+                                indices[key_position - 1],
+                                frame,
+                                translations,
+                                rotations,
+                            )
+                        } else {
+                            VmdBoneInterpolation::LINEAR
+                        };
                     ReducedBoneKey {
                         sample_index: frame,
                         translation: translations[index],
                         rotation: rotations[index],
+                        vmd_interpolation,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -833,7 +892,154 @@ fn update_worst(worst: &mut Option<WorstError>, normalized: f32, frame: usize, t
     }
 }
 
-fn sample_bone_track(track: &ReducedBoneTrack, sample_frames: &[f32], frame: f32) -> (Vec3A, Quat) {
+fn fit_vmd_bone_interpolation(
+    input: DensePoseSequenceView<'_>,
+    bone: usize,
+    start: usize,
+    end: usize,
+    translations: &[Vec3A],
+    rotations: &[Quat],
+) -> VmdBoneInterpolation {
+    let bone_count = input.bone_count;
+    let start_index = start * bone_count + bone;
+    let end_index = end * bone_count + bone;
+    let start_translation = translations[start_index];
+    let end_translation = translations[end_index];
+    let translation = std::array::from_fn(|axis| {
+        let start_value = start_translation.to_array()[axis];
+        let end_value = end_translation.to_array()[axis];
+        fit_quantized_bezier(
+            start,
+            end,
+            |sample| {
+                let value = translations[sample * bone_count + bone].to_array()[axis];
+                normalized_channel_value(start_value, end_value, value)
+            },
+            |sample| input.sample_frame(sample),
+        )
+    });
+    let start_rotation = rotations[start_index];
+    let end_rotation = rotations[end_index];
+    let total_angle = quat_angle(start_rotation, end_rotation);
+    let rotation = fit_quantized_bezier(
+        start,
+        end,
+        |sample| {
+            if total_angle <= f32::EPSILON {
+                0.0
+            } else {
+                (quat_angle(start_rotation, rotations[sample * bone_count + bone]) / total_angle)
+                    .clamp(0.0, 1.0)
+            }
+        },
+        |sample| input.sample_frame(sample),
+    );
+    VmdBoneInterpolation {
+        translation,
+        rotation,
+    }
+}
+
+fn fit_quantized_bezier(
+    start: usize,
+    end: usize,
+    value_at: impl Fn(usize) -> f32,
+    frame_at: impl Fn(usize) -> f32,
+) -> QuantizedBezier {
+    if end <= start + 1 {
+        return QuantizedBezier::LINEAR;
+    }
+    let mut best = QuantizedBezier::LINEAR;
+    let score = |curve: QuantizedBezier| -> f32 {
+        (start + 1..end)
+            .map(|sample| {
+                let time = segment_amount(start, end, sample, &frame_at);
+                (curve.evaluate(time) - value_at(sample)).abs()
+            })
+            .fold(0.0f32, f32::max)
+    };
+    let mut best_score = score(best);
+    const COARSE: [u8; 9] = [0, 16, 32, 48, 64, 80, 96, 112, 127];
+    for &x1 in &COARSE {
+        for &x2 in &COARSE {
+            if x1 > x2 {
+                continue;
+            }
+            for &y1 in &COARSE {
+                for &y2 in &COARSE {
+                    let candidate = QuantizedBezier { x1, y1, x2, y2 };
+                    let candidate_score = score(candidate);
+                    if candidate_score.total_cmp(&best_score) == Ordering::Less {
+                        best = candidate;
+                        best_score = candidate_score;
+                    }
+                }
+            }
+        }
+    }
+    for step in [32i16, 16, 8, 4, 2, 1] {
+        loop {
+            let origin = [best.x1, best.y1, best.x2, best.y2];
+            let mut next_best = best;
+            let mut next_score = best_score;
+            for d0 in [-step, 0, step] {
+                for d1 in [-step, 0, step] {
+                    for d2 in [-step, 0, step] {
+                        for d3 in [-step, 0, step] {
+                            let offsets = [d0, d1, d2, d3];
+                            let mut values = [0u8; 4];
+                            let mut valid = true;
+                            for coordinate in 0..4 {
+                                let value = origin[coordinate] as i16 + offsets[coordinate];
+                                if !(0..=127).contains(&value) {
+                                    valid = false;
+                                    break;
+                                }
+                                values[coordinate] = value as u8;
+                            }
+                            if !valid || values[0] > values[2] {
+                                continue;
+                            }
+                            let candidate = QuantizedBezier {
+                                x1: values[0],
+                                y1: values[1],
+                                x2: values[2],
+                                y2: values[3],
+                            };
+                            let candidate_score = score(candidate);
+                            if candidate_score.total_cmp(&next_score) == Ordering::Less {
+                                next_best = candidate;
+                                next_score = candidate_score;
+                            }
+                        }
+                    }
+                }
+            }
+            if next_best == best {
+                break;
+            }
+            best = next_best;
+            best_score = next_score;
+        }
+    }
+    best
+}
+
+fn normalized_channel_value(start: f32, end: f32, value: f32) -> f32 {
+    let range = end - start;
+    if range.abs() <= f32::EPSILON {
+        0.0
+    } else {
+        ((value - start) / range).clamp(0.0, 1.0)
+    }
+}
+
+fn sample_bone_track(
+    track: &ReducedBoneTrack,
+    sample_frames: &[f32],
+    frame: f32,
+    target: ReductionTarget,
+) -> (Vec3A, Quat) {
     let upper = track
         .keys
         .partition_point(|key| sample_frames[key.sample_index] <= frame);
@@ -849,9 +1055,27 @@ fn sample_bone_track(track: &ReducedBoneTrack, sample_frames: &[f32], frame: f32
     let amount = ((frame - sample_frames[left.sample_index])
         / (sample_frames[right.sample_index] - sample_frames[left.sample_index]))
         .clamp(0.0, 1.0);
+    let translation_amount = if target == ReductionTarget::VmdBezier {
+        Vec3A::new(
+            right.vmd_interpolation.translation[0].evaluate(amount),
+            right.vmd_interpolation.translation[1].evaluate(amount),
+            right.vmd_interpolation.translation[2].evaluate(amount),
+        )
+    } else {
+        Vec3A::splat(amount)
+    };
+    let rotation_amount = if target == ReductionTarget::VmdBezier {
+        right.vmd_interpolation.rotation.evaluate(amount)
+    } else {
+        amount
+    };
     (
-        left.translation.lerp(right.translation, amount),
-        normalize_quat(left.rotation.slerp(right.rotation, amount)),
+        Vec3A::new(
+            left.translation.x + (right.translation.x - left.translation.x) * translation_amount.x,
+            left.translation.y + (right.translation.y - left.translation.y) * translation_amount.y,
+            left.translation.z + (right.translation.z - left.translation.z) * translation_amount.z,
+        ),
+        normalize_quat(left.rotation.slerp(right.rotation, rotation_amount)),
     )
 }
 

@@ -39,6 +39,12 @@ pub use model::{
     ModelBuildError, MorphIndex, MorphInit, MorphOffsetSpan, VertexMorphOffset,
 };
 pub use pose::PoseArena;
+pub use reduce::{
+    DensePoseSequenceView, PoseReductionError, PoseReductionReport, QuantizedBezier,
+    ReducedBoneKey, ReducedBoneTrack, ReducedMorphKey, ReducedMorphTrack, ReducedPoseSample,
+    ReducedPoseSequence, ReductionTarget, ReductionTolerances, SkeletonSnapshot,
+    VmdBoneInterpolation, reduce_dense_pose_sequence,
+};
 pub use runtime::{
     HostPoseError, HostPoseView, IkSolveOptions, IkSolverRuntimeStats, PhysicsMode,
     PhysicsStepStats, PhysicsTickConfig, RuntimeInstance,

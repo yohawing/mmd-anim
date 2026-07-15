@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use glam::{Mat3, Mat4, Quat, Vec3, Vec3A};
+use glam::{EulerRot, Mat3, Mat4, Quat, Vec3, Vec3A};
 use thiserror::Error;
 
 use crate::{BoneIndex, InterpolationScalar, ModelArena};
@@ -197,6 +197,23 @@ impl SkeletonSnapshot {
 pub enum ReductionTarget {
     LinearSlerp,
     VmdBezier,
+    DccCubic,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DccCubicSegment {
+    pub translation_out_tangent: Vec3A,
+    pub translation_in_tangent: Vec3A,
+    pub rotation_start_euler_xyz: Vec3A,
+    pub rotation_end_euler_xyz: Vec3A,
+    pub rotation_out_tangent: Vec3A,
+    pub rotation_in_tangent: Vec3A,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DccScalarSegment {
+    pub out_tangent: f32,
+    pub in_tangent: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +302,7 @@ pub struct ReducedBoneKey {
     pub translation: Vec3A,
     pub rotation: Quat,
     pub vmd_interpolation: VmdBoneInterpolation,
+    pub dcc_segment: DccCubicSegment,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -302,6 +320,7 @@ impl ReducedBoneTrack {
 pub struct ReducedMorphKey {
     pub sample_index: usize,
     pub weight: f32,
+    pub dcc_segment: DccScalarSegment,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -384,7 +403,7 @@ impl ReducedPoseSequence {
         let morph_weights = self
             .morph_tracks
             .iter()
-            .map(|track| sample_morph_track(track, &self.sample_frames, frame))
+            .map(|track| sample_morph_track(track, &self.sample_frames, frame, self.target))
             .collect::<Vec<_>>();
         let world_matrices =
             build_world_matrices(&self.snapshot, &local_translations, &local_rotations);
@@ -468,6 +487,7 @@ pub fn reduce_dense_pose_sequence(
     }
 
     let (local_translations, local_rotations) = decompose_dense_pose(input, &snapshot)?;
+    let local_euler_xyz = unwrap_euler_xyz(&local_rotations, input.frame_count, input.bone_count);
     for frame in 0..input.frame_count {
         for morph in 0..input.morph_count {
             if !input.morph_weight(frame, morph).is_finite() {
@@ -491,8 +511,10 @@ pub fn reduce_dense_pose_sequence(
             );
         }
     }
-    for (morph, keys) in morph_key_indices.iter_mut().enumerate() {
-        split_morph_track(keys, input, morph, tolerances.morph_weight);
+    if target != ReductionTarget::DccCubic {
+        for (morph, keys) in morph_key_indices.iter_mut().enumerate() {
+            split_morph_track(keys, input, morph, tolerances.morph_weight);
+        }
     }
 
     loop {
@@ -500,8 +522,11 @@ pub fn reduce_dense_pose_sequence(
             &snapshot,
             target,
             input,
-            &local_translations,
-            &local_rotations,
+            DenseLocalPose {
+                translations: &local_translations,
+                rotations: &local_rotations,
+                euler_xyz: &local_euler_xyz,
+            },
             &bone_key_indices,
             &morph_key_indices,
         );
@@ -732,12 +757,18 @@ fn insert_key(keys: &mut Vec<usize>, frame: usize) -> bool {
     }
 }
 
+#[derive(Clone, Copy)]
+struct DenseLocalPose<'a> {
+    translations: &'a [Vec3A],
+    rotations: &'a [Quat],
+    euler_xyz: &'a [Vec3A],
+}
+
 fn build_sequence(
     snapshot: &SkeletonSnapshot,
     target: ReductionTarget,
     input: DensePoseSequenceView<'_>,
-    translations: &[Vec3A],
-    rotations: &[Quat],
+    local_pose: DenseLocalPose<'_>,
     bone_key_indices: &[Vec<usize>],
     morph_key_indices: &[Vec<usize>],
 ) -> ReducedPoseSequence {
@@ -757,17 +788,30 @@ fn build_sequence(
                                 bone,
                                 indices[key_position - 1],
                                 frame,
-                                translations,
-                                rotations,
+                                local_pose.translations,
+                                local_pose.rotations,
                             )
                         } else {
                             VmdBoneInterpolation::LINEAR
                         };
+                    let dcc_segment = if target == ReductionTarget::DccCubic && key_position > 0 {
+                        fit_dcc_bone_segment(
+                            input,
+                            bone,
+                            indices[key_position - 1],
+                            frame,
+                            local_pose.translations,
+                            local_pose.euler_xyz,
+                        )
+                    } else {
+                        DccCubicSegment::default()
+                    };
                     ReducedBoneKey {
                         sample_index: frame,
-                        translation: translations[index],
-                        rotation: rotations[index],
+                        translation: local_pose.translations[index],
+                        rotation: local_pose.rotations[index],
                         vmd_interpolation,
+                        dcc_segment,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -781,9 +825,20 @@ fn build_sequence(
         .map(|(morph, indices)| ReducedMorphTrack {
             keys: indices
                 .iter()
-                .map(|&frame| ReducedMorphKey {
+                .enumerate()
+                .map(|(key_position, &frame)| ReducedMorphKey {
                     sample_index: frame,
                     weight: input.morph_weight(frame, morph),
+                    dcc_segment: if target == ReductionTarget::DccCubic && key_position > 0 {
+                        fit_dcc_scalar_segment(
+                            indices[key_position - 1],
+                            frame,
+                            |sample| input.morph_weight(sample, morph),
+                            |sample| input.sample_frame(sample),
+                        )
+                    } else {
+                        DccScalarSegment::default()
+                    },
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -1034,6 +1089,176 @@ fn normalized_channel_value(start: f32, end: f32, value: f32) -> f32 {
     }
 }
 
+fn unwrap_euler_xyz(rotations: &[Quat], frame_count: usize, bone_count: usize) -> Vec<Vec3A> {
+    let mut result = vec![Vec3A::ZERO; rotations.len()];
+    for bone in 0..bone_count {
+        for frame in 0..frame_count {
+            let index = frame * bone_count + bone;
+            let (x, y, z) = rotations[index].to_euler(EulerRot::XYZ);
+            let mut value = Vec3A::new(x, y, z);
+            if frame > 0 {
+                let previous = result[index - bone_count];
+                value.x = unwrap_angle(previous.x, value.x);
+                value.y = unwrap_angle(previous.y, value.y);
+                value.z = unwrap_angle(previous.z, value.z);
+            }
+            result[index] = value;
+        }
+    }
+    result
+}
+
+fn unwrap_angle(previous: f32, value: f32) -> f32 {
+    let turns = ((previous - value) / std::f32::consts::TAU).round();
+    value + turns * std::f32::consts::TAU
+}
+
+fn fit_dcc_bone_segment(
+    input: DensePoseSequenceView<'_>,
+    bone: usize,
+    start: usize,
+    end: usize,
+    translations: &[Vec3A],
+    euler_xyz: &[Vec3A],
+) -> DccCubicSegment {
+    let bone_count = input.bone_count;
+    let translation = std::array::from_fn::<_, 3, _>(|axis| {
+        fit_dcc_scalar_segment(
+            start,
+            end,
+            |sample| translations[sample * bone_count + bone].to_array()[axis],
+            |sample| input.sample_frame(sample),
+        )
+    });
+    let rotation = std::array::from_fn::<_, 3, _>(|axis| {
+        fit_dcc_scalar_segment(
+            start,
+            end,
+            |sample| euler_xyz[sample * bone_count + bone].to_array()[axis],
+            |sample| input.sample_frame(sample),
+        )
+    });
+    DccCubicSegment {
+        translation_out_tangent: Vec3A::new(
+            translation[0].out_tangent,
+            translation[1].out_tangent,
+            translation[2].out_tangent,
+        ),
+        translation_in_tangent: Vec3A::new(
+            translation[0].in_tangent,
+            translation[1].in_tangent,
+            translation[2].in_tangent,
+        ),
+        rotation_start_euler_xyz: euler_xyz[start * bone_count + bone],
+        rotation_end_euler_xyz: euler_xyz[end * bone_count + bone],
+        rotation_out_tangent: Vec3A::new(
+            rotation[0].out_tangent,
+            rotation[1].out_tangent,
+            rotation[2].out_tangent,
+        ),
+        rotation_in_tangent: Vec3A::new(
+            rotation[0].in_tangent,
+            rotation[1].in_tangent,
+            rotation[2].in_tangent,
+        ),
+    }
+}
+
+fn fit_dcc_scalar_segment(
+    start: usize,
+    end: usize,
+    value_at: impl Fn(usize) -> f32,
+    frame_at: impl Fn(usize) -> f32,
+) -> DccScalarSegment {
+    let duration = frame_at(end) - frame_at(start);
+    let start_value = value_at(start);
+    let end_value = value_at(end);
+    let slope = (end_value - start_value) / duration;
+    if end <= start + 1 {
+        return DccScalarSegment {
+            out_tangent: slope,
+            in_tangent: slope,
+        };
+    }
+
+    let mut aa = 0.0;
+    let mut ab = 0.0;
+    let mut bb = 0.0;
+    let mut ar = 0.0;
+    let mut br = 0.0;
+    for sample in start + 1..end {
+        let t = segment_amount(start, end, sample, &frame_at);
+        let (h00, h10, h01, h11) = hermite_basis(t);
+        let a = h10 * duration;
+        let b = h11 * duration;
+        let residual = value_at(sample) - h00 * start_value - h01 * end_value;
+        aa += a * a;
+        ab += a * b;
+        bb += b * b;
+        ar += a * residual;
+        br += b * residual;
+    }
+    let determinant = aa * bb - ab * ab;
+    let (mut out_tangent, mut in_tangent) = if determinant.abs() > f32::EPSILON {
+        (
+            (ar * bb - br * ab) / determinant,
+            (br * aa - ar * ab) / determinant,
+        )
+    } else {
+        (slope, slope)
+    };
+    clamp_monotonic_tangents(slope, &mut out_tangent, &mut in_tangent);
+    DccScalarSegment {
+        out_tangent,
+        in_tangent,
+    }
+}
+
+fn clamp_monotonic_tangents(slope: f32, out_tangent: &mut f32, in_tangent: &mut f32) {
+    if slope.abs() <= f32::EPSILON {
+        *out_tangent = 0.0;
+        *in_tangent = 0.0;
+        return;
+    }
+    if *out_tangent * slope < 0.0 {
+        *out_tangent = 0.0;
+    }
+    if *in_tangent * slope < 0.0 {
+        *in_tangent = 0.0;
+    }
+    let alpha = *out_tangent / slope;
+    let beta = *in_tangent / slope;
+    let length = alpha.hypot(beta);
+    if length > 3.0 {
+        let scale = 3.0 / length;
+        *out_tangent = scale * alpha * slope;
+        *in_tangent = scale * beta * slope;
+    }
+}
+
+fn hermite_basis(t: f32) -> (f32, f32, f32, f32) {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    (
+        2.0 * t3 - 3.0 * t2 + 1.0,
+        t3 - 2.0 * t2 + t,
+        -2.0 * t3 + 3.0 * t2,
+        t3 - t2,
+    )
+}
+
+fn sample_hermite(
+    start: f32,
+    end: f32,
+    out_tangent: f32,
+    in_tangent: f32,
+    duration: f32,
+    t: f32,
+) -> f32 {
+    let (h00, h10, h01, h11) = hermite_basis(t);
+    h00 * start + h10 * duration * out_tangent + h01 * end + h11 * duration * in_tangent
+}
+
 fn sample_bone_track(
     track: &ReducedBoneTrack,
     sample_frames: &[f32],
@@ -1055,6 +1280,66 @@ fn sample_bone_track(
     let amount = ((frame - sample_frames[left.sample_index])
         / (sample_frames[right.sample_index] - sample_frames[left.sample_index]))
         .clamp(0.0, 1.0);
+    if target == ReductionTarget::DccCubic {
+        let duration = sample_frames[right.sample_index] - sample_frames[left.sample_index];
+        let segment = right.dcc_segment;
+        let translation = Vec3A::new(
+            sample_hermite(
+                left.translation.x,
+                right.translation.x,
+                segment.translation_out_tangent.x,
+                segment.translation_in_tangent.x,
+                duration,
+                amount,
+            ),
+            sample_hermite(
+                left.translation.y,
+                right.translation.y,
+                segment.translation_out_tangent.y,
+                segment.translation_in_tangent.y,
+                duration,
+                amount,
+            ),
+            sample_hermite(
+                left.translation.z,
+                right.translation.z,
+                segment.translation_out_tangent.z,
+                segment.translation_in_tangent.z,
+                duration,
+                amount,
+            ),
+        );
+        let euler = Vec3A::new(
+            sample_hermite(
+                segment.rotation_start_euler_xyz.x,
+                segment.rotation_end_euler_xyz.x,
+                segment.rotation_out_tangent.x,
+                segment.rotation_in_tangent.x,
+                duration,
+                amount,
+            ),
+            sample_hermite(
+                segment.rotation_start_euler_xyz.y,
+                segment.rotation_end_euler_xyz.y,
+                segment.rotation_out_tangent.y,
+                segment.rotation_in_tangent.y,
+                duration,
+                amount,
+            ),
+            sample_hermite(
+                segment.rotation_start_euler_xyz.z,
+                segment.rotation_end_euler_xyz.z,
+                segment.rotation_out_tangent.z,
+                segment.rotation_in_tangent.z,
+                duration,
+                amount,
+            ),
+        );
+        return (
+            translation,
+            normalize_quat(Quat::from_euler(EulerRot::XYZ, euler.x, euler.y, euler.z)),
+        );
+    }
     let translation_amount = if target == ReductionTarget::VmdBezier {
         Vec3A::new(
             right.vmd_interpolation.translation[0].evaluate(amount),
@@ -1079,7 +1364,12 @@ fn sample_bone_track(
     )
 }
 
-fn sample_morph_track(track: &ReducedMorphTrack, sample_frames: &[f32], frame: f32) -> f32 {
+fn sample_morph_track(
+    track: &ReducedMorphTrack,
+    sample_frames: &[f32],
+    frame: f32,
+    target: ReductionTarget,
+) -> f32 {
     let upper = track
         .keys
         .partition_point(|key| sample_frames[key.sample_index] <= frame);
@@ -1094,6 +1384,17 @@ fn sample_morph_track(track: &ReducedMorphTrack, sample_frames: &[f32], frame: f
     let amount = ((frame - sample_frames[left.sample_index])
         / (sample_frames[right.sample_index] - sample_frames[left.sample_index]))
         .clamp(0.0, 1.0);
+    if target == ReductionTarget::DccCubic {
+        let duration = sample_frames[right.sample_index] - sample_frames[left.sample_index];
+        return sample_hermite(
+            left.weight,
+            right.weight,
+            right.dcc_segment.out_tangent,
+            right.dcc_segment.in_tangent,
+            duration,
+            amount,
+        );
+    }
     left.weight + (right.weight - left.weight) * amount
 }
 

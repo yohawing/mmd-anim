@@ -40,10 +40,10 @@ pub use model::{
 };
 pub use pose::PoseArena;
 pub use reduce::{
-    DensePoseSequenceView, PoseReductionError, PoseReductionReport, QuantizedBezier,
-    ReducedBoneKey, ReducedBoneTrack, ReducedMorphKey, ReducedMorphTrack, ReducedPoseSample,
-    ReducedPoseSequence, ReductionTarget, ReductionTolerances, SkeletonSnapshot,
-    VmdBoneInterpolation, reduce_dense_pose_sequence,
+    DccCubicSegment, DccScalarSegment, DensePoseSequenceView, PoseReductionError,
+    PoseReductionReport, QuantizedBezier, ReducedBoneKey, ReducedBoneTrack, ReducedMorphKey,
+    ReducedMorphTrack, ReducedPoseSample, ReducedPoseSequence, ReductionTarget,
+    ReductionTolerances, SkeletonSnapshot, VmdBoneInterpolation, reduce_dense_pose_sequence,
 };
 pub use runtime::{
     HostPoseError, HostPoseView, IkSolveOptions, IkSolverRuntimeStats, PhysicsMode,

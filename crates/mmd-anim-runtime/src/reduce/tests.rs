@@ -364,3 +364,213 @@ fn vmd_bezier_world_rotation_gate_handles_near_pi_motion() {
     .unwrap();
     assert!(reduced.report().max_world_rotation_error_radians <= 0.002);
 }
+
+#[test]
+fn dcc_hermite_matches_independent_reference_equation() {
+    let start = -2.0;
+    let end = 3.0;
+    let out_tangent = 1.25;
+    let in_tangent = -0.75;
+    let duration = 4.0;
+    for step in 0..=16 {
+        let t = step as f32 / 16.0;
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let reference = (2.0 * t3 - 3.0 * t2 + 1.0) * start
+            + (t3 - 2.0 * t2 + t) * duration * out_tangent
+            + (-2.0 * t3 + 3.0 * t2) * end
+            + (t3 - t2) * duration * in_tangent;
+        assert!(
+            (sample_hermite(start, end, out_tangent, in_tangent, duration, t) - reference).abs()
+                <= f32::EPSILON
+        );
+    }
+}
+
+#[test]
+fn dcc_cubic_uses_fewer_keys_for_a_single_smooth_peak() {
+    let frame_count = 9;
+    let world = (0..frame_count)
+        .map(|frame| {
+            let t = frame as f32 / (frame_count - 1) as f32;
+            Mat4::from_translation(Vec3::new(4.0 * t * (1.0 - t), 0.0, 0.0))
+        })
+        .collect::<Vec<_>>();
+    let morphs = (0..frame_count)
+        .map(|frame| {
+            let t = frame as f32 / (frame_count - 1) as f32;
+            4.0 * t * (1.0 - t)
+        })
+        .collect::<Vec<_>>();
+    let reduce = |target| {
+        reduce_dense_pose_sequence(
+            DensePoseSequenceView::new(&world, &morphs, frame_count, 1, 1, 0.0, 1.0).unwrap(),
+            SkeletonSnapshot::new(vec![-1], vec![Vec3A::ZERO], vec![Quat::IDENTITY], 1, 13)
+                .unwrap(),
+            ReductionTolerances {
+                local_position: 0.01,
+                world_position: 0.01,
+                morph_weight: 0.01,
+                ..Default::default()
+            },
+            target,
+        )
+        .unwrap()
+    };
+    let linear = reduce(ReductionTarget::LinearSlerp);
+    let cubic = reduce(ReductionTarget::DccCubic);
+    assert_eq!(
+        cubic.bone_tracks()[0].keys().len(),
+        3,
+        "{:?} {:?}",
+        cubic.report(),
+        cubic.bone_tracks()[0].keys()
+    );
+    assert_eq!(cubic.morph_tracks()[0].keys().len(), 3);
+    assert!(
+        cubic.report().reduced_bone_key_count < linear.report().reduced_bone_key_count
+            && cubic.report().reduced_morph_key_count < linear.report().reduced_morph_key_count
+    );
+    assert!(cubic.report().max_world_position_error <= 0.01);
+    assert!(cubic.report().max_morph_weight_error <= 0.01);
+}
+
+#[test]
+fn dcc_constant_tangent_motion_is_finite_and_exact() {
+    let constant = [2.0f32; 4];
+    let constant_segment = fit_dcc_scalar_segment(
+        0,
+        constant.len() - 1,
+        |sample| constant[sample],
+        |sample| sample as f32,
+    );
+    assert_eq!(constant_segment, DccScalarSegment::default());
+    for step in 0..=16 {
+        assert_eq!(
+            sample_hermite(
+                constant[0],
+                constant[constant.len() - 1],
+                constant_segment.out_tangent,
+                constant_segment.in_tangent,
+                (constant.len() - 1) as f32,
+                step as f32 / 16.0,
+            ),
+            2.0
+        );
+    }
+
+    let frame_count = 6;
+    let world = (0..frame_count)
+        .map(|frame| {
+            Mat4::from_rotation_translation(
+                Quat::from_rotation_z(frame as f32 * 0.1),
+                Vec3::new(frame as f32 * 0.25, 0.0, 0.0),
+            )
+        })
+        .collect::<Vec<_>>();
+    let morphs = (0..frame_count)
+        .map(|frame| frame as f32 * 0.2)
+        .collect::<Vec<_>>();
+    let reduced = reduce_dense_pose_sequence(
+        DensePoseSequenceView::new(&world, &morphs, frame_count, 1, 1, 0.0, 1.0).unwrap(),
+        SkeletonSnapshot::new(vec![-1], vec![Vec3A::ZERO], vec![Quat::IDENTITY], 1, 16).unwrap(),
+        ReductionTolerances {
+            local_position: 1.0e-5,
+            local_rotation_radians: 1.0e-4,
+            world_position: 1.0e-5,
+            world_rotation_radians: 1.0e-4,
+            morph_weight: 1.0e-5,
+        },
+        ReductionTarget::DccCubic,
+    )
+    .unwrap();
+    assert_eq!(reduced.bone_tracks()[0].keys().len(), 2);
+    assert_eq!(reduced.morph_tracks()[0].keys().len(), 2);
+    let bone_segment = reduced.bone_tracks()[0].keys()[1].dcc_segment;
+    let morph_segment = reduced.morph_tracks()[0].keys()[1].dcc_segment;
+    assert!((bone_segment.translation_out_tangent.x - 0.25).abs() <= 1.0e-5);
+    assert!((bone_segment.translation_in_tangent.x - 0.25).abs() <= 1.0e-5);
+    assert!((bone_segment.rotation_out_tangent.z - 0.1).abs() <= 1.0e-4);
+    assert!((bone_segment.rotation_in_tangent.z - 0.1).abs() <= 1.0e-4);
+    assert!((morph_segment.out_tangent - 0.2).abs() <= 1.0e-5);
+    assert!((morph_segment.in_tangent - 0.2).abs() <= 1.0e-5);
+}
+
+#[test]
+fn dcc_euler_xyz_unwraps_across_pi_without_flips() {
+    let degrees = [170.0f32, 175.0, 179.0, 181.0, 185.0, 190.0];
+    let world = degrees
+        .iter()
+        .map(|degrees| Mat4::from_quat(Quat::from_rotation_x(degrees.to_radians())))
+        .collect::<Vec<_>>();
+    let reduced = reduce_dense_pose_sequence(
+        DensePoseSequenceView::new(&world, &[], world.len(), 1, 0, 0.0, 1.0).unwrap(),
+        SkeletonSnapshot::new(vec![-1], vec![Vec3A::ZERO], vec![Quat::IDENTITY], 0, 14).unwrap(),
+        ReductionTolerances {
+            local_rotation_radians: 0.002,
+            world_rotation_radians: 0.002,
+            ..Default::default()
+        },
+        ReductionTarget::DccCubic,
+    )
+    .unwrap();
+    assert!(reduced.report().max_world_rotation_error_radians <= 0.002);
+    for (frame, degrees) in degrees.iter().enumerate() {
+        let sample = reduced.sample(frame as f32).unwrap();
+        assert!(sample.local_rotations[0].is_finite());
+        assert!(
+            quat_angle(
+                Quat::from_rotation_x(degrees.to_radians()),
+                sample.local_rotations[0]
+            ) <= 0.002
+        );
+    }
+}
+
+#[test]
+fn dcc_broken_tangents_stay_finite_and_do_not_overshoot_monotonic_segments() {
+    let values = [0.0f32, 0.85, 0.9, 1.0];
+    let segment = fit_dcc_scalar_segment(
+        0,
+        values.len() - 1,
+        |sample| values[sample],
+        |sample| sample as f32,
+    );
+    assert!(segment.out_tangent.is_finite() && segment.in_tangent.is_finite());
+    for step in 0..=128 {
+        let value = sample_hermite(
+            values[0],
+            values[values.len() - 1],
+            segment.out_tangent,
+            segment.in_tangent,
+            (values.len() - 1) as f32,
+            step as f32 / 128.0,
+        );
+        assert!(
+            (-1.0e-6..=1.0 + 1.0e-6).contains(&value),
+            "{segment:?} {value}"
+        );
+    }
+
+    let extrema = [0.0f32, 1.0, -1.0, 1.0, 0.0];
+    let world = extrema
+        .iter()
+        .map(|value| Mat4::from_translation(Vec3::new(*value, 0.0, 0.0)))
+        .collect::<Vec<_>>();
+    let reduced = reduce_dense_pose_sequence(
+        DensePoseSequenceView::new(&world, &[], world.len(), 1, 0, 0.0, 1.0).unwrap(),
+        SkeletonSnapshot::new(vec![-1], vec![Vec3A::ZERO], vec![Quat::IDENTITY], 0, 15).unwrap(),
+        ReductionTolerances {
+            local_position: 0.01,
+            world_position: 0.01,
+            ..Default::default()
+        },
+        ReductionTarget::DccCubic,
+    )
+    .unwrap();
+    assert!(reduced.report().max_world_position_error <= 0.01);
+    assert!(reduced.bone_tracks()[0].keys().iter().all(|key| {
+        key.dcc_segment.translation_out_tangent.is_finite()
+            && key.dcc_segment.translation_in_tangent.is_finite()
+    }));
+}

@@ -69,7 +69,14 @@ pub(crate) fn diff_fbx_skin(
         );
         println!("{}", serde_json::to_string(&value)?);
     } else {
-        print_diff_report_text(path_a, path_b, clusters_a.len(), clusters_b.len(), &options, &report);
+        print_diff_report_text(
+            path_a,
+            path_b,
+            clusters_a.len(),
+            clusters_b.len(),
+            &options,
+            &report,
+        );
     }
 
     if difference_count == 0 {
@@ -183,11 +190,7 @@ fn diff_report_json(
     options: &DiffFbxSkinOptions,
     report: &FbxSkinDiffReport,
 ) -> serde_json::Value {
-    let bones = report
-        .bones
-        .iter()
-        .map(bone_diff_json)
-        .collect::<Vec<_>>();
+    let bones = report.bones.iter().map(bone_diff_json).collect::<Vec<_>>();
     json!({
         "status": if report.difference_count() == 0 { "ok" } else { "diff" },
         "command": "fbx-skin-diff",

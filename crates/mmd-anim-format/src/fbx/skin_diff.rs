@@ -12,7 +12,10 @@ use std::{collections::HashMap, io::Cursor};
 
 use fbxcel::{
     low::v7400::AttributeValue,
-    tree::{any::AnyTree, v7400::{NodeHandle, Tree}},
+    tree::{
+        any::AnyTree,
+        v7400::{NodeHandle, Tree},
+    },
 };
 
 /// One parsed FBX skin cluster (per-bone deformer).
@@ -94,8 +97,8 @@ pub fn read_fbx_skin_clusters(bytes: &[u8]) -> Result<Vec<FbxSkinClusterData>, F
             .unwrap_or_else(|| format!("<unresolved-cluster-{cluster_id}>"));
         let indices = arr_i32_child(deformer, "Indexes").unwrap_or_default();
         let weights = arr_f64_child(deformer, "Weights").unwrap_or_default();
-        let transform =
-            arr_f64_child(deformer, "Transform").and_then(|values| <[f64; 16]>::try_from(values.as_slice()).ok());
+        let transform = arr_f64_child(deformer, "Transform")
+            .and_then(|values| <[f64; 16]>::try_from(values.as_slice()).ok());
         let transform_link = arr_f64_child(deformer, "TransformLink")
             .and_then(|values| <[f64; 16]>::try_from(values.as_slice()).ok());
         clusters.push(FbxSkinClusterData {
@@ -339,7 +342,12 @@ fn diff_one_bone(
         transform_b,
         transform_link_a,
         transform_link_b,
-        transform_differs: matrix_differs(transform_max_abs_delta, transform_a, transform_b, options.matrix_epsilon),
+        transform_differs: matrix_differs(
+            transform_max_abs_delta,
+            transform_a,
+            transform_b,
+            options.matrix_epsilon,
+        ),
         transform_link_differs: matrix_differs(
             transform_link_max_abs_delta,
             transform_link_a,
@@ -366,7 +374,9 @@ fn matrix_max_abs_delta(a: Option<[f64; 16]>, b: Option<[f64; 16]>) -> Option<f6
             .iter()
             .zip(b.iter())
             .map(|(x, y)| (x - y).abs())
-            .fold(None, |max, delta| Some(max.map_or(delta, |max: f64| max.max(delta)))),
+            .fold(None, |max, delta| {
+                Some(max.map_or(delta, |max: f64| max.max(delta)))
+            }),
         _ => None,
     }
 }
@@ -455,10 +465,18 @@ mod tests {
         let b = vec![cluster("OnlyB", &[0], &[1.0])];
         let report = diff_fbx_skin_clusters(&a, &b, FbxSkinDiffOptions::default());
         assert_eq!(report.bones.len(), 2);
-        let only_a = report.bones.iter().find(|bone| bone.bone_name == "OnlyA").unwrap();
+        let only_a = report
+            .bones
+            .iter()
+            .find(|bone| bone.bone_name == "OnlyA")
+            .unwrap();
         assert!(only_a.in_a && !only_a.in_b);
         assert!(only_a.has_differences());
-        let only_b = report.bones.iter().find(|bone| bone.bone_name == "OnlyB").unwrap();
+        let only_b = report
+            .bones
+            .iter()
+            .find(|bone| bone.bone_name == "OnlyB")
+            .unwrap();
         assert!(!only_b.in_a && only_b.in_b);
         assert!(only_b.has_differences());
     }

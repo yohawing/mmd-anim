@@ -14,3 +14,6 @@ description = "Renderer-independent MMD animation runtime core"
 glam.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rayon.workspace = true
+

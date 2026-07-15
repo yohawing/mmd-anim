@@ -92,6 +92,7 @@ typedef struct mmd_runtime_vmd_camera_track_t mmd_runtime_vmd_camera_track_t;
 typedef struct mmd_runtime_vmd_light_track_t mmd_runtime_vmd_light_track_t;
 typedef struct mmd_runtime_vmd_self_shadow_track_t mmd_runtime_vmd_self_shadow_track_t;
 typedef struct mmd_runtime_physics_world_t mmd_runtime_physics_world_t;
+typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 
 /* ------------------------------------------------------------------ */
 /*  Flag constants                                                    */
@@ -123,6 +124,59 @@ typedef enum mmd_runtime_status {
     MMD_RUNTIME_STATUS_BUFFER_TOO_SMALL = 3,
     MMD_RUNTIME_STATUS_ERROR = 4
 } mmd_runtime_status_t;
+
+typedef enum mmd_runtime_reduction_target {
+    MMD_RUNTIME_REDUCTION_TARGET_LINEAR_SLERP = 0,
+    MMD_RUNTIME_REDUCTION_TARGET_VMD_BEZIER = 1,
+    MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC = 2
+} mmd_runtime_reduction_target_t;
+
+typedef enum mmd_runtime_unity_curve_semantic {
+    MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION = 0,
+    MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER = 1,
+    MMD_RUNTIME_UNITY_CURVE_MORPH_WEIGHT = 2
+} mmd_runtime_unity_curve_semantic_t;
+
+typedef enum mmd_runtime_unity_curve_axis {
+    MMD_RUNTIME_UNITY_CURVE_AXIS_X = 0,
+    MMD_RUNTIME_UNITY_CURVE_AXIS_Y = 1,
+    MMD_RUNTIME_UNITY_CURVE_AXIS_Z = 2,
+    MMD_RUNTIME_UNITY_CURVE_AXIS_NONE = 3
+} mmd_runtime_unity_curve_axis_t;
+
+typedef struct mmd_runtime_ffi_reduction_tolerances {
+    float local_position;
+    float local_rotation_radians;
+    float world_position;
+    float world_rotation_radians;
+    float morph_weight;
+} mmd_runtime_ffi_reduction_tolerances_t;
+
+typedef struct mmd_runtime_ffi_pose_reduction_report {
+    size_t source_bone_key_count;
+    size_t reduced_bone_key_count;
+    size_t source_morph_key_count;
+    size_t reduced_morph_key_count;
+    float max_local_position_error;
+    float max_local_rotation_error_radians;
+    float max_world_position_error;
+    float max_world_rotation_error_radians;
+    float max_morph_weight_error;
+} mmd_runtime_ffi_pose_reduction_report_t;
+
+typedef struct mmd_runtime_ffi_unity_curve_descriptor {
+    uint32_t semantic;    /* mmd_runtime_unity_curve_semantic_t */
+    uint32_t target_index; /* bone index or morph index */
+    uint32_t axis;        /* mmd_runtime_unity_curve_axis_t */
+    size_t   key_count;
+} mmd_runtime_ffi_unity_curve_descriptor_t;
+
+typedef struct mmd_runtime_ffi_unity_curve_key {
+    float time_seconds;
+    float value;
+    float in_tangent;
+    float out_tangent;
+} mmd_runtime_ffi_unity_curve_key_t;
 
 typedef enum mmd_runtime_physics_mode {
     MMD_RUNTIME_PHYSICS_MODE_OFF = 0,
@@ -1100,6 +1154,64 @@ bool mmd_runtime_instance_evaluate_clip_frame_batch(
     size_t                        out_world_matrices_f32_len,
     float*                        out_morph_weights_f32,
     size_t                        out_morph_weights_f32_len);
+
+/* Reduces dense batch output into an owned opaque sparse-pose handle.
+   Dense layouts match evaluate_clip_frame_batch. On failure, *out_reduced_pose
+   is set to NULL. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_create_from_dense(
+    const mmd_runtime_model_t*                     model,
+    uint64_t                                       model_identity,
+    const float*                                   world_matrices_f32,
+    size_t                                         world_matrices_f32_len,
+    const float*                                   morph_weights_f32,
+    size_t                                         morph_weights_f32_len,
+    size_t                                         frame_count,
+    float                                          start_frame,
+    float                                          frame_step,
+    uint32_t                                       target,
+    mmd_runtime_ffi_reduction_tolerances_t         tolerances,
+    mmd_runtime_reduced_pose_t**                   out_reduced_pose);
+
+void mmd_runtime_reduced_pose_free(mmd_runtime_reduced_pose_t* pose);
+size_t mmd_runtime_reduced_pose_bone_count(const mmd_runtime_reduced_pose_t* pose);
+size_t mmd_runtime_reduced_pose_morph_count(const mmd_runtime_reduced_pose_t* pose);
+mmd_runtime_status_t mmd_runtime_reduced_pose_report(
+    const mmd_runtime_reduced_pose_t*               pose,
+    mmd_runtime_ffi_pose_reduction_report_t*        out_report);
+
+/* Enumerates target-native Unity scalar curves from a DCC_CUBIC reduced pose.
+   Curves are translation XYZ then local Euler XYZ for each bone, followed by
+   one weight curve for each morph. frames_per_second must be finite and > 0;
+   flip_z selects Unity handedness conversion. LINEAR_SLERP and VMD_BEZIER
+   reduced poses return MMD_RUNTIME_STATUS_UNSUPPORTED rather than being
+   silently converted to Hermite curves. The reduced handle owns its skeleton
+   snapshot, so these calls remain valid after the source model is freed. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_count(
+    const mmd_runtime_reduced_pose_t* pose,
+    float                             frames_per_second,
+    bool                              flip_z,
+    size_t*                           out_curve_count);
+
+mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_descriptor(
+    const mmd_runtime_reduced_pose_t*             pose,
+    float                                         frames_per_second,
+    bool                                          flip_z,
+    size_t                                        curve_index,
+    mmd_runtime_ffi_unity_curve_descriptor_t*     out_descriptor);
+
+/* Two-call caller-owned retrieval. Pass out_keys = NULL and capacity = 0 to
+   receive MMD_RUNTIME_STATUS_BUFFER_TOO_SMALL plus out_required_count, then
+   allocate that many keys and call again. Any short buffer returns the same
+   status and required count. Euler filtering, degree conversion, and
+   per-second tangent conversion are already applied by Rust. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_keys(
+    const mmd_runtime_reduced_pose_t* pose,
+    float                             frames_per_second,
+    bool                              flip_z,
+    size_t                            curve_index,
+    mmd_runtime_ffi_unity_curve_key_t* out_keys,
+    size_t                            out_key_capacity,
+    size_t*                           out_required_count);
 
 /* Stateful sequential physics bake.
    After world creation or a successful mmd_runtime_physics_world_reset, the

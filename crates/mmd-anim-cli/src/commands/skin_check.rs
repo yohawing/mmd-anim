@@ -85,7 +85,11 @@ fn bone_name(parsed: &PmxParsedModel, index: u32) -> &str {
         .unwrap_or("<out-of-range>")
 }
 
-fn analyze_skin(parsed: &PmxParsedModel, tolerance: f32, distance_threshold: f32) -> SkinCheckReport {
+fn analyze_skin(
+    parsed: &PmxParsedModel,
+    tolerance: f32,
+    distance_threshold: f32,
+) -> SkinCheckReport {
     let geometry = &parsed.geometry;
     let vertex_count = geometry.positions.len() / 3;
     let modes = &geometry.sdef.skinning_modes;
@@ -195,7 +199,10 @@ impl SkinCheckReport {
             distance_threshold,
         );
 
-        if self.weight_sum.is_empty() && self.duplicate_bone.is_empty() && self.negative_index.is_empty() {
+        if self.weight_sum.is_empty()
+            && self.duplicate_bone.is_empty()
+            && self.negative_index.is_empty()
+        {
             println!("no skin anomalies found");
             return;
         }
@@ -224,7 +231,10 @@ impl SkinCheckReport {
         }
 
         if !self.duplicate_bone.is_empty() {
-            println!("\n[duplicate-bone] ({} vertices)", self.duplicate_bone.len());
+            println!(
+                "\n[duplicate-bone] ({} vertices)",
+                self.duplicate_bone.len()
+            );
             for anomaly in &self.duplicate_bone {
                 let slots_str = anomaly
                     .slots
@@ -365,7 +375,10 @@ mod tests {
         let result = skin_check(Path::new("nonexistent.pmx"), false, -1.0, 1.0);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("tolerance"), "error should mention tolerance: {err}");
+        assert!(
+            err.contains("tolerance"),
+            "error should mention tolerance: {err}"
+        );
     }
 
     #[test]

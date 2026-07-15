@@ -1,0 +1,955 @@
+use std::cmp::Ordering;
+
+use glam::{Mat3, Mat4, Quat, Vec3, Vec3A};
+use thiserror::Error;
+
+use crate::{BoneIndex, ModelArena};
+
+const AFFINE_EPSILON: f32 = 1.0e-4;
+
+#[derive(Debug, Clone, Copy)]
+pub struct DensePoseSequenceView<'a> {
+    world_matrices: &'a [Mat4],
+    morph_weights: &'a [f32],
+    frame_count: usize,
+    bone_count: usize,
+    morph_count: usize,
+    start_frame: f32,
+    frame_step: f32,
+}
+
+impl<'a> DensePoseSequenceView<'a> {
+    pub fn new(
+        world_matrices: &'a [Mat4],
+        morph_weights: &'a [f32],
+        frame_count: usize,
+        bone_count: usize,
+        morph_count: usize,
+        start_frame: f32,
+        frame_step: f32,
+    ) -> Result<Self, PoseReductionError> {
+        if frame_count == 0 {
+            return Err(PoseReductionError::EmptySequence);
+        }
+        if bone_count == 0 {
+            return Err(PoseReductionError::EmptySkeleton);
+        }
+        if !start_frame.is_finite() || !frame_step.is_finite() || frame_step <= 0.0 {
+            return Err(PoseReductionError::InvalidTimeBase);
+        }
+        let mut previous_frame = start_frame;
+        for sample_index in 1..frame_count {
+            let frame = start_frame + sample_index as f32 * frame_step;
+            if !frame.is_finite() || frame <= previous_frame {
+                return Err(PoseReductionError::InvalidTimeBase);
+            }
+            previous_frame = frame;
+        }
+        let expected_world = frame_count
+            .checked_mul(bone_count)
+            .ok_or(PoseReductionError::LengthOverflow)?;
+        let expected_morph = frame_count
+            .checked_mul(morph_count)
+            .ok_or(PoseReductionError::LengthOverflow)?;
+        if world_matrices.len() != expected_world {
+            return Err(PoseReductionError::InvalidWorldMatrixCount {
+                actual: world_matrices.len(),
+                expected: expected_world,
+            });
+        }
+        if morph_weights.len() != expected_morph {
+            return Err(PoseReductionError::InvalidMorphWeightCount {
+                actual: morph_weights.len(),
+                expected: expected_morph,
+            });
+        }
+        Ok(Self {
+            world_matrices,
+            morph_weights,
+            frame_count,
+            bone_count,
+            morph_count,
+            start_frame,
+            frame_step,
+        })
+    }
+
+    pub fn frame_count(&self) -> usize {
+        self.frame_count
+    }
+    pub fn bone_count(&self) -> usize {
+        self.bone_count
+    }
+    pub fn morph_count(&self) -> usize {
+        self.morph_count
+    }
+    pub fn start_frame(&self) -> f32 {
+        self.start_frame
+    }
+    pub fn frame_step(&self) -> f32 {
+        self.frame_step
+    }
+
+    fn world_matrix(&self, frame: usize, bone: usize) -> Mat4 {
+        self.world_matrices[frame * self.bone_count + bone]
+    }
+
+    fn morph_weight(&self, frame: usize, morph: usize) -> f32 {
+        self.morph_weights[frame * self.morph_count + morph]
+    }
+
+    fn sample_frame(&self, sample_index: usize) -> f32 {
+        self.start_frame + sample_index as f32 * self.frame_step
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkeletonSnapshot {
+    parent_indices: Box<[i32]>,
+    rest_local_translations: Box<[Vec3A]>,
+    rest_local_rotations: Box<[Quat]>,
+    evaluation_order: Box<[usize]>,
+    morph_count: usize,
+    model_identity: u64,
+}
+
+impl SkeletonSnapshot {
+    pub fn new(
+        parent_indices: Vec<i32>,
+        rest_local_translations: Vec<Vec3A>,
+        rest_local_rotations: Vec<Quat>,
+        morph_count: usize,
+        model_identity: u64,
+    ) -> Result<Self, PoseReductionError> {
+        if parent_indices.is_empty() {
+            return Err(PoseReductionError::EmptySkeleton);
+        }
+        if rest_local_translations.len() != parent_indices.len()
+            || rest_local_rotations.len() != parent_indices.len()
+        {
+            return Err(PoseReductionError::InvalidSkeletonLengths);
+        }
+        for (bone, &parent) in parent_indices.iter().enumerate() {
+            if parent < -1 || parent >= parent_indices.len() as i32 || parent == bone as i32 {
+                return Err(PoseReductionError::InvalidParent { bone, parent });
+            }
+            if !rest_local_translations[bone].is_finite()
+                || !quat_is_finite(rest_local_rotations[bone])
+            {
+                return Err(PoseReductionError::NonFiniteSkeleton { bone });
+            }
+        }
+        let evaluation_order = build_evaluation_order(&parent_indices)?;
+        Ok(Self {
+            parent_indices: parent_indices.into_boxed_slice(),
+            rest_local_translations: rest_local_translations.into_boxed_slice(),
+            rest_local_rotations: rest_local_rotations
+                .into_iter()
+                .map(normalize_quat)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            evaluation_order: evaluation_order.into_boxed_slice(),
+            morph_count,
+            model_identity,
+        })
+    }
+
+    pub fn from_model(model: &ModelArena, model_identity: u64) -> Result<Self, PoseReductionError> {
+        let mut parents = Vec::with_capacity(model.bone_count());
+        let mut translations = Vec::with_capacity(model.bone_count());
+        for bone in 0..model.bone_count() {
+            let bone_index = BoneIndex(bone as u32);
+            let parent = model.parent_index(bone_index);
+            parents.push(parent.map_or(-1, |value| value.0 as i32));
+            let parent_position = parent.map_or(Vec3A::ZERO, |value| model.rest_position(value));
+            translations.push(model.rest_position(bone_index) - parent_position);
+        }
+        Self::new(
+            parents,
+            translations,
+            vec![Quat::IDENTITY; model.bone_count()],
+            model.morph_count() as usize,
+            model_identity,
+        )
+    }
+
+    pub fn bone_count(&self) -> usize {
+        self.parent_indices.len()
+    }
+    pub fn morph_count(&self) -> usize {
+        self.morph_count
+    }
+    pub fn model_identity(&self) -> u64 {
+        self.model_identity
+    }
+    pub fn parent_indices(&self) -> &[i32] {
+        &self.parent_indices
+    }
+    pub fn rest_local_translations(&self) -> &[Vec3A] {
+        &self.rest_local_translations
+    }
+    pub fn rest_local_rotations(&self) -> &[Quat] {
+        &self.rest_local_rotations
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReductionTarget {
+    LinearSlerp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReductionTolerances {
+    pub local_position: f32,
+    pub local_rotation_radians: f32,
+    pub world_position: f32,
+    pub world_rotation_radians: f32,
+    pub morph_weight: f32,
+}
+
+impl ReductionTolerances {
+    fn validate(self) -> Result<Self, PoseReductionError> {
+        let values = [
+            self.local_position,
+            self.local_rotation_radians,
+            self.world_position,
+            self.world_rotation_radians,
+            self.morph_weight,
+        ];
+        if values
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(PoseReductionError::InvalidTolerance);
+        }
+        Ok(self)
+    }
+}
+
+impl Default for ReductionTolerances {
+    fn default() -> Self {
+        Self {
+            local_position: 1.0e-4,
+            local_rotation_radians: 1.0e-4,
+            world_position: 1.0e-4,
+            world_rotation_radians: 1.0e-4,
+            morph_weight: 1.0e-4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReducedBoneKey {
+    pub sample_index: usize,
+    pub translation: Vec3A,
+    pub rotation: Quat,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReducedBoneTrack {
+    keys: Box<[ReducedBoneKey]>,
+}
+
+impl ReducedBoneTrack {
+    pub fn keys(&self) -> &[ReducedBoneKey] {
+        &self.keys
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReducedMorphKey {
+    pub sample_index: usize,
+    pub weight: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReducedMorphTrack {
+    keys: Box<[ReducedMorphKey]>,
+}
+
+impl ReducedMorphTrack {
+    pub fn keys(&self) -> &[ReducedMorphKey] {
+        &self.keys
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PoseReductionReport {
+    pub source_bone_key_count: usize,
+    pub reduced_bone_key_count: usize,
+    pub source_morph_key_count: usize,
+    pub reduced_morph_key_count: usize,
+    pub max_local_position_error: f32,
+    pub max_local_rotation_error_radians: f32,
+    pub max_world_position_error: f32,
+    pub max_world_rotation_error_radians: f32,
+    pub max_morph_weight_error: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReducedPoseSequence {
+    snapshot: SkeletonSnapshot,
+    target: ReductionTarget,
+    start_frame: f32,
+    frame_step: f32,
+    frame_count: usize,
+    sample_frames: Box<[f32]>,
+    bone_tracks: Box<[ReducedBoneTrack]>,
+    morph_tracks: Box<[ReducedMorphTrack]>,
+    report: PoseReductionReport,
+}
+
+impl ReducedPoseSequence {
+    pub fn snapshot(&self) -> &SkeletonSnapshot {
+        &self.snapshot
+    }
+    pub fn target(&self) -> ReductionTarget {
+        self.target
+    }
+    pub fn start_frame(&self) -> f32 {
+        self.start_frame
+    }
+    pub fn frame_step(&self) -> f32 {
+        self.frame_step
+    }
+    pub fn frame_count(&self) -> usize {
+        self.frame_count
+    }
+    pub fn bone_tracks(&self) -> &[ReducedBoneTrack] {
+        &self.bone_tracks
+    }
+    pub fn morph_tracks(&self) -> &[ReducedMorphTrack] {
+        &self.morph_tracks
+    }
+    pub fn report(&self) -> PoseReductionReport {
+        self.report
+    }
+
+    pub fn sample(&self, frame: f32) -> Result<ReducedPoseSample, PoseReductionError> {
+        if !frame.is_finite() {
+            return Err(PoseReductionError::InvalidSampleTime);
+        }
+        let local_translations = self
+            .bone_tracks
+            .iter()
+            .map(|track| sample_bone_track(track, &self.sample_frames, frame).0)
+            .collect::<Vec<_>>();
+        let local_rotations = self
+            .bone_tracks
+            .iter()
+            .map(|track| sample_bone_track(track, &self.sample_frames, frame).1)
+            .collect::<Vec<_>>();
+        let morph_weights = self
+            .morph_tracks
+            .iter()
+            .map(|track| sample_morph_track(track, &self.sample_frames, frame))
+            .collect::<Vec<_>>();
+        let world_matrices =
+            build_world_matrices(&self.snapshot, &local_translations, &local_rotations);
+        Ok(ReducedPoseSample {
+            local_translations,
+            local_rotations,
+            world_matrices,
+            morph_weights,
+        })
+    }
+
+    pub fn validate_model(
+        &self,
+        model_identity: u64,
+        bone_count: usize,
+        morph_count: usize,
+    ) -> bool {
+        self.snapshot.model_identity == model_identity
+            && self.snapshot.bone_count() == bone_count
+            && self.snapshot.morph_count == morph_count
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReducedPoseSample {
+    pub local_translations: Vec<Vec3A>,
+    pub local_rotations: Vec<Quat>,
+    pub world_matrices: Vec<Mat4>,
+    pub morph_weights: Vec<f32>,
+}
+
+#[derive(Debug, Error, Clone, PartialEq)]
+pub enum PoseReductionError {
+    #[error("dense pose sequence must contain at least one frame")]
+    EmptySequence,
+    #[error("skeleton must contain at least one bone")]
+    EmptySkeleton,
+    #[error("invalid or non-positive dense pose time base")]
+    InvalidTimeBase,
+    #[error("dense pose buffer length overflow")]
+    LengthOverflow,
+    #[error("world matrix count {actual} does not match expected {expected}")]
+    InvalidWorldMatrixCount { actual: usize, expected: usize },
+    #[error("morph weight count {actual} does not match expected {expected}")]
+    InvalidMorphWeightCount { actual: usize, expected: usize },
+    #[error("skeleton arrays have inconsistent lengths")]
+    InvalidSkeletonLengths,
+    #[error("bone {bone} has invalid parent index {parent}")]
+    InvalidParent { bone: usize, parent: i32 },
+    #[error("skeleton hierarchy contains a cycle at bone {bone}")]
+    SkeletonCycle { bone: usize },
+    #[error("bone {bone} has non-finite rest data")]
+    NonFiniteSkeleton { bone: usize },
+    #[error("dense pose skeleton counts do not match snapshot")]
+    SnapshotMismatch,
+    #[error("reduction tolerance must be finite and non-negative")]
+    InvalidTolerance,
+    #[error("frame {frame}, bone {bone} contains a non-finite matrix")]
+    NonFiniteMatrix { frame: usize, bone: usize },
+    #[error("frame {frame}, bone {bone} contains scale or shear")]
+    ScaleOrShear { frame: usize, bone: usize },
+    #[error("frame {frame}, bone {bone} has a singular parent transform")]
+    SingularParent { frame: usize, bone: usize },
+    #[error("frame {frame}, morph {morph} contains a non-finite weight")]
+    NonFiniteMorph { frame: usize, morph: usize },
+    #[error("sample time must be finite")]
+    InvalidSampleTime,
+    #[error("requested tolerance cannot be attained at source frame {frame}")]
+    ToleranceUnattainable { frame: usize },
+}
+
+pub fn reduce_dense_pose_sequence(
+    input: DensePoseSequenceView<'_>,
+    snapshot: SkeletonSnapshot,
+    tolerances: ReductionTolerances,
+    target: ReductionTarget,
+) -> Result<ReducedPoseSequence, PoseReductionError> {
+    let tolerances = tolerances.validate()?;
+    if input.bone_count != snapshot.bone_count() || input.morph_count != snapshot.morph_count() {
+        return Err(PoseReductionError::SnapshotMismatch);
+    }
+
+    let (local_translations, local_rotations) = decompose_dense_pose(input, &snapshot)?;
+    for frame in 0..input.frame_count {
+        for morph in 0..input.morph_count {
+            if !input.morph_weight(frame, morph).is_finite() {
+                return Err(PoseReductionError::NonFiniteMorph { frame, morph });
+            }
+        }
+    }
+
+    let mut bone_key_indices = vec![endpoint_indices(input.frame_count); input.bone_count];
+    let mut morph_key_indices = vec![endpoint_indices(input.frame_count); input.morph_count];
+
+    for (bone, keys) in bone_key_indices.iter_mut().enumerate() {
+        split_bone_track(
+            keys,
+            input,
+            bone,
+            &local_translations,
+            &local_rotations,
+            tolerances,
+        );
+    }
+    for (morph, keys) in morph_key_indices.iter_mut().enumerate() {
+        split_morph_track(keys, input, morph, tolerances.morph_weight);
+    }
+
+    loop {
+        let candidate = build_sequence(
+            &snapshot,
+            target,
+            input,
+            &local_translations,
+            &local_rotations,
+            &bone_key_indices,
+            &morph_key_indices,
+        );
+        let (report, worst) = measure_error(
+            &candidate,
+            input,
+            &local_translations,
+            &local_rotations,
+            tolerances,
+        )?;
+        let Some(worst) = worst.filter(|worst| worst.normalized_error > 1.0) else {
+            let mut result = candidate;
+            result.report = PoseReductionReport {
+                source_bone_key_count: input.frame_count * input.bone_count,
+                reduced_bone_key_count: result
+                    .bone_tracks
+                    .iter()
+                    .map(|track| track.keys.len())
+                    .sum(),
+                source_morph_key_count: input.frame_count * input.morph_count,
+                reduced_morph_key_count: result
+                    .morph_tracks
+                    .iter()
+                    .map(|track| track.keys.len())
+                    .sum(),
+                ..report
+            };
+            return Ok(result);
+        };
+        let mut inserted = false;
+        match worst.track {
+            ErrorTrack::Bone(bone) => {
+                let mut cursor = Some(bone);
+                while let Some(index) = cursor {
+                    inserted |= insert_key(&mut bone_key_indices[index], worst.frame);
+                    let parent = snapshot.parent_indices[index];
+                    cursor = (parent >= 0).then_some(parent as usize);
+                }
+            }
+            ErrorTrack::Morph(morph) => {
+                inserted = insert_key(&mut morph_key_indices[morph], worst.frame);
+            }
+        }
+        if !inserted {
+            return Err(PoseReductionError::ToleranceUnattainable { frame: worst.frame });
+        }
+    }
+}
+
+fn endpoint_indices(frame_count: usize) -> Vec<usize> {
+    if frame_count == 1 {
+        vec![0]
+    } else {
+        vec![0, frame_count - 1]
+    }
+}
+
+fn decompose_dense_pose(
+    input: DensePoseSequenceView<'_>,
+    snapshot: &SkeletonSnapshot,
+) -> Result<(Vec<Vec3A>, Vec<Quat>), PoseReductionError> {
+    let mut translations = vec![Vec3A::ZERO; input.frame_count * input.bone_count];
+    let mut rotations = vec![Quat::IDENTITY; input.frame_count * input.bone_count];
+    for frame in 0..input.frame_count {
+        for &bone in snapshot.evaluation_order.iter() {
+            let world = input.world_matrix(frame, bone);
+            validate_finite_matrix(world, frame, bone)?;
+            let local = if snapshot.parent_indices[bone] < 0 {
+                world
+            } else {
+                let parent = snapshot.parent_indices[bone] as usize;
+                let parent_world = input.world_matrix(frame, parent);
+                validate_finite_matrix(parent_world, frame, parent)?;
+                let determinant = Mat3::from_mat4(parent_world).determinant();
+                if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
+                    return Err(PoseReductionError::SingularParent { frame, bone });
+                }
+                parent_world.inverse() * world
+            };
+            let (translation, rotation) = decompose_rigid(local, frame, bone)?;
+            let index = frame * input.bone_count + bone;
+            translations[index] = translation;
+            rotations[index] = if frame > 0 {
+                let previous = rotations[index - input.bone_count];
+                if previous.dot(rotation) < 0.0 {
+                    -rotation
+                } else {
+                    rotation
+                }
+            } else {
+                rotation
+            };
+        }
+    }
+    Ok((translations, rotations))
+}
+
+fn decompose_rigid(
+    matrix: Mat4,
+    frame: usize,
+    bone: usize,
+) -> Result<(Vec3A, Quat), PoseReductionError> {
+    validate_finite_matrix(matrix, frame, bone)?;
+    let x = matrix.x_axis.truncate();
+    let y = matrix.y_axis.truncate();
+    let z = matrix.z_axis.truncate();
+    let unit = |v: Vec3| (v.length_squared() - 1.0).abs() <= AFFINE_EPSILON;
+    if !unit(x)
+        || !unit(y)
+        || !unit(z)
+        || x.dot(y).abs() > AFFINE_EPSILON
+        || x.dot(z).abs() > AFFINE_EPSILON
+        || y.dot(z).abs() > AFFINE_EPSILON
+        || Mat3::from_cols(x, y, z).determinant() < 0.0
+        || matrix.x_axis.w.abs() > AFFINE_EPSILON
+        || matrix.y_axis.w.abs() > AFFINE_EPSILON
+        || matrix.z_axis.w.abs() > AFFINE_EPSILON
+        || (matrix.w_axis.w - 1.0).abs() > AFFINE_EPSILON
+    {
+        return Err(PoseReductionError::ScaleOrShear { frame, bone });
+    }
+    let rotation = normalize_quat(Quat::from_mat3(&Mat3::from_cols(x, y, z)));
+    Ok((Vec3A::from(matrix.w_axis.truncate()), rotation))
+}
+
+fn validate_finite_matrix(
+    matrix: Mat4,
+    frame: usize,
+    bone: usize,
+) -> Result<(), PoseReductionError> {
+    if matrix
+        .to_cols_array()
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        Err(PoseReductionError::NonFiniteMatrix { frame, bone })
+    } else {
+        Ok(())
+    }
+}
+
+fn split_bone_track(
+    keys: &mut Vec<usize>,
+    input: DensePoseSequenceView<'_>,
+    bone: usize,
+    translations: &[Vec3A],
+    rotations: &[Quat],
+    tolerances: ReductionTolerances,
+) {
+    if input.frame_count <= 2 {
+        return;
+    }
+    let bone_count = translations.len() / input.frame_count;
+    let mut stack = vec![(0usize, input.frame_count - 1)];
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+        let start_index = start * bone_count + bone;
+        let end_index = end * bone_count + bone;
+        let mut worst: Option<(f32, usize)> = None;
+        for frame in start + 1..end {
+            let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
+            let index = frame * bone_count + bone;
+            let position_error = translations[index]
+                .distance(translations[start_index].lerp(translations[end_index], amount));
+            let rotation_error = quat_angle(
+                rotations[index],
+                rotations[start_index].slerp(rotations[end_index], amount),
+            );
+            let normalized = normalized_error(position_error, tolerances.local_position).max(
+                normalized_error(rotation_error, tolerances.local_rotation_radians),
+            );
+            if is_worse(worst, normalized, frame) {
+                worst = Some((normalized, frame));
+            }
+        }
+        if let Some((normalized, frame)) = worst.filter(|value| value.0 > 1.0) {
+            let _ = normalized;
+            insert_key(keys, frame);
+            stack.push((frame, end));
+            stack.push((start, frame));
+        }
+    }
+}
+
+fn split_morph_track(
+    keys: &mut Vec<usize>,
+    input: DensePoseSequenceView<'_>,
+    morph: usize,
+    tolerance: f32,
+) {
+    if input.frame_count <= 2 {
+        return;
+    }
+    let mut stack = vec![(0usize, input.frame_count - 1)];
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+        let mut worst: Option<(f32, usize)> = None;
+        for frame in start + 1..end {
+            let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
+            let expected = input.morph_weight(start, morph)
+                + (input.morph_weight(end, morph) - input.morph_weight(start, morph)) * amount;
+            let normalized = normalized_error(
+                (input.morph_weight(frame, morph) - expected).abs(),
+                tolerance,
+            );
+            if is_worse(worst, normalized, frame) {
+                worst = Some((normalized, frame));
+            }
+        }
+        if let Some((_, frame)) = worst.filter(|value| value.0 > 1.0) {
+            insert_key(keys, frame);
+            stack.push((frame, end));
+            stack.push((start, frame));
+        }
+    }
+}
+
+fn insert_key(keys: &mut Vec<usize>, frame: usize) -> bool {
+    if let Err(position) = keys.binary_search(&frame) {
+        keys.insert(position, frame);
+        true
+    } else {
+        false
+    }
+}
+
+fn build_sequence(
+    snapshot: &SkeletonSnapshot,
+    target: ReductionTarget,
+    input: DensePoseSequenceView<'_>,
+    translations: &[Vec3A],
+    rotations: &[Quat],
+    bone_key_indices: &[Vec<usize>],
+    morph_key_indices: &[Vec<usize>],
+) -> ReducedPoseSequence {
+    let bone_tracks = bone_key_indices
+        .iter()
+        .enumerate()
+        .map(|(bone, indices)| ReducedBoneTrack {
+            keys: indices
+                .iter()
+                .map(|&frame| {
+                    let index = frame * input.bone_count + bone;
+                    ReducedBoneKey {
+                        sample_index: frame,
+                        translation: translations[index],
+                        rotation: rotations[index],
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let morph_tracks = morph_key_indices
+        .iter()
+        .enumerate()
+        .map(|(morph, indices)| ReducedMorphTrack {
+            keys: indices
+                .iter()
+                .map(|&frame| ReducedMorphKey {
+                    sample_index: frame,
+                    weight: input.morph_weight(frame, morph),
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    ReducedPoseSequence {
+        snapshot: snapshot.clone(),
+        target,
+        start_frame: input.start_frame,
+        frame_step: input.frame_step,
+        frame_count: input.frame_count,
+        sample_frames: (0..input.frame_count)
+            .map(|sample| input.sample_frame(sample))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        bone_tracks,
+        morph_tracks,
+        report: PoseReductionReport::default(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ErrorTrack {
+    Bone(usize),
+    Morph(usize),
+}
+
+#[derive(Clone, Copy)]
+struct WorstError {
+    normalized_error: f32,
+    frame: usize,
+    track: ErrorTrack,
+}
+
+fn measure_error(
+    sequence: &ReducedPoseSequence,
+    input: DensePoseSequenceView<'_>,
+    translations: &[Vec3A],
+    rotations: &[Quat],
+    tolerances: ReductionTolerances,
+) -> Result<(PoseReductionReport, Option<WorstError>), PoseReductionError> {
+    measure_error_with_tolerances(sequence, input, translations, rotations, tolerances)
+}
+
+fn measure_error_with_tolerances(
+    sequence: &ReducedPoseSequence,
+    input: DensePoseSequenceView<'_>,
+    translations: &[Vec3A],
+    rotations: &[Quat],
+    tolerances: ReductionTolerances,
+) -> Result<(PoseReductionReport, Option<WorstError>), PoseReductionError> {
+    let mut report = PoseReductionReport::default();
+    let mut worst: Option<WorstError> = None;
+    for frame in 0..input.frame_count {
+        let sample = sequence.sample(input.sample_frame(frame))?;
+        for bone in 0..input.bone_count {
+            let index = frame * input.bone_count + bone;
+            let local_position = translations[index].distance(sample.local_translations[bone]);
+            let local_rotation = quat_angle(rotations[index], sample.local_rotations[bone]);
+            let world_position = Vec3A::from(input.world_matrix(frame, bone).w_axis.truncate())
+                .distance(Vec3A::from(sample.world_matrices[bone].w_axis.truncate()));
+            let expected_world_rotation =
+                decompose_rigid(input.world_matrix(frame, bone), frame, bone)?.1;
+            let sampled_world_rotation =
+                decompose_rigid(sample.world_matrices[bone], frame, bone)?.1;
+            let world_rotation = quat_angle(expected_world_rotation, sampled_world_rotation);
+            report.max_local_position_error = report.max_local_position_error.max(local_position);
+            report.max_local_rotation_error_radians =
+                report.max_local_rotation_error_radians.max(local_rotation);
+            report.max_world_position_error = report.max_world_position_error.max(world_position);
+            report.max_world_rotation_error_radians =
+                report.max_world_rotation_error_radians.max(world_rotation);
+            for normalized in [
+                normalized_error(local_position, tolerances.local_position),
+                normalized_error(local_rotation, tolerances.local_rotation_radians),
+                normalized_error(world_position, tolerances.world_position),
+                normalized_error(world_rotation, tolerances.world_rotation_radians),
+            ] {
+                update_worst(&mut worst, normalized, frame, ErrorTrack::Bone(bone));
+            }
+        }
+        for morph in 0..input.morph_count {
+            let error = (input.morph_weight(frame, morph) - sample.morph_weights[morph]).abs();
+            report.max_morph_weight_error = report.max_morph_weight_error.max(error);
+            update_worst(
+                &mut worst,
+                normalized_error(error, tolerances.morph_weight),
+                frame,
+                ErrorTrack::Morph(morph),
+            );
+        }
+    }
+    Ok((report, worst))
+}
+
+fn update_worst(worst: &mut Option<WorstError>, normalized: f32, frame: usize, track: ErrorTrack) {
+    let replace = worst
+        .is_none_or(|current| normalized.total_cmp(&current.normalized_error) == Ordering::Greater);
+    if replace {
+        *worst = Some(WorstError {
+            normalized_error: normalized,
+            frame,
+            track,
+        });
+    }
+}
+
+fn sample_bone_track(track: &ReducedBoneTrack, sample_frames: &[f32], frame: f32) -> (Vec3A, Quat) {
+    let upper = track
+        .keys
+        .partition_point(|key| sample_frames[key.sample_index] <= frame);
+    if upper == 0 {
+        return (track.keys[0].translation, track.keys[0].rotation);
+    }
+    if upper == track.keys.len() {
+        let key = track.keys[track.keys.len() - 1];
+        return (key.translation, key.rotation);
+    }
+    let left = track.keys[upper - 1];
+    let right = track.keys[upper];
+    let amount = ((frame - sample_frames[left.sample_index])
+        / (sample_frames[right.sample_index] - sample_frames[left.sample_index]))
+        .clamp(0.0, 1.0);
+    (
+        left.translation.lerp(right.translation, amount),
+        normalize_quat(left.rotation.slerp(right.rotation, amount)),
+    )
+}
+
+fn sample_morph_track(track: &ReducedMorphTrack, sample_frames: &[f32], frame: f32) -> f32 {
+    let upper = track
+        .keys
+        .partition_point(|key| sample_frames[key.sample_index] <= frame);
+    if upper == 0 {
+        return track.keys[0].weight;
+    }
+    if upper == track.keys.len() {
+        return track.keys[track.keys.len() - 1].weight;
+    }
+    let left = track.keys[upper - 1];
+    let right = track.keys[upper];
+    let amount = ((frame - sample_frames[left.sample_index])
+        / (sample_frames[right.sample_index] - sample_frames[left.sample_index]))
+        .clamp(0.0, 1.0);
+    left.weight + (right.weight - left.weight) * amount
+}
+
+fn build_world_matrices(
+    snapshot: &SkeletonSnapshot,
+    translations: &[Vec3A],
+    rotations: &[Quat],
+) -> Vec<Mat4> {
+    let mut result = vec![Mat4::IDENTITY; snapshot.bone_count()];
+    for &bone in snapshot.evaluation_order.iter() {
+        let local = Mat4::from_rotation_translation(rotations[bone], translations[bone].into());
+        result[bone] = if snapshot.parent_indices[bone] < 0 {
+            local
+        } else {
+            result[snapshot.parent_indices[bone] as usize] * local
+        };
+    }
+    result
+}
+
+fn build_evaluation_order(parents: &[i32]) -> Result<Vec<usize>, PoseReductionError> {
+    fn visit(
+        bone: usize,
+        parents: &[i32],
+        state: &mut [u8],
+        order: &mut Vec<usize>,
+    ) -> Result<(), PoseReductionError> {
+        match state[bone] {
+            1 => return Err(PoseReductionError::SkeletonCycle { bone }),
+            2 => return Ok(()),
+            _ => {}
+        }
+        state[bone] = 1;
+        if parents[bone] >= 0 {
+            visit(parents[bone] as usize, parents, state, order)?;
+        }
+        state[bone] = 2;
+        order.push(bone);
+        Ok(())
+    }
+    let mut state = vec![0u8; parents.len()];
+    let mut order = Vec::with_capacity(parents.len());
+    for bone in 0..parents.len() {
+        visit(bone, parents, &mut state, &mut order)?;
+    }
+    Ok(order)
+}
+
+fn normalize_quat(value: Quat) -> Quat {
+    if value.length_squared() <= f32::EPSILON {
+        Quat::IDENTITY
+    } else {
+        value.normalize()
+    }
+}
+
+fn quat_is_finite(value: Quat) -> bool {
+    value.to_array().iter().all(|value| value.is_finite()) && value.length_squared() > f32::EPSILON
+}
+
+fn quat_angle(a: Quat, b: Quat) -> f32 {
+    2.0 * a.dot(b).abs().clamp(-1.0, 1.0).acos()
+}
+
+fn normalized_error(error: f32, tolerance: f32) -> f32 {
+    if tolerance == 0.0 {
+        if error == 0.0 { 0.0 } else { f32::INFINITY }
+    } else {
+        error / tolerance
+    }
+}
+
+fn segment_amount(start: usize, end: usize, sample: usize, frame_at: impl Fn(usize) -> f32) -> f32 {
+    let start_frame = frame_at(start);
+    (frame_at(sample) - start_frame) / (frame_at(end) - start_frame)
+}
+
+fn is_worse(current: Option<(f32, usize)>, error: f32, frame: usize) -> bool {
+    current.is_none_or(|(best, best_frame)| error > best || (error == best && frame < best_frame))
+}
+
+#[cfg(test)]
+mod tests;

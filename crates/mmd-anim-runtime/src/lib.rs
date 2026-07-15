@@ -10,6 +10,10 @@ mod flat_model;
 pub mod ik_primitive;
 mod model;
 mod pose;
+// The reducer remains crate-private until its Rust shape is stabilized by the
+// format targets and wrapper parity work in later POSE-REDUCE phases.
+#[allow(dead_code)]
+pub(crate) mod reduce;
 mod runtime;
 
 pub use animation::{

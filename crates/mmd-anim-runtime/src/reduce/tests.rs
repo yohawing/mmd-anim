@@ -1,6 +1,60 @@
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::hint::black_box;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
 use glam::{Mat4, Quat, Vec3, Vec3A};
 
 use super::*;
+
+static TEST_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static COUNT_TEST_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+}
+
+struct TestCountingAllocator;
+
+fn record_test_allocation() {
+    if COUNT_TEST_ALLOCATIONS.try_with(Cell::get).unwrap_or(false) {
+        TEST_ALLOCATIONS.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+}
+
+unsafe impl GlobalAlloc for TestCountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        record_test_allocation();
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        record_test_allocation();
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        record_test_allocation();
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static TEST_GLOBAL_ALLOCATOR: TestCountingAllocator = TestCountingAllocator;
+
+fn count_test_allocations(f: impl FnOnce()) -> usize {
+    COUNT_TEST_ALLOCATIONS.with(|enabled| {
+        enabled.set(false);
+        TEST_ALLOCATIONS.store(0, AtomicOrdering::Relaxed);
+        enabled.set(true);
+        f();
+        enabled.set(false);
+    });
+    TEST_ALLOCATIONS.load(AtomicOrdering::Relaxed)
+}
 
 fn snapshot() -> SkeletonSnapshot {
     SkeletonSnapshot::new(
@@ -94,6 +148,39 @@ fn sample_reconstructs_world_without_runtime_procedural_layers() {
         }
     }
     assert!((sample.morph_weights[0] - 0.5).abs() < 1.0e-6);
+}
+
+#[test]
+fn sample_into_reuses_scratch_without_allocating_and_matches_sample() {
+    let world = dense_world(7);
+    let morphs = [0.0, 0.2, 0.8, 0.3, 0.7, 0.9, 1.0];
+    let input = DensePoseSequenceView::new(&world, &morphs, 7, 2, 1, 0.0, 1.0).unwrap();
+    let reduced = reduce_dense_pose_sequence(
+        input,
+        snapshot(),
+        ReductionTolerances {
+            local_position: 0.01,
+            local_rotation_radians: 0.01,
+            world_position: 0.01,
+            world_rotation_radians: 0.01,
+            morph_weight: 0.01,
+        },
+        ReductionTarget::DccCubic,
+    )
+    .unwrap();
+    let expected = reduced.sample(2.5).unwrap();
+    let mut scratch = ReducedPoseScratch::default();
+    reduced.sample_into(2.5, &mut scratch).unwrap();
+
+    let allocations = count_test_allocations(|| {
+        reduced.sample_into(black_box(2.5), &mut scratch).unwrap();
+    });
+
+    assert_eq!(allocations, 0);
+    assert_eq!(scratch.local_translations, expected.local_translations);
+    assert_eq!(scratch.local_rotations, expected.local_rotations);
+    assert_eq!(scratch.world_matrices, expected.world_matrices);
+    assert_eq!(scratch.morph_weights, expected.morph_weights);
 }
 
 #[test]

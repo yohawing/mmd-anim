@@ -398,32 +398,42 @@ impl ReducedPoseSequence {
     }
 
     pub fn sample(&self, frame: f32) -> Result<ReducedPoseSample, PoseReductionError> {
+        let mut scratch = ReducedPoseScratch::default();
+        self.sample_into(frame, &mut scratch)?;
+        Ok(ReducedPoseSample {
+            local_translations: scratch.local_translations,
+            local_rotations: scratch.local_rotations,
+            world_matrices: scratch.world_matrices,
+            morph_weights: scratch.morph_weights,
+        })
+    }
+
+    fn sample_into(
+        &self,
+        frame: f32,
+        scratch: &mut ReducedPoseScratch,
+    ) -> Result<(), PoseReductionError> {
         if !frame.is_finite() {
             return Err(PoseReductionError::InvalidSampleTime);
         }
-        let local_translations = self
-            .bone_tracks
-            .iter()
-            .map(|track| sample_bone_track(track, &self.sample_frames, frame, self.target).0)
-            .collect::<Vec<_>>();
-        let local_rotations = self
-            .bone_tracks
-            .iter()
-            .map(|track| sample_bone_track(track, &self.sample_frames, frame, self.target).1)
-            .collect::<Vec<_>>();
-        let morph_weights = self
-            .morph_tracks
-            .iter()
-            .map(|track| sample_morph_track(track, &self.sample_frames, frame, self.target))
-            .collect::<Vec<_>>();
-        let world_matrices =
-            build_world_matrices(&self.snapshot, &local_translations, &local_rotations);
-        Ok(ReducedPoseSample {
-            local_translations,
-            local_rotations,
-            world_matrices,
-            morph_weights,
-        })
+        scratch.prepare(self.snapshot.bone_count(), self.snapshot.morph_count());
+        for (bone, track) in self.bone_tracks.iter().enumerate() {
+            let (translation, rotation) =
+                sample_bone_track(track, &self.sample_frames, frame, self.target);
+            scratch.local_translations[bone] = translation;
+            scratch.local_rotations[bone] = rotation;
+        }
+        for (morph, track) in self.morph_tracks.iter().enumerate() {
+            scratch.morph_weights[morph] =
+                sample_morph_track(track, &self.sample_frames, frame, self.target);
+        }
+        build_world_matrices_into(
+            &self.snapshot,
+            &scratch.local_translations,
+            &scratch.local_rotations,
+            &mut scratch.world_matrices,
+        );
+        Ok(())
     }
 
     pub fn validate_model(
@@ -435,6 +445,23 @@ impl ReducedPoseSequence {
         self.snapshot.model_identity == model_identity
             && self.snapshot.bone_count() == bone_count
             && self.snapshot.morph_count == morph_count
+    }
+}
+
+#[derive(Debug, Default)]
+struct ReducedPoseScratch {
+    local_translations: Vec<Vec3A>,
+    local_rotations: Vec<Quat>,
+    world_matrices: Vec<Mat4>,
+    morph_weights: Vec<f32>,
+}
+
+impl ReducedPoseScratch {
+    fn prepare(&mut self, bone_count: usize, morph_count: usize) {
+        self.local_translations.resize(bone_count, Vec3A::ZERO);
+        self.local_rotations.resize(bone_count, Quat::IDENTITY);
+        self.world_matrices.resize(bone_count, Mat4::IDENTITY);
+        self.morph_weights.resize(morph_count, 0.0);
     }
 }
 
@@ -498,6 +525,7 @@ pub fn reduce_dense_pose_sequence(
     }
 
     let (local_translations, local_rotations) = decompose_dense_pose(input, &snapshot)?;
+    let (world_positions, world_rotations) = cache_dense_world_components(input)?;
     let local_euler_xyz = unwrap_euler_xyz(&local_rotations, input.frame_count, input.bone_count);
     for frame in 0..input.frame_count {
         for morph in 0..input.morph_count {
@@ -546,6 +574,8 @@ pub fn reduce_dense_pose_sequence(
             input,
             &local_translations,
             &local_rotations,
+            &world_positions,
+            &world_rotations,
             tolerances,
         )?;
         let failing = worst_by_track
@@ -643,6 +673,22 @@ fn decompose_dense_pose(
         }
     }
     Ok((translations, rotations))
+}
+
+fn cache_dense_world_components(
+    input: DensePoseSequenceView<'_>,
+) -> Result<(Vec<Vec3A>, Vec<Quat>), PoseReductionError> {
+    let count = input.frame_count * input.bone_count;
+    let mut positions = Vec::with_capacity(count);
+    let mut rotations = Vec::with_capacity(count);
+    for frame in 0..input.frame_count {
+        for bone in 0..input.bone_count {
+            let world = input.world_matrix(frame, bone);
+            positions.push(Vec3A::from(world.w_axis.truncate()));
+            rotations.push(decompose_rigid(world, frame, bone)?.1);
+        }
+    }
+    Ok((positions, rotations))
 }
 
 fn decompose_rigid(
@@ -900,9 +946,19 @@ fn measure_error(
     input: DensePoseSequenceView<'_>,
     translations: &[Vec3A],
     rotations: &[Quat],
+    world_positions: &[Vec3A],
+    world_rotations: &[Quat],
     tolerances: ReductionTolerances,
 ) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
-    measure_error_with_tolerances(sequence, input, translations, rotations, tolerances)
+    measure_error_with_tolerances(
+        sequence,
+        input,
+        translations,
+        rotations,
+        world_positions,
+        world_rotations,
+        tolerances,
+    )
 }
 
 fn measure_error_with_tolerances(
@@ -910,23 +966,25 @@ fn measure_error_with_tolerances(
     input: DensePoseSequenceView<'_>,
     translations: &[Vec3A],
     rotations: &[Quat],
+    world_positions: &[Vec3A],
+    world_rotations: &[Quat],
     tolerances: ReductionTolerances,
 ) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
     let mut report = PoseReductionReport::default();
     let mut worst = vec![None; input.bone_count + input.morph_count];
+    let mut scratch = ReducedPoseScratch::default();
+    scratch.prepare(input.bone_count, input.morph_count);
     for frame in 0..input.frame_count {
-        let sample = sequence.sample(input.sample_frame(frame))?;
+        sequence.sample_into(input.sample_frame(frame), &mut scratch)?;
         for (bone, bone_worst) in worst[..input.bone_count].iter_mut().enumerate() {
             let index = frame * input.bone_count + bone;
-            let local_position = translations[index].distance(sample.local_translations[bone]);
-            let local_rotation = quat_angle(rotations[index], sample.local_rotations[bone]);
-            let world_position = Vec3A::from(input.world_matrix(frame, bone).w_axis.truncate())
-                .distance(Vec3A::from(sample.world_matrices[bone].w_axis.truncate()));
-            let expected_world_rotation =
-                decompose_rigid(input.world_matrix(frame, bone), frame, bone)?.1;
+            let local_position = translations[index].distance(scratch.local_translations[bone]);
+            let local_rotation = quat_angle(rotations[index], scratch.local_rotations[bone]);
+            let world_position = world_positions[index]
+                .distance(Vec3A::from(scratch.world_matrices[bone].w_axis.truncate()));
             let sampled_world_rotation =
-                decompose_rigid(sample.world_matrices[bone], frame, bone)?.1;
-            let world_rotation = quat_angle(expected_world_rotation, sampled_world_rotation);
+                decompose_rigid(scratch.world_matrices[bone], frame, bone)?.1;
+            let world_rotation = quat_angle(world_rotations[index], sampled_world_rotation);
             report.max_local_position_error = report.max_local_position_error.max(local_position);
             report.max_local_rotation_error_radians =
                 report.max_local_rotation_error_radians.max(local_rotation);
@@ -943,7 +1001,7 @@ fn measure_error_with_tolerances(
             }
         }
         for morph in 0..input.morph_count {
-            let error = (input.morph_weight(frame, morph) - sample.morph_weights[morph]).abs();
+            let error = (input.morph_weight(frame, morph) - scratch.morph_weights[morph]).abs();
             report.max_morph_weight_error = report.max_morph_weight_error.max(error);
             update_worst(
                 &mut worst[input.bone_count + morph],
@@ -1419,12 +1477,13 @@ fn sample_morph_track(
     left.weight + (right.weight - left.weight) * amount
 }
 
-fn build_world_matrices(
+fn build_world_matrices_into(
     snapshot: &SkeletonSnapshot,
     translations: &[Vec3A],
     rotations: &[Quat],
-) -> Vec<Mat4> {
-    let mut result = vec![Mat4::IDENTITY; snapshot.bone_count()];
+    result: &mut Vec<Mat4>,
+) {
+    result.resize(snapshot.bone_count(), Mat4::IDENTITY);
     for &bone in snapshot.evaluation_order.iter() {
         let local = Mat4::from_rotation_translation(rotations[bone], translations[bone].into());
         result[bone] = if snapshot.parent_indices[bone] < 0 {
@@ -1433,7 +1492,6 @@ fn build_world_matrices(
             result[snapshot.parent_indices[bone] as usize] * local
         };
     }
-    result
 }
 
 fn build_evaluation_order(parents: &[i32]) -> Result<Vec<usize>, PoseReductionError> {

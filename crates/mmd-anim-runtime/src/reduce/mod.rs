@@ -2,6 +2,10 @@ use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 
 use glam::{EulerRot, Mat3, Mat4, Quat, Vec3, Vec3A};
+#[cfg(not(target_family = "wasm"))]
+use rayon::prelude::*;
+#[cfg(not(target_family = "wasm"))]
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use thiserror::Error;
 
 use crate::{BoneIndex, InterpolationScalar, ModelArena};
@@ -378,6 +382,12 @@ pub struct ReductionTimings {
     pub dcc_fit: Duration,
 }
 
+#[cfg(not(target_family = "wasm"))]
+type ReductionThreadPool = ThreadPool;
+
+#[cfg(target_family = "wasm")]
+struct ReductionThreadPool;
+
 #[derive(Debug, Clone)]
 pub struct ReducedPoseSequence {
     snapshot: SkeletonSnapshot,
@@ -557,6 +567,8 @@ pub enum PoseReductionError {
     InvalidSampleTime,
     #[error("requested tolerance cannot be attained at source frame {frame}")]
     ToleranceUnattainable { frame: usize },
+    #[error("failed to create pose reduction worker pool")]
+    WorkerPool,
 }
 
 pub fn reduce_dense_pose_sequence(
@@ -564,6 +576,16 @@ pub fn reduce_dense_pose_sequence(
     snapshot: SkeletonSnapshot,
     tolerances: ReductionTolerances,
     target: ReductionTarget,
+) -> Result<ReducedPoseSequence, PoseReductionError> {
+    reduce_dense_pose_sequence_with_worker_count(input, snapshot, tolerances, target, 0)
+}
+
+pub fn reduce_dense_pose_sequence_with_worker_count(
+    input: DensePoseSequenceView<'_>,
+    snapshot: SkeletonSnapshot,
+    tolerances: ReductionTolerances,
+    target: ReductionTarget,
+    worker_count: usize,
 ) -> Result<ReducedPoseSequence, PoseReductionError> {
     let tolerances = tolerances.validate()?;
     if input.bone_count != snapshot.bone_count() || input.morph_count != snapshot.morph_count() {
@@ -577,6 +599,8 @@ pub fn reduce_dense_pose_sequence(
         ..Default::default()
     };
     let mut timings = ReductionTimings::default();
+    let worker_count = resolve_reduction_worker_count(worker_count, input.frame_count);
+    let worker_pool = build_reduction_worker_pool(worker_count)?;
     let local_euler_xyz = unwrap_euler_xyz(&local_rotations, input.frame_count, input.bone_count);
     for frame in 0..input.frame_count {
         for morph in 0..input.morph_count {
@@ -640,13 +664,16 @@ pub fn reduce_dense_pose_sequence(
             },
             tolerances,
             &mut work_stats,
+            worker_pool.as_ref(),
+            worker_count,
         )?;
         timings.error_measure += error_measure_started.elapsed();
-        let failing = worst_by_track
+        let mut failing = worst_by_track
             .into_iter()
             .flatten()
             .filter(|worst| worst.normalized_error > 1.0)
             .collect::<Vec<_>>();
+        failing.sort_by(compare_worst_errors);
         if failing.is_empty() {
             work_stats.added_keys_per_pass.push(0);
             let mut result = candidate;
@@ -1041,7 +1068,7 @@ fn build_sequence(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ErrorTrack {
     Bone(usize),
     Morph(usize),
@@ -1060,8 +1087,18 @@ fn measure_error(
     dense: DenseValidationPose<'_>,
     tolerances: ReductionTolerances,
     work_stats: &mut ReductionWorkStats,
+    worker_pool: Option<&ReductionThreadPool>,
+    worker_count: usize,
 ) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
-    measure_error_with_tolerances(sequence, input, dense, tolerances, work_stats)
+    measure_error_with_tolerances(
+        sequence,
+        input,
+        dense,
+        tolerances,
+        work_stats,
+        worker_pool,
+        worker_count,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1072,23 +1109,93 @@ struct DenseValidationPose<'a> {
     world_rotations: &'a [Quat],
 }
 
+struct FrameErrorResult {
+    report: PoseReductionReport,
+    worst: Vec<Option<WorstError>>,
+}
+
 fn measure_error_with_tolerances(
     sequence: &ReducedPoseSequence,
     input: DensePoseSequenceView<'_>,
     dense: DenseValidationPose<'_>,
     tolerances: ReductionTolerances,
     work_stats: &mut ReductionWorkStats,
+    worker_pool: Option<&ReductionThreadPool>,
+    worker_count: usize,
 ) -> Result<(PoseReductionReport, Vec<Option<WorstError>>), PoseReductionError> {
+    work_stats.bone_samples += input.frame_count * input.bone_count;
+    work_stats.morph_samples += input.frame_count * input.morph_count;
+    work_stats.world_rebuilds += input.frame_count;
+    work_stats.world_rotation_decompositions += input.frame_count * input.bone_count;
+
+    let chunk_size = input.frame_count.div_ceil(worker_count);
+    let ranges = (0..worker_count)
+        .map(|worker| {
+            let start = worker * chunk_size;
+            start..(start + chunk_size).min(input.frame_count)
+        })
+        .filter(|range| !range.is_empty())
+        .collect::<Vec<_>>();
+    #[cfg(not(target_family = "wasm"))]
+    let results = if let Some(pool) = worker_pool {
+        pool.install(|| {
+            ranges
+                .par_iter()
+                .map(|range| {
+                    measure_error_range(sequence, input, dense, tolerances, range.start, range.end)
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })?
+    } else {
+        vec![measure_error_range(
+            sequence,
+            input,
+            dense,
+            tolerances,
+            0,
+            input.frame_count,
+        )?]
+    };
+    #[cfg(target_family = "wasm")]
+    let results = {
+        let _ = (worker_pool, ranges);
+        vec![measure_error_range(
+            sequence,
+            input,
+            dense,
+            tolerances,
+            0,
+            input.frame_count,
+        )?]
+    };
+
+    let mut report = PoseReductionReport::default();
+    let mut worst = vec![None; input.bone_count + input.morph_count];
+    for result in results {
+        merge_reduction_report(&mut report, result.report);
+        for (merged, candidate) in worst.iter_mut().zip(result.worst) {
+            if let Some(candidate) = candidate {
+                update_worst_candidate(merged, candidate);
+            }
+        }
+    }
+    Ok((report, worst))
+}
+
+fn measure_error_range(
+    sequence: &ReducedPoseSequence,
+    input: DensePoseSequenceView<'_>,
+    dense: DenseValidationPose<'_>,
+    tolerances: ReductionTolerances,
+    start_frame: usize,
+    end_frame: usize,
+) -> Result<FrameErrorResult, PoseReductionError> {
     let mut report = PoseReductionReport::default();
     let mut worst = vec![None; input.bone_count + input.morph_count];
     let mut scratch = ReducedPoseScratch::default();
     scratch.prepare(input.bone_count, input.morph_count);
-    for frame in 0..input.frame_count {
+    for frame in start_frame..end_frame {
         sequence.sample_into(input.sample_frame(frame), &mut scratch)?;
-        work_stats.bone_samples += input.bone_count;
-        work_stats.morph_samples += input.morph_count;
-        work_stats.world_rebuilds += 1;
-        work_stats.world_rotation_decompositions += input.bone_count;
         for (bone, bone_worst) in worst[..input.bone_count].iter_mut().enumerate() {
             let index = frame * input.bone_count + bone;
             let local_position =
@@ -1125,19 +1232,96 @@ fn measure_error_with_tolerances(
             );
         }
     }
-    Ok((report, worst))
+    Ok(FrameErrorResult { report, worst })
+}
+
+fn merge_reduction_report(report: &mut PoseReductionReport, candidate: PoseReductionReport) {
+    report.max_local_position_error = report
+        .max_local_position_error
+        .max(candidate.max_local_position_error);
+    report.max_local_rotation_error_radians = report
+        .max_local_rotation_error_radians
+        .max(candidate.max_local_rotation_error_radians);
+    report.max_world_position_error = report
+        .max_world_position_error
+        .max(candidate.max_world_position_error);
+    report.max_world_rotation_error_radians = report
+        .max_world_rotation_error_radians
+        .max(candidate.max_world_rotation_error_radians);
+    report.max_morph_weight_error = report
+        .max_morph_weight_error
+        .max(candidate.max_morph_weight_error);
 }
 
 fn update_worst(worst: &mut Option<WorstError>, normalized: f32, frame: usize, track: ErrorTrack) {
-    let replace = worst
-        .is_none_or(|current| normalized.total_cmp(&current.normalized_error) == Ordering::Greater);
-    if replace {
-        *worst = Some(WorstError {
+    update_worst_candidate(
+        worst,
+        WorstError {
             normalized_error: normalized,
             frame,
             track,
-        });
+        },
+    );
+}
+
+fn update_worst_candidate(worst: &mut Option<WorstError>, candidate: WorstError) {
+    if worst.is_none_or(|current| compare_worst_errors(&candidate, &current) == Ordering::Less) {
+        *worst = Some(candidate);
     }
+}
+
+fn compare_worst_errors(a: &WorstError, b: &WorstError) -> Ordering {
+    b.normalized_error
+        .total_cmp(&a.normalized_error)
+        .then_with(|| a.frame.cmp(&b.frame))
+        .then_with(|| error_track_sort_key(a.track).cmp(&error_track_sort_key(b.track)))
+}
+
+fn error_track_sort_key(track: ErrorTrack) -> (u8, usize) {
+    match track {
+        ErrorTrack::Bone(index) => (0, index),
+        ErrorTrack::Morph(index) => (1, index),
+    }
+}
+
+fn resolve_reduction_worker_count(requested: usize, frame_count: usize) -> usize {
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = (requested, frame_count);
+        1
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let workers = if requested == 0 {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+        } else {
+            requested
+        };
+        workers.clamp(1, frame_count.max(1))
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn build_reduction_worker_pool(
+    worker_count: usize,
+) -> Result<Option<ReductionThreadPool>, PoseReductionError> {
+    (worker_count > 1)
+        .then(|| {
+            ThreadPoolBuilder::new()
+                .num_threads(worker_count)
+                .build()
+                .map_err(|_| PoseReductionError::WorkerPool)
+        })
+        .transpose()
+}
+
+#[cfg(target_family = "wasm")]
+fn build_reduction_worker_pool(
+    _worker_count: usize,
+) -> Result<Option<ReductionThreadPool>, PoseReductionError> {
+    Ok(None)
 }
 
 fn fit_vmd_bone_interpolation(

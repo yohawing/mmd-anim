@@ -44,7 +44,7 @@ pub use reduce::{
     PoseReductionReport, QuantizedBezier, ReducedBoneKey, ReducedBoneTrack, ReducedMorphKey,
     ReducedMorphTrack, ReducedPoseSample, ReducedPoseSequence, ReductionTarget, ReductionTimings,
     ReductionTolerances, ReductionWorkStats, SkeletonSnapshot, VmdBoneInterpolation,
-    reduce_dense_pose_sequence,
+    reduce_dense_pose_sequence, reduce_dense_pose_sequence_with_worker_count,
 };
 pub use runtime::{
     HostPoseError, HostPoseView, IkSolveOptions, IkSolverRuntimeStats, PhysicsMode,

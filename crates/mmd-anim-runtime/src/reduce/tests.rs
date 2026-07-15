@@ -230,6 +230,70 @@ fn reduction_work_stats_are_deterministic_and_separate_from_quality_report() {
 }
 
 #[test]
+fn frame_validation_is_deterministic_across_worker_counts() {
+    let world = dense_world(17);
+    let morphs = (0..17)
+        .map(|frame| ((frame as f32 * 0.73).sin() * 0.5 + 0.5).clamp(0.0, 1.0))
+        .collect::<Vec<_>>();
+    let reduce = |workers| {
+        reduce_dense_pose_sequence_with_worker_count(
+            DensePoseSequenceView::new(&world, &morphs, 17, 2, 1, 0.0, 1.0).unwrap(),
+            snapshot(),
+            ReductionTolerances {
+                local_position: 0.01,
+                local_rotation_radians: 0.01,
+                world_position: 0.01,
+                world_rotation_radians: 0.01,
+                morph_weight: 0.01,
+            },
+            ReductionTarget::DccCubic,
+            workers,
+        )
+        .unwrap()
+    };
+
+    let single = reduce(1);
+    let two = reduce(2);
+    let four = reduce(4);
+    assert_eq!(single, two);
+    assert_eq!(single, four);
+    assert_eq!(single.work_stats(), two.work_stats());
+    assert_eq!(single.work_stats(), four.work_stats());
+}
+
+#[test]
+fn worst_error_order_is_normalized_then_frame_then_track() {
+    let mut errors = [
+        WorstError {
+            normalized_error: 2.0,
+            frame: 4,
+            track: ErrorTrack::Morph(0),
+        },
+        WorstError {
+            normalized_error: 3.0,
+            frame: 8,
+            track: ErrorTrack::Bone(2),
+        },
+        WorstError {
+            normalized_error: 2.0,
+            frame: 3,
+            track: ErrorTrack::Bone(5),
+        },
+        WorstError {
+            normalized_error: 2.0,
+            frame: 4,
+            track: ErrorTrack::Bone(1),
+        },
+    ];
+    errors.sort_by(compare_worst_errors);
+
+    assert_eq!(errors[0].normalized_error, 3.0);
+    assert_eq!(errors[1].frame, 3);
+    assert_eq!(errors[2].track, ErrorTrack::Bone(1));
+    assert_eq!(errors[3].track, ErrorTrack::Morph(0));
+}
+
+#[test]
 fn rejects_non_finite_scale_shear_and_invalid_time_base_atomically() {
     let mut non_finite = Mat4::IDENTITY;
     non_finite.x_axis.x = f32::NAN;

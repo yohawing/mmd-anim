@@ -183,6 +183,9 @@ cargo install mmd-anim-cli
 mmd-anim --help
 ```
 
+CLI、ネイティブ API、物理演算 crate をソースからビルドする場合は、対象環境向けの C++ compiler が必要です。
+Bullet 自体を別途インストールする必要はありません。GitHub Releases のビルド済み CLI はそのまま利用できます。
+
 PMXとVMDから、アニメーション付きFBXを書き出せます。
 
 ```powershell

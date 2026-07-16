@@ -38,6 +38,11 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Check lightweight builds
+        run: |
+          cargo check -p mmd-anim-physics-bullet --no-default-features
+          cargo test -p mmd-anim-cli -p mmd-anim-ffi --no-default-features
+
       - name: Build docs
         run: cargo doc --workspace --no-deps
 

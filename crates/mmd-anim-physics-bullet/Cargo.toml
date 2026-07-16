@@ -8,7 +8,7 @@ repository.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Optional Bullet physics backend for mmd-anim"
+description = "Bundled Bullet Physics backend for MMD animation"
 include = [
     "Cargo.toml",
     "build.rs",

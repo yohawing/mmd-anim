@@ -193,6 +193,10 @@ cargo install mmd-anim-cli
 mmd-anim --help
 ```
 
+Source builds of the CLI, native API, or physics crate require a C++ compiler
+for the target. Bullet itself does not need to be installed separately.
+Prebuilt CLI binaries from GitHub Releases can be used directly.
+
 You can export animated FBX files from PMX and VMD inputs.
 
 ```powershell

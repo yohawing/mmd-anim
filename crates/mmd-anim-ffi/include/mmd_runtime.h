@@ -1053,6 +1053,24 @@ mmd_runtime_status_t mmd_runtime_physics_world_create_from_pmx_bytes(
 void mmd_runtime_physics_world_free(
     mmd_runtime_physics_world_t* world);
 
+/* Returns a deterministic UTF-8 JSON snapshot of the editable physics
+   parameters for a PMX-created world. The top-level schema_version is 1;
+   rigid_bodies and joints are objects keyed by the original PMX names.
+   Descriptor-created worlds return an empty buffer and UNSUPPORTED details in
+   the thread-local last error. The returned Rust-owned buffer must be freed
+   with mmd_runtime_byte_buffer_free. */
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_physics_params_get_json(
+    const mmd_runtime_physics_world_t* world);
+
+/* Applies a partial schema-version-1 named parameter update. A successful
+   update rebuilds the physics world, preserves gravity, resets simulation
+   state, and takes effect on the next seed/step. Validation or rebuild failure
+   leaves the existing world unchanged. */
+mmd_runtime_status_t mmd_runtime_physics_params_set_json(
+    mmd_runtime_physics_world_t* world,
+    const uint8_t*               data,
+    size_t                       len);
+
 /* Successful reset reseeds every bound body from the runtime pose, performs
    one fixed 1/60 solver settle, re-pins static bodies, cleans transient state,
    writes the settled dynamic bodies back to the runtime pose, and arms

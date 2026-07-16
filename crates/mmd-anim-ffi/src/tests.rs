@@ -1460,6 +1460,24 @@ fn physics_world_abi_exports_unsupported_stubs_when_feature_is_off() {
         },
         MmdRuntimeStatus::Unsupported
     );
+
+    let get = unsafe { mmd_runtime_physics_params_get_json(ptr::null()) };
+    assert!(get.data.is_null());
+    assert_eq!(get.len, 0);
+    assert_eq!(
+        unsafe { mmd_runtime_physics_params_set_json(ptr::null_mut(), b"{}".as_ptr(), 2) },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    let world = Box::into_raw(Box::new(MmdRuntimePhysicsWorld {}));
+    let get = unsafe { mmd_runtime_physics_params_get_json(world) };
+    assert!(get.data.is_null());
+    assert_eq!(get.len, 0);
+    assert_eq!(
+        unsafe { mmd_runtime_physics_params_set_json(world, b"{}".as_ptr(), 2) },
+        MmdRuntimeStatus::Unsupported
+    );
+    unsafe { mmd_runtime_physics_world_free(world) };
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -1892,6 +1910,43 @@ fn create_physics_bake_clip() -> *mut MmdRuntimeClip {
             morph_tracks.len(),
             morph_keyframes.as_ptr(),
             morph_keyframes.len(),
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+        )
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn create_bone_only_physics_bake_clip() -> *mut MmdRuntimeClip {
+    let bone_tracks = [MmdRuntimeFfiBoneTrack {
+        bone_index: 0,
+        keyframe_offset: 0,
+        keyframe_count: 2,
+    }];
+    let bone_keyframes = [
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 0,
+            position_xyz: [0.0, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        },
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 30,
+            position_xyz: [0.0, 1.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        },
+    ];
+    unsafe {
+        mmd_runtime_clip_create(
+            bone_tracks.as_ptr(),
+            bone_tracks.len(),
+            bone_keyframes.as_ptr(),
+            bone_keyframes.len(),
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
             ptr::null(),
             0,
             ptr::null(),
@@ -5188,30 +5243,41 @@ fn host_frame_pmx_bytes() -> Vec<u8> {
             ],
             "rigidBodies": [
                 {
-                    "name": "anchorBody",
+                    "name": "アンカー剛体",
                     "boneIndex": 1,
                     "shape": "sphere",
                     "size": [0.5, 0.0, 0.0],
                     "position": [0.0, 10.0, 0.0],
+                    "friction": 0.25,
                     "mode": "static"
                 },
                 {
-                    "name": "physicsBody",
+                    "name": "物理剛体",
                     "boneIndex": 2,
                     "shape": "sphere",
                     "size": [0.5, 0.0, 0.0],
                     "position": [0.0, 8.0, 0.0],
                     "mass": 1.0,
+                    "linearDamping": 0.2,
+                    "angularDamping": 0.3,
+                    "friction": 0.4,
+                    "restitution": 0.1,
                     "mode": "dynamic"
                 }
             ],
             "joints": [
                 {
-                    "name": "joint",
+                    "name": "接続ジョイント",
                     "type": "generic6dofSpring",
                     "rigidBodyIndexA": 0,
                     "rigidBodyIndexB": 1,
-                    "position": [0.0, 9.0, 0.0]
+                    "position": [0.0, 9.0, 0.0],
+                    "translationLowerLimit": [-1.0, -2.0, -3.0],
+                    "translationUpperLimit": [1.0, 2.0, 3.0],
+                    "rotationLowerLimit": [-0.1, -0.2, -0.3],
+                    "rotationUpperLimit": [0.1, 0.2, 0.3],
+                    "springTranslationFactor": [1.0, 2.0, 3.0],
+                    "springRotationFactor": [4.0, 5.0, 6.0]
                 }
             ]
         }))
@@ -5235,6 +5301,336 @@ fn host_frame_pmx_bytes() -> Vec<u8> {
     .unwrap();
 
     mmd_anim_format::export_pmx_model(&model)
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_params_json_bytes(world: *const MmdRuntimePhysicsWorld) -> Vec<u8> {
+    let buffer = unsafe { mmd_runtime_physics_params_get_json(world) };
+    assert!(!buffer.data.is_null(), "{:?}", last_error_cstr());
+    assert!(buffer.len > 0);
+    let bytes = unsafe { slice::from_raw_parts(buffer.data, buffer.len).to_vec() };
+    unsafe { mmd_runtime_byte_buffer_free(buffer) };
+    bytes
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_gravity(world: *const MmdRuntimePhysicsWorld) -> [f32; 3] {
+    let mut gravity = [0.0; 3];
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_get_gravity(world, gravity.as_mut_ptr()) },
+        MmdRuntimeStatus::Ok
+    );
+    gravity
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_from_bytes(bytes: &[u8]) -> *mut MmdRuntimePhysicsWorld {
+    let mut world = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create_from_pmx_bytes(bytes.as_ptr(), bytes.len(), &mut world)
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(!world.is_null());
+    world
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_get_emits_complete_deterministic_utf8_schema_v1_snapshot() {
+    let bytes = host_frame_pmx_bytes();
+    let world = physics_world_from_bytes(&bytes);
+
+    let first = physics_params_json_bytes(world);
+    let second = physics_params_json_bytes(world);
+    assert_eq!(first, second);
+    let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(
+        value.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["joints", "rigid_bodies", "schema_version"]
+    );
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(
+        value["rigid_bodies"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["アンカー剛体", "物理剛体"]
+    );
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["mass"], 1.0);
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["linear_damping"], 0.2);
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["angular_damping"], 0.3);
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["friction"], 0.4);
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["restitution"], 0.1);
+    assert_eq!(
+        value["joints"]["接続ジョイント"]["translation_lower_limit"],
+        serde_json::json!([-1.0, -2.0, -3.0])
+    );
+    assert_eq!(
+        value["joints"]["接続ジョイント"]["spring_rotation_factor"],
+        serde_json::json!([4.0, 5.0, 6.0])
+    );
+
+    unsafe { mmd_runtime_physics_world_free(world) };
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_unchanged_roundtrip_is_stable() {
+    let bytes = host_frame_pmx_bytes();
+    let world = physics_world_from_bytes(&bytes);
+    let snapshot = physics_params_json_bytes(world);
+
+    assert_eq!(
+        unsafe { mmd_runtime_physics_params_set_json(world, snapshot.as_ptr(), snapshot.len()) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(physics_params_json_bytes(world), snapshot);
+
+    unsafe { mmd_runtime_physics_world_free(world) };
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_set_rearms_next_bake_sample_as_seed_only_via_abi() {
+    let (model, instance, world) = host_frame_fixture();
+    let clip = create_bone_only_physics_bake_clip();
+    assert!(!clip.is_null());
+
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_reset(world, instance, ptr::null_mut()) },
+        MmdRuntimeStatus::Ok
+    );
+    let mut report = zero_physics_step_report();
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_step_runtime(world, instance, 1.0 / 60.0, &mut report) },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(report.tick.substeps > 0 || report.bones_written_back > 0);
+
+    let snapshot = physics_params_json_bytes(world);
+    assert_eq!(
+        unsafe { mmd_runtime_physics_params_set_json(world, snapshot.as_ptr(), snapshot.len()) },
+        MmdRuntimeStatus::Ok
+    );
+
+    let mut world_out = [0.0f32; 48];
+    let morph_count = unsafe { mmd_runtime_model_morph_count(model) };
+    let mut morphs = vec![0.0f32; morph_count];
+    report = zero_physics_step_report();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_bake_clip_frames(
+                world,
+                instance,
+                clip,
+                0.0,
+                15.0,
+                1.0 / 60.0,
+                1,
+                world_out.as_mut_ptr(),
+                world_out.len(),
+                morphs.as_mut_ptr(),
+                morphs.len(),
+                &mut report,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_zero_physics_step_report(&report);
+
+    unsafe {
+        mmd_runtime_clip_free(clip);
+        mmd_runtime_physics_world_free(world);
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_partial_set_rebuilds_and_preserves_gravity() {
+    let bytes = host_frame_pmx_bytes();
+    let world = physics_world_from_bytes(&bytes);
+    let gravity = [1.0f32, -42.0, 3.0];
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_set_gravity(world, gravity.as_ptr()) },
+        MmdRuntimeStatus::Ok
+    );
+    unsafe {
+        (*world).next_bake_sample_is_seed_only = false;
+    }
+    let update = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "rigid_bodies": {
+            "物理剛体": {
+                "mass": 2.5,
+                "linear_damping": 0.6,
+                "angular_damping": 0.7,
+                "friction": 0.8,
+                "restitution": 0.9
+            }
+        },
+        "joints": {
+            "接続ジョイント": {
+                "translation_lower_limit": [-4.0, -5.0, -6.0],
+                "translation_upper_limit": [4.0, 5.0, 6.0],
+                "rotation_lower_limit": [-0.4, -0.5, -0.6],
+                "rotation_upper_limit": [0.4, 0.5, 0.6],
+                "spring_translation_factor": [7.0, 8.0, 9.0],
+                "spring_rotation_factor": [10.0, 11.0, 12.0]
+            }
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        unsafe { mmd_runtime_physics_params_set_json(world, update.as_ptr(), update.len()) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(physics_gravity(world), gravity);
+    assert!(unsafe { (*world).next_bake_sample_is_seed_only });
+    let value: serde_json::Value =
+        serde_json::from_slice(&physics_params_json_bytes(world)).unwrap();
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["mass"], 2.5);
+    assert_eq!(
+        value["joints"]["接続ジョイント"]["translation_lower_limit"],
+        serde_json::json!([-4.0, -5.0, -6.0])
+    );
+    assert_eq!(
+        value["joints"]["接続ジョイント"]["spring_rotation_factor"],
+        serde_json::json!([10.0, 11.0, 12.0])
+    );
+
+    unsafe { mmd_runtime_physics_world_free(world) };
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_invalid_updates_are_fail_atomic() {
+    let bytes = host_frame_pmx_bytes();
+    let world = physics_world_from_bytes(&bytes);
+    let gravity = [2.0f32, -50.0, 4.0];
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_set_gravity(world, gravity.as_ptr()) },
+        MmdRuntimeStatus::Ok
+    );
+    let snapshot = physics_params_json_bytes(world);
+    unsafe {
+        (*world).next_bake_sample_is_seed_only = false;
+    }
+    let invalid_updates = [
+        r#"{"schema_version":2}"#.as_bytes().to_vec(),
+        r#"{"schema_version":1,"unknown":{}}"#.as_bytes().to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"missing":{"mass":1}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"物理剛体":{"unknown":1}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"物理剛体":{"mass":-1}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"物理剛体":{"mass":null}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"物理剛体":{"linear_damping":1.1}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"物理剛体":{"mass":1e999}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"joints":{"missing":{"spring_translation_factor":[0,0,0]}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"joints":{"接続ジョイント":{"spring_rotation_factor":[0,-1,0]}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"joints":{"接続ジョイント":{"spring_rotation_factor":null}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"joints":{"接続ジョイント":{"translation_lower_limit":[2,0,0]}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1"#.as_bytes().to_vec(),
+        vec![0xff, 0xfe],
+    ];
+
+    for update in &invalid_updates {
+        assert_eq!(
+            unsafe { mmd_runtime_physics_params_set_json(world, update.as_ptr(), update.len()) },
+            MmdRuntimeStatus::InvalidInput,
+            "update={:?}",
+            String::from_utf8_lossy(update)
+        );
+        assert!(last_error_cstr().is_some());
+        assert_eq!(physics_params_json_bytes(world), snapshot);
+        assert_eq!(physics_gravity(world), gravity);
+        assert!(!unsafe { (*world).next_bake_sample_is_seed_only });
+    }
+
+    unsafe { mmd_runtime_physics_world_free(world) };
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_reject_unnamed_and_ambiguous_worlds() {
+    let valid_update = br#"{"schema_version":1}"#;
+
+    let mut typed_world = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create(ptr::null(), 0, ptr::null(), 0, &mut typed_world)
+        },
+        MmdRuntimeStatus::Ok
+    );
+    let get = unsafe { mmd_runtime_physics_params_get_json(typed_world) };
+    assert!(get.data.is_null());
+    assert_eq!(get.len, 0);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_params_set_json(
+                typed_world,
+                valid_update.as_ptr(),
+                valid_update.len(),
+            )
+        },
+        MmdRuntimeStatus::Unsupported
+    );
+    unsafe { mmd_runtime_physics_world_free(typed_world) };
+
+    let mutations: [fn(&mut mmd_anim_format::PmxParsedModel); 2] = [
+        |model: &mut mmd_anim_format::PmxParsedModel| {
+            model.rigid_bodies[1].name = model.rigid_bodies[0].name.clone();
+        },
+        |model: &mut mmd_anim_format::PmxParsedModel| {
+            model.joints[0].name.clear();
+        },
+    ];
+    for mutate in mutations {
+        let bytes = host_frame_pmx_bytes();
+        let mut model = mmd_anim_format::parse_pmx_model(&bytes).unwrap();
+        mutate(&mut model);
+        let bytes = mmd_anim_format::export_pmx_model(&model);
+        let world = physics_world_from_bytes(&bytes);
+        let get = unsafe { mmd_runtime_physics_params_get_json(world) };
+        assert!(get.data.is_null());
+        assert_eq!(get.len, 0);
+        assert!(last_error_cstr().is_some());
+        assert_eq!(
+            unsafe {
+                mmd_runtime_physics_params_set_json(
+                    world,
+                    valid_update.as_ptr(),
+                    valid_update.len(),
+                )
+            },
+            MmdRuntimeStatus::InvalidInput
+        );
+        unsafe { mmd_runtime_physics_world_free(world) };
+    }
 }
 
 /// Builds a model + instance + physics world all derived from the same PMX

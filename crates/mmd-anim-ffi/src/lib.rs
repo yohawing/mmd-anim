@@ -2,10 +2,15 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(feature = "physics-bullet-native")]
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::{ptr, slice, str, sync::Arc};
+
+#[cfg(feature = "physics-bullet-native")]
+use serde::{Deserialize, Deserializer, Serialize};
 
 use mmd_anim_format::fbx::{
     UnityAnimationClipDto, UnityMorphBinding, UnityReducedPoseBindings,
@@ -128,6 +133,10 @@ pub struct MmdRuntimeAppendSolver {
 pub struct MmdRuntimePhysicsWorld {
     #[cfg(feature = "physics-bullet-native")]
     world: mmd_anim_physics_bullet::PmxBulletWorld,
+    /// The name-bearing rebuild source is available only for PMX-created
+    /// worlds. Descriptor-created worlds intentionally remain unnamed.
+    #[cfg(feature = "physics-bullet-native")]
+    pmx_model: Option<mmd_anim_format::PmxParsedModel>,
     /// When true, the next bake sample reseeds the Bullet world from the
     /// evaluated pose and copies outputs without advancing either the solver or
     /// the normal forward physics clock.
@@ -138,6 +147,92 @@ pub struct MmdRuntimePhysicsWorld {
     /// `mmd_runtime_physics_world_step_runtime`.
     #[cfg(feature = "physics-bullet-native")]
     next_bake_sample_is_seed_only: bool,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+const PHYSICS_PARAMS_SCHEMA_VERSION: u32 = 1;
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Serialize)]
+struct PhysicsParamsSnapshot {
+    schema_version: u32,
+    rigid_bodies: BTreeMap<String, PhysicsRigidBodyParams>,
+    joints: BTreeMap<String, PhysicsJointParams>,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Serialize)]
+struct PhysicsRigidBodyParams {
+    mass: f32,
+    linear_damping: f32,
+    angular_damping: f32,
+    friction: f32,
+    restitution: f32,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Serialize)]
+struct PhysicsJointParams {
+    translation_lower_limit: [f32; 3],
+    translation_upper_limit: [f32; 3],
+    rotation_lower_limit: [f32; 3],
+    rotation_upper_limit: [f32; 3],
+    spring_translation_factor: [f32; 3],
+    spring_rotation_factor: [f32; 3],
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhysicsParamsUpdate {
+    schema_version: u32,
+    #[serde(default)]
+    rigid_bodies: BTreeMap<String, PhysicsRigidBodyParamsUpdate>,
+    #[serde(default)]
+    joints: BTreeMap<String, PhysicsJointParamsUpdate>,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhysicsRigidBodyParamsUpdate {
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    mass: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    linear_damping: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    angular_damping: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    friction: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    restitution: Option<f32>,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhysicsJointParamsUpdate {
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    translation_lower_limit: Option<[f32; 3]>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    translation_upper_limit: Option<[f32; 3]>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    rotation_lower_limit: Option<[f32; 3]>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    rotation_upper_limit: Option<[f32; 3]>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    spring_translation_factor: Option<[f32; 3]>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    spring_rotation_factor: Option<[f32; 3]>,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[repr(C)]
@@ -4094,6 +4189,58 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_free(world: *mut MmdRuntimePh
     })
 }
 
+/// Returns a deterministic schema-v1 snapshot of editable PMX physics parameters.
+///
+/// The returned UTF-8 JSON buffer is Rust-owned and must be freed with
+/// `mmd_runtime_byte_buffer_free`. Only worlds created from PMX bytes have the
+/// original names required by this API; descriptor-created worlds are unsupported.
+///
+/// # Safety
+///
+/// `world` must be a valid physics-world handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_params_get_json(
+    world: *const MmdRuntimePhysicsWorld,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(world) = (unsafe { world.as_ref() }) else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        physics_params_get_json_impl(world)
+    })
+}
+
+/// Applies a partial schema-v1 named PMX physics-parameter update.
+///
+/// A successful update rebuilds the whole Bullet world, preserves gravity,
+/// resets simulation state, and re-arms seed-only behavior for the next
+/// seed/bake sample. Any parse, validation, or rebuild failure leaves the
+/// original world untouched.
+///
+/// # Safety
+///
+/// `world` must be a valid physics-world handle. `data` must point to `len`
+/// readable UTF-8 JSON bytes, and `len` must be non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_params_set_json(
+    world: *mut MmdRuntimePhysicsWorld,
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(world) = (unsafe { world.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(data) = (unsafe { checked_slice(data, len) }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if data.is_empty() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        physics_params_set_json_impl(world, data)
+    })
+}
+
 /// Resets the physics world and reseeds it from the runtime pose.
 ///
 /// Reset includes one fixed 1/60 second solver settle, static-body re-pinning,
@@ -4387,6 +4534,19 @@ fn physics_world_create_from_pmx_bytes_impl(
 }
 
 #[cfg(not(feature = "physics-bullet-native"))]
+fn physics_params_get_json_impl(_world: &MmdRuntimePhysicsWorld) -> MmdRuntimeFfiByteBuffer {
+    empty_byte_buffer_failure("physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_params_set_json_impl(
+    _world: &mut MmdRuntimePhysicsWorld,
+    _data: &[u8],
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
 fn physics_world_reset_impl(
     _world: *mut MmdRuntimePhysicsWorld,
     _instance: *mut MmdRuntimeInstance,
@@ -4538,6 +4698,7 @@ fn physics_world_create_impl(
             unsafe {
                 *out_world = Box::into_raw(Box::new(MmdRuntimePhysicsWorld {
                     world,
+                    pmx_model: None,
                     next_bake_sample_is_seed_only: true,
                 }));
             }
@@ -4564,6 +4725,7 @@ fn physics_world_create_from_pmx_bytes_impl(
             unsafe {
                 *out_world = Box::into_raw(Box::new(MmdRuntimePhysicsWorld {
                     world,
+                    pmx_model: Some(model),
                     next_bake_sample_is_seed_only: true,
                 }));
             }
@@ -4571,6 +4733,246 @@ fn physics_world_create_from_pmx_bytes_impl(
         }
         Err(err) => status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
     }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn validate_physics_param_names(model: &mmd_anim_format::PmxParsedModel) -> Result<(), String> {
+    fn validate<'a>(kind: &str, names: impl Iterator<Item = &'a str>) -> Result<(), String> {
+        let mut seen = HashSet::new();
+        for name in names {
+            if name.is_empty() {
+                return Err(format!("PMX {kind} has an empty name"));
+            }
+            if !seen.insert(name) {
+                return Err(format!("PMX {kind} name is duplicated: {name}"));
+            }
+        }
+        Ok(())
+    }
+
+    validate(
+        "rigid body",
+        model.rigid_bodies.iter().map(|body| body.name.as_str()),
+    )?;
+    validate(
+        "joint",
+        model.joints.iter().map(|joint| joint.name.as_str()),
+    )
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_params_get_json_impl(world: &MmdRuntimePhysicsWorld) -> MmdRuntimeFfiByteBuffer {
+    let Some(model) = world.pmx_model.as_ref() else {
+        return empty_byte_buffer_failure("physics parameters require a PMX-created world");
+    };
+    if let Err(message) = validate_physics_param_names(model) {
+        set_last_error(message);
+        return empty_byte_buffer();
+    }
+
+    let rigid_bodies = model
+        .rigid_bodies
+        .iter()
+        .map(|body| {
+            (
+                body.name.clone(),
+                PhysicsRigidBodyParams {
+                    mass: body.mass,
+                    linear_damping: body.linear_damping,
+                    angular_damping: body.angular_damping,
+                    friction: body.friction,
+                    restitution: body.restitution,
+                },
+            )
+        })
+        .collect();
+    let joints = model
+        .joints
+        .iter()
+        .map(|joint| {
+            (
+                joint.name.clone(),
+                PhysicsJointParams {
+                    translation_lower_limit: joint.translation_lower_limit,
+                    translation_upper_limit: joint.translation_upper_limit,
+                    rotation_lower_limit: joint.rotation_lower_limit,
+                    rotation_upper_limit: joint.rotation_upper_limit,
+                    spring_translation_factor: joint.spring_translation_factor,
+                    spring_rotation_factor: joint.spring_rotation_factor,
+                },
+            )
+        })
+        .collect();
+    let snapshot = PhysicsParamsSnapshot {
+        schema_version: PHYSICS_PARAMS_SCHEMA_VERSION,
+        rigid_bodies,
+        joints,
+    };
+    match serde_json::to_vec(&snapshot) {
+        Ok(bytes) => byte_buffer_from_vec(bytes),
+        Err(error) => {
+            set_last_error(format!("physics parameter JSON encode failed: {error}"));
+            empty_byte_buffer()
+        }
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_params_set_json_impl(
+    world: &mut MmdRuntimePhysicsWorld,
+    data: &[u8],
+) -> MmdRuntimeStatus {
+    let Some(source_model) = world.pmx_model.as_ref() else {
+        return status_failure(
+            MmdRuntimeStatus::Unsupported,
+            "physics parameters require a PMX-created world",
+        );
+    };
+    if let Err(message) = validate_physics_param_names(source_model) {
+        set_last_error(message);
+        return MmdRuntimeStatus::InvalidInput;
+    }
+    let update: PhysicsParamsUpdate = match serde_json::from_slice(data) {
+        Ok(update) => update,
+        Err(error) => {
+            set_last_error(format!("invalid physics parameter JSON: {error}"));
+            return MmdRuntimeStatus::InvalidInput;
+        }
+    };
+    if update.schema_version != PHYSICS_PARAMS_SCHEMA_VERSION {
+        return status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "unsupported physics parameter schema_version",
+        );
+    }
+
+    let mut replacement_model = source_model.clone();
+    for (name, values) in update.rigid_bodies {
+        let Some(body) = replacement_model
+            .rigid_bodies
+            .iter_mut()
+            .find(|body| body.name == name)
+        else {
+            set_last_error(format!("unknown PMX rigid body name: {name}"));
+            return MmdRuntimeStatus::InvalidInput;
+        };
+        if let Some(value) = values.mass {
+            if !value.is_finite() || value < 0.0 {
+                return invalid_physics_param("mass must be finite and >= 0");
+            }
+            body.mass = value;
+        }
+        if let Some(value) = values.linear_damping {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return invalid_physics_param("linear_damping must be finite and in [0, 1]");
+            }
+            body.linear_damping = value;
+        }
+        if let Some(value) = values.angular_damping {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return invalid_physics_param("angular_damping must be finite and in [0, 1]");
+            }
+            body.angular_damping = value;
+        }
+        if let Some(value) = values.friction {
+            if !value.is_finite() || value < 0.0 {
+                return invalid_physics_param("friction must be finite and >= 0");
+            }
+            body.friction = value;
+        }
+        if let Some(value) = values.restitution {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return invalid_physics_param("restitution must be finite and in [0, 1]");
+            }
+            body.restitution = value;
+        }
+    }
+
+    for (name, values) in update.joints {
+        let Some(joint) = replacement_model
+            .joints
+            .iter_mut()
+            .find(|joint| joint.name == name)
+        else {
+            set_last_error(format!("unknown PMX joint name: {name}"));
+            return MmdRuntimeStatus::InvalidInput;
+        };
+        if let Some(value) = values.translation_lower_limit {
+            joint.translation_lower_limit = value;
+        }
+        if let Some(value) = values.translation_upper_limit {
+            joint.translation_upper_limit = value;
+        }
+        if let Some(value) = values.rotation_lower_limit {
+            joint.rotation_lower_limit = value;
+        }
+        if let Some(value) = values.rotation_upper_limit {
+            joint.rotation_upper_limit = value;
+        }
+        if let Some(value) = values.spring_translation_factor {
+            joint.spring_translation_factor = value;
+        }
+        if let Some(value) = values.spring_rotation_factor {
+            joint.spring_rotation_factor = value;
+        }
+        for (field, value) in [
+            ("translation_lower_limit", joint.translation_lower_limit),
+            ("translation_upper_limit", joint.translation_upper_limit),
+            ("rotation_lower_limit", joint.rotation_lower_limit),
+            ("rotation_upper_limit", joint.rotation_upper_limit),
+        ] {
+            if !all_finite(&value) {
+                return invalid_physics_param(&format!("{field} must contain finite values"));
+            }
+        }
+        for (field, value) in [
+            ("spring_translation_factor", joint.spring_translation_factor),
+            ("spring_rotation_factor", joint.spring_rotation_factor),
+        ] {
+            if !all_finite(&value) || value.iter().any(|component| *component < 0.0) {
+                return invalid_physics_param(&format!("{field} must contain finite values >= 0"));
+            }
+        }
+        if joint
+            .translation_lower_limit
+            .iter()
+            .zip(joint.translation_upper_limit)
+            .any(|(lower, upper)| *lower > upper)
+        {
+            return invalid_physics_param("translation lower limits must be <= upper limits");
+        }
+        if joint
+            .rotation_lower_limit
+            .iter()
+            .zip(joint.rotation_upper_limit)
+            .any(|(lower, upper)| *lower > upper)
+        {
+            return invalid_physics_param("rotation lower limits must be <= upper limits");
+        }
+    }
+
+    let gravity = match world.world.world.gravity() {
+        Ok(gravity) => gravity,
+        Err(error) => return status_failure(MmdRuntimeStatus::Error, &error.to_string()),
+    };
+    let mut replacement_world =
+        match mmd_anim_physics_bullet::build_bullet_world_from_pmx(&replacement_model) {
+            Ok(world) => world,
+            Err(error) => return status_failure(MmdRuntimeStatus::Error, &error.to_string()),
+        };
+    if let Err(error) = replacement_world.world.set_gravity(gravity) {
+        return status_failure(MmdRuntimeStatus::Error, &error.to_string());
+    }
+
+    world.world = replacement_world;
+    world.pmx_model = Some(replacement_model);
+    world.next_bake_sample_is_seed_only = true;
+    MmdRuntimeStatus::Ok
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn invalid_physics_param(message: &str) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::InvalidInput, message)
 }
 
 #[cfg(feature = "physics-bullet-native")]

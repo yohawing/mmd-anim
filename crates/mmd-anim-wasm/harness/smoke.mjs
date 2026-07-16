@@ -207,6 +207,36 @@ assert(batch.copyWorldMatrices(new Float32Array(95)) === false, 'batch copyWorld
 runtime.copyWorldMatrices(buf);
 assertClose(buf[12], 2.0, 1e-6, 'batch evaluation does not mutate source runtime frame');
 
+console.log('\n7c. reduced pose handle parity, lifetime, short buffer, and free');
+const reductionArgs = [0, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4];
+const batchReduced = batch.reducePose(...reductionArgs);
+const hostReduced = wasm.reduceDensePose(
+  model,
+  batchWorld,
+  new Float32Array([]),
+  3,
+  0.0,
+  30.0,
+  ...reductionArgs,
+);
+assert(batchReduced.reducedBoneKeyCount() === 4, 'batch reduced pose keeps two keys per bone');
+assert(hostReduced.reducedBoneKeyCount() === 4, 'host dense reduced pose keeps two keys per bone');
+batch.free();
+model.free();
+const reducedWorldA = new Float32Array(32);
+const reducedWorldB = new Float32Array(32);
+assert(batchReduced.sample(30.0, reducedWorldA, new Float32Array([])) === true,
+  'batch reduced result samples after batch/model free');
+assert(hostReduced.sample(30.0, reducedWorldB, new Float32Array([])) === true,
+  'host reduced result samples after model free');
+assert(batchReduced.sample(30.0, new Float32Array(31), new Float32Array([])) === false,
+  'reduced pose sample rejects short buffer');
+assert(reducedWorldA.every((value, index) => value === reducedWorldB[index]),
+  'batch and host dense reduced samplers have parity');
+assertClose(reducedWorldA[12], 2.0, 1e-6, 'reduced pose frame 30 bone 0 world x = 2.0');
+batchReduced.free();
+hostReduced.free();
+
 console.log('\n8. skinningMatricesView()');
 const skinView = runtime.skinningMatricesView();
 assert(skinView instanceof Float32Array, 'skinningMatricesView returns Float32Array');
@@ -241,6 +271,11 @@ assert(vmdJson.kind === 'vmd', 'parseVmdAnimationJson returns VMD DTO kind');
 assert(vmdJson.metadata.format === 'vmd', 'parseVmdAnimationJson metadata.format === vmd');
 assert(vmdJson.boneFrames.length === 0, 'parseVmdAnimationJson bone frame count === 0');
 assert(vmdJson.metadata.counts.bones === 0, 'parseVmdAnimationJson metadata.counts.bones === 0');
+
+clip.free();
+runtime.free();
+runtime2.free();
+model2.free();
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
 if (failed > 0) process.exit(1);

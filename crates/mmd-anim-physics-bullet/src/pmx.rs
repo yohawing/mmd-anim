@@ -129,6 +129,16 @@ impl PmxBulletWorld {
         }
         Ok(bone_transforms)
     }
+
+    /// Minimum number of bones the instance must have for all rigidbody
+    /// bindings to be valid. Returns 0 if there are no bone-bound bodies.
+    pub fn required_bone_count(&self) -> usize {
+        self.rigidbody_bindings
+            .iter()
+            .filter_map(|b| b.bone_index)
+            .max()
+            .map_or(0, |max_idx| max_idx.saturating_add(1))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

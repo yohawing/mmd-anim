@@ -14,6 +14,12 @@ use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
 use crate::sjis::{decode_sjis_fixed_trimmed, encode_sjis};
 
+mod reduced;
+pub use reduced::{
+    VmdExportMorphKind, VmdExportName, VmdPoseExport, VmdPoseExportBindings, VmdPoseExportError,
+    VmdPoseExportReport, export_reduced_pose_to_vmd,
+};
+
 type Reader<'a> = ByteReader<'a>;
 
 const VMD_MAGIC: [u8; 30] = *b"Vocaloid Motion Data 0002\0\0\0\0\0";

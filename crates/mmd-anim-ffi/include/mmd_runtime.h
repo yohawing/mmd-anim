@@ -16,6 +16,67 @@ extern "C" {
 #define MMD_RUNTIME_ABI_VERSION 2
 
 /* ------------------------------------------------------------------ */
+/*  Host physics FFI surface contract                                 */
+/* ------------------------------------------------------------------ */
+/*
+   Capability detection
+   ---------------------
+   mmd_runtime_feature_flags() returns a bitmask describing what this build
+   supports: bit 0 (MMD_RUNTIME_FEATURE_SPLIT_PHYSICS_EVALUATION) is set when
+   the before/after-physics split evaluation API is available; bit 1
+   (MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE) is set when the native Bullet
+   physics world is available. Check the relevant bit before calling any
+   physics_world_* or evaluate_host_frame function; when the bit is unset
+   those functions return MMD_RUNTIME_STATUS_UNSUPPORTED.
+
+   Handle ownership
+   ----------------
+   mmd_runtime_model_t* is shared and read-only after creation (Arc-backed).
+   The same model may be used to create any number of instances.
+   mmd_runtime_instance_t* is exclusively owned by the caller and must be
+   released with mmd_runtime_instance_free.
+   mmd_runtime_physics_world_t* is exclusively owned and created
+   independently from PMX bytes or rigidbody/joint descriptors — it does
+   not hold a reference to the model handle. The caller is responsible for
+   ensuring that the bone indices used by the physics world match those of
+   the instance it is paired with; index mismatches within bounds silently
+   drive the wrong bones.
+   Free order: release instances before releasing the model they were
+   created from. Physics worlds may be freed in any order relative to
+   models. Freeing a model while instances still reference it is safe (Arc
+   keeps storage alive), but using any handle after it has been freed is
+   undefined behavior.
+
+   Thread safety
+   -------------
+   Individual handles are not thread-safe: do not call FFI functions on the
+   same instance or physics world from more than one thread at a time.
+   Independent (model, instance, world) triples that share no handle may be
+   driven concurrently from different threads. mmd_runtime_last_error_message
+   is thread-local; the returned message is valid only until the next FFI
+   call made on that same thread.
+
+   Same-frame re-evaluation
+   -------------------------
+   mmd_runtime_evaluate_host_frame with action = STEP advances the physics
+   world's fixed-step clock. Calling it more than once for the same logical
+   frame accumulates physics time as if multiple frames had elapsed; the
+   caller must not double-step a frame. STEP requires the instance's physics
+   mode to be Trace or Live; it returns MMD_RUNTIME_STATUS_INVALID_INPUT
+   when the mode is Off. action = SEED resets rigid bodies to their
+   bone-derived positions, zeroes velocities, and evaluates after-physics —
+   it does not advance the solver. SEED may be called at any time to
+   reinitialize physics state.
+
+   Error recovery
+   --------------
+   When any function returns a status other than MMD_RUNTIME_STATUS_OK, the
+   handles it was given remain valid and may be used in subsequent calls,
+   which may succeed. The only functions that never fail are the handle-free
+   functions.
+*/
+
+/* ------------------------------------------------------------------ */
 /*  Opaque handle types                                               */
 /* ------------------------------------------------------------------ */
 
@@ -31,6 +92,7 @@ typedef struct mmd_runtime_vmd_camera_track_t mmd_runtime_vmd_camera_track_t;
 typedef struct mmd_runtime_vmd_light_track_t mmd_runtime_vmd_light_track_t;
 typedef struct mmd_runtime_vmd_self_shadow_track_t mmd_runtime_vmd_self_shadow_track_t;
 typedef struct mmd_runtime_physics_world_t mmd_runtime_physics_world_t;
+typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 
 /* ------------------------------------------------------------------ */
 /*  Flag constants                                                    */
@@ -63,6 +125,59 @@ typedef enum mmd_runtime_status {
     MMD_RUNTIME_STATUS_ERROR = 4
 } mmd_runtime_status_t;
 
+typedef enum mmd_runtime_reduction_target {
+    MMD_RUNTIME_REDUCTION_TARGET_LINEAR_SLERP = 0,
+    MMD_RUNTIME_REDUCTION_TARGET_VMD_BEZIER = 1,
+    MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC = 2
+} mmd_runtime_reduction_target_t;
+
+typedef enum mmd_runtime_unity_curve_semantic {
+    MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION = 0,
+    MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER = 1,
+    MMD_RUNTIME_UNITY_CURVE_MORPH_WEIGHT = 2
+} mmd_runtime_unity_curve_semantic_t;
+
+typedef enum mmd_runtime_unity_curve_axis {
+    MMD_RUNTIME_UNITY_CURVE_AXIS_X = 0,
+    MMD_RUNTIME_UNITY_CURVE_AXIS_Y = 1,
+    MMD_RUNTIME_UNITY_CURVE_AXIS_Z = 2,
+    MMD_RUNTIME_UNITY_CURVE_AXIS_NONE = 3
+} mmd_runtime_unity_curve_axis_t;
+
+typedef struct mmd_runtime_ffi_reduction_tolerances {
+    float local_position;
+    float local_rotation_radians;
+    float world_position;
+    float world_rotation_radians;
+    float morph_weight;
+} mmd_runtime_ffi_reduction_tolerances_t;
+
+typedef struct mmd_runtime_ffi_pose_reduction_report {
+    size_t source_bone_key_count;
+    size_t reduced_bone_key_count;
+    size_t source_morph_key_count;
+    size_t reduced_morph_key_count;
+    float max_local_position_error;
+    float max_local_rotation_error_radians;
+    float max_world_position_error;
+    float max_world_rotation_error_radians;
+    float max_morph_weight_error;
+} mmd_runtime_ffi_pose_reduction_report_t;
+
+typedef struct mmd_runtime_ffi_unity_curve_descriptor {
+    uint32_t semantic;    /* mmd_runtime_unity_curve_semantic_t */
+    uint32_t target_index; /* bone index or morph index */
+    uint32_t axis;        /* mmd_runtime_unity_curve_axis_t */
+    size_t   key_count;
+} mmd_runtime_ffi_unity_curve_descriptor_t;
+
+typedef struct mmd_runtime_ffi_unity_curve_key {
+    float time_seconds;
+    float value;
+    float in_tangent;
+    float out_tangent;
+} mmd_runtime_ffi_unity_curve_key_t;
+
 typedef enum mmd_runtime_physics_mode {
     MMD_RUNTIME_PHYSICS_MODE_OFF = 0,
     MMD_RUNTIME_PHYSICS_MODE_TRACE = 1,
@@ -86,6 +201,17 @@ typedef enum mmd_runtime_physics_joint_kind {
     MMD_RUNTIME_PHYSICS_JOINT_KIND_GENERIC_6DOF_SPRING = 0,
     MMD_RUNTIME_PHYSICS_JOINT_KIND_UNSUPPORTED = 1
 } mmd_runtime_physics_joint_kind_t;
+
+/* Selects the physics action performed by
+   mmd_runtime_evaluate_host_frame: reseed the Bullet world from the
+   evaluated pose without advancing the solver (SEED places all bodies at
+   their bone-derived positions and zeroes velocities), or advance the
+   runtime's fixed-step physics clock forward (STEP requires physics mode
+   Trace or Live; returns INVALID_INPUT when mode is Off). */
+typedef enum mmd_runtime_physics_frame_action {
+    MMD_RUNTIME_PHYSICS_FRAME_ACTION_SEED = 0,
+    MMD_RUNTIME_PHYSICS_FRAME_ACTION_STEP = 1
+} mmd_runtime_physics_frame_action_t;
 
 /* ------------------------------------------------------------------ */
 /*  Descriptor structs                                                */
@@ -250,6 +376,22 @@ typedef struct mmd_runtime_ffi_physics_world_step_report {
     size_t kinematic_rigidbodies_fed;
     size_t bones_written_back;
 } mmd_runtime_ffi_physics_world_step_report_t;
+
+typedef struct mmd_runtime_ffi_physics_rigidbody_binding {
+    int32_t  bone_index;  /* -1 if unbound */
+    uint32_t mode;        /* mmd_runtime_physics_rigidbody_mode_t values */
+} mmd_runtime_ffi_physics_rigidbody_binding_t;
+
+typedef struct mmd_runtime_ffi_host_pose_view {
+    const float*   local_position_offsets_xyz;
+    const float*   local_rotation_xyzw;
+    const float*   local_scales_xyz;
+    size_t         bone_count;
+    const float*   morph_weights;
+    size_t         morph_count;
+    const uint8_t* ik_enabled;
+    size_t         ik_count;
+} mmd_runtime_ffi_host_pose_view_t;
 
 /* ------------------------------------------------------------------ */
 /*  Model lifecycle                                                   */
@@ -867,6 +1009,14 @@ mmd_runtime_status_t mmd_runtime_instance_evaluate_clip_frame_before_physics_wit
 mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_before_physics(
     mmd_runtime_instance_t* instance);
 
+mmd_runtime_status_t mmd_runtime_instance_apply_host_pose(
+    mmd_runtime_instance_t *instance,
+    const mmd_runtime_ffi_host_pose_view_t *view);
+
+mmd_runtime_status_t mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(
+    mmd_runtime_instance_t *instance,
+    const mmd_runtime_ffi_host_pose_view_t *view);
+
 mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_after_physics(
     mmd_runtime_instance_t* instance);
 
@@ -903,29 +1053,77 @@ mmd_runtime_status_t mmd_runtime_physics_world_create_from_pmx_bytes(
 void mmd_runtime_physics_world_free(
     mmd_runtime_physics_world_t* world);
 
-/* Successful reset reseeds from the runtime pose and arms seed-only behavior
-   for the next mmd_runtime_physics_world_bake_clip_frames sample. */
+/* Successful reset reseeds every bound body from the runtime pose, performs
+   one fixed 1/60 solver settle, re-pins static bodies, cleans transient state,
+   writes the settled dynamic bodies back to the runtime pose, and arms
+   seed-only behavior for the next bake sample. */
 mmd_runtime_status_t mmd_runtime_physics_world_reset(
     mmd_runtime_physics_world_t* world,
     mmd_runtime_instance_t*      instance,
     size_t*                      out_seeded_rigidbody_count);
 
-/* Successful explicit step disarms bake seed-only state so the next bake
-   sample advances physics normally. */
+/* Forward steps feed static bodies only; DynamicBone bodies are seeded by
+   reset and remain solver-owned. A successful explicit step disarms bake
+   seed-only state so the next bake sample advances physics normally. */
 mmd_runtime_status_t mmd_runtime_physics_world_step_runtime(
     mmd_runtime_physics_world_t*                      world,
     mmd_runtime_instance_t*                           instance,
     float                                             dt_seconds,
     mmd_runtime_ffi_physics_world_step_report_t*      out_report);
 
+/* Applies a validated host pose, evaluates the before-physics phase, seeds or
+   steps the physics world (per `action`), and evaluates the after-physics
+   phase, all as a single atomic call. On failure applying the host pose, no
+   mutation occurs. For SEED, dt_seconds is ignored and out_report (when
+   non-null) is zeroed, since a seed resets rigid bodies to their
+   bone-derived positions without advancing the solver. For STEP, dt_seconds
+   must be finite and >= 0, and the instance's physics mode must be Trace or
+   Live; MMD_RUNTIME_STATUS_INVALID_INPUT is returned when the mode is Off.
+   Unknown action values return MMD_RUNTIME_STATUS_INVALID_INPUT.
+   MMD_RUNTIME_STATUS_INVALID_INPUT is also returned when the physics
+   world's rigidbody bindings reference bone indices outside the instance's
+   bone range. IK options apply to the before-physics phase; after-physics
+   uses defaults. */
+mmd_runtime_status_t mmd_runtime_evaluate_host_frame(
+    mmd_runtime_instance_t*                     instance,
+    mmd_runtime_physics_world_t*                world,
+    const mmd_runtime_ffi_host_pose_view_t*     pose,
+    mmd_runtime_physics_frame_action_t          action,
+    float                                       dt_seconds,
+    float                                       ik_tolerance,
+    uint32_t                                    ik_max_iterations_cap,
+    mmd_runtime_ffi_physics_world_step_report_t* out_report);
+
 mmd_runtime_status_t mmd_runtime_physics_world_rigidbody_count(
     const mmd_runtime_physics_world_t* world,
     size_t*                            out_rigidbody_count);
+
+mmd_runtime_status_t mmd_runtime_physics_world_get_gravity(
+    const mmd_runtime_physics_world_t* world,
+    float                               out_gravity_xyz[3]);
+
+mmd_runtime_status_t mmd_runtime_physics_world_set_gravity(
+    mmd_runtime_physics_world_t* world,
+    const float                   gravity_xyz[3]);
 
 mmd_runtime_status_t mmd_runtime_physics_world_copy_rigidbody_states(
     const mmd_runtime_physics_world_t* world,
     float*                             out_transforms_f32,
     size_t                             out_transforms_f32_len);
+
+mmd_runtime_status_t mmd_runtime_physics_world_copy_rigidbody_bindings(
+    const mmd_runtime_physics_world_t *world,
+    mmd_runtime_ffi_physics_rigidbody_binding_t *out_bindings,
+    size_t capacity,
+    size_t *out_count);
+
+/* Returns MMD_RUNTIME_STATUS_BUFFER_TOO_SMALL when bone_count is smaller than
+   the physics world's required bone count (the highest bound bone index
+   plus one), rather than silently ignoring out-of-range bindings. */
+mmd_runtime_status_t mmd_runtime_physics_world_physics_driven_bone_mask(
+    const mmd_runtime_physics_world_t *world,
+    uint8_t *out_mask,
+    size_t bone_count);
 
 bool mmd_runtime_instance_evaluate_clip_frame_without_ik(
     mmd_runtime_instance_t*       instance,
@@ -957,11 +1155,70 @@ bool mmd_runtime_instance_evaluate_clip_frame_batch(
     float*                        out_morph_weights_f32,
     size_t                        out_morph_weights_f32_len);
 
+/* Reduces dense batch output into an owned opaque sparse-pose handle.
+   Dense layouts match evaluate_clip_frame_batch. On failure, *out_reduced_pose
+   is set to NULL. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_create_from_dense(
+    const mmd_runtime_model_t*                     model,
+    uint64_t                                       model_identity,
+    const float*                                   world_matrices_f32,
+    size_t                                         world_matrices_f32_len,
+    const float*                                   morph_weights_f32,
+    size_t                                         morph_weights_f32_len,
+    size_t                                         frame_count,
+    float                                          start_frame,
+    float                                          frame_step,
+    uint32_t                                       target,
+    mmd_runtime_ffi_reduction_tolerances_t         tolerances,
+    mmd_runtime_reduced_pose_t**                   out_reduced_pose);
+
+void mmd_runtime_reduced_pose_free(mmd_runtime_reduced_pose_t* pose);
+size_t mmd_runtime_reduced_pose_bone_count(const mmd_runtime_reduced_pose_t* pose);
+size_t mmd_runtime_reduced_pose_morph_count(const mmd_runtime_reduced_pose_t* pose);
+mmd_runtime_status_t mmd_runtime_reduced_pose_report(
+    const mmd_runtime_reduced_pose_t*               pose,
+    mmd_runtime_ffi_pose_reduction_report_t*        out_report);
+
+/* Enumerates target-native Unity scalar curves from a DCC_CUBIC reduced pose.
+   Curves are translation XYZ then local Euler XYZ for each bone, followed by
+   one weight curve for each morph. frames_per_second must be finite and > 0;
+   flip_z selects Unity handedness conversion. LINEAR_SLERP and VMD_BEZIER
+   reduced poses return MMD_RUNTIME_STATUS_UNSUPPORTED rather than being
+   silently converted to Hermite curves. The reduced handle owns its skeleton
+   snapshot, so these calls remain valid after the source model is freed. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_count(
+    const mmd_runtime_reduced_pose_t* pose,
+    float                             frames_per_second,
+    bool                              flip_z,
+    size_t*                           out_curve_count);
+
+mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_descriptor(
+    const mmd_runtime_reduced_pose_t*             pose,
+    float                                         frames_per_second,
+    bool                                          flip_z,
+    size_t                                        curve_index,
+    mmd_runtime_ffi_unity_curve_descriptor_t*     out_descriptor);
+
+/* Two-call caller-owned retrieval. Pass out_keys = NULL and capacity = 0 to
+   receive MMD_RUNTIME_STATUS_BUFFER_TOO_SMALL plus out_required_count, then
+   allocate that many keys and call again. Any short buffer returns the same
+   status and required count. Euler filtering, degree conversion, and
+   per-second tangent conversion are already applied by Rust. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_keys(
+    const mmd_runtime_reduced_pose_t* pose,
+    float                             frames_per_second,
+    bool                              flip_z,
+    size_t                            curve_index,
+    mmd_runtime_ffi_unity_curve_key_t* out_keys,
+    size_t                            out_key_capacity,
+    size_t*                           out_required_count);
+
 /* Stateful sequential physics bake.
    After world creation or a successful mmd_runtime_physics_world_reset, the
    first bake sample is seed-only: evaluate_clip_frame_before_physics at that
-   sample, reset/reseed Bullet from the evaluated pose (physics tick reset
-   included), copy world/morph outputs, and do NOT step physics. Later samples
+   sample, reset/reseed Bullet from the evaluated pose (physics tick reset, no
+   solver settle), copy world/morph outputs, and do NOT advance the solver or
+   normal forward-step clock. Later samples
    use evaluate -> step -> copy. A continuation bake without another successful
    reset does not skip its first sample. frame_count == 0 does not consume the
    seed-only state. A successful mmd_runtime_physics_world_step_runtime also

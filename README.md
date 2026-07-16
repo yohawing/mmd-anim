@@ -21,9 +21,8 @@ frozen yet, and breaking changes may happen before 1.0. Feedback is welcome.
 - Load a PMX model and convert it into runtime-ready model data.
 - Load a VMD motion and convert bone, camera, light, and other motion tracks into a playable form.
 - Interpolate between keyframes with MMD-style Bezier interpolation for translation and rotation.
-- An optional MMD physics backend using Bullet Physics, available to
-  `mmd-anim-cli` and `mmd-anim-ffi` builds through their
-  `physics-bullet-native` feature.
+- Bullet Physics simulation for MMD models is available through the CLI and
+  native API.
 
 ## Test Foundation
 
@@ -34,12 +33,11 @@ The repository includes tests for:
 
 - animation evaluation, bone hierarchy evaluation, IK, append transforms, morphs, and format read/write paths;
 - round-trip checks that write parsed data and read it back without changing the represented content;
-- frame-by-frame PMX/VMD runtime evaluation against expected synthetic results;
+- frame-by-frame PMX/VMD runtime evaluation against expected results;
 - maintainer CLI diagnostics for inspecting loaded models and evaluated state;
 - C ABI and WASM smoke checks to confirm host-facing APIs use the same runtime path.
 
 Recommended public release checks:
-
 
 ```powershell
 cargo test --workspace
@@ -48,25 +46,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
-Maintainers with local GoldenOracle physics baselines should also run the local
-physics release gate before cutting a release:
-
-```powershell
-.\scripts\local-physics-release-gate.ps1
-```
-
-The physics gate uses ignored `tools/golden-gate/physics-*.local.json` configs
-and local `.ai/` baselines. It never updates baselines; use
-`tools/golden-gate` directly when accepting a new baseline.
-
 ## Used By
 
 `mmd-anim` is developed as the shared animation backend for MMD-related projects.
 
 - [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): A Three.js
   MMD loader that uses `mmd-anim` as its animation and format backend.
-- [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools): Maya plugin for
-  MMD model and motion handling, using `mmd-anim` as its native runtime.
+- [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools): A Maya plugin
+  for editing MMD animation. It uses `mmd-anim` for full-bake VMD import and as
+  the source of truth for its rig implementation.
 - [unity-mmd-loader](https://github.com/yohawing/unity-mmd-loader): An MMD
   loader optimized for Unity 6 and URP, using `mmd-anim` for importing and as
   its core animation runtime.
@@ -93,7 +81,7 @@ Format support overview. "Loading" means parsing a file into structured data.
 
 ```toml
 [dependencies]
-mmd-anim = "0.1"
+mmd-anim = "0.3"
 ```
 
 ## Native Hosts (C ABI)
@@ -134,9 +122,6 @@ this runtime provides matrices, morph state, and IK state. To generate PMX from
 host-side geometry data, use `mmd_runtime_export_pmx_from_parts`.
 Input arrays remain owned by the caller, and returned bytes must be freed with
 `mmd_runtime_byte_buffer_free`.
-
-This native integration crate is not published to crates.io. It is
-kept in the Rust workspace for builds and checks.
 
 ## WASM / Browser
 
@@ -198,9 +183,6 @@ const generatedPmxBytes = exportPmxFromParts(
 );
 ```
 
-The WASM package is not published to crates.io. It is kept in the Rust
-workspace for builds and checks.
-
 ## CLI
 
 `mmd-anim-cli` is a command-line tool for inspecting, converting, and diagnosing
@@ -210,6 +192,10 @@ MMD format files (PMX, VMD, VPD, PMM, X/VAC).
 cargo install mmd-anim-cli
 mmd-anim --help
 ```
+
+Source builds of the CLI, native API, or physics crate require a C++ compiler
+for the target. Bullet itself does not need to be installed separately.
+Prebuilt CLI binaries from GitHub Releases can be used directly.
 
 You can export animated FBX files from PMX and VMD inputs.
 
@@ -224,12 +210,14 @@ mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 | `mmd-anim` | Main public crate. Provides the evaluation core and format handling through one entry point. |
 | `mmd-anim-runtime` | Format-independent evaluation core: model arena, pose, VMD evaluation, append transforms, IK, and morphs. |
 | `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
-| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for the 0.1.x line. |
-| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for the 0.1.x line. |
+| `mmd-anim-physics-bullet` | Bullet Physics backend for MMD. Builds the bundled Bullet3 sources for the target and integrates them with the runtime and PMX formats. |
+| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations, PMX parts writing, sparse curves, and physics simulation. Repository-local and not published to crates.io. |
+| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, PMX parts writing, and sparse curves. Workspace-local and not published to crates.io. |
 | `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files, including maintainer-local oracle and numeric comparison schemas. Installable via `cargo install mmd-anim-cli`. |
 
 For normal library use, depend on `mmd-anim`. Advanced users who only need a
-lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
+lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly. Use
+`mmd-anim-physics-bullet` to access the physics backend directly from Rust.
 
 ## Current Limitations
 

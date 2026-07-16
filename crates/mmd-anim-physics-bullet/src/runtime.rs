@@ -23,6 +23,14 @@ pub trait RuntimePhysicsBridgeExt {
 
     fn seed_runtime_physics(&mut self, runtime: &RuntimeInstance) -> Result<usize, BulletError>;
 
+    /// Starts an offline bake from the current evaluated pose without advancing
+    /// the solver. This is the shared first-sample contract for CLI and FFI
+    /// bakes.
+    fn initialize_runtime_physics_bake(
+        &mut self,
+        runtime: &mut RuntimeInstance,
+    ) -> Result<usize, BulletError>;
+
     fn feed_runtime_kinematic_rigidbodies(
         &mut self,
         runtime: &RuntimeInstance,
@@ -67,7 +75,27 @@ impl RuntimePhysicsBridgeExt for PmxBulletWorld {
     ) -> Result<usize, BulletError> {
         runtime.reset_physics_tick();
         self.world.reset()?;
-        self.seed_runtime_physics(runtime)
+        let seeded = self.seed_runtime_physics(runtime)?;
+
+        // Match the Unity/saba reset sequence. Relax the constraints for one
+        // 1/60 second update. Bullet's fixed step is 1/120, so two substeps are
+        // required to consume the whole settle interval.
+        self.world.step(1.0 / 60.0, 2)?;
+
+        // The settle may move dynamic bodies, but static bodies remain driven
+        // by the current runtime pose. Re-pin only those bodies before the
+        // final cleanup; DynamicBone must remain solver-owned until readback.
+        let bone_world_transforms = runtime
+            .world_matrices()
+            .iter()
+            .copied()
+            .map(Transform::from_mat4)
+            .collect::<Vec<_>>();
+        self.feed_kinematic_rigidbodies_with_options(&bone_world_transforms, false)?;
+        self.settle_to_current()?;
+        self.apply_readback_to_runtime(runtime)?;
+        runtime.evaluate_current_pose_after_physics();
+        Ok(seeded)
     }
 
     fn seed_runtime_physics(&mut self, runtime: &RuntimeInstance) -> Result<usize, BulletError> {
@@ -80,6 +108,15 @@ impl RuntimePhysicsBridgeExt for PmxBulletWorld {
         let fed = self.seed_rigidbodies_from_bones(&bone_world_transforms)?;
         self.settle_to_current()?;
         Ok(fed)
+    }
+
+    fn initialize_runtime_physics_bake(
+        &mut self,
+        runtime: &mut RuntimeInstance,
+    ) -> Result<usize, BulletError> {
+        runtime.reset_physics_tick();
+        self.world.reset()?;
+        self.seed_runtime_physics(runtime)
     }
 
     fn feed_runtime_kinematic_rigidbodies(
@@ -157,7 +194,11 @@ impl RuntimePhysicsBridgeExt for PmxBulletWorld {
         if tick.substeps > 0 {
             let simulated_dt =
                 runtime.physics_tick_config().fixed_substep_seconds * tick.substeps as f32;
-            self.world.step(simulated_dt, tick.substeps as i32)?;
+            self.world.step_with_fixed_substep(
+                simulated_dt,
+                tick.substeps as i32,
+                runtime.physics_tick_config().fixed_substep_seconds,
+            )?;
         }
 
         let bones_written_back = self.apply_readback_to_runtime(runtime)?;
@@ -492,9 +533,12 @@ mod tests {
     }
 
     #[test]
-    fn bridge_reset_reseeds_bullet_world_from_runtime_pose() {
+    fn bridge_reset_settles_first_step_and_repeats_from_runtime_pose() {
         let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
-            "bones": [{"name": "anchor", "position": [0.0, 10.0, 0.0]}],
+            "bones": [
+                {"name": "anchor", "position": [0.0, 10.0, 0.0]},
+                {"name": "physics", "position": [0.0, 8.0, 0.0]}
+            ],
             "rigidBodies": [
                 {
                     "name": "anchorBody",
@@ -503,6 +547,24 @@ mod tests {
                     "size": [0.5, 0.0, 0.0],
                     "position": [0.0, 10.0, 0.0],
                     "mode": "static"
+                },
+                {
+                    "name": "physicsBody",
+                    "boneIndex": 1,
+                    "shape": "sphere",
+                    "size": [0.5, 0.0, 0.0],
+                    "position": [0.0, 8.0, 0.0],
+                    "mass": 1.0,
+                    "mode": "dynamic"
+                }
+            ],
+            "joints": [
+                {
+                    "name": "joint",
+                    "type": "generic6dofSpring",
+                    "rigidBodyIndexA": 0,
+                    "rigidBodyIndexB": 1,
+                    "position": [0.0, 9.0, 0.0]
                 }
             ]
         }))
@@ -510,21 +572,93 @@ mod tests {
         let model = crate::test_support::build_test_pmx_model(descriptor);
         let mut bullet = build_bullet_world_from_pmx(&model).unwrap();
         let runtime_model = Arc::new(
-            ModelArena::new(vec![BoneInit::new(None, Vec3A::new(0.0, 10.0, 0.0))]).unwrap(),
+            ModelArena::new(vec![
+                BoneInit::new(None, Vec3A::new(0.0, 10.0, 0.0)),
+                BoneInit::new(None, Vec3A::new(0.0, 8.0, 0.0)),
+            ])
+            .unwrap(),
         );
         let mut runtime = RuntimeInstance::new(runtime_model);
+        runtime.evaluate_rest_pose();
+        runtime.set_physics_mode(PhysicsMode::Live);
+        runtime
+            .pose_mut()
+            .set_local_position_offset(BoneIndex(0), Vec3A::new(0.0, 5.0, 0.0));
+        runtime
+            .pose_mut()
+            .set_local_position_offset(BoneIndex(1), Vec3A::new(0.0, 5.0, 0.0));
+        runtime.evaluate_current_pose();
+
+        let mut seed_only_bullet = build_bullet_world_from_pmx(&model).unwrap();
+        assert_eq!(seed_only_bullet.seed_runtime_physics(&runtime).unwrap(), 2);
+        let dynamic_after_direct_seed = seed_only_bullet
+            .world
+            .rigidbody_transform(seed_only_bullet.rigidbody_handles[1])
+            .unwrap();
+        assert!(
+            (dynamic_after_direct_seed.position[1] - 13.0).abs() < 1.0e-4,
+            "direct seed must synchronize without integrating: {dynamic_after_direct_seed:?}"
+        );
+
+        assert_eq!(bullet.reset_runtime_physics(&mut runtime).unwrap(), 2);
+        let anchor_after_reset = bullet
+            .world
+            .rigidbody_transform(bullet.rigidbody_handles[0])
+            .unwrap();
+        let dynamic_after_reset = bullet
+            .world
+            .rigidbody_transform(bullet.rigidbody_handles[1])
+            .unwrap();
+
+        assert!((anchor_after_reset.position[1] - 15.0).abs() < 1.0e-4);
+        assert!(
+            dynamic_after_reset.position[1] < 13.0,
+            "reset must include the 1/60 settle: {dynamic_after_reset:?}"
+        );
+        assert!(
+            (translation(runtime.world_matrices()[1]).y - dynamic_after_reset.position[1]).abs()
+                < 1.0e-4,
+            "reset must expose the settled body transform through the runtime bone"
+        );
+
+        let first_step = bullet
+            .step_runtime_physics_with_runtime_clock_options(&mut runtime, 1.0 / 60.0, false)
+            .unwrap();
+        assert_eq!(first_step.tick.substeps, 2);
+        assert_eq!(first_step.kinematic_rigidbodies_fed, 1);
+        assert_eq!(first_step.bones_written_back, 1);
+        let first_step_dynamic = bullet
+            .world
+            .rigidbody_transform(bullet.rigidbody_handles[1])
+            .unwrap();
+        assert!(
+            (first_step_dynamic.position[1] - dynamic_after_reset.position[1]).abs() > 1.0e-6,
+            "first forward step must advance the settled body: reset={dynamic_after_reset:?}, first={first_step_dynamic:?}"
+        );
+        assert!(
+            (translation(runtime.world_matrices()[1]).y - first_step_dynamic.position[1]).abs()
+                < 1.0e-4,
+            "first forward step must write the body transform back to the runtime bone"
+        );
+
         runtime.evaluate_rest_pose();
         runtime
             .pose_mut()
             .set_local_position_offset(BoneIndex(0), Vec3A::new(0.0, 5.0, 0.0));
+        runtime
+            .pose_mut()
+            .set_local_position_offset(BoneIndex(1), Vec3A::new(0.0, 5.0, 0.0));
         runtime.evaluate_current_pose();
 
-        assert_eq!(bullet.reset_runtime_physics(&mut runtime).unwrap(), 1);
-        let body = bullet
+        assert_eq!(bullet.reset_runtime_physics(&mut runtime).unwrap(), 2);
+        let repeated_reset_dynamic = bullet
             .world
-            .rigidbody_transform(bullet.rigidbody_handles[0])
+            .rigidbody_transform(bullet.rigidbody_handles[1])
             .unwrap();
-
-        assert!((body.position[1] - 15.0).abs() < 1.0e-4);
+        assert!(
+            (repeated_reset_dynamic.position[1] - dynamic_after_reset.position[1]).abs() < 1.0e-5,
+            "reset settle must be repeatable: first={dynamic_after_reset:?}, repeated={repeated_reset_dynamic:?}"
+        );
+        assert_eq!(runtime.physics_accumulator_seconds(), 0.0);
     }
 }

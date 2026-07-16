@@ -2,6 +2,7 @@
 
 #include <btBulletDynamicsCommon.h>
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -54,7 +55,6 @@ static void configure_spring_axis(btGeneric6DofSpringConstraint &constraint, int
     if (stiffness > 0.0f) {
         constraint.enableSpring(axis, true);
         constraint.setStiffness(axis, stiffness);
-        constraint.setEquilibriumPoint(axis);
     }
 }
 
@@ -154,7 +154,10 @@ mmd_anim_bullet_status mmd_anim_bullet_world_reset(mmd_anim_bullet_world *world)
         entry.body->setInterpolationWorldTransform(entry.initial_transform);
         entry.body->setLinearVelocity(btVector3(0.0f, 0.0f, 0.0f));
         entry.body->setAngularVelocity(btVector3(0.0f, 0.0f, 0.0f));
+        entry.body->setInterpolationLinearVelocity(btVector3(0.0f, 0.0f, 0.0f));
+        entry.body->setInterpolationAngularVelocity(btVector3(0.0f, 0.0f, 0.0f));
         entry.body->clearForces();
+        entry.body->activate(true);
         if (entry.motion_state) {
             entry.motion_state->setWorldTransform(entry.initial_transform);
         }
@@ -195,15 +198,22 @@ mmd_anim_bullet_status mmd_anim_bullet_world_settle_to_current(mmd_anim_bullet_w
     return MMD_ANIM_BULLET_OK;
 }
 
-mmd_anim_bullet_status mmd_anim_bullet_world_step(mmd_anim_bullet_world *world, float delta_time, int32_t max_sub_steps) {
+mmd_anim_bullet_status mmd_anim_bullet_world_step(
+    mmd_anim_bullet_world *world,
+    float delta_time,
+    int32_t max_sub_steps,
+    float fixed_substep_seconds) {
     if (!world) {
         return fail(MMD_ANIM_BULLET_NULL_POINTER, "world is null");
     }
-    if (delta_time < 0.0f || max_sub_steps < 0) {
-        return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "delta_time and max_sub_steps must be non-negative");
+    if (!std::isfinite(delta_time) || delta_time < 0.0f || max_sub_steps < 0 ||
+        !std::isfinite(fixed_substep_seconds) || fixed_substep_seconds <= 0.0f) {
+        return fail(
+            MMD_ANIM_BULLET_INVALID_ARGUMENT,
+            "delta_time and max_sub_steps must be non-negative and fixed_substep_seconds must be positive");
     }
 
-    world->dynamics_world->stepSimulation(delta_time, max_sub_steps, 1.0f / 120.0f);
+    world->dynamics_world->stepSimulation(delta_time, max_sub_steps, fixed_substep_seconds);
     g_last_error.clear();
     return MMD_ANIM_BULLET_OK;
 }
@@ -350,6 +360,7 @@ mmd_anim_bullet_status mmd_anim_bullet_world_add_6dof_spring_joint(
             configure_spring_axis(*constraint, axis, desc->spring_translation_factor[axis]);
             configure_spring_axis(*constraint, axis + 3, desc->spring_rotation_factor[axis]);
         }
+        constraint->setEquilibriumPoint();
 
         world->dynamics_world->addConstraint(constraint.get(), true);
         world->constraints.push_back(std::move(constraint));
@@ -419,6 +430,34 @@ mmd_anim_bullet_status mmd_anim_bullet_world_collect_contacts(
     }
 
     *out_count = count;
+    g_last_error.clear();
+    return MMD_ANIM_BULLET_OK;
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_get_gravity(
+    const mmd_anim_bullet_world *world,
+    float out_gravity_xyz[3]) {
+    if (!world || !out_gravity_xyz) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world or out_gravity_xyz is null");
+    }
+    btVector3 gravity = world->dynamics_world->getGravity();
+    out_gravity_xyz[0] = gravity.x();
+    out_gravity_xyz[1] = gravity.y();
+    out_gravity_xyz[2] = gravity.z();
+    g_last_error.clear();
+    return MMD_ANIM_BULLET_OK;
+}
+
+mmd_anim_bullet_status mmd_anim_bullet_world_set_gravity(
+    mmd_anim_bullet_world *world,
+    const float gravity_xyz[3]) {
+    if (!world || !gravity_xyz) {
+        return fail(MMD_ANIM_BULLET_NULL_POINTER, "world or gravity_xyz is null");
+    }
+    if (!std::isfinite(gravity_xyz[0]) || !std::isfinite(gravity_xyz[1]) || !std::isfinite(gravity_xyz[2])) {
+        return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "gravity_xyz must be finite");
+    }
+    world->dynamics_world->setGravity(btVector3(gravity_xyz[0], gravity_xyz[1], gravity_xyz[2]));
     g_last_error.clear();
     return MMD_ANIM_BULLET_OK;
 }

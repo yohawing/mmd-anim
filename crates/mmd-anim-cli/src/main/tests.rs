@@ -29,6 +29,41 @@ fn completion_subcommand_is_registered_in_clap_metadata() {
 }
 
 #[test]
+fn convert_fbx_physics_bake_requires_vmd_at_clap_level() {
+    use clap::Parser;
+
+    let error = match Cli::try_parse_from([
+        "mmd-anim",
+        "convert-fbx",
+        "model.pmx",
+        "model.fbx",
+        "--physics-bake",
+    ]) {
+        Ok(_) => panic!("--physics-bake without --vmd must be rejected"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("--vmd"));
+
+    let cli = Cli::try_parse_from([
+        "mmd-anim",
+        "convert-fbx",
+        "model.pmx",
+        "model.fbx",
+        "--vmd",
+        "motion.vmd",
+        "--physics-bake",
+    ])
+    .expect("--physics-bake with --vmd should parse");
+    assert!(matches!(
+        cli.command,
+        Some(Commands::ConvertFbx {
+            physics_bake: true,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn completion_generates_non_empty_scripts_for_supported_shells() {
     use clap::CommandFactory;
     use clap_complete::{Shell, generate};

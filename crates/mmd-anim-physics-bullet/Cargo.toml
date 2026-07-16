@@ -8,10 +8,22 @@ repository.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Optional Bullet physics backend for mmd-anim"
+description = "Bundled Bullet Physics backend for MMD animation"
+include = [
+    "Cargo.toml",
+    "build.rs",
+    "native/**",
+    "src/**",
+    "vendor/bullet3/LICENSE.txt",
+    "vendor/bullet3/README.md",
+    "vendor/bullet3/src/*.h",
+    "vendor/bullet3/src/LinearMath/**",
+    "vendor/bullet3/src/BulletCollision/**",
+    "vendor/bullet3/src/BulletDynamics/**",
+]
 
 [features]
-default = []
+default = ["native", "pmx-format", "runtime"]
 native = []
 pmx-format = ["dep:mmd-anim-format"]
 runtime = ["dep:mmd-anim-runtime"]

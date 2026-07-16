@@ -10,6 +10,10 @@ mod flat_model;
 pub mod ik_primitive;
 mod model;
 mod pose;
+// The reducer remains crate-private until its Rust shape is stabilized by the
+// format targets and wrapper parity work in later POSE-REDUCE phases.
+#[allow(dead_code)]
+pub(crate) mod reduce;
 mod runtime;
 
 pub use animation::{
@@ -35,7 +39,14 @@ pub use model::{
     ModelBuildError, MorphIndex, MorphInit, MorphOffsetSpan, VertexMorphOffset,
 };
 pub use pose::PoseArena;
+pub use reduce::{
+    DccCubicSegment, DccScalarSegment, DensePoseSequenceView, PoseReductionError,
+    PoseReductionReport, QuantizedBezier, ReducedBoneKey, ReducedBoneTrack, ReducedMorphKey,
+    ReducedMorphTrack, ReducedPoseSample, ReducedPoseSequence, ReductionTarget, ReductionTimings,
+    ReductionTolerances, ReductionWorkStats, SkeletonSnapshot, VmdBoneInterpolation,
+    reduce_dense_pose_sequence, reduce_dense_pose_sequence_with_worker_count,
+};
 pub use runtime::{
-    IkSolveOptions, IkSolverRuntimeStats, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
-    RuntimeInstance,
+    HostPoseError, HostPoseView, IkSolveOptions, IkSolverRuntimeStats, PhysicsMode,
+    PhysicsStepStats, PhysicsTickConfig, RuntimeInstance,
 };

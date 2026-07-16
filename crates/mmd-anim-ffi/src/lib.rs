@@ -7,16 +7,22 @@ use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::{ptr, slice, str, sync::Arc};
 
+use mmd_anim_format::fbx::{
+    UnityAnimationClipDto, UnityMorphBinding, UnityReducedPoseBindings,
+    reduced_pose_to_unity_animation_clip_with_fps,
+};
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, FlatAppendTransformInput,
-    FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput, FlatIkLinkInput, FlatIkSolverInput,
-    IkAngleLimit, IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver,
-    IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack,
-    MovableBoneKeyframe, MovableBoneTrack, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
-    PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
-    build_append_transforms_from_flat_iter, build_bones_from_flat, build_ik_solvers_from_flat_iter,
-    build_morph_init_from_flat_iter, solve_append_transform,
+    AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, DensePoseSequenceView,
+    FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
+    FlatIkLinkInput, FlatIkSolverInput, HostPoseView, IkAngleLimit, IkChainDefinition,
+    IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkSolveOptions, MorphAnimationBinding,
+    MorphIndex, MorphInit, MorphKeyframe, MorphTrack, MovableBoneKeyframe, MovableBoneTrack,
+    PhysicsMode, PhysicsStepStats, PhysicsTickConfig, PoseReductionReport,
+    PropertyAnimationBinding, PropertyKeyframe, ReducedPoseSequence, ReductionTarget,
+    ReductionTolerances, RuntimeInstance, SkeletonSnapshot, build_append_transforms_from_flat_iter,
+    build_bones_from_flat, build_ik_solvers_from_flat_iter, build_morph_init_from_flat_iter,
+    solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 2;
@@ -70,6 +76,17 @@ pub struct MmdRuntimeClip {
     clip: AnimationClip,
 }
 
+pub struct MmdRuntimeReducedPose {
+    sequence: ReducedPoseSequence,
+    unity_curve_cache: RefCell<Option<MmdRuntimeUnityCurveCache>>,
+}
+
+struct MmdRuntimeUnityCurveCache {
+    frames_per_second_bits: u32,
+    flip_z: bool,
+    clip: UnityAnimationClipDto,
+}
+
 pub struct MmdRuntimeVmdCameraTrack {
     frames: Vec<mmd_anim_format::vmd::VmdParsedCameraFrame>,
 }
@@ -112,7 +129,8 @@ pub struct MmdRuntimePhysicsWorld {
     #[cfg(feature = "physics-bullet-native")]
     world: mmd_anim_physics_bullet::PmxBulletWorld,
     /// When true, the next bake sample reseeds the Bullet world from the
-    /// evaluated pose and copies outputs without advancing physics.
+    /// evaluated pose and copies outputs without advancing either the solver or
+    /// the normal forward physics clock.
     ///
     /// Armed on world creation and on a successful
     /// `mmd_runtime_physics_world_reset`. Disarmed after the seed-only bake
@@ -247,6 +265,57 @@ pub struct MmdRuntimeFfiByteBuffer {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MmdRuntimeFfiReductionTolerances {
+    pub local_position: f32,
+    pub local_rotation_radians: f32,
+    pub world_position: f32,
+    pub world_rotation_radians: f32,
+    pub morph_weight: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiPoseReductionReport {
+    pub source_bone_key_count: usize,
+    pub reduced_bone_key_count: usize,
+    pub source_morph_key_count: usize,
+    pub reduced_morph_key_count: usize,
+    pub max_local_position_error: f32,
+    pub max_local_rotation_error_radians: f32,
+    pub max_world_position_error: f32,
+    pub max_world_rotation_error_radians: f32,
+    pub max_morph_weight_error: f32,
+}
+
+pub const MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION: u32 = 0;
+pub const MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER: u32 = 1;
+pub const MMD_RUNTIME_UNITY_CURVE_MORPH_WEIGHT: u32 = 2;
+
+pub const MMD_RUNTIME_UNITY_CURVE_AXIS_X: u32 = 0;
+pub const MMD_RUNTIME_UNITY_CURVE_AXIS_Y: u32 = 1;
+pub const MMD_RUNTIME_UNITY_CURVE_AXIS_Z: u32 = 2;
+pub const MMD_RUNTIME_UNITY_CURVE_AXIS_NONE: u32 = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiUnityCurveDescriptor {
+    pub semantic: u32,
+    pub target_index: u32,
+    pub axis: u32,
+    pub key_count: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiUnityCurveKey {
+    pub time_seconds: f32,
+    pub value: f32,
+    pub in_tangent: f32,
+    pub out_tangent: f32,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MmdRuntimeStatus {
     Ok = 0,
@@ -286,6 +355,17 @@ pub enum MmdRuntimeFfiPhysicsRigidBodyMode {
 pub enum MmdRuntimeFfiPhysicsJointKind {
     Generic6DofSpring = 0,
     Unsupported = 1,
+}
+
+/// Selects the physics action performed by
+/// `mmd_runtime_evaluate_host_frame`: reseed the Bullet world from the
+/// evaluated pose without advancing the solver, or advance the runtime's
+/// fixed-step physics clock forward.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MmdRuntimePhysicsFrameAction {
+    Seed = 0,
+    Step = 1,
 }
 
 #[repr(C)]
@@ -348,6 +428,26 @@ pub struct MmdRuntimeFfiPhysicsWorldStepReport {
     pub tick: MmdRuntimeFfiPhysicsStepStats,
     pub kinematic_rigidbodies_fed: usize,
     pub bones_written_back: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmdRuntimeFfiPhysicsRigidBodyBinding {
+    pub bone_index: i32,
+    pub mode: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MmdRuntimeFfiHostPoseView {
+    pub local_position_offsets_xyz: *const f32,
+    pub local_rotation_xyzw: *const f32,
+    pub local_scales_xyz: *const f32,
+    pub bone_count: usize,
+    pub morph_weights: *const f32,
+    pub morph_count: usize,
+    pub ik_enabled: *const u8,
+    pub ik_count: usize,
 }
 
 const APPEND_FLAG_ROTATION: u32 = 1;
@@ -3654,6 +3754,127 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_current_pose_before_physi
     })
 }
 
+/// Applies a host-provided local pose to the runtime instance.
+///
+/// Validates counts, finiteness, and applies atomically - no partial
+/// mutation on failure. After success the pose is set but world matrices
+/// are NOT yet evaluated; call evaluate_current_pose_before_physics next.
+///
+/// # Safety
+///
+/// `instance` must be a valid instance handle. `view` must be a valid
+/// pointer to a `MmdRuntimeFfiHostPoseView` whose data pointers are valid
+/// for reads of the indicated counts.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_apply_host_pose(
+    instance: *mut MmdRuntimeInstance,
+    view: *const MmdRuntimeFfiHostPoseView,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(view) = (unsafe { view.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        apply_host_pose_impl(instance, view)
+    })
+}
+
+/// Applies a host pose and evaluates the before-physics phase in one call.
+///
+/// Equivalent to apply_host_pose followed by
+/// evaluate_current_pose_before_physics. On failure, neither the pose nor
+/// the evaluation is applied.
+///
+/// # Safety
+///
+/// Same as `mmd_runtime_instance_apply_host_pose`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(
+    instance: *mut MmdRuntimeInstance,
+    view: *const MmdRuntimeFfiHostPoseView,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(view) = (unsafe { view.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let status = apply_host_pose_impl(instance, view);
+        if status != MmdRuntimeStatus::Ok {
+            return status;
+        }
+        instance.runtime.evaluate_current_pose_before_physics();
+        instance.refresh_matrix_caches();
+        MmdRuntimeStatus::Ok
+    })
+}
+
+fn apply_host_pose_impl(
+    instance: &mut MmdRuntimeInstance,
+    view: &MmdRuntimeFfiHostPoseView,
+) -> MmdRuntimeStatus {
+    let bone_count = view.bone_count;
+
+    let Some(position_len) = bone_count.checked_mul(3) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(rotation_len) = bone_count.checked_mul(4) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(scale_len) = bone_count.checked_mul(3) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+
+    let Some(position_f32) =
+        (unsafe { checked_slice(view.local_position_offsets_xyz, position_len) })
+    else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(rotation_f32) = (unsafe { checked_slice(view.local_rotation_xyzw, rotation_len) })
+    else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(scale_f32) = (unsafe { checked_slice(view.local_scales_xyz, scale_len) }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(morph_weights) = (unsafe { checked_slice(view.morph_weights, view.morph_count) })
+    else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let Some(ik_enabled) = (unsafe { checked_slice(view.ik_enabled, view.ik_count) }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+
+    let local_position_offsets: Vec<glam::Vec3A> = position_f32
+        .chunks_exact(3)
+        .map(|p| glam::Vec3A::new(p[0], p[1], p[2]))
+        .collect();
+    let local_rotations: Vec<glam::Quat> = rotation_f32
+        .chunks_exact(4)
+        .map(|q| glam::Quat::from_xyzw(q[0], q[1], q[2], q[3]))
+        .collect();
+    let local_scales: Vec<glam::Vec3A> = scale_f32
+        .chunks_exact(3)
+        .map(|s| glam::Vec3A::new(s[0], s[1], s[2]))
+        .collect();
+
+    let host_pose = HostPoseView {
+        local_position_offsets: &local_position_offsets,
+        local_rotations: &local_rotations,
+        local_scales: &local_scales,
+        morph_weights,
+        ik_enabled,
+    };
+
+    match instance.runtime.apply_host_pose(&host_pose) {
+        Ok(()) => MmdRuntimeStatus::Ok,
+        Err(err) => status_failure(MmdRuntimeStatus::InvalidInput, &err.to_string()),
+    }
+}
+
 /// Evaluates the current pose through the post-physics phase.
 ///
 /// # Safety
@@ -3875,9 +4096,15 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_free(world: *mut MmdRuntimePh
 
 /// Resets the physics world and reseeds it from the runtime pose.
 ///
+/// Reset includes one fixed 1/60 second solver settle, static-body re-pinning,
+/// transient-state cleanup, and settled dynamic-body readback into the runtime
+/// pose. The returned count still describes bodies seeded from the runtime
+/// pose, not solver substeps.
+///
 /// A successful reset also arms seed-only behavior for the next
 /// `mmd_runtime_physics_world_bake_clip_frames` sample: that sample evaluates,
-/// reseeds, and copies without stepping physics.
+/// reseeds without a solver step, and copies without advancing the normal
+/// forward physics clock.
 ///
 /// # Safety
 ///
@@ -3895,6 +4122,9 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_reset(
 }
 
 /// Steps a physics world using the runtime's fixed-step physics clock.
+///
+/// This live-evaluation path feeds static bodies before the step. DynamicBone
+/// bodies are seeded during reset but remain solver-owned during forward steps.
 ///
 /// A successful step disarms bake seed-only state: the next
 /// `mmd_runtime_physics_world_bake_clip_frames` sample advances physics
@@ -3915,6 +4145,109 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_step_runtime(
     })
 }
 
+/// Evaluates one atomic host frame: applies a validated host pose, evaluates
+/// the before-physics phase, seeds or steps the physics world, and evaluates
+/// the after-physics phase.
+///
+/// This combines the sequence a host would otherwise chain across
+/// `mmd_runtime_instance_apply_host_pose`,
+/// `mmd_runtime_instance_evaluate_current_pose_before_physics_with_ik_options`,
+/// either `mmd_runtime_physics_world_reset` or
+/// `mmd_runtime_physics_world_step_runtime`, and
+/// `mmd_runtime_instance_evaluate_current_pose_after_physics_with_ik_options`
+/// into a single call, guaranteeing the correct ordering.
+///
+/// On failure applying the host pose, no mutation occurs (fail-atomic). Once
+/// the pose has been applied, before-physics evaluation and the physics
+/// action always run; a physics failure still leaves the applied pose and its
+/// before-physics evaluation in place.
+///
+/// For `MmdRuntimePhysicsFrameAction::Seed`, `dt_seconds` is ignored and
+/// `out_report` (when non-null) is zeroed, since a seed does not advance the
+/// solver and produces no meaningful step statistics.
+///
+/// `MmdRuntimePhysicsFrameAction::Step` requires the instance's physics mode
+/// to be `Trace` or `Live`; it returns `INVALID_INPUT` when the mode is
+/// `Off`.
+///
+/// Returns `INVALID_INPUT` when the physics world's rigidbody bindings
+/// reference bone indices outside the instance's bone range.
+///
+/// # Safety
+///
+/// `instance` and `world` must be valid handles. `pose` must be a valid
+/// pointer to a `MmdRuntimeFfiHostPoseView` whose data pointers are valid for
+/// reads of the indicated counts. `out_report` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_evaluate_host_frame(
+    instance: *mut MmdRuntimeInstance,
+    world: *mut MmdRuntimePhysicsWorld,
+    pose: *const MmdRuntimeFfiHostPoseView,
+    action: u32,
+    dt_seconds: f32,
+    ik_tolerance: f32,
+    ik_max_iterations_cap: u32,
+    out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let action = match action {
+            0 => MmdRuntimePhysicsFrameAction::Seed,
+            1 => MmdRuntimePhysicsFrameAction::Step,
+            _ => {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "unknown physics frame action",
+                );
+            }
+        };
+
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if world.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if action == MmdRuntimePhysicsFrameAction::Step
+            && (!dt_seconds.is_finite() || dt_seconds < 0.0)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+
+        // Validate physics preconditions before mutating pose.
+        let pre_status = validate_host_frame_physics_impl(world, instance, action);
+        if pre_status != MmdRuntimeStatus::Ok {
+            return pre_status;
+        }
+
+        let status = apply_host_pose_impl(instance, pose);
+        if status != MmdRuntimeStatus::Ok {
+            return status;
+        }
+
+        // IK options apply to the before-physics phase only; the bridge
+        // functions (reset/step) evaluate after-physics with defaults.
+        let ik_options = IkSolveOptions {
+            tolerance: ik_tolerance,
+            max_iterations_cap: if ik_max_iterations_cap == 0 {
+                None
+            } else {
+                Some(ik_max_iterations_cap)
+            },
+        };
+        instance
+            .runtime
+            .evaluate_current_pose_before_physics_with_ik_options(ik_options);
+
+        evaluate_host_frame_physics_impl(world, instance, action, dt_seconds, out_report)
+    })
+}
+
 /// Returns the number of rigid bodies in a physics world.
 ///
 /// # Safety
@@ -3928,6 +4261,50 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_rigidbody_count(
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
         physics_world_rigidbody_count_impl(world, out_rigidbody_count)
+    })
+}
+
+/// Returns a physics world's current gravity vector.
+///
+/// # Safety
+///
+/// `world` must be a valid handle and `out_gravity_xyz` must be valid for
+/// writes of 3 `f32` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_world_get_gravity(
+    world: *const MmdRuntimePhysicsWorld,
+    out_gravity_xyz: *mut f32,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(world) = (unsafe { world.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if out_gravity_xyz.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        physics_world_get_gravity_impl(world, out_gravity_xyz)
+    })
+}
+
+/// Sets a physics world's gravity vector.
+///
+/// # Safety
+///
+/// `world` must be a valid handle and `gravity_xyz` must be valid for reads
+/// of 3 `f32` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_world_set_gravity(
+    world: *mut MmdRuntimePhysicsWorld,
+    gravity_xyz: *const f32,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(world) = (unsafe { world.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if gravity_xyz.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        physics_world_set_gravity_impl(world, gravity_xyz)
     })
 }
 
@@ -3945,6 +4322,47 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_copy_rigidbody_states(
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
         physics_world_copy_rigidbody_states_impl(world, out_transforms_f32, out_transforms_f32_len)
+    })
+}
+
+/// Copies rigidbody-to-bone binding metadata into a caller-owned buffer.
+///
+/// # Safety
+///
+/// `out_bindings` must point to at least `capacity` writable elements.
+/// `out_count` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_world_copy_rigidbody_bindings(
+    world: *const MmdRuntimePhysicsWorld,
+    out_bindings: *mut MmdRuntimeFfiPhysicsRigidBodyBinding,
+    capacity: usize,
+    out_count: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        physics_world_copy_rigidbody_bindings_impl(world, out_bindings, capacity, out_count)
+    })
+}
+
+/// Writes a per-bone mask where non-zero entries indicate bones driven by physics.
+///
+/// A bone is physics-driven if any rigidbody with `writes_back_to_bone()` mode
+/// (Dynamic or DynamicBone) is bound to it.
+///
+/// Returns `BUFFER_TOO_SMALL` when `bone_count` is smaller than the physics
+/// world's required bone count (the highest bound bone index plus one),
+/// since the mask could not represent all bindings in that case.
+///
+/// # Safety
+///
+/// `out_mask` must point to at least `bone_count` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_world_physics_driven_bone_mask(
+    world: *const MmdRuntimePhysicsWorld,
+    out_mask: *mut u8,
+    bone_count: usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        physics_world_physics_driven_bone_mask_impl(world, out_mask, bone_count)
     })
 }
 
@@ -3987,6 +4405,54 @@ fn physics_world_step_runtime_impl(
     status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
 }
 
+#[cfg(feature = "physics-bullet-native")]
+fn validate_host_frame_physics_impl(
+    world: *mut MmdRuntimePhysicsWorld,
+    instance: &MmdRuntimeInstance,
+    action: MmdRuntimePhysicsFrameAction,
+) -> MmdRuntimeStatus {
+    let Some(world) = (unsafe { world.as_ref() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let instance_bone_count = instance.runtime.world_matrices().len();
+    let required = world.world.required_bone_count();
+    if required > instance_bone_count {
+        return status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "physics world requires more bones than the instance provides",
+        );
+    }
+    if action == MmdRuntimePhysicsFrameAction::Step
+        && !instance.runtime.physics_mode().steps_backend()
+    {
+        return status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "physics mode is Off; set Trace or Live before stepping",
+        );
+    }
+    MmdRuntimeStatus::Ok
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn validate_host_frame_physics_impl(
+    _world: *mut MmdRuntimePhysicsWorld,
+    _instance: &MmdRuntimeInstance,
+    _action: MmdRuntimePhysicsFrameAction,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn evaluate_host_frame_physics_impl(
+    _world: *mut MmdRuntimePhysicsWorld,
+    _instance: &mut MmdRuntimeInstance,
+    _action: MmdRuntimePhysicsFrameAction,
+    _dt_seconds: f32,
+    _out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
 #[cfg(not(feature = "physics-bullet-native"))]
 fn physics_world_rigidbody_count_impl(
     _world: *const MmdRuntimePhysicsWorld,
@@ -4002,6 +4468,41 @@ fn physics_world_copy_rigidbody_states_impl(
     _out_transforms_f32_len: usize,
 ) -> MmdRuntimeStatus {
     status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_world_copy_rigidbody_bindings_impl(
+    _world: *const MmdRuntimePhysicsWorld,
+    _out_bindings: *mut MmdRuntimeFfiPhysicsRigidBodyBinding,
+    _capacity: usize,
+    _out_count: *mut usize,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_world_physics_driven_bone_mask_impl(
+    _world: *const MmdRuntimePhysicsWorld,
+    _out_mask: *mut u8,
+    _bone_count: usize,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_world_get_gravity_impl(
+    _world: &MmdRuntimePhysicsWorld,
+    _out_gravity_xyz: *mut f32,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics feature not enabled")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_world_set_gravity_impl(
+    _world: &mut MmdRuntimePhysicsWorld,
+    _gravity_xyz: *const f32,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics feature not enabled")
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -4120,10 +4621,11 @@ fn physics_world_step_runtime_impl(
     let Some(instance) = (unsafe { instance.as_mut() }) else {
         return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
     };
-    match world
-        .world
-        .step_runtime_physics_with_runtime_clock(&mut instance.runtime, dt_seconds)
-    {
+    match world.world.step_runtime_physics_with_runtime_clock_options(
+        &mut instance.runtime,
+        dt_seconds,
+        false,
+    ) {
         Ok(report) => {
             // Explicit physics advance disarms seed-only so the next bake sample steps.
             world.next_bake_sample_is_seed_only = false;
@@ -4140,6 +4642,94 @@ fn physics_world_step_runtime_impl(
             MmdRuntimeStatus::Ok
         }
         Err(err) => status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
+    }
+}
+
+/// Seeds or steps the physics world as part of an atomic host frame
+/// evaluation.
+///
+/// Seed uses `initialize_runtime_physics_bake` (reset tick, reset world, seed
+/// rigidbodies from bones, settle) followed by a manual readback and
+/// after-physics evaluation; it never advances the Bullet solver. Step
+/// requires the runtime's physics mode to be `Trace` or `Live` and uses
+/// `step_runtime_physics_with_runtime_clock_options`, which already evaluates
+/// the runtime's after-physics phase internally (with the default,
+/// non-IK-option evaluation), so this function must not double-evaluate
+/// after-physics on top of it.
+#[cfg(feature = "physics-bullet-native")]
+fn evaluate_host_frame_physics_impl(
+    world: *mut MmdRuntimePhysicsWorld,
+    instance: &mut MmdRuntimeInstance,
+    action: MmdRuntimePhysicsFrameAction,
+    dt_seconds: f32,
+    out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    use mmd_anim_physics_bullet::RuntimePhysicsBridgeExt;
+
+    // Safety: world was validated non-null and compatible by
+    // validate_host_frame_physics_impl before pose was applied.
+    let world = unsafe { &mut *world };
+
+    match action {
+        MmdRuntimePhysicsFrameAction::Seed => {
+            match world
+                .world
+                .initialize_runtime_physics_bake(&mut instance.runtime)
+            {
+                Ok(_seeded) => {
+                    if let Err(err) = world.world.apply_readback_to_runtime(&mut instance.runtime) {
+                        return status_failure(MmdRuntimeStatus::Error, err.to_string().as_str());
+                    }
+                    instance.runtime.evaluate_current_pose_after_physics();
+                    // Successful seed re-arms seed-only behavior for the next bake sample.
+                    world.next_bake_sample_is_seed_only = true;
+                    instance.refresh_matrix_caches();
+                    // A seed does not advance the solver, so the step report
+                    // carries no meaningful statistics.
+                    if !out_report.is_null() {
+                        unsafe {
+                            *out_report = MmdRuntimeFfiPhysicsWorldStepReport {
+                                tick: MmdRuntimeFfiPhysicsStepStats {
+                                    input_dt_seconds: 0.0,
+                                    clamped_dt_seconds: 0.0,
+                                    substeps: 0,
+                                    accumulator_seconds: 0.0,
+                                },
+                                kinematic_rigidbodies_fed: 0,
+                                bones_written_back: 0,
+                            };
+                        }
+                    }
+                    MmdRuntimeStatus::Ok
+                }
+                Err(err) => status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
+            }
+        }
+        MmdRuntimePhysicsFrameAction::Step => {
+            match world.world.step_runtime_physics_with_runtime_clock_options(
+                &mut instance.runtime,
+                dt_seconds,
+                false,
+            ) {
+                Ok(report) => {
+                    // Explicit physics advance disarms seed-only so the next
+                    // bake sample steps.
+                    world.next_bake_sample_is_seed_only = false;
+                    instance.refresh_matrix_caches();
+                    if !out_report.is_null() {
+                        unsafe {
+                            *out_report = MmdRuntimeFfiPhysicsWorldStepReport {
+                                tick: physics_step_stats_to_ffi(report.tick),
+                                kinematic_rigidbodies_fed: report.kinematic_rigidbodies_fed,
+                                bones_written_back: report.bones_written_back,
+                            };
+                        }
+                    }
+                    MmdRuntimeStatus::Ok
+                }
+                Err(err) => status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
+            }
+        }
     }
 }
 
@@ -4195,6 +4785,126 @@ fn physics_world_copy_rigidbody_states_impl(
         out[start + 3..start + 7].copy_from_slice(&transform.rotation_xyzw);
     }
     MmdRuntimeStatus::Ok
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_copy_rigidbody_bindings_impl(
+    world: *const MmdRuntimePhysicsWorld,
+    out_bindings: *mut MmdRuntimeFfiPhysicsRigidBodyBinding,
+    capacity: usize,
+    out_count: *mut usize,
+) -> MmdRuntimeStatus {
+    let Some(world) = (unsafe { world.as_ref() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let bindings = &world.world.rigidbody_bindings;
+    if !out_count.is_null() {
+        unsafe {
+            *out_count = bindings.len();
+        }
+    }
+    if bindings.len() > capacity {
+        return status_failure(MmdRuntimeStatus::BufferTooSmall, FFI_ERR_INVALID_INPUT);
+    }
+    if capacity > 0 {
+        if out_bindings.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let out = unsafe { slice::from_raw_parts_mut(out_bindings, bindings.len()) };
+        for (slot, binding) in out.iter_mut().zip(bindings.iter()) {
+            *slot = MmdRuntimeFfiPhysicsRigidBodyBinding {
+                bone_index: binding.bone_index.map(|i| i as i32).unwrap_or(-1),
+                mode: rigidbody_mode_to_ffi(binding.mode),
+            };
+        }
+    }
+    MmdRuntimeStatus::Ok
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_physics_driven_bone_mask_impl(
+    world: *const MmdRuntimePhysicsWorld,
+    out_mask: *mut u8,
+    bone_count: usize,
+) -> MmdRuntimeStatus {
+    let Some(world) = (unsafe { world.as_ref() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let required = world.world.required_bone_count();
+    if bone_count < required {
+        return status_failure(
+            MmdRuntimeStatus::BufferTooSmall,
+            "bone mask buffer too short for physics world bindings",
+        );
+    }
+    if bone_count == 0 {
+        return MmdRuntimeStatus::Ok;
+    }
+    if out_mask.is_null() {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    }
+    let out = unsafe { slice::from_raw_parts_mut(out_mask, bone_count) };
+    out.fill(0);
+    for binding in &world.world.rigidbody_bindings {
+        if !binding.mode.writes_back_to_bone() {
+            continue;
+        }
+        let Some(bone_index) = binding.bone_index else {
+            continue;
+        };
+        if bone_index < bone_count {
+            out[bone_index] = 1;
+        }
+    }
+    MmdRuntimeStatus::Ok
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn rigidbody_mode_to_ffi(mode: mmd_anim_physics_bullet::PmxRigidBodyMode) -> u32 {
+    use mmd_anim_physics_bullet::PmxRigidBodyMode;
+
+    match mode {
+        PmxRigidBodyMode::Static => 0,
+        PmxRigidBodyMode::Dynamic => 1,
+        PmxRigidBodyMode::DynamicBone => 2,
+        PmxRigidBodyMode::Unknown => 3,
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_get_gravity_impl(
+    world: &MmdRuntimePhysicsWorld,
+    out_gravity_xyz: *mut f32,
+) -> MmdRuntimeStatus {
+    match world.world.world.gravity() {
+        Ok(gravity) => {
+            unsafe {
+                let out = slice::from_raw_parts_mut(out_gravity_xyz, 3);
+                out.copy_from_slice(&gravity);
+            }
+            MmdRuntimeStatus::Ok
+        }
+        Err(e) => status_failure(MmdRuntimeStatus::Error, &e.to_string()),
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_set_gravity_impl(
+    world: &mut MmdRuntimePhysicsWorld,
+    gravity_xyz: *const f32,
+) -> MmdRuntimeStatus {
+    let gravity = unsafe { slice::from_raw_parts(gravity_xyz, 3) };
+    if !all_finite(gravity) {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    }
+    match world
+        .world
+        .world
+        .set_gravity([gravity[0], gravity[1], gravity[2]])
+    {
+        Ok(()) => MmdRuntimeStatus::Ok,
+        Err(e) => status_failure(MmdRuntimeStatus::Error, &e.to_string()),
+    }
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -4555,6 +5265,451 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_batch(
     })
 }
 
+fn reduction_target_from_u32(value: u32) -> Option<ReductionTarget> {
+    match value {
+        0 => Some(ReductionTarget::LinearSlerp),
+        1 => Some(ReductionTarget::VmdBezier),
+        2 => Some(ReductionTarget::DccCubic),
+        _ => None,
+    }
+}
+
+fn ffi_reduction_report(report: PoseReductionReport) -> MmdRuntimeFfiPoseReductionReport {
+    MmdRuntimeFfiPoseReductionReport {
+        source_bone_key_count: report.source_bone_key_count,
+        reduced_bone_key_count: report.reduced_bone_key_count,
+        source_morph_key_count: report.source_morph_key_count,
+        reduced_morph_key_count: report.reduced_morph_key_count,
+        max_local_position_error: report.max_local_position_error,
+        max_local_rotation_error_radians: report.max_local_rotation_error_radians,
+        max_world_position_error: report.max_world_position_error,
+        max_world_rotation_error_radians: report.max_world_rotation_error_radians,
+        max_morph_weight_error: report.max_morph_weight_error,
+    }
+}
+
+/// Reduces caller-owned dense batch output into an opaque sparse pose handle.
+///
+/// `world_matrices_f32` uses `[frame][bone][16]` column-major layout and
+/// `morph_weights_f32` uses `[frame][morph]`. The model supplies the immutable
+/// skeleton snapshot. On failure `*out_reduced_pose` is set to null.
+///
+/// # Safety
+///
+/// All non-empty input regions must be readable for their declared lengths.
+/// `out_reduced_pose` must point to writable handle storage. The returned
+/// handle must be released with `mmd_runtime_reduced_pose_free`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_create_from_dense(
+    model: *const MmdRuntimeModel,
+    model_identity: u64,
+    world_matrices_f32: *const f32,
+    world_matrices_f32_len: usize,
+    morph_weights_f32: *const f32,
+    morph_weights_f32_len: usize,
+    frame_count: usize,
+    start_frame: f32,
+    frame_step: f32,
+    target: u32,
+    tolerances: MmdRuntimeFfiReductionTolerances,
+    out_reduced_pose: *mut *mut MmdRuntimeReducedPose,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(out_reduced_pose) = (unsafe { out_reduced_pose.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        *out_reduced_pose = ptr::null_mut();
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(target) = reduction_target_from_u32(target) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let bone_count = model.model.bone_count();
+        if frame_count == 0 || !morph_weights_f32_len.is_multiple_of(frame_count) {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let morph_count = morph_weights_f32_len / frame_count;
+        let Some(required_world_len) = frame_count
+            .checked_mul(bone_count)
+            .and_then(|len| len.checked_mul(16))
+        else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(required_morph_len) = frame_count.checked_mul(morph_count) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if world_matrices_f32_len != required_world_len
+            || morph_weights_f32_len != required_morph_len
+            || (required_world_len > 0 && world_matrices_f32.is_null())
+            || (required_morph_len > 0 && morph_weights_f32.is_null())
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let world_values = if required_world_len == 0 {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(world_matrices_f32, required_world_len) }
+        };
+        let morph_weights = if required_morph_len == 0 {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(morph_weights_f32, required_morph_len) }
+        };
+        let world_matrices = world_values
+            .chunks_exact(16)
+            .map(glam::Mat4::from_cols_slice)
+            .collect::<Vec<_>>();
+        let snapshot = match SkeletonSnapshot::from_model_with_morph_count(
+            &model.model,
+            model_identity,
+            morph_count,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
+            }
+        };
+        let dense = match DensePoseSequenceView::new(
+            &world_matrices,
+            morph_weights,
+            frame_count,
+            bone_count,
+            morph_count,
+            start_frame,
+            frame_step,
+        ) {
+            Ok(dense) => dense,
+            Err(error) => {
+                return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
+            }
+        };
+        let tolerances = ReductionTolerances {
+            local_position: tolerances.local_position,
+            local_rotation_radians: tolerances.local_rotation_radians,
+            world_position: tolerances.world_position,
+            world_rotation_radians: tolerances.world_rotation_radians,
+            morph_weight: tolerances.morph_weight,
+        };
+        let sequence =
+            match mmd_anim_runtime::reduce_dense_pose_sequence(dense, snapshot, tolerances, target)
+            {
+                Ok(sequence) => sequence,
+                Err(error) => {
+                    return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
+                }
+            };
+        *out_reduced_pose = Box::into_raw(Box::new(MmdRuntimeReducedPose {
+            sequence,
+            unity_curve_cache: RefCell::new(None),
+        }));
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Releases a reduced-pose handle. Null is accepted.
+///
+/// # Safety
+///
+/// `pose` must be null or a live handle returned by the create function, and
+/// each non-null handle may be freed exactly once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_free(pose: *mut MmdRuntimeReducedPose) {
+    ffi_guard_void(|| {
+        if !pose.is_null() {
+            drop(unsafe { Box::from_raw(pose) });
+        }
+    });
+}
+
+/// Returns the reduced pose bone count, or zero for null.
+///
+/// # Safety
+///
+/// `pose` must be null or a live reduced-pose handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_bone_count(
+    pose: *const MmdRuntimeReducedPose,
+) -> usize {
+    ffi_guard(0, || {
+        unsafe { pose.as_ref() }
+            .map(|pose| pose.sequence.snapshot().bone_count())
+            .unwrap_or(0)
+    })
+}
+
+/// Returns the reduced pose morph count, or zero for null.
+///
+/// # Safety
+///
+/// `pose` must be null or a live reduced-pose handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_morph_count(
+    pose: *const MmdRuntimeReducedPose,
+) -> usize {
+    ffi_guard(0, || {
+        unsafe { pose.as_ref() }
+            .map(|pose| pose.sequence.snapshot().morph_count())
+            .unwrap_or(0)
+    })
+}
+
+/// Copies the immutable reduction report.
+///
+/// # Safety
+///
+/// `pose` must be a live reduced-pose handle and `out_report` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_report(
+    pose: *const MmdRuntimeReducedPose,
+    out_report: *mut MmdRuntimeFfiPoseReductionReport,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(out_report) = (unsafe { out_report.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        *out_report = ffi_reduction_report(pose.sequence.report());
+        MmdRuntimeStatus::Ok
+    })
+}
+
+fn validate_unity_curve_request(
+    pose: &MmdRuntimeReducedPose,
+    frames_per_second: f32,
+) -> Result<(), MmdRuntimeStatus> {
+    if !frames_per_second.is_finite() || frames_per_second <= 0.0 {
+        return Err(status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "frames per second must be finite and greater than zero",
+        ));
+    }
+    if pose.sequence.target() != ReductionTarget::DccCubic {
+        return Err(status_failure(
+            MmdRuntimeStatus::Unsupported,
+            "Unity curve enumeration requires a DccCubic reduced pose",
+        ));
+    }
+    Ok(())
+}
+
+fn unity_curve_count(sequence: &ReducedPoseSequence) -> Option<usize> {
+    sequence
+        .bone_tracks()
+        .len()
+        .checked_mul(6)
+        .and_then(|bone_curves| bone_curves.checked_add(sequence.morph_tracks().len()))
+}
+
+fn unity_curve_descriptor(
+    sequence: &ReducedPoseSequence,
+    curve_index: usize,
+) -> Option<MmdRuntimeFfiUnityCurveDescriptor> {
+    let bone_curve_count = sequence.bone_tracks().len().checked_mul(6)?;
+    if curve_index < bone_curve_count {
+        let target = curve_index / 6;
+        let channel = curve_index % 6;
+        let target_index = u32::try_from(target).ok()?;
+        let key_count = sequence.bone_tracks()[target].keys().len();
+        let (semantic, axis) = if channel < 3 {
+            (MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION, channel)
+        } else {
+            (MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER, channel - 3)
+        };
+        return Some(MmdRuntimeFfiUnityCurveDescriptor {
+            semantic,
+            target_index,
+            axis: axis as u32,
+            key_count,
+        });
+    }
+    let target = curve_index.checked_sub(bone_curve_count)?;
+    let track = sequence.morph_tracks().get(target)?;
+    Some(MmdRuntimeFfiUnityCurveDescriptor {
+        semantic: MMD_RUNTIME_UNITY_CURVE_MORPH_WEIGHT,
+        target_index: u32::try_from(target).ok()?,
+        axis: MMD_RUNTIME_UNITY_CURVE_AXIS_NONE,
+        key_count: track.keys().len(),
+    })
+}
+
+fn unity_clip_for_reduced_pose(
+    sequence: &ReducedPoseSequence,
+    frames_per_second: f32,
+    flip_z: bool,
+) -> Result<UnityAnimationClipDto, MmdRuntimeStatus> {
+    let bindings = UnityReducedPoseBindings {
+        model_identity: sequence.snapshot().model_identity(),
+        bone_paths: vec![String::new(); sequence.snapshot().bone_count()],
+        morph_bindings: (0..sequence.snapshot().morph_count())
+            .map(|_| {
+                Some(UnityMorphBinding {
+                    path: String::new(),
+                    property: String::new(),
+                })
+            })
+            .collect(),
+    };
+    reduced_pose_to_unity_animation_clip_with_fps(sequence, &bindings, frames_per_second, flip_z)
+        .map_err(|error| status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string()))
+}
+
+fn ensure_unity_curve_cache(
+    pose: &MmdRuntimeReducedPose,
+    frames_per_second: f32,
+    flip_z: bool,
+) -> Result<(), MmdRuntimeStatus> {
+    validate_unity_curve_request(pose, frames_per_second)?;
+    let cache_matches = pose
+        .unity_curve_cache
+        .borrow()
+        .as_ref()
+        .is_some_and(|cache| {
+            cache.frames_per_second_bits == frames_per_second.to_bits() && cache.flip_z == flip_z
+        });
+    if cache_matches {
+        return Ok(());
+    }
+    let clip = unity_clip_for_reduced_pose(&pose.sequence, frames_per_second, flip_z)?;
+    *pose.unity_curve_cache.borrow_mut() = Some(MmdRuntimeUnityCurveCache {
+        frames_per_second_bits: frames_per_second.to_bits(),
+        flip_z,
+        clip,
+    });
+    Ok(())
+}
+
+/// Returns the number of target-native Unity scalar curves.
+///
+/// # Safety
+///
+/// `pose` must be a live reduced-pose handle and `out_curve_count` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_count(
+    pose: *const MmdRuntimeReducedPose,
+    frames_per_second: f32,
+    flip_z: bool,
+    out_curve_count: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(out_curve_count) = (unsafe { out_curve_count.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        *out_curve_count = 0;
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if let Err(status) = ensure_unity_curve_cache(pose, frames_per_second, flip_z) {
+            return status;
+        }
+        let Some(count) = unity_curve_count(&pose.sequence) else {
+            return status_failure(MmdRuntimeStatus::Error, "Unity curve count overflow");
+        };
+        *out_curve_count = count;
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Copies one Unity scalar-curve descriptor.
+///
+/// Curves are ordered as translation XYZ then Euler XYZ for every bone,
+/// followed by one weight curve for every morph.
+///
+/// # Safety
+///
+/// `pose` must be a live reduced-pose handle and `out_descriptor` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_descriptor(
+    pose: *const MmdRuntimeReducedPose,
+    frames_per_second: f32,
+    flip_z: bool,
+    curve_index: usize,
+    out_descriptor: *mut MmdRuntimeFfiUnityCurveDescriptor,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(out_descriptor) = (unsafe { out_descriptor.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        *out_descriptor = MmdRuntimeFfiUnityCurveDescriptor::default();
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if let Err(status) = ensure_unity_curve_cache(pose, frames_per_second, flip_z) {
+            return status;
+        }
+        let Some(descriptor) = unity_curve_descriptor(&pose.sequence, curve_index) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, "curve index out of range");
+        };
+        *out_descriptor = descriptor;
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Copies one Unity scalar curve into a caller-owned key buffer.
+///
+/// `out_required_count` is always written after request validation. A null or
+/// short key buffer returns `BUFFER_TOO_SMALL` with the required count, which
+/// provides the first stage of the two-call retrieval pattern.
+///
+/// # Safety
+///
+/// `pose` must be a live reduced-pose handle. `out_required_count` must be
+/// writable. A non-empty key output region must be writable and must not alias
+/// `out_required_count`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_keys(
+    pose: *const MmdRuntimeReducedPose,
+    frames_per_second: f32,
+    flip_z: bool,
+    curve_index: usize,
+    out_keys: *mut MmdRuntimeFfiUnityCurveKey,
+    out_key_capacity: usize,
+    out_required_count: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(out_required_count) = (unsafe { out_required_count.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        *out_required_count = 0;
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if let Err(status) = ensure_unity_curve_cache(pose, frames_per_second, flip_z) {
+            return status;
+        }
+        let Some(descriptor) = unity_curve_descriptor(&pose.sequence, curve_index) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, "curve index out of range");
+        };
+        *out_required_count = descriptor.key_count;
+        if out_key_capacity < descriptor.key_count || out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+        let cache = pose.unity_curve_cache.borrow();
+        let Some(curve) = cache
+            .as_ref()
+            .and_then(|cache| cache.clip.curves.get(curve_index))
+        else {
+            return status_failure(MmdRuntimeStatus::Error, "Unity curve mapping mismatch");
+        };
+        if curve.keys.len() != descriptor.key_count {
+            return status_failure(MmdRuntimeStatus::Error, "Unity curve key count mismatch");
+        }
+        let out_keys = unsafe { slice::from_raw_parts_mut(out_keys, descriptor.key_count) };
+        for (out, key) in out_keys.iter_mut().zip(&curve.keys) {
+            *out = MmdRuntimeFfiUnityCurveKey {
+                time_seconds: key.time_seconds,
+                value: key.value,
+                in_tangent: key.in_tangent,
+                out_tangent: key.out_tangent,
+            };
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
 fn resolve_batch_worker_count(requested_worker_count: u32, frame_count: usize) -> usize {
     let requested = requested_worker_count as usize;
     let default_workers = std::thread::available_parallelism()
@@ -4612,8 +5767,9 @@ fn evaluate_clip_frame_batch_chunk(
 /// After physics world creation or a successful
 /// `mmd_runtime_physics_world_reset`, the next bake sample is **seed-only**:
 /// the clip frame is evaluated, the Bullet world is reset/reseeded from that
-/// pose (physics tick reset included), outputs are copied, and physics is
-/// **not** stepped. That sample disarms the seed-only state. Later samples in
+/// pose (including a physics tick reset, but no solver settle), outputs are
+/// copied, and the normal forward physics clock is **not** advanced. That
+/// sample disarms the seed-only state. Later samples in
 /// the same or subsequent bake calls use evaluate → step → copy.
 ///
 /// A continuation bake call without an intervening successful reset (or after
@@ -4763,18 +5919,23 @@ fn physics_world_bake_clip_frames_impl(
             .evaluate_clip_frame_before_physics(&clip.clip, frame);
 
         if world.next_bake_sample_is_seed_only {
-            // Initial seed-only sample: reseed Bullet from the evaluated pose
-            // and reset the physics tick, then copy without stepping.
-            if let Err(err) = world.world.reset_runtime_physics(&mut instance.runtime) {
+            // Initial seed-only sample: reset/reseed Bullet from the evaluated
+            // pose and reset the physics tick, then copy without advancing the
+            // solver or the normal forward physics clock.
+            if let Err(err) = world
+                .world
+                .initialize_runtime_physics_bake(&mut instance.runtime)
+            {
                 return status_failure(MmdRuntimeStatus::Error, err.to_string().as_str());
             }
             world.next_bake_sample_is_seed_only = false;
             // Keep last_report as the default zero report for this sample.
         } else {
-            let report = match world
-                .world
-                .step_runtime_physics_with_runtime_clock(&mut instance.runtime, dt_seconds)
-            {
+            let report = match world.world.step_runtime_physics_with_runtime_clock_options(
+                &mut instance.runtime,
+                dt_seconds,
+                false,
+            ) {
                 Ok(report) => report,
                 Err(err) => {
                     return status_failure(MmdRuntimeStatus::Error, err.to_string().as_str());

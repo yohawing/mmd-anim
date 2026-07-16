@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use glam::Quat;
+use glam::{Quat, Vec3A};
 
 use crate::ik_primitive::ChainLinkState;
 use crate::{AnimationClip, ModelArena, PoseArena};
@@ -110,6 +110,48 @@ pub(super) enum WorldMatrixBoneUpdateCategory {
     Other,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct HostPoseView<'a> {
+    pub local_position_offsets: &'a [Vec3A],
+    pub local_rotations: &'a [Quat],
+    pub local_scales: &'a [Vec3A],
+    pub morph_weights: &'a [f32],
+    pub ik_enabled: &'a [u8],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostPoseError {
+    BoneCountMismatch { expected: usize, got: usize },
+    MorphCountMismatch { expected: usize, got: usize },
+    IkCountMismatch { expected: usize, got: usize },
+    NonFiniteValue { field: &'static str, index: usize },
+    NonNormalizedQuaternion { index: usize },
+}
+
+impl std::fmt::Display for HostPoseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HostPoseError::BoneCountMismatch { expected, got } => {
+                write!(f, "bone count mismatch: expected {expected}, got {got}")
+            }
+            HostPoseError::MorphCountMismatch { expected, got } => {
+                write!(f, "morph count mismatch: expected {expected}, got {got}")
+            }
+            HostPoseError::IkCountMismatch { expected, got } => {
+                write!(f, "ik count mismatch: expected {expected}, got {got}")
+            }
+            HostPoseError::NonFiniteValue { field, index } => {
+                write!(f, "non-finite value in {field} at index {index}")
+            }
+            Self::NonNormalizedQuaternion { index } => {
+                write!(f, "non-normalized quaternion at local_rotations[{index}]")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HostPoseError {}
+
 #[derive(Debug)]
 pub struct RuntimeInstance {
     model: Arc<ModelArena>,
@@ -150,6 +192,7 @@ impl RuntimeInstance {
 
     pub fn new_with_counts(model: Arc<ModelArena>, morph_count: usize, ik_count: usize) -> Self {
         let morph_count = morph_count.max(model.morph_count() as usize);
+        let ik_count = ik_count.max(model.ik_count());
         let pose = PoseArena::new_with_counts(model.bone_count(), morph_count, ik_count);
         let ik_scratch = IkScratch::new(&model);
         let morph_scratch = MorphScratch::new(morph_count);
@@ -332,6 +375,89 @@ impl RuntimeInstance {
     pub fn evaluate_rest_pose(&mut self) {
         self.pose.reset_local_pose();
         self.evaluate_current_pose();
+    }
+
+    pub fn apply_host_pose(&mut self, view: &HostPoseView) -> Result<(), HostPoseError> {
+        let bone_count = self.model.bone_count();
+        let morph_count = self.pose.morph_weights().len();
+        let ik_count = self.pose.ik_enabled().len();
+
+        if view.local_position_offsets.len() != bone_count {
+            return Err(HostPoseError::BoneCountMismatch {
+                expected: bone_count,
+                got: view.local_position_offsets.len(),
+            });
+        }
+        if view.local_rotations.len() != bone_count {
+            return Err(HostPoseError::BoneCountMismatch {
+                expected: bone_count,
+                got: view.local_rotations.len(),
+            });
+        }
+        if view.local_scales.len() != bone_count {
+            return Err(HostPoseError::BoneCountMismatch {
+                expected: bone_count,
+                got: view.local_scales.len(),
+            });
+        }
+        if view.morph_weights.len() != morph_count {
+            return Err(HostPoseError::MorphCountMismatch {
+                expected: morph_count,
+                got: view.morph_weights.len(),
+            });
+        }
+        if view.ik_enabled.len() != ik_count {
+            return Err(HostPoseError::IkCountMismatch {
+                expected: ik_count,
+                got: view.ik_enabled.len(),
+            });
+        }
+
+        for (i, v) in view.local_position_offsets.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(HostPoseError::NonFiniteValue {
+                    field: "local_position_offsets",
+                    index: i,
+                });
+            }
+        }
+        for (i, q) in view.local_rotations.iter().enumerate() {
+            if !q.is_finite() {
+                return Err(HostPoseError::NonFiniteValue {
+                    field: "local_rotations",
+                    index: i,
+                });
+            }
+            if (q.length_squared() - 1.0).abs() > 1e-3 {
+                return Err(HostPoseError::NonNormalizedQuaternion { index: i });
+            }
+        }
+        for (i, v) in view.local_scales.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(HostPoseError::NonFiniteValue {
+                    field: "local_scales",
+                    index: i,
+                });
+            }
+        }
+        for (i, w) in view.morph_weights.iter().enumerate() {
+            if !w.is_finite() {
+                return Err(HostPoseError::NonFiniteValue {
+                    field: "morph_weights",
+                    index: i,
+                });
+            }
+        }
+
+        self.pose
+            .set_local_position_offsets_from_slice(view.local_position_offsets);
+        self.pose
+            .set_local_rotations_from_slice(view.local_rotations);
+        self.pose.set_local_scales_from_slice(view.local_scales);
+        self.pose.set_morph_weights_from_slice(view.morph_weights);
+        self.pose.set_ik_enabled_from_slice(view.ik_enabled);
+
+        Ok(())
     }
 
     pub fn evaluate_clip_frame(&mut self, clip: &AnimationClip, frame: f32) {

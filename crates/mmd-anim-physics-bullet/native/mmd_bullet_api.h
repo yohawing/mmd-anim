@@ -75,7 +75,11 @@ mmd_anim_bullet_world_reset(mmd_anim_bullet_world *world);
 MMD_ANIM_BULLET_API mmd_anim_bullet_status
 mmd_anim_bullet_world_settle_to_current(mmd_anim_bullet_world *world);
 MMD_ANIM_BULLET_API mmd_anim_bullet_status
-mmd_anim_bullet_world_step(mmd_anim_bullet_world *world, float delta_time, int32_t max_sub_steps);
+mmd_anim_bullet_world_step(
+    mmd_anim_bullet_world *world,
+    float delta_time,
+    int32_t max_sub_steps,
+    float fixed_substep_seconds);
 
 MMD_ANIM_BULLET_API mmd_anim_bullet_status
 mmd_anim_bullet_world_add_rigidbody(
@@ -109,6 +113,15 @@ mmd_anim_bullet_world_collect_contacts(
     mmd_anim_bullet_contact_point *out_contacts,
     int32_t capacity,
     int32_t *out_count);
+
+MMD_ANIM_BULLET_API mmd_anim_bullet_status
+mmd_anim_bullet_world_get_gravity(
+    const mmd_anim_bullet_world *world,
+    float out_gravity_xyz[3]);
+MMD_ANIM_BULLET_API mmd_anim_bullet_status
+mmd_anim_bullet_world_set_gravity(
+    mmd_anim_bullet_world *world,
+    const float gravity_xyz[3]);
 
 #ifdef __cplusplus
 }

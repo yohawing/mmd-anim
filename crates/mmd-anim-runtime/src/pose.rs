@@ -95,6 +95,41 @@ impl PoseArena {
     }
 
     #[inline]
+    pub fn local_position_offsets(&self) -> &[Vec3A] {
+        &self.local_position_offsets
+    }
+
+    #[inline]
+    pub fn local_rotations(&self) -> &[Quat] {
+        &self.local_rotations
+    }
+
+    #[inline]
+    pub fn local_scales(&self) -> &[Vec3A] {
+        &self.local_scales
+    }
+
+    pub(crate) fn set_local_position_offsets_from_slice(&mut self, src: &[Vec3A]) {
+        self.local_position_offsets.copy_from_slice(src);
+    }
+
+    pub(crate) fn set_local_rotations_from_slice(&mut self, src: &[Quat]) {
+        self.local_rotations.copy_from_slice(src);
+    }
+
+    pub(crate) fn set_local_scales_from_slice(&mut self, src: &[Vec3A]) {
+        self.local_scales.copy_from_slice(src);
+    }
+
+    pub(crate) fn set_morph_weights_from_slice(&mut self, src: &[f32]) {
+        self.morph_weights.copy_from_slice(src);
+    }
+
+    pub(crate) fn set_ik_enabled_from_slice(&mut self, src: &[u8]) {
+        self.ik_enabled.copy_from_slice(src);
+    }
+
+    #[inline]
     pub(crate) fn append_position_offset(&self, bone: BoneIndex) -> Vec3A {
         self.append_position_offsets[bone.as_usize()]
     }

@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mmd_anim_runtime::{
-    AnimationClip, BoneAnimationBinding, BoneIndex, FlatModelInputError, IkSolveOptions,
-    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack, MovableBoneKeyframe,
-    MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe, RuntimeInstance,
+    AnimationClip, BoneAnimationBinding, BoneIndex, DensePoseSequenceView, FlatModelInputError,
+    IkSolveOptions, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack,
+    MovableBoneKeyframe, MovableBoneTrack, PropertyAnimationBinding, PropertyKeyframe,
+    ReducedPoseSequence, ReductionTarget, ReductionTolerances, RuntimeInstance, SkeletonSnapshot,
 };
 use mmd_anim_runtime::{
     FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
@@ -976,11 +977,210 @@ impl WasmMmdRuntimeInstance {
 
 #[wasm_bindgen]
 pub struct WasmMmdRuntimeBatchEvaluation {
+    model: Arc<ModelArena>,
+    start_frame: f32,
+    frame_step: f32,
     frame_count: usize,
     bone_count: usize,
     morph_count: usize,
     world_matrices: Vec<f32>,
     morph_weights: Vec<f32>,
+}
+
+#[wasm_bindgen]
+pub struct WasmReducedPoseResult {
+    sequence: ReducedPoseSequence,
+}
+
+fn wasm_reduction_target(value: u32) -> Result<ReductionTarget, String> {
+    match value {
+        0 => Ok(ReductionTarget::LinearSlerp),
+        1 => Ok(ReductionTarget::VmdBezier),
+        2 => Ok(ReductionTarget::DccCubic),
+        _ => Err("target must be 0 (LinearSlerp), 1 (VmdBezier), or 2 (DccCubic)".to_owned()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_dense_pose_inner(
+    model: &ModelArena,
+    world_matrices_f32: &[f32],
+    morph_weights: &[f32],
+    frame_count: usize,
+    start_frame: f32,
+    frame_step: f32,
+    target: u32,
+    local_position_tolerance: f32,
+    local_rotation_tolerance: f32,
+    world_position_tolerance: f32,
+    world_rotation_tolerance: f32,
+    morph_weight_tolerance: f32,
+) -> Result<ReducedPoseSequence, String> {
+    let bone_count = model.bone_count();
+    if frame_count == 0 || !morph_weights.len().is_multiple_of(frame_count) {
+        return Err("morph weight length must be divisible by frame count".to_owned());
+    }
+    let morph_count = morph_weights.len() / frame_count;
+    let required_world_len = frame_count
+        .checked_mul(bone_count)
+        .and_then(|len| len.checked_mul(16))
+        .ok_or_else(|| "dense world matrix length overflow".to_owned())?;
+    let required_morph_len = frame_count
+        .checked_mul(morph_count)
+        .ok_or_else(|| "dense morph weight length overflow".to_owned())?;
+    if world_matrices_f32.len() != required_world_len || morph_weights.len() != required_morph_len {
+        return Err("dense pose buffer length does not match model and frame count".to_owned());
+    }
+    let world_matrices = world_matrices_f32
+        .chunks_exact(16)
+        .map(glam::Mat4::from_cols_slice)
+        .collect::<Vec<_>>();
+    let dense = DensePoseSequenceView::new(
+        &world_matrices,
+        morph_weights,
+        frame_count,
+        bone_count,
+        morph_count,
+        start_frame,
+        frame_step,
+    )
+    .map_err(|error| error.to_string())?;
+    let snapshot = SkeletonSnapshot::from_model_with_morph_count(model, 0, morph_count)
+        .map_err(|error| error.to_string())?;
+    mmd_anim_runtime::reduce_dense_pose_sequence(
+        dense,
+        snapshot,
+        ReductionTolerances {
+            local_position: local_position_tolerance,
+            local_rotation_radians: local_rotation_tolerance,
+            world_position: world_position_tolerance,
+            world_rotation_radians: world_rotation_tolerance,
+            morph_weight: morph_weight_tolerance,
+        },
+        wasm_reduction_target(target)?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Reduces host-provided dense pose buffers without assuming a native physics API.
+#[wasm_bindgen(js_name = reduceDensePose)]
+#[allow(clippy::too_many_arguments)]
+pub fn reduce_dense_pose(
+    model: &WasmMmdModel,
+    world_matrices_f32: &[f32],
+    morph_weights: &[f32],
+    frame_count: usize,
+    start_frame: f32,
+    frame_step: f32,
+    target: u32,
+    local_position_tolerance: f32,
+    local_rotation_tolerance: f32,
+    world_position_tolerance: f32,
+    world_rotation_tolerance: f32,
+    morph_weight_tolerance: f32,
+) -> Result<WasmReducedPoseResult, JsValue> {
+    reduce_dense_pose_inner(
+        &model.model,
+        world_matrices_f32,
+        morph_weights,
+        frame_count,
+        start_frame,
+        frame_step,
+        target,
+        local_position_tolerance,
+        local_rotation_tolerance,
+        world_position_tolerance,
+        world_rotation_tolerance,
+        morph_weight_tolerance,
+    )
+    .map(|sequence| WasmReducedPoseResult { sequence })
+    .map_err(|error| JsValue::from_str(&error))
+}
+
+#[wasm_bindgen]
+impl WasmReducedPoseResult {
+    #[wasm_bindgen(js_name = boneCount)]
+    pub fn bone_count(&self) -> usize {
+        self.sequence.snapshot().bone_count()
+    }
+
+    #[wasm_bindgen(js_name = morphCount)]
+    pub fn morph_count(&self) -> usize {
+        self.sequence.snapshot().morph_count()
+    }
+
+    #[wasm_bindgen(js_name = reducedBoneKeyCount)]
+    pub fn reduced_bone_key_count(&self) -> usize {
+        self.sequence.report().reduced_bone_key_count
+    }
+
+    #[wasm_bindgen(js_name = sourceBoneKeyCount)]
+    pub fn source_bone_key_count(&self) -> usize {
+        self.sequence.report().source_bone_key_count
+    }
+
+    #[wasm_bindgen(js_name = reducedMorphKeyCount)]
+    pub fn reduced_morph_key_count(&self) -> usize {
+        self.sequence.report().reduced_morph_key_count
+    }
+
+    #[wasm_bindgen(js_name = sourceMorphKeyCount)]
+    pub fn source_morph_key_count(&self) -> usize {
+        self.sequence.report().source_morph_key_count
+    }
+
+    #[wasm_bindgen(js_name = maxLocalPositionError)]
+    pub fn max_local_position_error(&self) -> f32 {
+        self.sequence.report().max_local_position_error
+    }
+
+    #[wasm_bindgen(js_name = maxLocalRotationErrorRadians)]
+    pub fn max_local_rotation_error_radians(&self) -> f32 {
+        self.sequence.report().max_local_rotation_error_radians
+    }
+
+    #[wasm_bindgen(js_name = maxWorldPositionError)]
+    pub fn max_world_position_error(&self) -> f32 {
+        self.sequence.report().max_world_position_error
+    }
+
+    #[wasm_bindgen(js_name = maxWorldRotationErrorRadians)]
+    pub fn max_world_rotation_error_radians(&self) -> f32 {
+        self.sequence.report().max_world_rotation_error_radians
+    }
+
+    #[wasm_bindgen(js_name = maxMorphWeightError)]
+    pub fn max_morph_weight_error(&self) -> f32 {
+        self.sequence.report().max_morph_weight_error
+    }
+
+    #[wasm_bindgen(js_name = sample)]
+    pub fn sample(
+        &self,
+        frame: f32,
+        out_world_matrices_f32: &mut [f32],
+        out_morph_weights: &mut [f32],
+    ) -> Result<bool, JsValue> {
+        let required_world_len = self.bone_count() * 16;
+        let required_morph_len = self.morph_count();
+        if out_world_matrices_f32.len() < required_world_len
+            || out_morph_weights.len() < required_morph_len
+        {
+            return Ok(false);
+        }
+        let sample = self
+            .sequence
+            .sample(frame)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        for (out, matrix) in out_world_matrices_f32[..required_world_len]
+            .chunks_exact_mut(16)
+            .zip(&sample.world_matrices)
+        {
+            out.copy_from_slice(&matrix.to_cols_array());
+        }
+        out_morph_weights[..required_morph_len].copy_from_slice(&sample.morph_weights);
+        Ok(true)
+    }
 }
 
 #[wasm_bindgen]
@@ -1046,6 +1246,35 @@ impl WasmMmdRuntimeBatchEvaluation {
         }
         out[..self.morph_weights.len()].copy_from_slice(&self.morph_weights);
         true
+    }
+
+    #[wasm_bindgen(js_name = reducePose)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn reduce_pose(
+        &self,
+        target: u32,
+        local_position_tolerance: f32,
+        local_rotation_tolerance: f32,
+        world_position_tolerance: f32,
+        world_rotation_tolerance: f32,
+        morph_weight_tolerance: f32,
+    ) -> Result<WasmReducedPoseResult, JsValue> {
+        reduce_dense_pose_inner(
+            &self.model,
+            &self.world_matrices,
+            &self.morph_weights,
+            self.frame_count,
+            self.start_frame,
+            self.frame_step,
+            target,
+            local_position_tolerance,
+            local_rotation_tolerance,
+            world_position_tolerance,
+            world_rotation_tolerance,
+            morph_weight_tolerance,
+        )
+        .map(|sequence| WasmReducedPoseResult { sequence })
+        .map_err(|error| JsValue::from_str(&error))
     }
 }
 
@@ -1205,6 +1434,9 @@ impl WasmMmdRuntimeInstance {
         }
 
         Ok(WasmMmdRuntimeBatchEvaluation {
+            model: Arc::clone(&self.model),
+            start_frame,
+            frame_step,
             frame_count,
             bone_count,
             morph_count,
@@ -2542,6 +2774,74 @@ TextureFilename { "tex/main.png"; }
 
         assert_eq!(runtime.world_matrices(), source_world_before);
         assert_eq!(runtime.morph_weights(), source_morph_before);
+    }
+
+    #[test]
+    fn reduced_pose_batch_and_host_dense_samplers_have_parity() {
+        let model = WasmMmdModel::new(&[-1], &[0.0, 0.0, 0.0]).unwrap();
+        let clip = WasmMmdClip::new(
+            &[0, 0, 2],
+            &[0, 60],
+            &[
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            &[0, 0, 2],
+            &[0, 60],
+            &[0.0, 1.0],
+            &[],
+            &[],
+            0,
+        )
+        .unwrap();
+        let runtime = WasmMmdRuntimeInstance::new(&model, 1);
+        let batch = runtime
+            .evaluate_clip_frame_batch(&clip, 0.0, 30.0, 3, 0)
+            .unwrap();
+        let from_batch = batch
+            .reduce_pose(0, 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4)
+            .unwrap();
+        let from_host = reduce_dense_pose(
+            &model,
+            &batch.world_matrices,
+            &batch.morph_weights,
+            3,
+            0.0,
+            30.0,
+            0,
+            1.0e-4,
+            1.0e-4,
+            1.0e-4,
+            1.0e-4,
+            1.0e-4,
+        )
+        .unwrap();
+        assert_eq!(from_batch.reduced_bone_key_count(), 2);
+        assert_eq!(from_host.reduced_bone_key_count(), 2);
+        assert_eq!(from_batch.reduced_morph_key_count(), 2);
+
+        let mut batch_world = [0.0_f32; 16];
+        let mut host_world = [0.0_f32; 16];
+        let mut batch_morph = [0.0_f32; 1];
+        let mut host_morph = [0.0_f32; 1];
+        assert!(
+            from_batch
+                .sample(30.0, &mut batch_world, &mut batch_morph)
+                .unwrap()
+        );
+        assert!(
+            from_host
+                .sample(30.0, &mut host_world, &mut host_morph)
+                .unwrap()
+        );
+        assert_eq!(batch_world, host_world);
+        assert_eq!(batch_morph, host_morph);
+        assert!((batch_world[12] - 1.0).abs() < 1.0e-5);
+        assert!((batch_morph[0] - 0.5).abs() < 1.0e-5);
+        assert!(
+            !from_batch
+                .sample(30.0, &mut [0.0; 15], &mut [0.0; 1])
+                .unwrap()
+        );
     }
 
     #[test]

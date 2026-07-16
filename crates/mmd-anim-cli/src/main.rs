@@ -144,6 +144,26 @@ enum Commands {
         bones: bool,
     },
 
+    /// Check PMX skin (BDEF/QDEF) weight data for anomalies.
+    #[command(
+        name = "skin-check",
+        long_about = "Scan a PMX model's per-vertex skin weight data for anomalies that can corrupt FBX export or in-engine deformation.\nFor BDEF4/QDEF vertices, reports weight sums that do not add up to ~1.0 and duplicate bone indices across slots.\nAlso flags vertices where bone index 0 carries a non-primary-slot weight while lying far from bone 0's position, a signature of a -1 (unbound) bone index having been clamped to 0 during parsing.\n\nSupported formats: .pmx only",
+        after_help = "Examples:\n  mmd-anim skin-check model.pmx\n  mmd-anim skin-check model.pmx --json\n  mmd-anim skin-check model.pmx --tolerance 0.0005 --distance-threshold 2.0"
+    )]
+    SkinCheck {
+        /// Path to the PMX model file
+        model: PathBuf,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Allowed absolute deviation from a weight sum of 1.0
+        #[arg(long, default_value_t = 0.001)]
+        tolerance: f32,
+        /// Minimum distance from bone 0 required to flag a non-primary-slot bone-0 weight as suspicious
+        #[arg(long, default_value_t = 1.0)]
+        distance_threshold: f32,
+    },
+
     /// Benchmark runtime evaluation.
     #[command(
         long_about = "Benchmark a PMX/VMD pair by default, or synthetic runtime data with --synthetic.\nUse this for local performance checks around import, clip build, evaluation, and host-facing matrix/morph copies.\n\nPair mode: <model.pmx> <motion.vmd> [start-frame] [frame-count] [step]\n  Flags: --instances <count>, --no-ik, --ik-tolerance <value>, --ik-max-iterations-cap <count>, [--json]\n  Defaults: instances=1, start-frame=0, frame-count=1000, step=1\n\nSynthetic mode: --synthetic [models] [bones] [frames] [--json]\n  Defaults: models=1, bones=32, frames=1000\n\nSupported formats: .pmx + .vmd",
@@ -252,6 +272,37 @@ enum Commands {
         json: bool,
     },
 
+    /// Reduce dense VMD bone and morph tracks into sparse linear VMD curves.
+    #[command(
+        name = "reduce-vmd",
+        long_about = "Reduce dense VMD bone and morph keyframes into sparse linear/slerp curves while preserving camera, light, self-shadow, and property tracks.\nThe reducer samples integer VMD frames and validates local position, rotation, and morph errors before writing the sparse VMD.",
+        after_help = "Examples:\n  mmd-anim reduce-vmd dense.vmd sparse.vmd\n  mmd-anim reduce-vmd dense.vmd sparse.vmd --position-tolerance 0.001 --rotation-tolerance 0.001 --morph-tolerance 0.001 --json"
+    )]
+    ReduceVmd {
+        /// Path to the dense input VMD file
+        input: PathBuf,
+        /// Path to the reduced output VMD file
+        output: PathBuf,
+        /// Maximum local translation error in MMD units
+        #[arg(long, default_value_t = 1.0e-4)]
+        position_tolerance: f32,
+        /// Maximum local rotation error in radians
+        #[arg(long, default_value_t = 1.0e-4)]
+        rotation_tolerance: f32,
+        /// Maximum morph weight error
+        #[arg(long, default_value_t = 1.0e-4)]
+        morph_tolerance: f32,
+        /// Curve fitting mode; vmd-bezier is substantially slower
+        #[arg(long, value_enum, default_value = "linear")]
+        curve_mode: commands::vmd_reduce::VmdReductionCurveMode,
+        /// Refuse motions requiring more sampled frames unless explicitly raised
+        #[arg(long, default_value_t = 100_000)]
+        max_sampled_frames: usize,
+        /// Output reduction report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Build a PMM scene from a model and motion.
     #[command(
         name = "build-pmm",
@@ -287,6 +338,21 @@ enum Commands {
         /// Optional inclusive maximum frame for FBX runtime bake smoke checks
         #[arg(long)]
         max_frame: Option<u32>,
+        /// Bake native Bullet physics into the exported bone animation (requires --vmd)
+        #[arg(long, requires = "vmd")]
+        physics_bake: bool,
+        /// Reduce the final baked pose into sparse DCC cubic curves before FBX export
+        #[arg(long, requires = "vmd")]
+        reduce_pose: bool,
+        /// Local/world position error limit used by --reduce-pose
+        #[arg(long, requires = "reduce_pose", default_value_t = 0.1)]
+        pose_position_tolerance: f32,
+        /// Local/world rotation error limit in radians used by --reduce-pose
+        #[arg(long, requires = "reduce_pose", default_value_t = 0.05)]
+        pose_rotation_tolerance: f32,
+        /// Morph-weight error limit used by --reduce-pose
+        #[arg(long, requires = "reduce_pose", default_value_t = 0.001)]
+        pose_morph_tolerance: f32,
         /// Copy PMX diffuse textures next to the FBX and rewrite FBX texture paths
         #[arg(long)]
         copy_diffuse_textures: bool,
@@ -300,6 +366,31 @@ enum Commands {
         #[arg(long)]
         write_physics_params: bool,
         /// Output conversion report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Compare FBX skin cluster (per-bone deformer) data between two files.
+    #[command(
+        name = "fbx-skin-diff",
+        long_about = "Compare skin cluster data between two FBX files, matching bones by name.\nReports vertex-influence additions/removals, weight deltas above a threshold, and Transform/TransformLink matrix differences per bone.\nUse this to detect what a DCC roundtrip (e.g. Maya import/export) changes about our exported skinning.\n\nSupported formats: .fbx (binary, v7.x)",
+        after_help = "Examples:\n  mmd-anim fbx-skin-diff ours.fbx maya-roundtrip.fbx\n  mmd-anim fbx-skin-diff ours.fbx maya-roundtrip.fbx --weight-epsilon 0.0005\n  mmd-anim fbx-skin-diff ours.fbx maya-roundtrip.fbx --summary-only\n  mmd-anim fbx-skin-diff ours.fbx maya-roundtrip.fbx --json"
+    )]
+    FbxSkinDiff {
+        /// Path to the first (e.g. our exported) FBX file
+        a: PathBuf,
+        /// Path to the second (e.g. Maya-roundtripped) FBX file
+        b: PathBuf,
+        /// Minimum absolute weight delta to report for a shared vertex
+        #[arg(long, default_value_t = 0.001)]
+        weight_epsilon: f64,
+        /// Minimum absolute per-component delta to report a Transform/TransformLink difference
+        #[arg(long, default_value_t = 1.0e-4)]
+        matrix_epsilon: f64,
+        /// Print only per-bone summary lines, without per-vertex diffs
+        #[arg(long)]
+        summary_only: bool,
+        /// Output report as JSON
         #[arg(long)]
         json: bool,
     },
@@ -417,6 +508,12 @@ fn main() -> ExitCode {
         Some(Commands::Rig { model, json, bones }) => {
             commands::rig::rig_inspect(&model, json, bones)
         }
+        Some(Commands::SkinCheck {
+            model,
+            json,
+            tolerance,
+            distance_threshold,
+        }) => commands::skin_check::skin_check(&model, json, tolerance, distance_threshold),
         Some(Commands::Bench {
             model,
             motion,
@@ -473,6 +570,27 @@ fn main() -> ExitCode {
             from_json,
             json,
         }) => dispatch_export(&input, &output, from_json, json),
+        Some(Commands::ReduceVmd {
+            input,
+            output,
+            position_tolerance,
+            rotation_tolerance,
+            morph_tolerance,
+            curve_mode,
+            max_sampled_frames,
+            json,
+        }) => commands::vmd_reduce::reduce_vmd(
+            &input,
+            &output,
+            commands::vmd_reduce::ReduceVmdOptions {
+                position_tolerance,
+                rotation_tolerance,
+                morph_tolerance,
+                curve_mode,
+                max_sampled_frames,
+                use_json: json,
+            },
+        ),
         Some(Commands::BuildPmm {
             model,
             motion,
@@ -484,6 +602,11 @@ fn main() -> ExitCode {
             output,
             vmd,
             max_frame,
+            physics_bake,
+            reduce_pose,
+            pose_position_tolerance,
+            pose_rotation_tolerance,
+            pose_morph_tolerance,
             copy_diffuse_textures,
             bones_only,
             readable_bone_names,
@@ -495,10 +618,32 @@ fn main() -> ExitCode {
             vmd.as_deref(),
             commands::fbx::ConvertFbxOptions {
                 max_frame,
+                physics_bake,
+                reduce_pose,
+                pose_position_tolerance,
+                pose_rotation_tolerance,
+                pose_morph_tolerance,
                 copy_diffuse_textures,
                 bones_only,
                 readable_bone_names,
                 write_physics_params,
+                use_json: json,
+            },
+        ),
+        Some(Commands::FbxSkinDiff {
+            a,
+            b,
+            weight_epsilon,
+            matrix_epsilon,
+            summary_only,
+            json,
+        }) => commands::fbx_skin_diff::diff_fbx_skin(
+            &a,
+            &b,
+            commands::fbx_skin_diff::DiffFbxSkinOptions {
+                weight_epsilon,
+                matrix_epsilon,
+                summary_only,
                 use_json: json,
             },
         ),

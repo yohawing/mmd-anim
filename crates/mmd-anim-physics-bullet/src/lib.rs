@@ -1,7 +1,8 @@
 //! Optional Bullet backend for mmd-anim physics.
 //!
-//! The default build has no native dependency. Enable the `native` feature and
-//! point `MMD_ANIM_BULLET3_DIR` at a Bullet checkout to build the C++ backend.
+//! The default build has no native dependency. Enabling the `native` feature
+//! builds the C++ backend from the vendored Bullet3 source. Maintainers can set
+//! `MMD_ANIM_BULLET3_DIR` to test against another Bullet3 checkout.
 
 pub const NATIVE_FEATURE_ENABLED: bool = cfg!(feature = "native");
 

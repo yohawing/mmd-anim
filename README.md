@@ -84,7 +84,7 @@ Format support overview. "Loading" means parsing a file into structured data.
 
 ```toml
 [dependencies]
-mmd-anim = "0.1"
+mmd-anim = "0.3"
 ```
 
 ## Native Hosts (C ABI)
@@ -209,8 +209,8 @@ mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 | `mmd-anim` | Main public crate. Provides the evaluation core and format handling through one entry point. |
 | `mmd-anim-runtime` | Format-independent evaluation core: model arena, pose, VMD evaluation, append transforms, IK, and morphs. |
 | `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
-| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations and PMX parts writing. Repository-local for the 0.1.x line. |
-| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, and PMX parts writing. Workspace-local for the 0.1.x line. |
+| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations, PMX parts writing, sparse curves, and optional physics integration. Repository-local and not published to crates.io. |
+| `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, PMX parts writing, and sparse curves. Workspace-local and not published to crates.io. |
 | `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files, including maintainer-local oracle and numeric comparison schemas. Installable via `cargo install mmd-anim-cli`. |
 
 For normal library use, depend on `mmd-anim`. Advanced users who only need a

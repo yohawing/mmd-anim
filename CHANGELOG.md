@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.3.0 - 2026-07-16
+
+Sparse pose reduction, host-driven physics integration, and expanded FBX
+animation diagnostics.
+
+### Added
+
+- Added sparse pose reduction for linear/slerp, VMD Bezier, and DCC cubic
+  curves, with opaque C ABI and WASM handles plus target-native Unity curve
+  enumeration.
+- Added `reduce-vmd` CLI support for reducing dense bone and morph tracks while
+  preserving camera, light, self-shadow, and property tracks.
+- Added fail-atomic host pose injection and atomic host-frame physics
+  evaluation APIs, including gravity configuration, rigid-body binding
+  introspection, and required-bone masks.
+- Added physics-baked FBX animation output and maintainer diagnostics for PMX
+  skin weights and FBX skin-cluster comparison.
+
+### Changed
+
+- Made offline physics bake frame zero seed-only, while live reset retains its
+  solver settle step and world-state synchronization.
+- Reduced pose reduction time and validation work through reusable scratch
+  storage, parallel validation, long-track prefitting, and cached dependency
+  data.
+- Stabilized static VMD reduction so a reduced track is only selected when it
+  does not increase the original key count.
+
+### Fixed
+
+- Fixed duplicate BDEF4 bone indices writing the same FBX control point more
+  than once instead of merging their weights.
+- Fixed runtime construction with an undersized IK count and tightened
+  rotation-tolerance handling for near-identical reduced poses.
+- Fixed Bullet reset, spring, and DynamicBone ownership behavior across live
+  and offline host paths.
+
+### Known limitations
+
+- Reduced DCC cubic output prioritizes the requested pose-error constraints;
+  tangent metadata can make an FBX file larger even when it contains fewer
+  animation keys.
+- FFI, WASM, sparse-curve, and native physics APIs remain experimental and may
+  change before 1.0.
+
 ## 0.2.0 - 2026-07-11
 
 FBX conversion, optional native Bullet physics integration, PMX IK axis

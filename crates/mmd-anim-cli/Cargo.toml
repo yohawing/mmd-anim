@@ -17,7 +17,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = []
+default = ["physics-bullet-native"]
 physics-bullet-native = ["dep:mmd-anim-physics-bullet"]
 
 [dependencies]

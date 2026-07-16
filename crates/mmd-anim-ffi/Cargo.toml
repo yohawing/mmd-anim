@@ -23,5 +23,5 @@ mmd-anim-physics-bullet = { path = "../mmd-anim-physics-bullet", version = "0.3.
 serde_json.workspace = true
 
 [features]
-default = []
+default = ["physics-bullet-native"]
 physics-bullet-native = ["dep:mmd-anim-physics-bullet"]

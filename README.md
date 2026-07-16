@@ -21,11 +21,8 @@ frozen yet, and breaking changes may happen before 1.0. Feedback is welcome.
 - Load a PMX model and convert it into runtime-ready model data.
 - Load a VMD motion and convert bone, camera, light, and other motion tracks into a playable form.
 - Interpolate between keyframes with MMD-style Bezier interpolation for translation and rotation.
-- An optional MMD physics backend using Bullet Physics, available to
-  `mmd-anim-cli` and `mmd-anim-ffi` builds through their
-  `physics-bullet-native` feature. The required Bullet3 modules are vendored
-  and compiled for the consumer's target; no separate Bullet installation is
-  required.
+- Bullet Physics simulation for MMD models is available through the CLI and
+  native API.
 
 ## Test Foundation
 
@@ -209,12 +206,14 @@ mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 | `mmd-anim` | Main public crate. Provides the evaluation core and format handling through one entry point. |
 | `mmd-anim-runtime` | Format-independent evaluation core: model arena, pose, VMD evaluation, append transforms, IK, and morphs. |
 | `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
-| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations, PMX parts writing, sparse curves, and optional physics integration. Repository-local and not published to crates.io. |
+| `mmd-anim-physics-bullet` | Bullet Physics backend for MMD. Builds the bundled Bullet3 sources for the target and integrates them with the runtime and PMX formats. |
+| `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations, PMX parts writing, sparse curves, and physics simulation. Repository-local and not published to crates.io. |
 | `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, PMX parts writing, and sparse curves. Workspace-local and not published to crates.io. |
 | `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files, including maintainer-local oracle and numeric comparison schemas. Installable via `cargo install mmd-anim-cli`. |
 
 For normal library use, depend on `mmd-anim`. Advanced users who only need a
-lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly.
+lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly. Use
+`mmd-anim-physics-bullet` to access the physics backend directly from Rust.
 
 ## Current Limitations
 

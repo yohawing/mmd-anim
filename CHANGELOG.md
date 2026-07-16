@@ -22,6 +22,9 @@ animation diagnostics.
 
 - Made offline physics bake frame zero seed-only, while live reset retains its
   solver settle step and world-state synchronization.
+- Enabled the bundled Bullet physics backend by default for CLI, native API,
+  and direct Rust builds; `--no-default-features` remains available for
+  lightweight builds.
 - Reduced pose reduction time and validation work through reusable scratch
   storage, parallel validation, long-track prefitting, and cached dependency
   data.

@@ -23,7 +23,7 @@ include = [
 ]
 
 [features]
-default = []
+default = ["native", "pmx-format", "runtime"]
 native = []
 pmx-format = ["dep:mmd-anim-format"]
 runtime = ["dep:mmd-anim-runtime"]

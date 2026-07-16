@@ -2734,7 +2734,11 @@ fn import_pmx_summary_reports_import_failure_context() {
     let error = import::import_pmx_summary(&path).unwrap_err();
     let message = error.to_string();
     assert!(message.contains("import:"), "{message}");
-    assert!(message.contains("failed to import PMX file"), "{message}");
+    assert!(
+        message.contains("failed to import file (format=PMX)"),
+        "{message}"
+    );
+    assert!(!message.contains("detected="), "{message}");
     assert!(message.contains("broken.pmx"), "{message}");
 }
 

@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
+from ._abi import ByteBuffer, IkSolveStats, RigBone, RigIkLink, bind_functions
+
 
 EXPECTED_ABI_VERSION = 2
 LIBRARY_ENV = "MMD_RUNTIME_LIBRARY"
@@ -20,15 +22,6 @@ class NativeRuntimeError(RuntimeError):
 
 class AbiVersionError(NativeRuntimeError):
     """Raised when the loaded native library does not implement ABI v2."""
-
-
-class ByteBuffer(ctypes.Structure):
-    """Value representation of ``mmd_runtime_ffi_byte_buffer_t``."""
-
-    _fields_ = [
-        ("data", ctypes.POINTER(ctypes.c_uint8)),
-        ("len", ctypes.c_size_t),
-    ]
 
 
 def _require_abi_version(actual: int) -> None:
@@ -103,71 +96,17 @@ class RuntimeLibrary:
 
     def _bind(self) -> None:
         lib = self._lib
-
-        lib.mmd_runtime_abi_version.argtypes = []
-        lib.mmd_runtime_abi_version.restype = ctypes.c_uint32
+        bind_functions(lib)
         _require_abi_version(lib.mmd_runtime_abi_version())
 
-        lib.mmd_runtime_last_error_message.argtypes = []
-        lib.mmd_runtime_last_error_message.restype = ctypes.c_void_p
-
-        lib.mmd_runtime_byte_buffer_free.argtypes = [ByteBuffer]
-        lib.mmd_runtime_byte_buffer_free.restype = None
-
-        lib.mmd_runtime_model_create.argtypes = [
-            ctypes.POINTER(ctypes.c_int32),
-            ctypes.POINTER(ctypes.c_float),
-            ctypes.c_size_t,
-        ]
-        lib.mmd_runtime_model_create.restype = ctypes.c_void_p
-        lib.mmd_runtime_model_free.argtypes = [ctypes.c_void_p]
-        lib.mmd_runtime_model_free.restype = None
-
-        lib.mmd_runtime_instance_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-        lib.mmd_runtime_instance_create.restype = ctypes.c_void_p
-        lib.mmd_runtime_instance_free.argtypes = [ctypes.c_void_p]
-        lib.mmd_runtime_instance_free.restype = None
-        lib.mmd_runtime_instance_evaluate_rest_pose.argtypes = [ctypes.c_void_p]
-        lib.mmd_runtime_instance_evaluate_rest_pose.restype = ctypes.c_bool
-        lib.mmd_runtime_instance_world_matrix_f32_len.argtypes = [ctypes.c_void_p]
-        lib.mmd_runtime_instance_world_matrix_f32_len.restype = ctypes.c_size_t
-        lib.mmd_runtime_instance_copy_world_matrices.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_float),
-            ctypes.c_size_t,
-        ]
-        lib.mmd_runtime_instance_copy_world_matrices.restype = ctypes.c_bool
-
-        lib.mmd_runtime_clip_create.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-        ]
-        lib.mmd_runtime_clip_create.restype = ctypes.c_void_p
-        lib.mmd_runtime_clip_free.argtypes = [ctypes.c_void_p]
-        lib.mmd_runtime_clip_free.restype = None
-        lib.mmd_runtime_instance_evaluate_clip_frame.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_float,
-        ]
-        lib.mmd_runtime_instance_evaluate_clip_frame.restype = ctypes.c_bool
-
     def _last_error(self) -> str | None:
-        pointer = self._lib.mmd_runtime_last_error_message()
-        if not pointer:
+        value = self._lib.mmd_runtime_last_error_message()
+        if not value:
             return None
-        # Copy immediately: this thread-local pointer expires on the next FFI call.
-        return ctypes.string_at(pointer).decode("utf-8", errors="replace")
+        # c_char_p copies the borrowed C string to bytes before returning. Keep
+        # integer-pointer handling for lightweight fake libraries in pure tests.
+        copied = value if isinstance(value, bytes) else ctypes.string_at(value)
+        return copied.decode("utf-8", errors="replace")
 
     def _failure(self, operation: str) -> NativeRuntimeError:
         detail = self._last_error()
@@ -209,6 +148,59 @@ class RuntimeLibrary:
         if not handle:
             raise self._failure("mmd_runtime_clip_create")
         return Clip(self, handle)
+
+    @staticmethod
+    def _input_bytes(data: bytes) -> tuple[object, int]:
+        if not data:
+            raise ValueError("native parser input must not be empty")
+        storage = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        return storage, len(data)
+
+    def parse_vmd_json(self, data: bytes) -> object:
+        storage, length = self._input_bytes(data)
+        return self.decode_owned_json(
+            self._lib.mmd_runtime_parse_vmd_json(storage, length),
+            "mmd_runtime_parse_vmd_json",
+        )
+
+    def parse_pmx_non_geometry_json(self, data: bytes) -> object:
+        storage, length = self._input_bytes(data)
+        return self.decode_owned_json(
+            self._lib.mmd_runtime_parse_pmx_non_geometry_json(storage, length),
+            "mmd_runtime_parse_pmx_non_geometry_json",
+        )
+
+    def create_pmx_geometry(self, data: bytes) -> PmxGeometry:
+        storage, length = self._input_bytes(data)
+        handle = self._lib.mmd_runtime_pmx_geometry_create(storage, length)
+        if not handle:
+            raise self._failure("mmd_runtime_pmx_geometry_create")
+        return PmxGeometry(self, handle)
+
+    def create_ik_chain(
+        self,
+        bones: Sequence[RigBone],
+        target_bone_slot: int,
+        links: Sequence[RigIkLink],
+        iteration_count: int,
+        limit_angle: float,
+    ) -> IkChain:
+        if not bones or not links:
+            raise ValueError("bones and links must not be empty")
+        native_bones = (RigBone * len(bones))(*bones)
+        native_links = (RigIkLink * len(links))(*links)
+        handle = self._lib.mmd_runtime_ik_chain_create(
+            native_bones,
+            len(bones),
+            target_bone_slot,
+            native_links,
+            len(links),
+            iteration_count,
+            limit_angle,
+        )
+        if not handle:
+            raise self._failure("mmd_runtime_ik_chain_create")
+        return IkChain(self, handle, len(bones), len(links))
 
     def copy_owned_bytes(self, buffer: ByteBuffer, operation: str) -> bytes:
         if buffer.len == 0 or not buffer.data:
@@ -354,4 +346,101 @@ class Clip:
         if self._handle is None:
             return
         self._runtime._lib.mmd_runtime_clip_free(self._handle)
+        self._handle = None
+
+
+class PmxGeometry:
+    """Owned parsed-PMX geometry handle."""
+
+    def __init__(self, runtime: RuntimeLibrary, handle: int) -> None:
+        self._runtime = runtime
+        self._handle: int | None = handle
+
+    def __enter__(self) -> PmxGeometry:
+        self._require_open()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def _require_open(self) -> int:
+        if self._handle is None:
+            raise NativeRuntimeError("PMX geometry handle is closed")
+        return self._handle
+
+    def positions_bytes(self) -> bytes:
+        return self._runtime.copy_owned_bytes(
+            self._runtime._lib.mmd_runtime_pmx_geometry_positions_buffer(
+                self._require_open()
+            ),
+            "mmd_runtime_pmx_geometry_positions_buffer",
+        )
+
+    def close(self) -> None:
+        if self._handle is None:
+            return
+        self._runtime._lib.mmd_runtime_pmx_geometry_free(self._handle)
+        self._handle = None
+
+
+class IkChain:
+    """Owned IK-chain primitive with caller-owned solve output."""
+
+    def __init__(
+        self, runtime: RuntimeLibrary, handle: int, bone_count: int, link_count: int
+    ) -> None:
+        self._runtime = runtime
+        self._handle: int | None = handle
+        self._bone_count = bone_count
+        self._link_count = link_count
+
+    def __enter__(self) -> IkChain:
+        self._require_open()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def _require_open(self) -> int:
+        if self._handle is None:
+            raise NativeRuntimeError("IK chain handle is closed")
+        return self._handle
+
+    def solve(
+        self,
+        local_rotations_xyzw: Sequence[float],
+        goal_position_xyz: Sequence[float],
+        *,
+        tolerance: float = 1.0e-3,
+        max_iterations_cap: int = 0,
+    ) -> tuple[list[float], IkSolveStats]:
+        if len(local_rotations_xyzw) != self._bone_count * 4:
+            raise ValueError("local rotations must contain four floats per bone")
+        if len(goal_position_xyz) != 3:
+            raise ValueError("goal position must contain three floats")
+        rotations = (ctypes.c_float * len(local_rotations_xyzw))(
+            *local_rotations_xyzw
+        )
+        goal = (ctypes.c_float * 3)(*goal_position_xyz)
+        output = (ctypes.c_float * (self._link_count * 4))()
+        stats = IkSolveStats()
+        if not self._runtime._lib.mmd_runtime_ik_chain_solve(
+            self._require_open(),
+            None,
+            None,
+            rotations,
+            goal,
+            tolerance,
+            max_iterations_cap,
+            output,
+            len(output),
+            ctypes.byref(stats),
+        ):
+            raise self._runtime._failure("mmd_runtime_ik_chain_solve")
+        return list(output), stats
+
+    def close(self) -> None:
+        if self._handle is None:
+            return
+        self._runtime._lib.mmd_runtime_ik_chain_free(self._handle)
         self._handle = None

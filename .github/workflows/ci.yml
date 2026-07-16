@@ -40,3 +40,28 @@ jobs:
         run: |
           cargo check -p mmd-anim-physics-bullet --no-default-features
           cargo test -p mmd-anim-cli -p mmd-anim-ffi --no-default-features
+
+  python-ffi:
+    name: Python FFI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Check Python ABI drift
+        run: python tools/check_python_abi_drift.py
+
+      - name: Build release C ABI library
+        run: cargo build -p mmd-anim-ffi --release
+
+      - name: Run Python binding tests with native library
+        run: python -m unittest discover -s bindings/python/tests -v

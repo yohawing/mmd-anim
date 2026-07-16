@@ -10,8 +10,14 @@ Run the tests from the repository root:
 python -m unittest discover -s bindings/python/tests -v
 ```
 
-The native lifecycle smoke uses `MMD_RUNTIME_LIBRARY` when set, otherwise it
-looks for the platform cdylib under `target/release`.  It creates a one-bone
-model and empty owned clip, evaluates a nonzero clip frame, copies the world
-matrix, and frees clip/instance/model handles.  Without either library, only
-that native test is skipped; pure ABI/ownership tests still run.
+The native lifecycle and parser/geometry/IK smokes use `MMD_RUNTIME_LIBRARY`
+when set; otherwise they look for the platform cdylib under `target/release`.
+They create a one-bone model and empty owned clip, evaluate a nonzero clip
+frame, copy the world matrix, parse tracked PMX/VMD fixtures, read an owned
+geometry buffer, solve an IK primitive, and free all handles. Without either
+library, native tests are skipped; pure ABI/ownership and header-drift tests
+still run.
+
+The ctypes signature manifest is `mmd_anim/_abi.py`. After changing
+`mmd_runtime.h`, update that manifest for every wrapped declaration, then run
+`python tools/check_python_abi_drift.py`.

@@ -15,6 +15,7 @@ sys.path.insert(0, str(PYTHON_BINDING_ROOT))
 
 from mmd_anim._runtime import (  # noqa: E402
     EXPECTED_ABI_VERSION,
+    FEATURE_PHYSICS_BULLET_NATIVE,
     LIBRARY_ENV,
     AbiVersionError,
     ByteBuffer,
@@ -22,6 +23,8 @@ from mmd_anim._runtime import (  # noqa: E402
     Instance,
     Model,
     NativeRuntimeError,
+    NativeStatusError,
+    PhysicsWorld,
     RigBone,
     RigIkLink,
     RuntimeLibrary,
@@ -33,6 +36,122 @@ from mmd_anim._abi import ctypes_type  # noqa: E402
 
 
 class PureBindingTests(unittest.TestCase):
+    def test_native_physics_capability_bit(self) -> None:
+        class FakeLibrary:
+            def __init__(self, flags: int) -> None:
+                self.flags = flags
+
+            def mmd_runtime_feature_flags(self) -> int:
+                return self.flags
+
+        runtime = object.__new__(RuntimeLibrary)
+        runtime._lib = FakeLibrary(0)
+        self.assertEqual(runtime.feature_flags(), 0)
+        self.assertFalse(runtime.supports_native_physics())
+
+        runtime._lib = FakeLibrary(FEATURE_PHYSICS_BULLET_NATIVE)
+        self.assertEqual(runtime.feature_flags(), FEATURE_PHYSICS_BULLET_NATIVE)
+        self.assertTrue(runtime.supports_native_physics())
+
+    def test_native_status_error_names_and_detail(self) -> None:
+        self.assertIs(ctypes_type("mmd_runtime_status_t"), ctypes.c_int)
+        self.assertIs(
+            ctypes_type("mmd_runtime_physics_world_t**"),
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        expected = {
+            0: "OK",
+            1: "INVALID_INPUT",
+            2: "UNSUPPORTED",
+            3: "BUFFER_TOO_SMALL",
+            4: "ERROR",
+        }
+        for status, name in expected.items():
+            with self.subTest(status=status):
+                error = NativeStatusError("test_operation", status, "native detail")
+                self.assertEqual(error.status, status)
+                self.assertEqual(error.status_name, name)
+                self.assertIn("native detail", str(error))
+
+    def test_physics_world_create_validates_and_cleans_failed_output(self) -> None:
+        class FakeLibrary:
+            def __init__(self, status: int, write_handle: bool) -> None:
+                self.status = status
+                self.write_handle = write_handle
+                self.create_calls = 0
+                self.freed: list[int] = []
+
+            def mmd_runtime_physics_world_create_from_pmx_bytes(
+                self, data: object, length: int, out_world: object
+            ) -> int:
+                self.create_calls += 1
+                if self.write_handle:
+                    ctypes.cast(out_world, ctypes.POINTER(ctypes.c_void_p))[0] = 77
+                return self.status
+
+            def mmd_runtime_physics_world_free(self, world: int) -> None:
+                self.freed.append(world)
+
+            def mmd_runtime_last_error_message(self) -> bytes:
+                return b"physics unavailable"
+
+        empty_runtime = object.__new__(RuntimeLibrary)
+        empty_runtime._lib = FakeLibrary(0, False)
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            empty_runtime.create_physics_world_from_pmx_bytes(b"")
+        self.assertEqual(empty_runtime._lib.create_calls, 0)
+
+        failed_runtime = object.__new__(RuntimeLibrary)
+        failed_runtime._lib = FakeLibrary(2, True)
+        with self.assertRaises(NativeStatusError) as caught:
+            failed_runtime.create_physics_world_from_pmx_bytes(b"pmx")
+        self.assertEqual(caught.exception.status_name, "UNSUPPORTED")
+        self.assertIn("physics unavailable", str(caught.exception))
+        self.assertEqual(failed_runtime._lib.freed, [77])
+
+        null_runtime = object.__new__(RuntimeLibrary)
+        null_runtime._lib = FakeLibrary(0, False)
+        with self.assertRaisesRegex(NativeRuntimeError, "NULL world"):
+            null_runtime.create_physics_world_from_pmx_bytes(b"pmx")
+
+    def test_physics_set_status_json_and_idempotent_close(self) -> None:
+        class FakeLibrary:
+            def __init__(self) -> None:
+                self.payload = b""
+                self.free_calls = 0
+
+            def mmd_runtime_physics_params_set_json(
+                self, world: int, data: object, length: int
+            ) -> int:
+                self.payload = bytes(data[:length])
+                return 1
+
+            def mmd_runtime_last_error_message(self) -> bytes:
+                return "無効な設定".encode()
+
+            def mmd_runtime_physics_world_free(self, world: int) -> None:
+                self.free_calls += 1
+
+        runtime = object.__new__(RuntimeLibrary)
+        runtime._lib = FakeLibrary()
+        world = PhysicsWorld(runtime, 9)
+
+        with self.assertRaises(TypeError):
+            world.set_params_json([("schema_version", 1)])  # type: ignore[arg-type]
+        with self.assertRaises(NativeStatusError) as caught:
+            world.set_params_json({"名前": "剛体", "schema_version": 1})
+        self.assertEqual(caught.exception.status, 1)
+        self.assertEqual(caught.exception.status_name, "INVALID_INPUT")
+        self.assertIn("無効な設定", str(caught.exception))
+        self.assertEqual(
+            runtime._lib.payload,
+            '{"schema_version":1,"名前":"剛体"}'.encode(),
+        )
+
+        world.close()
+        world.close()
+        self.assertEqual(runtime._lib.free_calls, 1)
+
     def test_f32_arrays_use_stdlib_storage_and_zero_length_policy(self) -> None:
         class FakeLibrary:
             def mmd_runtime_instance_morph_weight_len(self, instance: int) -> int:
@@ -287,6 +406,33 @@ class NativeRepresentativeSmoke(unittest.TestCase):
         self.assertEqual(vmd["metadata"]["counts"]["bones"], 5)
         self.assertEqual(vmd["metadata"]["maxFrame"], 30)
         self.assertEqual(vmd["boneFrames"][3]["frame"], 15)
+
+    def test_physics_parameter_json_roundtrip_is_fail_atomic(self) -> None:
+        if not self.runtime.supports_native_physics():
+            self.skipTest(
+                "release DLL does not advertise native Bullet physics capability"
+            )
+        world = self.runtime.create_physics_world_from_pmx_bytes(self.pmx)
+        self.addCleanup(world.close)
+
+        before = world.params_json()
+        self.assertEqual(
+            before,
+            {"schema_version": 1, "rigid_bodies": {}, "joints": {}},
+        )
+        world.set_params_json(before)
+        self.assertEqual(world.params_json(), before)
+
+        invalid = dict(before)
+        invalid["schema_version"] = 2
+        with self.assertRaises(NativeStatusError) as caught:
+            world.set_params_json(invalid)
+        self.assertEqual(caught.exception.status, 1)
+        self.assertEqual(caught.exception.status_name, "INVALID_INPUT")
+        self.assertEqual(world.params_json(), before)
+
+        world.close()
+        world.close()
 
     def test_repository_fixture_import_evaluate_and_idempotent_free(self) -> None:
         model = self.runtime.create_model_from_pmx_bytes(self.pmx)

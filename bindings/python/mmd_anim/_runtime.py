@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from array import array
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -14,11 +15,35 @@ from ._abi import ByteBuffer, IkSolveStats, RigBone, RigIkLink, bind_functions
 
 
 EXPECTED_ABI_VERSION = 2
+FEATURE_PHYSICS_BULLET_NATIVE = 1 << 1
 LIBRARY_ENV = "MMD_RUNTIME_LIBRARY"
 
 
 class NativeRuntimeError(RuntimeError):
     """Raised when loading or calling the native runtime fails."""
+
+
+_STATUS_NAMES = {
+    0: "OK",
+    1: "INVALID_INPUT",
+    2: "UNSUPPORTED",
+    3: "BUFFER_TOO_SMALL",
+    4: "ERROR",
+}
+
+
+class NativeStatusError(NativeRuntimeError):
+    """Raised when a status-returning native function does not return OK."""
+
+    def __init__(self, operation: str, status: int, detail: str | None) -> None:
+        self.operation = operation
+        self.status = int(status)
+        self.status_name = _STATUS_NAMES.get(self.status, "UNKNOWN_STATUS")
+        self.detail = detail
+        message = f"{operation} failed with {self.status_name} ({self.status})"
+        if detail:
+            message += f": {detail}"
+        super().__init__(message)
 
 
 class AbiVersionError(NativeRuntimeError):
@@ -100,6 +125,12 @@ class RuntimeLibrary:
         bind_functions(lib)
         _require_abi_version(lib.mmd_runtime_abi_version())
 
+    def feature_flags(self) -> int:
+        return int(self._lib.mmd_runtime_feature_flags())
+
+    def supports_native_physics(self) -> bool:
+        return bool(self.feature_flags() & FEATURE_PHYSICS_BULLET_NATIVE)
+
     def _last_error(self) -> str | None:
         value = self._lib.mmd_runtime_last_error_message()
         if not value:
@@ -112,6 +143,11 @@ class RuntimeLibrary:
     def _failure(self, operation: str) -> NativeRuntimeError:
         detail = self._last_error()
         return NativeRuntimeError(f"{operation} failed" + (f": {detail}" if detail else ""))
+
+    def _require_ok(self, status: int, operation: str) -> None:
+        numeric_status = int(status)
+        if numeric_status != 0:
+            raise NativeStatusError(operation, numeric_status, self._last_error())
 
     def create_model(
         self, parent_indices: Sequence[int], rest_positions_xyz: Sequence[float]
@@ -137,6 +173,23 @@ class RuntimeLibrary:
         if not handle:
             raise self._failure("mmd_runtime_model_create_from_pmx_bytes")
         return Model(self, handle)
+
+    def create_physics_world_from_pmx_bytes(self, data: bytes) -> PhysicsWorld:
+        storage, length = self._input_bytes(data)
+        out_world = ctypes.c_void_p()
+        operation = "mmd_runtime_physics_world_create_from_pmx_bytes"
+        status = self._lib.mmd_runtime_physics_world_create_from_pmx_bytes(
+            storage, length, ctypes.byref(out_world)
+        )
+        try:
+            self._require_ok(status, operation)
+        except NativeStatusError:
+            if out_world.value:
+                self._lib.mmd_runtime_physics_world_free(out_world.value)
+            raise
+        if not out_world.value:
+            raise NativeRuntimeError(f"{operation} returned OK with a NULL world")
+        return PhysicsWorld(self, out_world.value)
 
     def create_clip_from_vmd_bytes(self, model: Model, data: bytes) -> Clip:
         if model._runtime is not self:
@@ -422,6 +475,61 @@ class Clip:
         if self._handle is None:
             return
         self._runtime._lib.mmd_runtime_clip_free(self._handle)
+        self._handle = None
+
+
+class PhysicsWorld:
+    """Owned opaque PMX-derived physics world for parameter inspection."""
+
+    def __init__(self, runtime: RuntimeLibrary, handle: int) -> None:
+        self._runtime = runtime
+        self._handle: int | None = handle
+
+    def __enter__(self) -> PhysicsWorld:
+        self._require_open()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def _require_open(self) -> int:
+        if self._handle is None:
+            raise NativeRuntimeError("physics world handle is closed")
+        return self._handle
+
+    def params_json(self) -> dict[str, object]:
+        operation = "mmd_runtime_physics_params_get_json"
+        decoded = self._runtime.decode_owned_json(
+            self._runtime._lib.mmd_runtime_physics_params_get_json(
+                self._require_open()
+            ),
+            operation,
+        )
+        if not isinstance(decoded, dict):
+            raise NativeRuntimeError(f"{operation} did not return a JSON object")
+        return decoded
+
+    def set_params_json(self, params: Mapping[str, object]) -> None:
+        if not isinstance(params, Mapping):
+            raise TypeError("params must be a mapping")
+        payload = json.dumps(
+            dict(params),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        storage, length = self._runtime._input_bytes(payload)
+        operation = "mmd_runtime_physics_params_set_json"
+        status = self._runtime._lib.mmd_runtime_physics_params_set_json(
+            self._require_open(), storage, length
+        )
+        self._runtime._require_ok(status, operation)
+
+    def close(self) -> None:
+        if self._handle is None:
+            return
+        self._runtime._lib.mmd_runtime_physics_world_free(self._handle)
         self._handle = None
 
 

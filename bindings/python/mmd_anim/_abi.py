@@ -42,6 +42,7 @@ STRUCT_SPECS: dict[str, tuple[FieldSpec, ...]] = {
 
 FUNCTION_SPECS: dict[str, FunctionSpec] = {
     "mmd_runtime_abi_version": ("uint32_t", ()),
+    "mmd_runtime_feature_flags": ("uint32_t", ()),
     "mmd_runtime_last_error_message": ("const char*", ()),
     "mmd_runtime_byte_buffer_free": ("void", ("mmd_runtime_ffi_byte_buffer_t",)),
     "mmd_runtime_parse_vmd_json": (
@@ -145,6 +146,22 @@ FUNCTION_SPECS: dict[str, FunctionSpec] = {
         "bool",
         ("const mmd_runtime_clip_t*", "uint32_t*", "uint32_t*"),
     ),
+    "mmd_runtime_physics_world_create_from_pmx_bytes": (
+        "mmd_runtime_status_t",
+        ("const uint8_t*", "size_t", "mmd_runtime_physics_world_t**"),
+    ),
+    "mmd_runtime_physics_world_free": (
+        "void",
+        ("mmd_runtime_physics_world_t*",),
+    ),
+    "mmd_runtime_physics_params_get_json": (
+        "mmd_runtime_ffi_byte_buffer_t",
+        ("const mmd_runtime_physics_world_t*",),
+    ),
+    "mmd_runtime_physics_params_set_json": (
+        "mmd_runtime_status_t",
+        ("mmd_runtime_physics_world_t*", "const uint8_t*", "size_t"),
+    ),
     "mmd_runtime_ik_chain_create": (
         "mmd_runtime_ik_chain_t*",
         (
@@ -205,6 +222,7 @@ _SCALARS: dict[str, object] = {
     "bool": ctypes.c_bool,
     "float": ctypes.c_float,
     "int32_t": ctypes.c_int32,
+    "mmd_runtime_status_t": ctypes.c_int,
     "uint8_t": ctypes.c_uint8,
     "uint32_t": ctypes.c_uint32,
     "size_t": ctypes.c_size_t,
@@ -223,6 +241,8 @@ def ctypes_type(c_type: str) -> object:
         return STRUCT_TYPES[c_type]
     if c_type.startswith("const "):
         c_type = c_type.removeprefix("const ")
+    if c_type.endswith("**"):
+        return ctypes.POINTER(ctypes.c_void_p)
     if c_type.endswith("*"):
         pointee = c_type[:-1]
         if pointee in _SCALARS and _SCALARS[pointee] is not None:

@@ -65,10 +65,26 @@ FUNCTION_SPECS: dict[str, FunctionSpec] = {
         "mmd_runtime_model_t*",
         ("const int32_t*", "const float*", "size_t"),
     ),
+    "mmd_runtime_model_create_from_pmx_bytes": (
+        "mmd_runtime_model_t*",
+        ("const uint8_t*", "size_t"),
+    ),
+    "mmd_runtime_model_bone_count": (
+        "size_t",
+        ("const mmd_runtime_model_t*",),
+    ),
+    "mmd_runtime_model_morph_count": (
+        "size_t",
+        ("const mmd_runtime_model_t*",),
+    ),
     "mmd_runtime_model_free": ("void", ("mmd_runtime_model_t*",)),
     "mmd_runtime_instance_create": (
         "mmd_runtime_instance_t*",
         ("const mmd_runtime_model_t*", "size_t"),
+    ),
+    "mmd_runtime_instance_create_for_model": (
+        "mmd_runtime_instance_t*",
+        ("const mmd_runtime_model_t*",),
     ),
     "mmd_runtime_instance_free": ("void", ("mmd_runtime_instance_t*",)),
     "mmd_runtime_instance_evaluate_rest_pose": (
@@ -105,6 +121,14 @@ FUNCTION_SPECS: dict[str, FunctionSpec] = {
         ),
     ),
     "mmd_runtime_clip_free": ("void", ("mmd_runtime_clip_t*",)),
+    "mmd_runtime_clip_create_from_vmd_bytes_for_model": (
+        "mmd_runtime_clip_t*",
+        ("const mmd_runtime_model_t*", "const uint8_t*", "size_t"),
+    ),
+    "mmd_runtime_clip_frame_range": (
+        "bool",
+        ("const mmd_runtime_clip_t*", "uint32_t*", "uint32_t*"),
+    ),
     "mmd_runtime_ik_chain_create": (
         "mmd_runtime_ik_chain_t*",
         (

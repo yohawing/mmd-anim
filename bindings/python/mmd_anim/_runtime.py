@@ -130,6 +130,27 @@ class RuntimeLibrary:
             raise self._failure("mmd_runtime_model_create")
         return Model(self, handle)
 
+    def create_model_from_pmx_bytes(self, data: bytes) -> Model:
+        storage, length = self._input_bytes(data)
+        handle = self._lib.mmd_runtime_model_create_from_pmx_bytes(storage, length)
+        if not handle:
+            raise self._failure("mmd_runtime_model_create_from_pmx_bytes")
+        return Model(self, handle)
+
+    def create_clip_from_vmd_bytes(self, model: Model, data: bytes) -> Clip:
+        if model._runtime is not self:
+            raise ValueError("model and clip must belong to the same RuntimeLibrary")
+        model_handle = model._require_open()
+        storage, length = self._input_bytes(data)
+        handle = self._lib.mmd_runtime_clip_create_from_vmd_bytes_for_model(
+            model_handle, storage, length
+        )
+        if not handle:
+            raise self._failure(
+                "mmd_runtime_clip_create_from_vmd_bytes_for_model"
+            )
+        return Clip(self, handle)
+
     def create_empty_clip(self) -> Clip:
         handle = self._lib.mmd_runtime_clip_create(
             None,
@@ -251,6 +272,26 @@ class Model:
         self._instances.add(instance)
         return instance
 
+    def bone_count(self) -> int:
+        return int(
+            self._runtime._lib.mmd_runtime_model_bone_count(self._require_open())
+        )
+
+    def morph_count(self) -> int:
+        return int(
+            self._runtime._lib.mmd_runtime_model_morph_count(self._require_open())
+        )
+
+    def create_instance_for_model(self) -> Instance:
+        handle = self._runtime._lib.mmd_runtime_instance_create_for_model(
+            self._require_open()
+        )
+        if not handle:
+            raise self._runtime._failure("mmd_runtime_instance_create_for_model")
+        instance = Instance(self, handle)
+        self._instances.add(instance)
+        return instance
+
     def close(self) -> None:
         if self._handle is None:
             return
@@ -341,6 +382,15 @@ class Clip:
         if self._handle is None:
             raise NativeRuntimeError("clip handle is closed")
         return self._handle
+
+    def frame_range(self) -> tuple[int, int]:
+        first = ctypes.c_uint32()
+        last = ctypes.c_uint32()
+        if not self._runtime._lib.mmd_runtime_clip_frame_range(
+            self._require_open(), ctypes.byref(first), ctypes.byref(last)
+        ):
+            raise self._runtime._failure("mmd_runtime_clip_frame_range")
+        return first.value, last.value
 
     def close(self) -> None:
         if self._handle is None:

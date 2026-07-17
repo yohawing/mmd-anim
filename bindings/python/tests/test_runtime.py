@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import sys
 import unittest
@@ -31,6 +32,57 @@ from mmd_anim._abi import ctypes_type  # noqa: E402
 
 
 class PureBindingTests(unittest.TestCase):
+    def test_empty_import_bytes_are_rejected_before_native_calls(self) -> None:
+        class FakeLibrary:
+            def __init__(self) -> None:
+                self.model_import_calls = 0
+                self.clip_import_calls = 0
+
+            def mmd_runtime_model_create_from_pmx_bytes(
+                self, data: object, length: int
+            ) -> int:
+                self.model_import_calls += 1
+                return 1
+
+            def mmd_runtime_clip_create_from_vmd_bytes_for_model(
+                self, model: int, data: object, length: int
+            ) -> int:
+                self.clip_import_calls += 1
+                return 1
+
+        runtime = object.__new__(RuntimeLibrary)
+        runtime._lib = FakeLibrary()
+        model = Model(runtime, 1)
+
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            runtime.create_model_from_pmx_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            runtime.create_clip_from_vmd_bytes(model, b"")
+
+        self.assertEqual(runtime._lib.model_import_calls, 0)
+        self.assertEqual(runtime._lib.clip_import_calls, 0)
+
+    def test_cross_runtime_model_import_is_rejected_before_native_call(self) -> None:
+        class FakeLibrary:
+            def __init__(self) -> None:
+                self.clip_import_calls = 0
+
+            def mmd_runtime_clip_create_from_vmd_bytes_for_model(
+                self, model: int, data: object, length: int
+            ) -> int:
+                self.clip_import_calls += 1
+                return 1
+
+        runtime = object.__new__(RuntimeLibrary)
+        runtime._lib = FakeLibrary()
+        foreign_runtime = object.__new__(RuntimeLibrary)
+        foreign_runtime._lib = FakeLibrary()
+
+        with self.assertRaisesRegex(ValueError, "same RuntimeLibrary"):
+            runtime.create_clip_from_vmd_bytes(Model(foreign_runtime, 1), b"vmd")
+
+        self.assertEqual(runtime._lib.clip_import_calls, 0)
+
     def test_const_char_pointer_and_borrowed_last_error_copy(self) -> None:
         self.assertIs(ctypes_type("const char*"), ctypes.c_char_p)
 
@@ -181,6 +233,29 @@ class NativeRepresentativeSmoke(unittest.TestCase):
         self.assertEqual(vmd["metadata"]["counts"]["bones"], 5)
         self.assertEqual(vmd["metadata"]["maxFrame"], 30)
         self.assertEqual(vmd["boneFrames"][3]["frame"], 15)
+
+    def test_repository_fixture_import_evaluate_and_idempotent_free(self) -> None:
+        model = self.runtime.create_model_from_pmx_bytes(self.pmx)
+        self.addCleanup(model.close)
+        clip = self.runtime.create_clip_from_vmd_bytes(model, self.vmd)
+        self.addCleanup(clip.close)
+        instance = model.create_instance_for_model()
+        self.addCleanup(instance.close)
+
+        self.assertEqual(model.bone_count(), 3)
+        self.assertEqual(model.morph_count(), 0)
+        self.assertEqual(clip.frame_range(), (0, 30))
+
+        instance.evaluate_clip_frame(clip, 15.0)
+        matrices = instance.world_matrices()
+        self.assertEqual(len(matrices), model.bone_count() * 16)
+        self.assertTrue(all(math.isfinite(value) for value in matrices))
+
+        model.close()  # Cascades the still-live instance.
+        model.close()
+        instance.close()
+        clip.close()
+        clip.close()
 
     def test_pmx_geometry_positions_buffer_and_idempotent_free(self) -> None:
         geometry = self.runtime.create_pmx_geometry(self.pmx)

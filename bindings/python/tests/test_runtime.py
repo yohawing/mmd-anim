@@ -6,6 +6,7 @@ import math
 import os
 import sys
 import unittest
+from array import array
 from pathlib import Path
 
 
@@ -32,6 +33,59 @@ from mmd_anim._abi import ctypes_type  # noqa: E402
 
 
 class PureBindingTests(unittest.TestCase):
+    def test_f32_arrays_use_stdlib_storage_and_zero_length_policy(self) -> None:
+        class FakeLibrary:
+            def mmd_runtime_instance_morph_weight_len(self, instance: int) -> int:
+                return 0
+
+            def mmd_runtime_instance_world_matrix_f32_len(
+                self, instance: int
+            ) -> int:
+                return 0
+
+            def mmd_runtime_instance_skinning_matrix_f32_len(
+                self, instance: int
+            ) -> int:
+                return 0
+
+            def mmd_runtime_instance_copy_morph_weights(
+                self, instance: int, output: object, length: int
+            ) -> bool:
+                raise AssertionError("zero-length morph output must not be constructed")
+
+            def mmd_runtime_instance_copy_world_matrices(
+                self, instance: int, output: object, length: int
+            ) -> bool:
+                raise AssertionError("zero-length world output must not be constructed")
+
+            def mmd_runtime_instance_copy_skinning_matrices(
+                self, instance: int, output: object, length: int
+            ) -> bool:
+                raise AssertionError(
+                    "zero-length skinning output must not be constructed"
+                )
+
+            def mmd_runtime_last_error_message(self) -> None:
+                return None
+
+        runtime = object.__new__(RuntimeLibrary)
+        runtime._lib = FakeLibrary()
+        instance = Instance(Model(runtime, 1), 2)
+
+        morphs = instance.morph_weights_f32()
+        self.assertIsInstance(morphs, array)
+        self.assertEqual(morphs.typecode, "f")
+        self.assertEqual(morphs.itemsize, ctypes.sizeof(ctypes.c_float))
+        self.assertEqual(len(morphs), 0)
+        with self.assertRaisesRegex(
+            NativeRuntimeError, "world_matrix_f32_len failed"
+        ):
+            instance.world_matrices_f32()
+        with self.assertRaisesRegex(
+            NativeRuntimeError, "skinning_matrix_f32_len failed"
+        ):
+            instance.skinning_matrices_f32()
+
     def test_empty_import_bytes_are_rejected_before_native_calls(self) -> None:
         class FakeLibrary:
             def __init__(self) -> None:
@@ -192,7 +246,7 @@ class NativeLifecycleSmoke(unittest.TestCase):
                 clip = runtime.create_empty_clip()
                 with clip:
                     instance.evaluate_clip_frame(clip, 12.5)
-                    matrices = instance.world_matrices()
+                    matrices = instance.world_matrices_f32()
                 clip.close()  # Idempotent after context-manager cleanup.
 
         self.assertEqual(len(matrices), 16)
@@ -247,9 +301,18 @@ class NativeRepresentativeSmoke(unittest.TestCase):
         self.assertEqual(clip.frame_range(), (0, 30))
 
         instance.evaluate_clip_frame(clip, 15.0)
-        matrices = instance.world_matrices()
-        self.assertEqual(len(matrices), model.bone_count() * 16)
-        self.assertTrue(all(math.isfinite(value) for value in matrices))
+        world = instance.world_matrices_f32()
+        skinning = instance.skinning_matrices_f32()
+        morphs = instance.morph_weights_f32()
+        self.assertEqual(len(world), model.bone_count() * 16)
+        self.assertEqual(len(skinning), model.bone_count() * 16)
+        self.assertEqual(len(morphs), model.morph_count())
+        for output in (world, skinning, morphs):
+            self.assertIsInstance(output, array)
+            self.assertEqual(output.typecode, "f")
+        self.assertTrue(all(math.isfinite(value) for value in world))
+        self.assertTrue(all(math.isfinite(value) for value in skinning))
+        self.assertTrue(all(math.isfinite(value) for value in morphs))
 
         model.close()  # Cascades the still-live instance.
         model.close()

@@ -103,6 +103,22 @@ FUNCTION_SPECS: dict[str, FunctionSpec] = {
         "bool",
         ("const mmd_runtime_instance_t*", "float*", "size_t"),
     ),
+    "mmd_runtime_instance_skinning_matrix_f32_len": (
+        "size_t",
+        ("const mmd_runtime_instance_t*",),
+    ),
+    "mmd_runtime_instance_copy_skinning_matrices": (
+        "bool",
+        ("const mmd_runtime_instance_t*", "float*", "size_t"),
+    ),
+    "mmd_runtime_instance_morph_weight_len": (
+        "size_t",
+        ("const mmd_runtime_instance_t*",),
+    ),
+    "mmd_runtime_instance_copy_morph_weights": (
+        "bool",
+        ("const mmd_runtime_instance_t*", "float*", "size_t"),
+    ),
     "mmd_runtime_clip_create": (
         "mmd_runtime_clip_t*",
         (

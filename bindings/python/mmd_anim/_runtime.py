@@ -6,6 +6,7 @@ import ctypes
 import json
 import os
 import sys
+from array import array
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -338,23 +339,48 @@ class Instance:
                 "mmd_runtime_instance_evaluate_clip_frame"
             )
 
-    def world_matrices(self) -> list[float]:
+    def _copy_f32_array(
+        self,
+        length_function: str,
+        copy_function: str,
+        *,
+        allow_empty: bool,
+    ) -> array:
         handle = self._require_open()
-        length = self._model._runtime._lib.mmd_runtime_instance_world_matrix_f32_len(
-            handle
-        )
+        library = self._model._runtime._lib
+        length = int(getattr(library, length_function)(handle))
         if length == 0:
+            if allow_empty:
+                return array("f")
             raise self._model._runtime._failure(
-                "mmd_runtime_instance_world_matrix_f32_len"
+                length_function
             )
-        output = (ctypes.c_float * length)()
-        if not self._model._runtime._lib.mmd_runtime_instance_copy_world_matrices(
-            handle, output, length
-        ):
-            raise self._model._runtime._failure(
-                "mmd_runtime_instance_copy_world_matrices"
-            )
-        return list(output)
+        output = array("f", (0.0,)) * length
+        native_output = (ctypes.c_float * length).from_buffer(output)
+        if not getattr(library, copy_function)(handle, native_output, length):
+            raise self._model._runtime._failure(copy_function)
+        return output
+
+    def world_matrices_f32(self) -> array:
+        return self._copy_f32_array(
+            "mmd_runtime_instance_world_matrix_f32_len",
+            "mmd_runtime_instance_copy_world_matrices",
+            allow_empty=False,
+        )
+
+    def skinning_matrices_f32(self) -> array:
+        return self._copy_f32_array(
+            "mmd_runtime_instance_skinning_matrix_f32_len",
+            "mmd_runtime_instance_copy_skinning_matrices",
+            allow_empty=False,
+        )
+
+    def morph_weights_f32(self) -> array:
+        return self._copy_f32_array(
+            "mmd_runtime_instance_morph_weight_len",
+            "mmd_runtime_instance_copy_morph_weights",
+            allow_empty=True,
+        )
 
     def close(self) -> None:
         if self._handle is None:

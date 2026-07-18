@@ -707,7 +707,9 @@ fn read_bones_with_local_axes(
             // Preserve the historical PMX import policy: malformed optional
             // append metadata is ignored at the tolerant file-format boundary.
             // Host-authored typed descriptors remain strictly validated.
-            if let Some(source) = append_parent {
+            if let Some(source) = append_parent
+                && append_ratio.is_finite()
+            {
                 let target_idx = bones.len();
                 append_transforms.push(RuntimeAppendTransformDescriptorV1 {
                     target_bone: BoneIndex(target_idx as u32),
@@ -760,7 +762,11 @@ fn read_bones_with_local_axes(
                 let angle_limit = if has_limit != 0 {
                     let min = r.read_vec3()?;
                     let max = r.read_vec3()?;
-                    Some(IkAngleLimit::new(min, max))
+                    // Angle limits are optional metadata at the PMX boundary.
+                    // Keep the link, but drop a malformed limit before the
+                    // strict typed-descriptor compiler sees it.
+                    (min.is_finite() && max.is_finite() && min.cmple(max).bitmask() == 0b111)
+                        .then(|| IkAngleLimit::new(min, max))
                 } else {
                     None
                 };
@@ -777,6 +783,8 @@ fn read_bones_with_local_axes(
             // PMX import success.
             if let Some(target_bone) = ik_target
                 && ik_loop_count > 0
+                && ik_limit_angle.is_finite()
+                && ik_limit_angle >= 0.0
             {
                 ik_solvers.push(RuntimeIkSolverDescriptorV1 {
                     ik_bone,
@@ -4798,8 +4806,12 @@ pub fn import_pmx_runtime(data: &[u8]) -> Result<PmxRuntimeImport, ImportError> 
         morphs: morph_descriptor,
         ..bone_descriptor
     };
-    let model = compile_runtime_model_descriptor_v1(&descriptor)
-        .map_err(ImportError::ModelDescriptorFailed)?;
+    let model = compile_runtime_model_descriptor_v1(&descriptor).map_err(|error| {
+        ImportError::ModelBuildFailed(mmd_anim_runtime::ModelBuildError::InvalidRuntimeDescriptor {
+            path: error.path,
+            reason: error.kind.to_string(),
+        })
+    })?;
 
     Ok(PmxRuntimeImport {
         model,
@@ -6943,6 +6955,34 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_append_ratio_is_sanitized_to_no_append() {
+        for ratio in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+            buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+            buf.extend_from_slice(&build_empty_vertex_section());
+            buf.extend_from_slice(&build_empty_face_section());
+            buf.extend_from_slice(&build_empty_texture_section());
+            buf.extend_from_slice(&build_empty_material_section());
+            buf.extend_from_slice(&build_bone_section_header(1));
+            buf.extend_from_slice(&build_bone_name_bytes("NonFiniteAppend"));
+            buf.extend_from_slice(&build_bone_name_bytes(""));
+            buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+            buf.extend_from_slice(&(-1i16).to_le_bytes());
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            buf.extend_from_slice(&BONE_FLAG_APPEND_ROTATE.to_le_bytes());
+            buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+            // The source index is structurally valid; only the optional ratio is malformed.
+            buf.extend_from_slice(&0i16.to_le_bytes());
+            buf.extend_from_slice(&ratio.to_le_bytes());
+            buf.extend_from_slice(&0i32.to_le_bytes());
+
+            let imported = import_pmx_runtime(&buf).expect("non-finite append ratio is tolerated");
+            assert!(imported.model.append_transforms().is_empty());
+        }
+    }
+
+    #[test]
     fn pmx_fixed_axis_constrains_ik_end_to_end() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
@@ -7050,6 +7090,80 @@ mod tests {
         assert_eq!(imported.model.ik_solvers()[0].links[0].bone, BoneIndex(0));
     }
 
+    #[test]
+    fn invalid_ik_limit_angle_is_sanitized_to_no_solver() {
+        for limit_angle in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0] {
+            let imported = import_pmx_runtime(&build_local_axis_limit_pmx_with_metadata(
+                false,
+                16,
+                1,
+                0,
+                limit_angle,
+                [-std::f32::consts::FRAC_PI_2, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ))
+            .expect("invalid optional IK limit angle is tolerated");
+            assert_eq!(imported.model.ik_count(), 0);
+        }
+    }
+
+    #[test]
+    fn invalid_ik_angle_limit_is_dropped_but_solver_is_retained() {
+        let cases = [
+            ([f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            ([1.0, 0.0, 0.0], [0.0, 1.0, 1.0]),
+        ];
+        for (min, max) in cases {
+            let imported = import_pmx_runtime(&build_local_axis_limit_pmx_with_metadata(
+                false,
+                16,
+                1,
+                0,
+                std::f32::consts::PI,
+                min,
+                max,
+            ))
+            .expect("invalid optional IK angle limit is tolerated");
+            assert_eq!(imported.model.ik_count(), 1);
+            assert!(
+                imported.model.ik_solvers()[0].links[0]
+                    .angle_limit
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_import_rejects_non_finite_derived_local_rest_position() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(2));
+
+        for (name, position, parent) in [("Parent", f32::MAX, -1i16), ("Child", -f32::MAX, 0i16)] {
+            buf.extend_from_slice(&build_bone_name_bytes(name));
+            buf.extend_from_slice(&build_bone_name_bytes(""));
+            buf.extend_from_slice(&[position, 0.0, 0.0].map(f32::to_le_bytes).concat());
+            buf.extend_from_slice(&parent.to_le_bytes());
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        }
+        buf.extend_from_slice(&0i32.to_le_bytes());
+
+        let result = import_pmx_runtime(&buf);
+        assert!(matches!(
+            result,
+            Err(ImportError::ModelBuildFailed(
+                mmd_anim_runtime::ModelBuildError::InvalidRuntimeDescriptor { path, .. }
+            )) if path == "bones[1].rest_position"
+        ));
+    }
+
     fn build_local_axis_limit_pmx(has_local_axis: bool) -> Vec<u8> {
         build_local_axis_limit_pmx_with_loop_count(has_local_axis, 16)
     }
@@ -7066,6 +7180,26 @@ mod tests {
         ik_loop_count: i32,
         ik_target: i16,
         ik_link: i16,
+    ) -> Vec<u8> {
+        build_local_axis_limit_pmx_with_metadata(
+            has_local_axis,
+            ik_loop_count,
+            ik_target,
+            ik_link,
+            std::f32::consts::PI,
+            [-std::f32::consts::FRAC_PI_2, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        )
+    }
+
+    fn build_local_axis_limit_pmx_with_metadata(
+        has_local_axis: bool,
+        ik_loop_count: i32,
+        ik_target: i16,
+        ik_link: i16,
+        ik_limit_angle: f32,
+        angle_limit_min: [f32; 3],
+        angle_limit_max: [f32; 3],
     ) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
@@ -7113,16 +7247,16 @@ mod tests {
         buf.extend_from_slice(&1i16.to_le_bytes());
         buf.extend_from_slice(&ik_target.to_le_bytes());
         buf.extend_from_slice(&ik_loop_count.to_le_bytes());
-        buf.extend_from_slice(&std::f32::consts::PI.to_le_bytes());
+        buf.extend_from_slice(&ik_limit_angle.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes());
         buf.extend_from_slice(&ik_link.to_le_bytes());
         buf.push(1);
-        buf.extend_from_slice(&(-std::f32::consts::FRAC_PI_2).to_le_bytes());
-        buf.extend_from_slice(&0.0f32.to_le_bytes());
-        buf.extend_from_slice(&0.0f32.to_le_bytes());
-        buf.extend_from_slice(&0.0f32.to_le_bytes());
-        buf.extend_from_slice(&0.0f32.to_le_bytes());
-        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        for value in angle_limit_min {
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in angle_limit_max {
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf
     }

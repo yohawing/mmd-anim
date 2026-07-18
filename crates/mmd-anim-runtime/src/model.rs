@@ -249,6 +249,8 @@ impl IkSolverInit {
 pub enum ModelBuildError {
     #[error("model must contain at least one bone")]
     EmptyModel,
+    #[error("runtime descriptor validation failed at {path}: {reason}")]
+    InvalidRuntimeDescriptor { path: String, reason: String },
     #[error("bone {bone} references invalid parent {parent}")]
     InvalidParent { bone: usize, parent: u32 },
     #[error("bone hierarchy contains a cycle involving bone {bone}")]

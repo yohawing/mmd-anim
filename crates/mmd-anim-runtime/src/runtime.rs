@@ -12,9 +12,9 @@ mod world;
 
 #[cfg(test)]
 use crate::ik_primitive::{
-    LimitedAxesLinkStepInput, PlaneLinkStepInput, axis_vec, decompose_euler_xyz, euler_xyz_to_quat,
-    limit_axis_bounds, quat_to_rotation_mat3, signed_projected_angle, solve_limited_axes_link_step,
-    solve_plane_link_step,
+    axis_vec, decompose_euler_xyz, euler_xyz_to_quat, limit_axis_bounds, quat_to_rotation_mat3,
+    signed_projected_angle, solve_limited_axes_link_step, solve_plane_link_step,
+    LimitedAxesLinkStepInput, PlaneLinkStepInput,
 };
 
 #[derive(Debug)]
@@ -47,14 +47,26 @@ impl IkScratch {
 }
 
 #[derive(Debug)]
+struct GroupMorphFrame {
+    morph_idx: usize,
+    weight: f32,
+    next_offset: u32,
+}
+
+#[derive(Debug)]
 struct MorphScratch {
     expanded_weights: Vec<f32>,
+    group_stack: Vec<GroupMorphFrame>,
 }
 
 impl MorphScratch {
     fn new(morph_count: usize) -> Self {
         Self {
             expanded_weights: vec![0.0; morph_count],
+            // Grow to the graph depth on first use, then reuse that allocation.
+            // Reserving morph_count here would penalize models with many
+            // non-group morphs and every additional runtime instance.
+            group_stack: Vec::new(),
         }
     }
 }

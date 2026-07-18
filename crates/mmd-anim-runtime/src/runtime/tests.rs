@@ -1464,6 +1464,43 @@ fn assert_near(actual: f32, expected: f32) {
     );
 }
 
+fn deep_group_morph_model(depth: usize) -> Arc<ModelArena> {
+    let group_offsets = (0..depth.saturating_sub(1))
+        .map(|index| crate::GroupMorphOffset {
+            child_morph: crate::MorphIndex((index + 1) as u32),
+            ratio: 1.0,
+        })
+        .collect();
+    let group_spans = (0..depth)
+        .map(|index| {
+            if index + 1 < depth {
+                crate::MorphOffsetSpan {
+                    start: index as u32,
+                    count: 1,
+                }
+            } else {
+                crate::MorphOffsetSpan::default()
+            }
+        })
+        .collect();
+    Arc::new(
+        ModelArena::new_with_morphs(
+            vec![BoneInit::new(None, Vec3A::ZERO)],
+            Vec::new(),
+            Vec::new(),
+            crate::MorphInit {
+                morph_count: depth as u32,
+                vertex_spans: vec![crate::MorphOffsetSpan::default(); depth],
+                bone_spans: vec![crate::MorphOffsetSpan::default(); depth],
+                group_offsets,
+                group_spans,
+                ..crate::MorphInit::default()
+            },
+        )
+        .unwrap(),
+    )
+}
+
 #[test]
 fn bone_morph_position_offset_drives_world_position() {
     let model = Arc::new(
@@ -1792,6 +1829,48 @@ fn chained_group_morphs_descend_to_bone_morph_weight() {
         translation(runtime.world_matrices()[1]),
         Vec3A::new(0.0, 1.0, 0.25),
     );
+}
+
+#[test]
+fn deep_group_morph_chain_expands_without_native_stack_recursion() {
+    const DEPTH: usize = 20_000;
+    let model = deep_group_morph_model(DEPTH);
+    let mut runtime = RuntimeInstance::new(model);
+    runtime
+        .pose_mut()
+        .set_morph_weight(crate::MorphIndex(0), 1.0);
+
+    runtime.expand_morphs();
+
+    assert_eq!(runtime.morph_weights()[0], 1.0);
+    assert_eq!(runtime.morph_weights()[DEPTH - 1], 1.0);
+    assert!(runtime.morph_scratch.group_stack.capacity() >= DEPTH);
+}
+
+#[test]
+fn host_pose_evaluates_deep_group_morph_chain_without_native_stack_recursion() {
+    const DEPTH: usize = 20_000;
+    let model = deep_group_morph_model(DEPTH);
+    let mut runtime = RuntimeInstance::new(model);
+    let position_offsets = [Vec3A::ZERO];
+    let rotations = [Quat::IDENTITY];
+    let scales = [Vec3A::ONE];
+    let mut morph_weights = vec![0.0; DEPTH];
+    morph_weights[0] = 1.0;
+    let ik_enabled: [u8; 0] = [];
+
+    runtime
+        .apply_host_pose(&crate::HostPoseView {
+            local_position_offsets: &position_offsets,
+            local_rotations: &rotations,
+            local_scales: &scales,
+            morph_weights: &morph_weights,
+            ik_enabled: &ik_enabled,
+        })
+        .unwrap();
+    runtime.evaluate_current_pose();
+
+    assert_eq!(runtime.morph_weights()[DEPTH - 1], 1.0);
 }
 
 #[test]
@@ -2883,6 +2962,7 @@ fn scratch_morph_capacity_stable_after_repeated_clip_frame() {
     runtime.evaluate_clip_frame(&clip, 5.0);
 
     let cap_expanded = runtime.morph_scratch.expanded_weights.capacity();
+    let cap_group_stack = runtime.morph_scratch.group_stack.capacity();
 
     for _ in 0..10 {
         runtime.evaluate_clip_frame(&clip, 5.0);
@@ -2891,6 +2971,10 @@ fn scratch_morph_capacity_stable_after_repeated_clip_frame() {
     assert_eq!(
         runtime.morph_scratch.expanded_weights.capacity(),
         cap_expanded
+    );
+    assert_eq!(
+        runtime.morph_scratch.group_stack.capacity(),
+        cap_group_stack
     );
 }
 

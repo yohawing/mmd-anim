@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from ._abi import ByteBuffer, IkSolveStats, RigBone, RigIkLink, bind_functions
+from ._model_descriptor import (
+    FEATURE_MODEL_DESCRIPTOR,
+    ModelDefinition,
+    marshal_model_definition,
+)
 
 
 EXPECTED_ABI_VERSION = 2
@@ -131,6 +136,14 @@ class RuntimeLibrary:
     def supports_native_physics(self) -> bool:
         return bool(self.feature_flags() & FEATURE_PHYSICS_BULLET_NATIVE)
 
+    def supports_model_descriptor(self) -> bool:
+        """Return whether the optional typed descriptor constructor is usable."""
+
+        return bool(
+            self.feature_flags() & FEATURE_MODEL_DESCRIPTOR
+            and hasattr(self._lib, "mmd_runtime_model_create_from_descriptor")
+        )
+
     def _last_error(self) -> str | None:
         value = self._lib.mmd_runtime_last_error_message()
         if not value:
@@ -172,6 +185,28 @@ class RuntimeLibrary:
         handle = self._lib.mmd_runtime_model_create_from_pmx_bytes(storage, length)
         if not handle:
             raise self._failure("mmd_runtime_model_create_from_pmx_bytes")
+        return Model(self, handle)
+
+    def create_model_from_descriptor(self, definition: ModelDefinition) -> Model:
+        """Create a model from an immutable, payload-free typed snapshot.
+
+        The carrier is deliberately kept in a local until the native call
+        returns.  The ABI constructor copies all pointed-to records before it
+        returns, so no Python storage is retained by the resulting ``Model``.
+        """
+
+        if not self.supports_model_descriptor():
+            raise NativeRuntimeError(
+                "mmd_runtime_model_create_from_descriptor is unsupported by this runtime"
+            )
+        carrier = marshal_model_definition(definition)
+        handle = self._lib.mmd_runtime_model_create_from_descriptor(
+            ctypes.byref(carrier.descriptor)
+        )
+        if not handle:
+            # Read the indexed TLS error immediately, before any other native
+            # operation can overwrite it.
+            raise self._failure("mmd_runtime_model_create_from_descriptor")
         return Model(self, handle)
 
     def create_physics_world_from_pmx_bytes(self, data: bytes) -> PhysicsWorld:

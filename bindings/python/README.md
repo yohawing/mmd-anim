@@ -35,3 +35,14 @@ python tools/check_model_descriptor_abi.py
 available and checks the version/feature guard, create/instance/rest-evaluate,
 world and skinning copies, deterministic fresh creation, and indexed
 thread-local errors for invalid descriptors.
+
+The optional typed descriptor helper is kept internal (there is no package-root
+re-export).  Build an immutable `ModelDefinition` from `Bone`, `IkSolver`,
+`IkLink`, append, and morph records, then call
+`RuntimeLibrary.create_model_from_descriptor`.  Bone list position is the
+native index and `Bone.rest_position_pmx_xyz` is an absolute PMX-space rest
+position.  The helper keeps all six contiguous ctypes arrays alive through the
+constructor; the native model owns its copy after the call returns.  A
+descriptor-created model intentionally has no bone/morph name map, so passing
+it to `create_clip_from_vmd_bytes` preserves the explicit native name-resolution
+error.

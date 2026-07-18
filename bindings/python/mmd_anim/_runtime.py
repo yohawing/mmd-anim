@@ -11,7 +11,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable, Sequence
 
-from ._abi import ByteBuffer, IkSolveStats, RigBone, RigIkLink, bind_functions
+from ._abi import (
+    ByteBuffer,
+    IkSolveStats,
+    PhysicsRigidbodyBinding,
+    PhysicsWorldStepReport,
+    RigBone,
+    RigIkLink,
+    bind_functions,
+)
 from ._model_descriptor import (
     FEATURE_MODEL_DESCRIPTOR,
     ModelDefinition,
@@ -226,6 +234,61 @@ class RuntimeLibrary:
             raise NativeRuntimeError(f"{operation} returned OK with a NULL world")
         return PhysicsWorld(self, out_world.value)
 
+    def create_physics_world_from_descriptors(self, definition: object) -> PhysicsWorld:
+        """Create a typed physics world, copying descriptor arrays on return."""
+
+        from ._live_reload import marshal_physics_definition
+
+        carrier = marshal_physics_definition(definition)  # type: ignore[arg-type]
+        out_world = ctypes.c_void_p()
+        operation = "mmd_runtime_physics_world_create"
+        status = self._lib.mmd_runtime_physics_world_create(
+            carrier.rigidbodies,
+            0 if carrier.rigidbodies is None else len(carrier.rigidbodies),
+            carrier.joints,
+            0 if carrier.joints is None else len(carrier.joints),
+            ctypes.byref(out_world),
+        )
+        try:
+            self._require_ok(status, operation)
+        except NativeStatusError:
+            if out_world.value:
+                self._lib.mmd_runtime_physics_world_free(out_world.value)
+            raise
+        if not out_world.value:
+            raise NativeRuntimeError(f"{operation} returned OK with a NULL world")
+        return PhysicsWorld(self, out_world.value)
+
+    def evaluate_host_frame(
+        self,
+        instance: Instance,
+        world: PhysicsWorld,
+        pose: object,
+        *,
+        action: int,
+        dt_seconds: float,
+        ik_tolerance: float = 1.0e-3,
+        ik_max_iterations_cap: int = 0,
+    ) -> PhysicsWorldStepReport:
+        if instance._model._runtime is not self or world._runtime is not self:
+            raise ValueError("instance, physics world, and runtime must match")
+        from ._live_reload import marshal_host_pose
+
+        carrier = marshal_host_pose(pose)  # type: ignore[arg-type]
+        report = PhysicsWorldStepReport()
+        status = self._lib.mmd_runtime_evaluate_host_frame(
+            instance._require_open(),
+            world._require_open(),
+            ctypes.byref(carrier.view),
+            action,
+            dt_seconds,
+            ik_tolerance,
+            ik_max_iterations_cap,
+            ctypes.byref(report),
+        )
+        self._require_ok(status, "mmd_runtime_evaluate_host_frame")
+        return report
+
     def create_clip_from_vmd_bytes(self, model: Model, data: bytes) -> Clip:
         if model._runtime is not self:
             raise ValueError("model and clip must belong to the same RuntimeLibrary")
@@ -371,6 +434,9 @@ class Model:
             self._runtime._lib.mmd_runtime_model_morph_count(self._require_open())
         )
 
+    def ik_count(self) -> int:
+        return int(self._runtime._lib.mmd_runtime_model_ik_count(self._require_open()))
+
     def create_instance_for_model(self) -> Instance:
         handle = self._runtime._lib.mmd_runtime_instance_create_for_model(
             self._require_open()
@@ -416,6 +482,35 @@ class Instance:
             raise self._model._runtime._failure(
                 "mmd_runtime_instance_evaluate_rest_pose"
             )
+
+    def apply_host_pose(self, pose: object) -> None:
+        from ._live_reload import marshal_host_pose
+
+        carrier = marshal_host_pose(pose)  # type: ignore[arg-type]
+        status = self._model._runtime._lib.mmd_runtime_instance_apply_host_pose(
+            self._require_open(), ctypes.byref(carrier.view)
+        )
+        self._model._runtime._require_ok(status, "mmd_runtime_instance_apply_host_pose")
+
+    def apply_host_pose_and_evaluate_before_physics(self, pose: object) -> None:
+        from ._live_reload import marshal_host_pose
+
+        carrier = marshal_host_pose(pose)  # type: ignore[arg-type]
+        status = self._model._runtime._lib.mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(
+            self._require_open(), ctypes.byref(carrier.view)
+        )
+        self._model._runtime._require_ok(
+            status,
+            "mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics",
+        )
+
+    def evaluate_current_pose_after_physics(self) -> None:
+        status = self._model._runtime._lib.mmd_runtime_instance_evaluate_current_pose_after_physics(
+            self._require_open()
+        )
+        self._model._runtime._require_ok(
+            status, "mmd_runtime_instance_evaluate_current_pose_after_physics"
+        )
 
     def evaluate_clip_frame(self, clip: Clip, frame: float) -> None:
         if clip._runtime is not self._model._runtime:
@@ -560,6 +655,44 @@ class PhysicsWorld:
             self._require_open(), storage, length
         )
         self._runtime._require_ok(status, operation)
+
+    def rigidbody_count(self) -> int:
+        count = ctypes.c_size_t()
+        status = self._runtime._lib.mmd_runtime_physics_world_rigidbody_count(
+            self._require_open(), ctypes.byref(count)
+        )
+        self._runtime._require_ok(status, "mmd_runtime_physics_world_rigidbody_count")
+        return count.value
+
+    def rigidbody_bindings(self) -> list[PhysicsRigidbodyBinding]:
+        count = self.rigidbody_count()
+        if count == 0:
+            return []
+        output = (PhysicsRigidbodyBinding * count)()
+        actual = ctypes.c_size_t()
+        status = self._runtime._lib.mmd_runtime_physics_world_copy_rigidbody_bindings(
+            self._require_open(), output, count, ctypes.byref(actual)
+        )
+        self._runtime._require_ok(
+            status, "mmd_runtime_physics_world_copy_rigidbody_bindings"
+        )
+        return list(output[: actual.value])
+
+    def rigidbody_states_f32(self) -> array:
+        """Copy rigidbody position/quaternion state as contiguous f32 values."""
+
+        count = self.rigidbody_count()
+        if count == 0:
+            return array("f")
+        output = array("f", (0.0,)) * (count * 7)
+        native_output = (ctypes.c_float * len(output)).from_buffer(output)
+        status = self._runtime._lib.mmd_runtime_physics_world_copy_rigidbody_states(
+            self._require_open(), native_output, len(output)
+        )
+        self._runtime._require_ok(
+            status, "mmd_runtime_physics_world_copy_rigidbody_states"
+        )
+        return output
 
     def close(self) -> None:
         if self._handle is None:

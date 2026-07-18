@@ -6970,7 +6970,7 @@ fn evaluate_host_frame_rejects_incompatible_world() {
     let message = last_error_cstr().expect("expected bone-count mismatch error message");
     assert_eq!(
         message.to_bytes(),
-        b"physics world requires more bones than the instance provides"
+        b"physics_world.rigidbodies[1].bone_index: 2 exceeds instance bone_count 2"
     );
 
     let mut matrices_after = vec![0.0f32; mat_len];

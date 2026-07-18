@@ -3971,9 +3971,11 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_current_pose_before_physi
 
 /// Applies a host-provided local pose to the runtime instance.
 ///
-/// Validates counts, finiteness, and applies atomically - no partial
-/// mutation on failure. After success the pose is set but world matrices
-/// are NOT yet evaluated; call evaluate_current_pose_before_physics next.
+/// The local arrays are the pre-morph base pose. The runtime validates counts
+/// and finiteness, applies atomically - no partial mutation on failure - then
+/// expands group/bone morph weights natively. Hosts must not preapply morph
+/// bone deltas. After success the pose is set but world matrices are NOT yet
+/// evaluated; call evaluate_current_pose_before_physics next.
 ///
 /// # Safety
 ///
@@ -3998,9 +4000,11 @@ pub unsafe extern "C" fn mmd_runtime_instance_apply_host_pose(
 
 /// Applies a host pose and evaluates the before-physics phase in one call.
 ///
-/// Equivalent to apply_host_pose followed by
-/// evaluate_current_pose_before_physics. On failure, neither the pose nor
-/// the evaluation is applied.
+/// The local arrays follow the pre-morph base-pose contract of
+/// `mmd_runtime_instance_apply_host_pose`; group/bone morph expansion is
+/// native and hosts must not preapply morph bone deltas. Equivalent to
+/// apply_host_pose followed by evaluate_current_pose_before_physics. On
+/// failure, neither the pose nor the evaluation is applied.
 ///
 /// # Safety
 ///
@@ -4695,12 +4699,18 @@ fn validate_host_frame_physics_impl(
         return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
     };
     let instance_bone_count = instance.runtime.world_matrices().len();
-    let required = world.world.required_bone_count();
-    if required > instance_bone_count {
-        return status_failure(
-            MmdRuntimeStatus::InvalidInput,
-            "physics world requires more bones than the instance provides",
-        );
+    for (rigidbody_index, binding) in world.world.rigidbody_bindings.iter().enumerate() {
+        let Some(bone_index) = binding.bone_index else {
+            continue;
+        };
+        if bone_index >= instance_bone_count {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                &format!(
+                    "physics_world.rigidbodies[{rigidbody_index}].bone_index: {bone_index} exceeds instance bone_count {instance_bone_count}"
+                ),
+            );
+        }
     }
     if action == MmdRuntimePhysicsFrameAction::Step
         && !instance.runtime.physics_mode().steps_backend()

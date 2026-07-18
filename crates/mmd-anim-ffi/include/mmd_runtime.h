@@ -459,10 +459,13 @@ typedef struct mmd_runtime_ffi_physics_rigidbody_binding {
     uint32_t mode;        /* mmd_runtime_physics_rigidbody_mode_t values */
 } mmd_runtime_ffi_physics_rigidbody_binding_t;
 
+/* Host pose local arrays are the pre-morph base pose.  The runtime validates
+   and copies them, then expands group/bone morph weights natively.  Hosts must
+   not preapply morph bone deltas to these local arrays. */
 typedef struct mmd_runtime_ffi_host_pose_view {
-    const float*   local_position_offsets_xyz;
-    const float*   local_rotation_xyzw;
-    const float*   local_scales_xyz;
+    const float*   local_position_offsets_xyz; /* pre-morph base offsets */
+    const float*   local_rotation_xyzw;         /* pre-morph base rotations */
+    const float*   local_scales_xyz;            /* pre-morph base scales */
     size_t         bone_count;
     const float*   morph_weights;
     size_t         morph_count;
@@ -1089,10 +1092,16 @@ mmd_runtime_status_t mmd_runtime_instance_evaluate_clip_frame_before_physics_wit
 mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_before_physics(
     mmd_runtime_instance_t* instance);
 
+/* Applies a complete host pose.  Local arrays must contain the pre-morph base
+   pose; native validation and group/bone morph expansion happen after all
+   validation and before the next evaluation.  Hosts must not preapply morph
+   bone deltas.  World matrices are not evaluated by this call. */
 mmd_runtime_status_t mmd_runtime_instance_apply_host_pose(
     mmd_runtime_instance_t *instance,
     const mmd_runtime_ffi_host_pose_view_t *view);
 
+/* Applies the same pre-morph host pose contract as apply_host_pose, expands
+   group/bone morphs natively, and evaluates the before-physics phase. */
 mmd_runtime_status_t mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(
     mmd_runtime_instance_t *instance,
     const mmd_runtime_ffi_host_pose_view_t *view);
@@ -1169,19 +1178,20 @@ mmd_runtime_status_t mmd_runtime_physics_world_step_runtime(
     float                                             dt_seconds,
     mmd_runtime_ffi_physics_world_step_report_t*      out_report);
 
-/* Applies a validated host pose, evaluates the before-physics phase, seeds or
-   steps the physics world (per `action`), and evaluates the after-physics
-   phase, all as a single atomic call. On failure applying the host pose, no
-   mutation occurs. For SEED, dt_seconds is ignored and out_report (when
-   non-null) is zeroed, since a seed resets rigid bodies to their
-   bone-derived positions without advancing the solver. For STEP, dt_seconds
-   must be finite and >= 0, and the instance's physics mode must be Trace or
-   Live; MMD_RUNTIME_STATUS_INVALID_INPUT is returned when the mode is Off.
-   Unknown action values return MMD_RUNTIME_STATUS_INVALID_INPUT.
-   MMD_RUNTIME_STATUS_INVALID_INPUT is also returned when the physics
-   world's rigidbody bindings reference bone indices outside the instance's
-   bone range. IK options apply to the before-physics phase; after-physics
-   uses defaults. */
+/* Applies a validated pre-morph host pose, expands Group/Bone morphs natively,
+   evaluates the before-physics phase, seeds or steps the physics world (per
+   `action`), and evaluates the after-physics phase, all as a single atomic
+   call. Hosts must not preapply morph bone deltas. On failure applying the
+   host pose, no mutation occurs. For SEED, dt_seconds is ignored and
+   out_report (when non-null) is zeroed, since a seed resets rigid bodies to
+   their bone-derived positions without advancing the solver. For STEP,
+   dt_seconds must be finite and >= 0, and the instance's physics mode must be
+   Trace or Live; MMD_RUNTIME_STATUS_INVALID_INPUT is returned when the mode
+   is Off. Unknown action values return MMD_RUNTIME_STATUS_INVALID_INPUT.
+   MMD_RUNTIME_STATUS_INVALID_INPUT is also returned with an indexed
+   `physics_world.rigidbodies[i].bone_index` detail when a binding is outside
+   the instance's bone range. IK options apply to the before-physics phase;
+   after-physics uses defaults. */
 mmd_runtime_status_t mmd_runtime_evaluate_host_frame(
     mmd_runtime_instance_t*                     instance,
     mmd_runtime_physics_world_t*                world,

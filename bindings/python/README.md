@@ -46,3 +46,19 @@ constructor; the native model owns its copy after the call returns.  A
 descriptor-created model intentionally has no bone/morph name map, so passing
 it to `create_clip_from_vmd_bytes` preserves the explicit native name-resolution
 error.
+
+`mmd_anim._live_reload` adds the host-neutral `HostPose`,
+`RuntimeHandleSet`, and `LiveRuntime` helpers for DCC integrations.  A
+`LiveRuntime.reload(definition, current_pose, physics_definition)` builds a new
+model and instance, applies the caller-owned current pose, and (when physics is
+provided) always creates a fresh typed physics world and validates/reseeds it
+with `SEED` before atomically swapping the handle set.  The old world, instance,
+and model are then closed in that order.  Per-frame pose/morph/IK updates use
+the host-pose API and do not rebuild descriptors.  `HostPose` local arrays are
+pre-morph base values; native runtime expansion applies Group/Bone morph
+deltas, so DCC hosts must not preapply those deltas.
+
+The current pose remains host-owned and must be supplied by the DCC; no pose
+getter or live in-place model mutation is provided.  Physics continuity,
+mid-drag physics parameter updates, automatic name-map generation, and
+package-root re-exports are intentionally out of scope.

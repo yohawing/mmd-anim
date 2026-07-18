@@ -18,16 +18,16 @@ use mmd_anim_format::fbx::{
 };
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
-    AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, DensePoseSequenceView,
-    FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
-    FlatIkLinkInput, FlatIkSolverInput, HostPoseView, IkAngleLimit, IkChainDefinition,
-    IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkSolveOptions, MorphAnimationBinding,
-    MorphIndex, MorphInit, MorphKeyframe, MorphTrack, MovableBoneKeyframe, MovableBoneTrack,
-    PhysicsMode, PhysicsStepStats, PhysicsTickConfig, PoseReductionReport,
-    PropertyAnimationBinding, PropertyKeyframe, ReducedPoseSequence, ReductionTarget,
-    ReductionTolerances, RuntimeInstance, SkeletonSnapshot, build_append_transforms_from_flat_iter,
-    build_bones_from_flat, build_ik_solvers_from_flat_iter, build_morph_init_from_flat_iter,
-    solve_append_transform,
+    AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, BoneInit,
+    DensePoseSequenceView, FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput,
+    FlatGroupMorphInput, FlatIkLinkInput, FlatIkSolverInput, HostPoseView, IkAngleLimit,
+    IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkSolveOptions,
+    LocalAxis, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack,
+    MovableBoneKeyframe, MovableBoneTrack, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
+    PoseReductionReport, PropertyAnimationBinding, PropertyKeyframe, ReducedPoseSequence,
+    ReductionTarget, ReductionTolerances, RuntimeInstance, SkeletonSnapshot,
+    build_append_transforms_from_flat_iter, build_bones_from_flat, build_ik_solvers_from_flat_iter,
+    build_morph_init_from_flat_iter, solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 2;
@@ -295,6 +295,20 @@ pub struct MmdRuntimeFfiIkLink {
     pub angle_limit_max_xyz: [f32; 3],
 }
 
+/// Complete per-bone descriptor for payload-free runtime model construction.
+/// `rest_position_xyz` is the absolute PMX-space rest position; the runtime
+/// derives the parent-relative rest translation and inverse bind matrix.
+#[repr(C)]
+pub struct MmdRuntimeFfiModelBoneV2 {
+    pub parent_index: i32,
+    pub rest_position_xyz: [f32; 3],
+    pub transform_order: i32,
+    pub flags: u32,
+    pub fixed_axis_xyz: [f32; 3],
+    pub local_axis_x_xyz: [f32; 3],
+    pub local_axis_z_xyz: [f32; 3],
+}
+
 #[repr(C)]
 pub struct MmdRuntimeFfiRigIkLink {
     pub bone_slot: u32,
@@ -549,6 +563,9 @@ const APPEND_FLAG_ROTATION: u32 = 1;
 const APPEND_FLAG_TRANSLATION: u32 = 1 << 1;
 const APPEND_FLAG_LOCAL: u32 = 1 << 2;
 const IK_LINK_FLAG_ANGLE_LIMIT: u32 = 1;
+const MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS: u32 = 1;
+const MODEL_BONE_FLAG_FIXED_AXIS: u32 = 1 << 1;
+const MODEL_BONE_FLAG_LOCAL_AXIS: u32 = 1 << 2;
 const RIG_BONE_FIXED_AXIS: u32 = 1;
 const FFI_PANIC_ERROR_MESSAGE: &str = "internal panic in mmd-anim-ffi";
 const FFI_ERR_INVALID_INPUT: &str = "invalid input";
@@ -3273,6 +3290,59 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full_with_morphs(
             group_morph_offset_count: group_morph_offset_count,
         },
     )
+}
+
+/// Creates a complete runtime model from typed scene descriptors without PMX bytes.
+///
+/// Bone rest positions use raw absolute PMX coordinates. The runtime derives
+/// parent-relative rest translations and `translation(-absolute_position)`
+/// inverse bind matrices, matching PMX import. Remaining descriptor pointer
+/// contracts match `mmd_runtime_model_create_full_with_morphs`.
+///
+/// # Safety
+///
+/// `bones` must point to `bone_count` readable descriptors. Other descriptor
+/// pointers must be null when their count is zero, or point to that many
+/// readable entries. All pointers must remain valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_model_create_from_descriptors_v2(
+    bones: *const MmdRuntimeFfiModelBoneV2,
+    bone_count: usize,
+    ik_solvers: *const MmdRuntimeFfiIkSolver,
+    ik_solver_count: usize,
+    ik_links: *const MmdRuntimeFfiIkLink,
+    ik_link_count: usize,
+    append_transforms: *const MmdRuntimeFfiAppendTransform,
+    append_transform_count: usize,
+    morph_count: u32,
+    bone_morph_offsets: *const MmdRuntimeFfiBoneMorphOffset,
+    bone_morph_offset_count: usize,
+    group_morph_offsets: *const MmdRuntimeFfiGroupMorphOffset,
+    group_morph_offset_count: usize,
+) -> *mut MmdRuntimeModel {
+    ffi_guard(ptr::null_mut(), || {
+        if bones.is_null() || bone_count == 0 {
+            return ptr::null_mut();
+        }
+        unsafe {
+            create_runtime_model_from_ffi_input(RawModelInput {
+                model_bones_v2: bones,
+                bone_count,
+                ik_solvers,
+                ik_solver_count,
+                ik_links,
+                ik_link_count,
+                append_transforms,
+                append_transform_count,
+                morph_count,
+                bone_morph_offsets,
+                bone_morph_offset_count,
+                group_morph_offsets,
+                group_morph_offset_count,
+                ..RawModelInput::default()
+            })
+        }
+    })
 }
 
 /// Creates a model by importing a PMX binary from byte slice, keeping only
@@ -7017,6 +7087,7 @@ fn checked_range<T>(slice: &[T], offset: usize, count: usize) -> Option<&[T]> {
 struct RawModelInput {
     parent_indices: *const i32,
     rest_positions_xyz: *const f32,
+    model_bones_v2: *const MmdRuntimeFfiModelBoneV2,
     inverse_bind_matrices: *const f32,
     transform_orders: *const i32,
     bone_count: usize,
@@ -7038,6 +7109,7 @@ impl Default for RawModelInput {
         Self {
             parent_indices: ptr::null(),
             rest_positions_xyz: ptr::null(),
+            model_bones_v2: ptr::null(),
             inverse_bind_matrices: ptr::null(),
             transform_orders: ptr::null(),
             bone_count: 0,
@@ -7085,9 +7157,11 @@ unsafe fn create_runtime_model_from_ffi_input(input: RawModelInput) -> *mut MmdR
 }
 
 unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
-    let parents = unsafe { slice::from_raw_parts(input.parent_indices, input.bone_count) };
-    let positions =
-        unsafe { slice::from_raw_parts(input.rest_positions_xyz, input.bone_count * 3) };
+    let descriptor_bones = if input.model_bones_v2.is_null() {
+        None
+    } else {
+        Some(unsafe { slice::from_raw_parts(input.model_bones_v2, input.bone_count) })
+    };
     let inverse_bind_matrices = if input.inverse_bind_matrices.is_null() {
         &[]
     } else {
@@ -7102,13 +7176,21 @@ unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
     let ik_links = unsafe { checked_slice(input.ik_links, input.ik_link_count) }?;
     let append_transforms =
         unsafe { checked_slice(input.append_transforms, input.append_transform_count) }?;
-    let bones = build_bones_from_flat(FlatBoneInput {
-        parent_indices: parents,
-        rest_positions_xyz: positions,
-        inverse_bind_matrices,
-        transform_orders,
-    })
-    .ok()?;
+    let (bones, local_axes) = if let Some(descriptors) = descriptor_bones {
+        build_bones_from_descriptors_v2(descriptors)?
+    } else {
+        let parents = unsafe { slice::from_raw_parts(input.parent_indices, input.bone_count) };
+        let positions =
+            unsafe { slice::from_raw_parts(input.rest_positions_xyz, input.bone_count * 3) };
+        let bones = build_bones_from_flat(FlatBoneInput {
+            parent_indices: parents,
+            rest_positions_xyz: positions,
+            inverse_bind_matrices,
+            transform_orders,
+        })
+        .ok()?;
+        (bones, Vec::new())
+    };
 
     let ik_links = ik_links
         .iter()
@@ -7151,7 +7233,71 @@ unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
     let morph =
         build_morph_init_from_ffi(input.morph_count, bone_morph_offsets, group_morph_offsets)?;
 
-    ModelArena::new_with_morphs(bones, ik_solvers, append_transforms, morph).ok()
+    let model = ModelArena::new_with_morphs(bones, ik_solvers, append_transforms, morph).ok()?;
+    Some(model.with_local_axes(local_axes))
+}
+
+fn build_bones_from_descriptors_v2(
+    descriptors: &[MmdRuntimeFfiModelBoneV2],
+) -> Option<(Vec<BoneInit>, Vec<Option<LocalAxis>>)> {
+    let absolute_positions = descriptors
+        .iter()
+        .map(|bone| glam::Vec3A::from_array(bone.rest_position_xyz))
+        .collect::<Vec<_>>();
+    if absolute_positions
+        .iter()
+        .any(|position| !position.is_finite())
+    {
+        return None;
+    }
+
+    let mut bones = Vec::with_capacity(descriptors.len());
+    let mut local_axes = Vec::with_capacity(descriptors.len());
+    for (bone_index, descriptor) in descriptors.iter().enumerate() {
+        let parent = match descriptor.parent_index {
+            -1 => None,
+            index
+                if index >= 0
+                    && (index as usize) < descriptors.len()
+                    && index as usize != bone_index =>
+            {
+                Some(BoneIndex(index as u32))
+            }
+            _ => return None,
+        };
+        let absolute_position = absolute_positions[bone_index];
+        let rest_position = parent
+            .map(|index| absolute_position - absolute_positions[index.as_usize()])
+            .unwrap_or(absolute_position);
+        let fixed_axis = if descriptor.flags & MODEL_BONE_FLAG_FIXED_AXIS != 0 {
+            let axis = glam::Vec3A::from_array(descriptor.fixed_axis_xyz);
+            if !axis.is_finite() || axis.length_squared() <= f32::EPSILON {
+                return None;
+            }
+            Some(axis)
+        } else {
+            None
+        };
+        bones.push(BoneInit {
+            parent,
+            rest_position,
+            inverse_bind_matrix: glam::Mat4::from_translation((-absolute_position).into()),
+            transform_order: descriptor.transform_order,
+            transform_after_physics: descriptor.flags & MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS
+                != 0,
+            fixed_axis,
+            enforce_fixed_axis: false,
+        });
+        local_axes.push(if descriptor.flags & MODEL_BONE_FLAG_LOCAL_AXIS != 0 {
+            Some(LocalAxis {
+                x: glam::Vec3A::from_array(descriptor.local_axis_x_xyz),
+                z: glam::Vec3A::from_array(descriptor.local_axis_z_xyz),
+            })
+        } else {
+            None
+        });
+    }
+    Some((bones, local_axes))
 }
 
 fn build_morph_init_from_ffi(

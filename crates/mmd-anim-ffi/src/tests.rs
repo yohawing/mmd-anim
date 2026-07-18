@@ -3171,6 +3171,120 @@ fn applies_transform_order_to_append_chain_through_c_abi() {
 }
 
 #[test]
+fn descriptor_v2_matches_pmx_bone_rest_and_metadata_contract() {
+    let bones = [
+        MmdRuntimeFfiModelBoneV2 {
+            parent_index: -1,
+            rest_position_xyz: [1.0, 2.0, 3.0],
+            transform_order: 4,
+            flags: MODEL_BONE_FLAG_FIXED_AXIS | MODEL_BONE_FLAG_LOCAL_AXIS,
+            fixed_axis_xyz: [0.0, 2.0, 0.0],
+            local_axis_x_xyz: [0.0, 1.0, 0.0],
+            local_axis_z_xyz: [0.0, 0.0, 1.0],
+        },
+        MmdRuntimeFfiModelBoneV2 {
+            parent_index: 0,
+            rest_position_xyz: [5.0, 2.0, 3.0],
+            transform_order: 7,
+            flags: MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS,
+            fixed_axis_xyz: [0.0; 3],
+            local_axis_x_xyz: [0.0; 3],
+            local_axis_z_xyz: [0.0; 3],
+        },
+    ];
+    let model = unsafe {
+        mmd_runtime_model_create_from_descriptors_v2(
+            bones.as_ptr(),
+            bones.len(),
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+        )
+    };
+    assert!(!model.is_null());
+    let arena = unsafe { &(*model).model };
+    assert_eq!(
+        arena.rest_position(BoneIndex(0)),
+        glam::Vec3A::new(1.0, 2.0, 3.0)
+    );
+    assert_eq!(
+        arena.rest_position(BoneIndex(1)),
+        glam::Vec3A::new(4.0, 0.0, 0.0)
+    );
+    assert_eq!(arena.transform_order(BoneIndex(0)), 4);
+    assert_eq!(arena.transform_order(BoneIndex(1)), 7);
+    assert!(arena.transform_after_physics(BoneIndex(1)));
+    assert_eq!(arena.fixed_axis(BoneIndex(0)), Some(glam::Vec3A::Y));
+    assert!(arena.local_axis(BoneIndex(0)).is_some());
+
+    let instance = unsafe { mmd_runtime_instance_create(model, 0) };
+    assert!(!instance.is_null());
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    let mut world = [0.0f32; 32];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, world.as_mut_ptr(), world.len())
+    });
+    assert_eq!(&world[12..15], &[1.0, 2.0, 3.0]);
+    assert_eq!(&world[28..31], &[5.0, 2.0, 3.0]);
+    let mut skinning = [0.0f32; 32];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_skinning_matrices(instance, skinning.as_mut_ptr(), skinning.len())
+    });
+    assert_eq!(
+        &skinning[..16],
+        glam::Mat4::IDENTITY.to_cols_array().as_slice()
+    );
+    assert_eq!(
+        &skinning[16..],
+        glam::Mat4::IDENTITY.to_cols_array().as_slice()
+    );
+
+    unsafe {
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[test]
+fn descriptor_v2_rejects_invalid_parent_index() {
+    let bones = [MmdRuntimeFfiModelBoneV2 {
+        parent_index: 1,
+        rest_position_xyz: [0.0; 3],
+        transform_order: 0,
+        flags: 0,
+        fixed_axis_xyz: [0.0; 3],
+        local_axis_x_xyz: [0.0; 3],
+        local_axis_z_xyz: [0.0; 3],
+    }];
+    let model = unsafe {
+        mmd_runtime_model_create_from_descriptors_v2(
+            bones.as_ptr(),
+            bones.len(),
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+        )
+    };
+    assert!(model.is_null());
+}
+
+#[test]
 fn creates_bone_morph_through_c_abi() {
     let parents = [-1];
     let rest_positions = [0.0, 0.0, 0.0];

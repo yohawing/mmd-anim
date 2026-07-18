@@ -269,6 +269,21 @@ typedef struct mmd_runtime_ffi_ik_link {
     float    angle_limit_max_xyz[3];
 } mmd_runtime_ffi_ik_link_t;
 
+/* Complete bone descriptor for payload-free model construction.
+   rest_position_xyz is the absolute PMX-space rest position. */
+#define MMD_RUNTIME_MODEL_BONE_TRANSFORM_AFTER_PHYSICS (1u << 0)
+#define MMD_RUNTIME_MODEL_BONE_FIXED_AXIS              (1u << 1)
+#define MMD_RUNTIME_MODEL_BONE_LOCAL_AXIS              (1u << 2)
+typedef struct mmd_runtime_ffi_model_bone_v2 {
+    int32_t  parent_index;
+    float    rest_position_xyz[3];
+    int32_t  transform_order;
+    uint32_t flags;
+    float    fixed_axis_xyz[3];
+    float    local_axis_x_xyz[3];
+    float    local_axis_z_xyz[3];
+} mmd_runtime_ffi_model_bone_v2_t;
+
 typedef struct mmd_runtime_ffi_rig_ik_link {
     uint32_t bone_slot;
     bool     has_angle_limit;
@@ -906,6 +921,21 @@ mmd_runtime_model_t* mmd_runtime_model_create_full_with_morphs(
     size_t                                   bone_morph_offset_count,
     const mmd_runtime_ffi_group_morph_offset_t* group_morph_offsets,
     size_t                                   group_morph_offset_count);
+
+mmd_runtime_model_t* mmd_runtime_model_create_from_descriptors_v2(
+    const mmd_runtime_ffi_model_bone_v2_t*       bones,
+    size_t                                       bone_count,
+    const mmd_runtime_ffi_ik_solver_t*           ik_solvers,
+    size_t                                       ik_solver_count,
+    const mmd_runtime_ffi_ik_link_t*             ik_links,
+    size_t                                       ik_link_count,
+    const mmd_runtime_ffi_append_transform_t*    append_transforms,
+    size_t                                       append_transform_count,
+    uint32_t                                     morph_count,
+    const mmd_runtime_ffi_bone_morph_offset_t*   bone_morph_offsets,
+    size_t                                       bone_morph_offset_count,
+    const mmd_runtime_ffi_group_morph_offset_t*  group_morph_offsets,
+    size_t                                       group_morph_offset_count);
 
 mmd_runtime_model_t* mmd_runtime_model_create_from_pmx_bytes(
     const uint8_t* data,

@@ -868,21 +868,37 @@ fn visit_bone(
     state: &mut [VisitState],
     order: &mut Vec<BoneIndex>,
 ) -> Result<(), ModelBuildError> {
-    match state[bone] {
-        VisitState::Visited => return Ok(()),
-        VisitState::Visiting => return Err(ModelBuildError::ParentCycle { bone }),
-        VisitState::Unvisited => {}
+    if state[bone] == VisitState::Visited {
+        return Ok(());
     }
 
-    state[bone] = VisitState::Visiting;
+    // Explicit post-order stack keeps malformed/deep host descriptors from
+    // consuming the native call stack.  `expanded` is the return edge from a
+    // child to its parent in the former recursive implementation.
+    let mut stack = vec![(bone, false)];
+    while let Some((current, expanded)) = stack.pop() {
+        if expanded {
+            state[current] = VisitState::Visited;
+            order.push(BoneIndex(current as u32));
+            continue;
+        }
 
-    let parent = parent_indices[bone];
-    if parent >= 0 {
-        visit_bone(parent as usize, parent_indices, state, order)?;
+        match state[current] {
+            VisitState::Visited => continue,
+            VisitState::Visiting => {
+                return Err(ModelBuildError::ParentCycle { bone: current });
+            }
+            VisitState::Unvisited => {}
+        }
+
+        state[current] = VisitState::Visiting;
+        stack.push((current, true));
+        let parent = parent_indices[current];
+        if parent >= 0 {
+            stack.push((parent as usize, false));
+        }
     }
 
-    state[bone] = VisitState::Visited;
-    order.push(BoneIndex(bone as u32));
     Ok(())
 }
 
@@ -954,25 +970,40 @@ fn visit_group_morph(
     morph: &MorphInit,
     state: &mut [VisitState],
 ) -> Result<(), ModelBuildError> {
-    match state[morph_index] {
-        VisitState::Visited => return Ok(()),
-        VisitState::Visiting => {
-            return Err(ModelBuildError::GroupMorphCycle { morph: morph_index });
-        }
-        VisitState::Unvisited => {}
+    if state[morph_index] == VisitState::Visited {
+        return Ok(());
     }
 
+    // Iterative DFS equivalent to the previous recursive walk.  The second
+    // tuple member is the next offset in this morph's span to inspect.
+    let mut stack = vec![(morph_index, 0usize)];
     state[morph_index] = VisitState::Visiting;
-    let span = morph.group_spans[morph_index];
-    for offset_index in span.start..span.start + span.count {
-        let child = morph.group_offsets[offset_index as usize]
-            .child_morph
-            .as_usize();
-        if morph.group_spans[child].count > 0 {
-            visit_group_morph(child, morph, state)?;
+    while let Some((current, next_offset)) = stack.last_mut() {
+        let span = morph.group_spans[*current];
+        if *next_offset >= span.count as usize {
+            state[*current] = VisitState::Visited;
+            stack.pop();
+            continue;
+        }
+
+        let offset_index = span.start as usize + *next_offset;
+        *next_offset += 1;
+        let child = morph.group_offsets[offset_index].child_morph.as_usize();
+        if morph.group_spans[child].count == 0 {
+            continue;
+        }
+        match state[child] {
+            VisitState::Visited => {}
+            VisitState::Visiting => {
+                return Err(ModelBuildError::GroupMorphCycle { morph: child });
+            }
+            VisitState::Unvisited => {
+                state[child] = VisitState::Visiting;
+                stack.push((child, 0));
+            }
         }
     }
-    state[morph_index] = VisitState::Visited;
+
     Ok(())
 }
 

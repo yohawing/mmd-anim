@@ -25,7 +25,9 @@ extern "C" {
    supports: bit 0 (MMD_RUNTIME_FEATURE_SPLIT_PHYSICS_EVALUATION) is set when
    the before/after-physics split evaluation API is available; bit 1
    (MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE) is set when the native Bullet
-   physics world is available. Check the relevant bit before calling any
+   physics world is available; bit 2 (MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR)
+   is set when the version 1 typed model descriptor constructor is available.
+   Check the relevant bit before calling any
    physics_world_* or evaluate_host_frame function; when the bit is unset
    those functions return MMD_RUNTIME_STATUS_UNSUPPORTED.
 
@@ -112,6 +114,8 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 /* Runtime feature flags (bitmask) */
 #define MMD_RUNTIME_FEATURE_SPLIT_PHYSICS_EVALUATION (1u << 0)
 #define MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE    (1u << 1)
+#define MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR         (1u << 2)
+#define MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1      1u
 
 /* ------------------------------------------------------------------ */
 /*  Status and mode enums                                             */
@@ -269,12 +273,12 @@ typedef struct mmd_runtime_ffi_ik_link {
     float    angle_limit_max_xyz[3];
 } mmd_runtime_ffi_ik_link_t;
 
-/* Complete bone descriptor for payload-free model construction.
-   rest_position_xyz is the absolute PMX-space rest position. */
+/* Version 1 typed model descriptor records.  All flags are fixed-width
+   integer bitmasks; input memory is borrowed only during the constructor call. */
 #define MMD_RUNTIME_MODEL_BONE_TRANSFORM_AFTER_PHYSICS (1u << 0)
 #define MMD_RUNTIME_MODEL_BONE_FIXED_AXIS              (1u << 1)
 #define MMD_RUNTIME_MODEL_BONE_LOCAL_AXIS              (1u << 2)
-typedef struct mmd_runtime_ffi_model_bone_v2 {
+typedef struct mmd_runtime_model_bone_descriptor {
     int32_t  parent_index;
     float    rest_position_xyz[3];
     int32_t  transform_order;
@@ -282,7 +286,64 @@ typedef struct mmd_runtime_ffi_model_bone_v2 {
     float    fixed_axis_xyz[3];
     float    local_axis_x_xyz[3];
     float    local_axis_z_xyz[3];
-} mmd_runtime_ffi_model_bone_v2_t;
+} mmd_runtime_model_bone_descriptor_t;
+
+typedef struct mmd_runtime_model_ik_solver_descriptor {
+    uint32_t ik_bone_index;
+    uint32_t target_bone_index;
+    size_t   link_offset;
+    size_t   link_count;
+    uint32_t iteration_count;
+    float    limit_angle;
+} mmd_runtime_model_ik_solver_descriptor_t;
+
+#define MMD_RUNTIME_MODEL_IK_LINK_ANGLE_LIMIT (1u << 0)
+typedef struct mmd_runtime_model_ik_link_descriptor {
+    uint32_t bone_index;
+    uint32_t flags;
+    float    angle_limit_min_xyz[3];
+    float    angle_limit_max_xyz[3];
+} mmd_runtime_model_ik_link_descriptor_t;
+
+typedef struct mmd_runtime_model_append_descriptor {
+    uint32_t target_bone_index;
+    uint32_t source_bone_index;
+    float    ratio;
+    uint32_t flags;
+} mmd_runtime_model_append_descriptor_t;
+
+typedef struct mmd_runtime_model_bone_morph_offset_descriptor {
+    uint32_t morph_index;
+    uint32_t target_bone_index;
+    float    position_offset_xyz[3];
+    float    rotation_offset_xyzw[4];
+} mmd_runtime_model_bone_morph_offset_descriptor_t;
+
+typedef struct mmd_runtime_model_group_morph_offset_descriptor {
+    uint32_t morph_index;
+    uint32_t child_morph_index;
+    float    ratio;
+} mmd_runtime_model_group_morph_offset_descriptor_t;
+
+typedef struct mmd_runtime_model_descriptor {
+    uint32_t struct_size;
+    uint32_t descriptor_version;
+    uint32_t flags;
+    uint32_t reserved;
+    const mmd_runtime_model_bone_descriptor_t* bones;
+    size_t bone_count;
+    const mmd_runtime_model_ik_solver_descriptor_t* ik_solvers;
+    size_t ik_solver_count;
+    const mmd_runtime_model_ik_link_descriptor_t* ik_links;
+    size_t ik_link_count;
+    const mmd_runtime_model_append_descriptor_t* append_transforms;
+    size_t append_transform_count;
+    uint32_t morph_count;
+    const mmd_runtime_model_bone_morph_offset_descriptor_t* bone_morph_offsets;
+    size_t bone_morph_offset_count;
+    const mmd_runtime_model_group_morph_offset_descriptor_t* group_morph_offsets;
+    size_t group_morph_offset_count;
+} mmd_runtime_model_descriptor_t;
 
 typedef struct mmd_runtime_ffi_rig_ik_link {
     uint32_t bone_slot;
@@ -922,20 +983,8 @@ mmd_runtime_model_t* mmd_runtime_model_create_full_with_morphs(
     const mmd_runtime_ffi_group_morph_offset_t* group_morph_offsets,
     size_t                                   group_morph_offset_count);
 
-mmd_runtime_model_t* mmd_runtime_model_create_from_descriptors_v2(
-    const mmd_runtime_ffi_model_bone_v2_t*       bones,
-    size_t                                       bone_count,
-    const mmd_runtime_ffi_ik_solver_t*           ik_solvers,
-    size_t                                       ik_solver_count,
-    const mmd_runtime_ffi_ik_link_t*             ik_links,
-    size_t                                       ik_link_count,
-    const mmd_runtime_ffi_append_transform_t*    append_transforms,
-    size_t                                       append_transform_count,
-    uint32_t                                     morph_count,
-    const mmd_runtime_ffi_bone_morph_offset_t*   bone_morph_offsets,
-    size_t                                       bone_morph_offset_count,
-    const mmd_runtime_ffi_group_morph_offset_t*  group_morph_offsets,
-    size_t                                       group_morph_offset_count);
+mmd_runtime_model_t* mmd_runtime_model_create_from_descriptor(
+    const mmd_runtime_model_descriptor_t* descriptor);
 
 mmd_runtime_model_t* mmd_runtime_model_create_from_pmx_bytes(
     const uint8_t* data,

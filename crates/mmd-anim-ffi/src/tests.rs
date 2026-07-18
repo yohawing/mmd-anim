@@ -3171,45 +3171,147 @@ fn applies_transform_order_to_append_chain_through_c_abi() {
 }
 
 #[test]
-fn descriptor_v2_matches_pmx_bone_rest_and_metadata_contract() {
-    let bones = [
-        MmdRuntimeFfiModelBoneV2 {
+fn descriptor_v1_creates_owned_model_with_metadata() {
+    let model = {
+        let mut bones = vec![
+            MmdRuntimeModelBoneDescriptor {
+                parent_index: -1,
+                rest_position_xyz: [1.0, 2.0, 3.0],
+                transform_order: 4,
+                flags: MODEL_BONE_FLAG_FIXED_AXIS | MODEL_BONE_FLAG_LOCAL_AXIS,
+                fixed_axis_xyz: [0.0, 2.0, 0.0],
+                local_axis_x_xyz: [0.0, 1.0, 0.0],
+                local_axis_z_xyz: [0.0, 0.0, 1.0],
+            },
+            MmdRuntimeModelBoneDescriptor {
+                parent_index: 0,
+                rest_position_xyz: [5.0, 2.0, 3.0],
+                transform_order: 7,
+                flags: MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS,
+                fixed_axis_xyz: [0.0; 3],
+                local_axis_x_xyz: [0.0; 3],
+                local_axis_z_xyz: [0.0; 3],
+            },
+        ];
+        let mut links = vec![MmdRuntimeModelIkLinkDescriptor {
+            bone_index: 0,
+            flags: IK_LINK_FLAG_ANGLE_LIMIT,
+            angle_limit_min_xyz: [-1.0; 3],
+            angle_limit_max_xyz: [1.0; 3],
+        }];
+        let mut solvers = vec![MmdRuntimeModelIkSolverDescriptor {
+            ik_bone_index: 1,
+            target_bone_index: 0,
+            link_offset: 0,
+            link_count: 1,
+            iteration_count: 1,
+            limit_angle: 0.5,
+        }];
+        let mut appends = vec![MmdRuntimeModelAppendDescriptor {
+            target_bone_index: 1,
+            source_bone_index: 0,
+            ratio: 0.25,
+            flags: APPEND_FLAG_ROTATION | APPEND_FLAG_LOCAL,
+        }];
+        let mut bone_offsets = vec![MmdRuntimeModelBoneMorphOffsetDescriptor {
+            morph_index: 0,
+            target_bone_index: 1,
+            position_offset_xyz: [0.1, 0.0, 0.0],
+            rotation_offset_xyzw: [0.0, 0.0, 0.0, 1.0],
+        }];
+        let mut group_offsets = vec![MmdRuntimeModelGroupMorphOffsetDescriptor {
+            morph_index: 1,
+            child_morph_index: 0,
+            ratio: 0.5,
+        }];
+        let mut descriptor = MmdRuntimeModelDescriptor {
+            struct_size: std::mem::size_of::<MmdRuntimeModelDescriptor>() as u32,
+            descriptor_version: MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1,
+            flags: 0,
+            reserved: 0,
+            bones: bones.as_ptr(),
+            bone_count: bones.len(),
+            ik_solvers: solvers.as_ptr(),
+            ik_solver_count: solvers.len(),
+            ik_links: links.as_ptr(),
+            ik_link_count: links.len(),
+            append_transforms: appends.as_ptr(),
+            append_transform_count: appends.len(),
+            morph_count: 2,
+            bone_morph_offsets: bone_offsets.as_ptr(),
+            bone_morph_offset_count: bone_offsets.len(),
+            group_morph_offsets: group_offsets.as_ptr(),
+            group_morph_offset_count: group_offsets.len(),
+        };
+        let model = unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) };
+        assert!(!model.is_null());
+
+        bones.fill(MmdRuntimeModelBoneDescriptor {
             parent_index: -1,
-            rest_position_xyz: [1.0, 2.0, 3.0],
-            transform_order: 4,
-            flags: MODEL_BONE_FLAG_FIXED_AXIS | MODEL_BONE_FLAG_LOCAL_AXIS,
-            fixed_axis_xyz: [0.0, 2.0, 0.0],
-            local_axis_x_xyz: [0.0, 1.0, 0.0],
-            local_axis_z_xyz: [0.0, 0.0, 1.0],
-        },
-        MmdRuntimeFfiModelBoneV2 {
-            parent_index: 0,
-            rest_position_xyz: [5.0, 2.0, 3.0],
-            transform_order: 7,
-            flags: MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS,
+            rest_position_xyz: [99.0; 3],
+            transform_order: -99,
+            flags: 0,
             fixed_axis_xyz: [0.0; 3],
             local_axis_x_xyz: [0.0; 3],
             local_axis_z_xyz: [0.0; 3],
-        },
-    ];
-    let model = unsafe {
-        mmd_runtime_model_create_from_descriptors_v2(
-            bones.as_ptr(),
-            bones.len(),
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-            0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-        )
+        });
+        links.fill(MmdRuntimeModelIkLinkDescriptor {
+            bone_index: u32::MAX,
+            flags: 0,
+            angle_limit_min_xyz: [99.0; 3],
+            angle_limit_max_xyz: [99.0; 3],
+        });
+        solvers.fill(MmdRuntimeModelIkSolverDescriptor {
+            ik_bone_index: u32::MAX,
+            target_bone_index: u32::MAX,
+            link_offset: 0,
+            link_count: 0,
+            iteration_count: 0,
+            limit_angle: 99.0,
+        });
+        appends.fill(MmdRuntimeModelAppendDescriptor {
+            target_bone_index: u32::MAX,
+            source_bone_index: u32::MAX,
+            ratio: 99.0,
+            flags: 0,
+        });
+        bone_offsets.fill(MmdRuntimeModelBoneMorphOffsetDescriptor {
+            morph_index: u32::MAX,
+            target_bone_index: u32::MAX,
+            position_offset_xyz: [99.0; 3],
+            rotation_offset_xyzw: [99.0; 4],
+        });
+        group_offsets.fill(MmdRuntimeModelGroupMorphOffsetDescriptor {
+            morph_index: u32::MAX,
+            child_morph_index: u32::MAX,
+            ratio: 99.0,
+        });
+        descriptor.struct_size = 0;
+        descriptor.descriptor_version = 0;
+        descriptor.bones = ptr::null();
+        descriptor.bone_count = 0;
+        descriptor.ik_solvers = ptr::null();
+        descriptor.ik_solver_count = 0;
+        descriptor.ik_links = ptr::null();
+        descriptor.ik_link_count = 0;
+        descriptor.append_transforms = ptr::null();
+        descriptor.append_transform_count = 0;
+        descriptor.morph_count = 0;
+        descriptor.bone_morph_offsets = ptr::null();
+        descriptor.bone_morph_offset_count = 0;
+        descriptor.group_morph_offsets = ptr::null();
+        descriptor.group_morph_offset_count = 0;
+        std::hint::black_box((
+            &bones,
+            &links,
+            &solvers,
+            &appends,
+            &bone_offsets,
+            &group_offsets,
+            &descriptor,
+        ));
+        model
     };
-    assert!(!model.is_null());
     let arena = unsafe { &(*model).model };
     assert_eq!(
         arena.rest_position(BoneIndex(0)),
@@ -3224,6 +3326,9 @@ fn descriptor_v2_matches_pmx_bone_rest_and_metadata_contract() {
     assert!(arena.transform_after_physics(BoneIndex(1)));
     assert_eq!(arena.fixed_axis(BoneIndex(0)), Some(glam::Vec3A::Y));
     assert!(arena.local_axis(BoneIndex(0)).is_some());
+    assert_eq!(arena.ik_solvers().len(), 1);
+    assert_eq!(arena.append_transforms().len(), 1);
+    assert_eq!(arena.morph_count(), 2);
 
     let instance = unsafe { mmd_runtime_instance_create(model, 0) };
     assert!(!instance.is_null());
@@ -3254,8 +3359,8 @@ fn descriptor_v2_matches_pmx_bone_rest_and_metadata_contract() {
 }
 
 #[test]
-fn descriptor_v2_rejects_invalid_parent_index() {
-    let bones = [MmdRuntimeFfiModelBoneV2 {
+fn descriptor_v1_rejects_invalid_parent_index_with_indexed_error() {
+    let bones = [MmdRuntimeModelBoneDescriptor {
         parent_index: 1,
         rest_position_xyz: [0.0; 3],
         transform_order: 0,
@@ -3264,24 +3369,248 @@ fn descriptor_v2_rejects_invalid_parent_index() {
         local_axis_x_xyz: [0.0; 3],
         local_axis_z_xyz: [0.0; 3],
     }];
-    let model = unsafe {
-        mmd_runtime_model_create_from_descriptors_v2(
-            bones.as_ptr(),
-            bones.len(),
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-            0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-        )
+    let descriptor = MmdRuntimeModelDescriptor {
+        struct_size: std::mem::size_of::<MmdRuntimeModelDescriptor>() as u32,
+        descriptor_version: MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1,
+        flags: 0,
+        reserved: 0,
+        bones: bones.as_ptr(),
+        bone_count: bones.len(),
+        ik_solvers: ptr::null(),
+        ik_solver_count: 0,
+        ik_links: ptr::null(),
+        ik_link_count: 0,
+        append_transforms: ptr::null(),
+        append_transform_count: 0,
+        morph_count: 0,
+        bone_morph_offsets: ptr::null(),
+        bone_morph_offset_count: 0,
+        group_morph_offsets: ptr::null(),
+        group_morph_offset_count: 0,
     };
+    let model = unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) };
     assert!(model.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("indexed descriptor error")
+            .to_string_lossy()
+            .contains("bones[0].parent")
+    );
+}
+
+fn descriptor_v1_header_fixture() -> (
+    Vec<MmdRuntimeModelBoneDescriptor>,
+    MmdRuntimeModelDescriptor,
+) {
+    let bones = vec![MmdRuntimeModelBoneDescriptor {
+        parent_index: -1,
+        rest_position_xyz: [0.0; 3],
+        transform_order: 0,
+        flags: 0,
+        fixed_axis_xyz: [0.0; 3],
+        local_axis_x_xyz: [0.0; 3],
+        local_axis_z_xyz: [0.0; 3],
+    }];
+    let descriptor = MmdRuntimeModelDescriptor {
+        struct_size: std::mem::size_of::<MmdRuntimeModelDescriptor>() as u32,
+        descriptor_version: MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1,
+        flags: 0,
+        reserved: 0,
+        bones: bones.as_ptr(),
+        bone_count: bones.len(),
+        ik_solvers: ptr::null(),
+        ik_solver_count: 0,
+        ik_links: ptr::null(),
+        ik_link_count: 0,
+        append_transforms: ptr::null(),
+        append_transform_count: 0,
+        morph_count: 0,
+        bone_morph_offsets: ptr::null(),
+        bone_morph_offset_count: 0,
+        group_morph_offsets: ptr::null(),
+        group_morph_offset_count: 0,
+    };
+    (bones, descriptor)
+}
+
+#[test]
+fn descriptor_v1_rejects_header_and_pointer_contracts() {
+    let (bones, mut descriptor) = descriptor_v1_header_fixture();
+
+    descriptor.struct_size = 0;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("struct size error")
+            .to_string_lossy()
+            .contains("descriptor.struct_size")
+    );
+
+    descriptor.struct_size = std::mem::size_of::<MmdRuntimeModelDescriptor>() as u32;
+    descriptor.descriptor_version = 99;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("version error")
+            .to_string_lossy()
+            .contains("descriptor.descriptor_version")
+    );
+
+    descriptor.descriptor_version = MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1;
+    descriptor.flags = 1;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("flags error")
+            .to_string_lossy()
+            .contains("descriptor.flags")
+    );
+
+    descriptor.flags = 0;
+    descriptor.reserved = 1;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("reserved error")
+            .to_string_lossy()
+            .contains("descriptor.reserved")
+    );
+
+    descriptor.reserved = 0;
+    descriptor.bones = ptr::null();
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("pointer/count error")
+            .to_string_lossy()
+            .contains("descriptor.bones")
+    );
+
+    descriptor.bones = bones.as_ptr();
+    descriptor.bone_count = 0;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("empty bones error")
+            .to_string_lossy()
+            .contains("descriptor.bones")
+    );
+}
+
+#[test]
+fn descriptor_v1_rejects_unknown_record_flags_and_link_range() {
+    let (bones, mut descriptor) = descriptor_v1_header_fixture();
+    let bad_bones = [MmdRuntimeModelBoneDescriptor {
+        flags: 1 << 31,
+        ..bones[0]
+    }];
+    descriptor.bones = bad_bones.as_ptr();
+    descriptor.bone_count = bad_bones.len();
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("unknown bone flag error")
+            .to_string_lossy()
+            .contains("bones[0].flags")
+    );
+
+    descriptor.bones = bones.as_ptr();
+    let bad_link_flags = [MmdRuntimeModelIkLinkDescriptor {
+        bone_index: 0,
+        flags: 1 << 31,
+        angle_limit_min_xyz: [0.0; 3],
+        angle_limit_max_xyz: [0.0; 3],
+    }];
+    descriptor.ik_links = bad_link_flags.as_ptr();
+    descriptor.ik_link_count = bad_link_flags.len();
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("unreferenced IK link flag error")
+            .to_string_lossy()
+            .contains("ik_links[0].flags")
+    );
+
+    descriptor.ik_links = ptr::null();
+    descriptor.ik_link_count = 0;
+    let bad_append_flags = [MmdRuntimeModelAppendDescriptor {
+        target_bone_index: 0,
+        source_bone_index: 0,
+        ratio: 1.0,
+        flags: 1 << 31,
+    }];
+    descriptor.append_transforms = bad_append_flags.as_ptr();
+    descriptor.append_transform_count = bad_append_flags.len();
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("unknown append flag error")
+            .to_string_lossy()
+            .contains("append_transforms[0].flags")
+    );
+
+    descriptor.append_transforms = ptr::null();
+    descriptor.append_transform_count = 0;
+    let links = [MmdRuntimeModelIkLinkDescriptor {
+        bone_index: 0,
+        flags: 0,
+        angle_limit_min_xyz: [0.0; 3],
+        angle_limit_max_xyz: [0.0; 3],
+    }];
+    let solvers = [MmdRuntimeModelIkSolverDescriptor {
+        ik_bone_index: 0,
+        target_bone_index: 0,
+        link_offset: 1,
+        link_count: 1,
+        iteration_count: 1,
+        limit_angle: 0.0,
+    }];
+    descriptor.ik_links = links.as_ptr();
+    descriptor.ik_link_count = links.len();
+    descriptor.ik_solvers = solvers.as_ptr();
+    descriptor.ik_solver_count = solvers.len();
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("link range error")
+            .to_string_lossy()
+            .contains("ik_solvers[0].links")
+    );
+}
+
+#[test]
+fn descriptor_v1_rejects_misaligned_and_oversized_record_ranges_before_deref() {
+    let (bones, mut descriptor) = descriptor_v1_header_fixture();
+    let misaligned_bones =
+        unsafe { bones.as_ptr().cast::<u8>().add(1) as *const MmdRuntimeModelBoneDescriptor };
+    descriptor.bones = misaligned_bones;
+    descriptor.bone_count = 1;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("misaligned record error")
+            .to_string_lossy()
+            .contains("descriptor.bones: pointer is misaligned")
+    );
+
+    descriptor.bones = bones.as_ptr();
+    descriptor.bone_count = (u32::MAX as usize).saturating_add(1);
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("oversized count error")
+            .to_string_lossy()
+            .contains("descriptor.bones: count exceeds u32::MAX")
+    );
+}
+
+#[test]
+fn descriptor_feature_flag_is_available_without_changing_abi() {
+    assert_eq!(mmd_runtime_abi_version(), ABI_VERSION);
+    assert_ne!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR,
+        0
+    );
 }
 
 #[test]

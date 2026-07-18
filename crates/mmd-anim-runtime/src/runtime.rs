@@ -377,6 +377,11 @@ impl RuntimeInstance {
         self.evaluate_current_pose();
     }
 
+    /// Apply a complete host-owned pose and expand its morphs.
+    ///
+    /// The supplied local offsets are the base pose. Group morph weights are
+    /// expanded and bone-morph offsets are applied after all input validation
+    /// and pose slices have been copied, matching clip evaluation semantics.
     pub fn apply_host_pose(&mut self, view: &HostPoseView) -> Result<(), HostPoseError> {
         let bone_count = self.model.bone_count();
         let morph_count = self.pose.morph_weights().len();
@@ -456,6 +461,7 @@ impl RuntimeInstance {
         self.pose.set_local_scales_from_slice(view.local_scales);
         self.pose.set_morph_weights_from_slice(view.morph_weights);
         self.pose.set_ik_enabled_from_slice(view.ik_enabled);
+        self.expand_morphs();
 
         Ok(())
     }

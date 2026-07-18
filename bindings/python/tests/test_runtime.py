@@ -15,6 +15,7 @@ sys.path.insert(0, str(PYTHON_BINDING_ROOT))
 
 from mmd_anim._runtime import (  # noqa: E402
     EXPECTED_ABI_VERSION,
+    FEATURE_HOST_POSE_NATIVE_MORPHS,
     FEATURE_PHYSICS_BULLET_NATIVE,
     LIBRARY_ENV,
     AbiVersionError,
@@ -52,6 +53,21 @@ class PureBindingTests(unittest.TestCase):
         runtime._lib = FakeLibrary(FEATURE_PHYSICS_BULLET_NATIVE)
         self.assertEqual(runtime.feature_flags(), FEATURE_PHYSICS_BULLET_NATIVE)
         self.assertTrue(runtime.supports_native_physics())
+
+    def test_native_host_pose_morph_capability_bit(self) -> None:
+        class FakeLibrary:
+            def __init__(self, flags: int) -> None:
+                self.flags = flags
+
+            def mmd_runtime_feature_flags(self) -> int:
+                return self.flags
+
+        runtime = object.__new__(RuntimeLibrary)
+        runtime._lib = FakeLibrary(0)
+        self.assertFalse(runtime.supports_native_host_pose_morphs())
+
+        runtime._lib = FakeLibrary(FEATURE_HOST_POSE_NATIVE_MORPHS)
+        self.assertTrue(runtime.supports_native_host_pose_morphs())
 
     def test_native_status_error_names_and_detail(self) -> None:
         self.assertIs(ctypes_type("mmd_runtime_status_t"), ctypes.c_int)

@@ -25,7 +25,13 @@ extern "C" {
    supports: bit 0 (MMD_RUNTIME_FEATURE_SPLIT_PHYSICS_EVALUATION) is set when
    the before/after-physics split evaluation API is available; bit 1
    (MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE) is set when the native Bullet
-   physics world is available. Check the relevant bit before calling any
+   physics world is available; bit 2 (MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR)
+   is set when the version 1 typed model descriptor constructor is available;
+   bit 3 (MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS) is set when HostPose
+   local arrays are pre-Morph base values and Group/Bone Morph expansion is
+   performed natively. Hosts that pre-apply Morph bone deltas must stop doing
+   so before using that contract.
+   Check the relevant bit before calling any
    physics_world_* or evaluate_host_frame function; when the bit is unset
    those functions return MMD_RUNTIME_STATUS_UNSUPPORTED.
 
@@ -112,6 +118,10 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 /* Runtime feature flags (bitmask) */
 #define MMD_RUNTIME_FEATURE_SPLIT_PHYSICS_EVALUATION (1u << 0)
 #define MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE    (1u << 1)
+#define MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR         (1u << 2)
+#define MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS  (1u << 3)
+#define MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1      1u
+#define MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE     0u
 
 /* ------------------------------------------------------------------ */
 /*  Status and mode enums                                             */
@@ -269,12 +279,12 @@ typedef struct mmd_runtime_ffi_ik_link {
     float    angle_limit_max_xyz[3];
 } mmd_runtime_ffi_ik_link_t;
 
-/* Complete bone descriptor for payload-free model construction.
-   rest_position_xyz is the absolute PMX-space rest position. */
+/* Version 1 typed model descriptor records.  All flags are fixed-width
+   integer bitmasks; input memory is borrowed only during the constructor call. */
 #define MMD_RUNTIME_MODEL_BONE_TRANSFORM_AFTER_PHYSICS (1u << 0)
 #define MMD_RUNTIME_MODEL_BONE_FIXED_AXIS              (1u << 1)
 #define MMD_RUNTIME_MODEL_BONE_LOCAL_AXIS              (1u << 2)
-typedef struct mmd_runtime_ffi_model_bone_v2 {
+typedef struct mmd_runtime_model_bone_descriptor {
     int32_t  parent_index;
     float    rest_position_xyz[3];
     int32_t  transform_order;
@@ -282,7 +292,64 @@ typedef struct mmd_runtime_ffi_model_bone_v2 {
     float    fixed_axis_xyz[3];
     float    local_axis_x_xyz[3];
     float    local_axis_z_xyz[3];
-} mmd_runtime_ffi_model_bone_v2_t;
+} mmd_runtime_model_bone_descriptor_t;
+
+typedef struct mmd_runtime_model_ik_solver_descriptor {
+    uint32_t ik_bone_index;
+    uint32_t target_bone_index;
+    size_t   link_offset;
+    size_t   link_count;
+    uint32_t iteration_count;
+    float    limit_angle;
+} mmd_runtime_model_ik_solver_descriptor_t;
+
+#define MMD_RUNTIME_MODEL_IK_LINK_ANGLE_LIMIT (1u << 0)
+typedef struct mmd_runtime_model_ik_link_descriptor {
+    uint32_t bone_index;
+    uint32_t flags;
+    float    angle_limit_min_xyz[3];
+    float    angle_limit_max_xyz[3];
+} mmd_runtime_model_ik_link_descriptor_t;
+
+typedef struct mmd_runtime_model_append_descriptor {
+    uint32_t target_bone_index;
+    uint32_t source_bone_index;
+    float    ratio;
+    uint32_t flags;
+} mmd_runtime_model_append_descriptor_t;
+
+typedef struct mmd_runtime_model_bone_morph_offset_descriptor {
+    uint32_t morph_index;
+    uint32_t target_bone_index;
+    float    position_offset_xyz[3];
+    float    rotation_offset_xyzw[4];
+} mmd_runtime_model_bone_morph_offset_descriptor_t;
+
+typedef struct mmd_runtime_model_group_morph_offset_descriptor {
+    uint32_t morph_index;
+    uint32_t child_morph_index;
+    float    ratio;
+} mmd_runtime_model_group_morph_offset_descriptor_t;
+
+typedef struct mmd_runtime_model_descriptor {
+    uint32_t struct_size;
+    uint32_t descriptor_version;
+    uint32_t flags;
+    uint32_t reserved;
+    const mmd_runtime_model_bone_descriptor_t* bones;
+    size_t bone_count;
+    const mmd_runtime_model_ik_solver_descriptor_t* ik_solvers;
+    size_t ik_solver_count;
+    const mmd_runtime_model_ik_link_descriptor_t* ik_links;
+    size_t ik_link_count;
+    const mmd_runtime_model_append_descriptor_t* append_transforms;
+    size_t append_transform_count;
+    uint32_t morph_count;
+    const mmd_runtime_model_bone_morph_offset_descriptor_t* bone_morph_offsets;
+    size_t bone_morph_offset_count;
+    const mmd_runtime_model_group_morph_offset_descriptor_t* group_morph_offsets;
+    size_t group_morph_offset_count;
+} mmd_runtime_model_descriptor_t;
 
 typedef struct mmd_runtime_ffi_rig_ik_link {
     uint32_t bone_slot;
@@ -397,10 +464,13 @@ typedef struct mmd_runtime_ffi_physics_rigidbody_binding {
     uint32_t mode;        /* mmd_runtime_physics_rigidbody_mode_t values */
 } mmd_runtime_ffi_physics_rigidbody_binding_t;
 
+/* Host pose local arrays are the pre-morph base pose.  The runtime validates
+   and copies them, then expands group/bone morph weights natively.  Hosts must
+   not preapply morph bone deltas to these local arrays. */
 typedef struct mmd_runtime_ffi_host_pose_view {
-    const float*   local_position_offsets_xyz;
-    const float*   local_rotation_xyzw;
-    const float*   local_scales_xyz;
+    const float*   local_position_offsets_xyz; /* pre-morph base offsets */
+    const float*   local_rotation_xyzw;         /* pre-morph base rotations */
+    const float*   local_scales_xyz;            /* pre-morph base scales */
     size_t         bone_count;
     const float*   morph_weights;
     size_t         morph_count;
@@ -922,20 +992,11 @@ mmd_runtime_model_t* mmd_runtime_model_create_full_with_morphs(
     const mmd_runtime_ffi_group_morph_offset_t* group_morph_offsets,
     size_t                                   group_morph_offset_count);
 
-mmd_runtime_model_t* mmd_runtime_model_create_from_descriptors_v2(
-    const mmd_runtime_ffi_model_bone_v2_t*       bones,
-    size_t                                       bone_count,
-    const mmd_runtime_ffi_ik_solver_t*           ik_solvers,
-    size_t                                       ik_solver_count,
-    const mmd_runtime_ffi_ik_link_t*             ik_links,
-    size_t                                       ik_link_count,
-    const mmd_runtime_ffi_append_transform_t*    append_transforms,
-    size_t                                       append_transform_count,
-    uint32_t                                     morph_count,
-    const mmd_runtime_ffi_bone_morph_offset_t*   bone_morph_offsets,
-    size_t                                       bone_morph_offset_count,
-    const mmd_runtime_ffi_group_morph_offset_t*  group_morph_offsets,
-    size_t                                       group_morph_offset_count);
+/* Creates a model by copying a complete version 1 descriptor. Each pointer
+   field must be NULL exactly when its paired count is zero; otherwise it must
+   reference that many readable records for the duration of this call. */
+mmd_runtime_model_t* mmd_runtime_model_create_from_descriptor(
+    const mmd_runtime_model_descriptor_t* descriptor);
 
 mmd_runtime_model_t* mmd_runtime_model_create_from_pmx_bytes(
     const uint8_t* data,
@@ -1039,10 +1100,16 @@ mmd_runtime_status_t mmd_runtime_instance_evaluate_clip_frame_before_physics_wit
 mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_before_physics(
     mmd_runtime_instance_t* instance);
 
+/* Applies a complete host pose.  Local arrays must contain the pre-morph base
+   pose; native validation and group/bone morph expansion happen after all
+   validation and before the next evaluation.  Hosts must not preapply morph
+   bone deltas.  World matrices are not evaluated by this call. */
 mmd_runtime_status_t mmd_runtime_instance_apply_host_pose(
     mmd_runtime_instance_t *instance,
     const mmd_runtime_ffi_host_pose_view_t *view);
 
+/* Applies the same pre-morph host pose contract as apply_host_pose, expands
+   group/bone morphs natively, and evaluates the before-physics phase. */
 mmd_runtime_status_t mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(
     mmd_runtime_instance_t *instance,
     const mmd_runtime_ffi_host_pose_view_t *view);
@@ -1119,19 +1186,20 @@ mmd_runtime_status_t mmd_runtime_physics_world_step_runtime(
     float                                             dt_seconds,
     mmd_runtime_ffi_physics_world_step_report_t*      out_report);
 
-/* Applies a validated host pose, evaluates the before-physics phase, seeds or
-   steps the physics world (per `action`), and evaluates the after-physics
-   phase, all as a single atomic call. On failure applying the host pose, no
-   mutation occurs. For SEED, dt_seconds is ignored and out_report (when
-   non-null) is zeroed, since a seed resets rigid bodies to their
-   bone-derived positions without advancing the solver. For STEP, dt_seconds
-   must be finite and >= 0, and the instance's physics mode must be Trace or
-   Live; MMD_RUNTIME_STATUS_INVALID_INPUT is returned when the mode is Off.
-   Unknown action values return MMD_RUNTIME_STATUS_INVALID_INPUT.
-   MMD_RUNTIME_STATUS_INVALID_INPUT is also returned when the physics
-   world's rigidbody bindings reference bone indices outside the instance's
-   bone range. IK options apply to the before-physics phase; after-physics
-   uses defaults. */
+/* Applies a validated pre-morph host pose, expands Group/Bone morphs natively,
+   evaluates the before-physics phase, seeds or steps the physics world (per
+   `action`), and evaluates the after-physics phase, all as a single atomic
+   call. Hosts must not preapply morph bone deltas. On failure applying the
+   host pose, no mutation occurs. For SEED, dt_seconds is ignored and
+   out_report (when non-null) is zeroed, since a seed resets rigid bodies to
+   their bone-derived positions without advancing the solver. For STEP,
+   dt_seconds must be finite and >= 0, and the instance's physics mode must be
+   Trace or Live; MMD_RUNTIME_STATUS_INVALID_INPUT is returned when the mode
+   is Off. Unknown action values return MMD_RUNTIME_STATUS_INVALID_INPUT.
+   MMD_RUNTIME_STATUS_INVALID_INPUT is also returned with an indexed
+   `physics_world.rigidbodies[i].bone_index` detail when a binding is outside
+   the instance's bone range. IK options apply to the before-physics phase;
+   after-physics uses defaults. */
 mmd_runtime_status_t mmd_runtime_evaluate_host_frame(
     mmd_runtime_instance_t*                     instance,
     mmd_runtime_physics_world_t*                world,

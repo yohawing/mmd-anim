@@ -18,6 +18,20 @@ geometry buffer, solve an IK primitive, and free all handles. Without either
 library, native tests are skipped; pure ABI/ownership and header-drift tests
 still run.
 
-The ctypes signature manifest is `mmd_anim/_abi.py`. After changing
-`mmd_runtime.h`, update that manifest for every wrapped declaration, then run
-`python tools/check_python_abi_drift.py`.
+The shared version 1 model-descriptor ABI manifest is
+`crates/mmd-anim-ffi/abi/model_descriptor_v1.json`. It fixes the C/Rust/ctypes
+record names, field order/types, `sizeof`, `alignof`, and every field offset on
+64-bit Windows and Ubuntu, as well as ABI/version/feature/flag constants and
+the `mmd_runtime_model_create_from_descriptor` prototype. The ctypes bridge
+loads this manifest directly; Rust layout tests and the drift checker validate
+the other two surfaces. Run both checks after changing `mmd_runtime.h`:
+
+```powershell
+python tools/check_python_abi_drift.py
+python tools/check_model_descriptor_abi.py
+```
+
+`test_model_descriptor_abi.py` loads the release cdylib with raw ctypes when
+available and checks the version/feature guard, create/instance/rest-evaluate,
+world and skinning copies, deterministic fresh creation, and indexed
+thread-local errors for invalid descriptors.

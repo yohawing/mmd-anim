@@ -62,6 +62,206 @@ fn abi_version_matches_current_breaking_surface() {
     assert_eq!(mmd_runtime_abi_version(), ABI_VERSION);
 }
 
+#[test]
+fn descriptor_v1_layout_matches_shared_manifest() {
+    if std::mem::size_of::<usize>() != 8 {
+        // The manifest deliberately fixes only the supported Windows/Ubuntu
+        // x86_64 ABI.  Keep other targets buildable without claiming parity.
+        return;
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../abi/model_descriptor_v1.json"))
+            .expect("valid model descriptor ABI manifest");
+    assert_eq!(manifest["abi_version"].as_u64(), Some(ABI_VERSION as u64));
+    assert_eq!(
+        manifest["descriptor_version"].as_u64(),
+        Some(MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1 as u64)
+    );
+    assert_eq!(
+        manifest["feature"]["value"].as_u64(),
+        Some(MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR as u64)
+    );
+    let manifest_flags = &manifest["flags"];
+    for (name, value) in [
+        (
+            "MMD_RUNTIME_MODEL_BONE_TRANSFORM_AFTER_PHYSICS",
+            MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS,
+        ),
+        (
+            "MMD_RUNTIME_MODEL_BONE_FIXED_AXIS",
+            MODEL_BONE_FLAG_FIXED_AXIS,
+        ),
+        (
+            "MMD_RUNTIME_MODEL_BONE_LOCAL_AXIS",
+            MODEL_BONE_FLAG_LOCAL_AXIS,
+        ),
+        (
+            "MMD_RUNTIME_MODEL_IK_LINK_ANGLE_LIMIT",
+            IK_LINK_FLAG_ANGLE_LIMIT,
+        ),
+        ("MMD_RUNTIME_APPEND_ROTATION", APPEND_FLAG_ROTATION),
+        ("MMD_RUNTIME_APPEND_TRANSLATION", APPEND_FLAG_TRANSLATION),
+        ("MMD_RUNTIME_APPEND_LOCAL", APPEND_FLAG_LOCAL),
+        (
+            "MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE",
+            MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE,
+        ),
+    ] {
+        assert_eq!(manifest_flags[name].as_u64(), Some(value as u64), "{name}");
+    }
+    let function = &manifest["functions"][0];
+    assert_eq!(
+        function["name"].as_str(),
+        Some("mmd_runtime_model_create_from_descriptor")
+    );
+    assert_eq!(
+        function["return_type"].as_str(),
+        Some("mmd_runtime_model_t*")
+    );
+    assert_eq!(
+        function["arguments"][0]["type"].as_str(),
+        Some("const mmd_runtime_model_descriptor_t*")
+    );
+    assert_eq!(function["arguments"].as_array().map(Vec::len), Some(1));
+    let _: unsafe extern "C" fn(*const MmdRuntimeModelDescriptor) -> *mut MmdRuntimeModel =
+        mmd_runtime_model_create_from_descriptor;
+
+    fn assert_record(
+        manifest: &serde_json::Value,
+        name: &str,
+        size: usize,
+        align: usize,
+        fields: &[(&str, &str, usize)],
+    ) {
+        let record = manifest["records"]
+            .as_array()
+            .expect("records array")
+            .iter()
+            .find(|record| record["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("manifest record missing: {name}"));
+        assert_eq!(record["sizeof"].as_u64(), Some(size as u64), "{name} size");
+        assert_eq!(
+            record["alignof"].as_u64(),
+            Some(align as u64),
+            "{name} align"
+        );
+        let manifest_fields: Vec<(&str, &str, usize)> = record["fields"]
+            .as_array()
+            .expect("fields array")
+            .iter()
+            .map(|field| {
+                (
+                    field["name"].as_str().expect("field name"),
+                    field["type"].as_str().expect("field type"),
+                    field["offset"].as_u64().expect("field offset") as usize,
+                )
+            })
+            .collect();
+        assert_eq!(manifest_fields, fields, "{name} fields");
+    }
+
+    macro_rules! assert_record_types {
+        ($name:literal, $record:ty, { $($field:ident: $rust_type:ty => $c_type:literal),+ $(,)? }) => {{
+            $(let _: fn(&$record) -> &$rust_type = |value| &value.$field;)+
+            assert_record(
+                &manifest,
+                $name,
+                std::mem::size_of::<$record>(),
+                std::mem::align_of::<$record>(),
+                &[$((stringify!($field), $c_type, std::mem::offset_of!($record, $field))),+],
+            );
+        }};
+    }
+
+    assert_record_types!(
+        "mmd_runtime_model_bone_descriptor_t",
+        MmdRuntimeModelBoneDescriptor,
+        {
+            parent_index: i32 => "int32_t",
+            rest_position_xyz: [f32; 3] => "float[3]",
+            transform_order: i32 => "int32_t",
+            flags: u32 => "uint32_t",
+            fixed_axis_xyz: [f32; 3] => "float[3]",
+            local_axis_x_xyz: [f32; 3] => "float[3]",
+            local_axis_z_xyz: [f32; 3] => "float[3]",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_ik_solver_descriptor_t",
+        MmdRuntimeModelIkSolverDescriptor,
+        {
+            ik_bone_index: u32 => "uint32_t",
+            target_bone_index: u32 => "uint32_t",
+            link_offset: usize => "size_t",
+            link_count: usize => "size_t",
+            iteration_count: u32 => "uint32_t",
+            limit_angle: f32 => "float",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_ik_link_descriptor_t",
+        MmdRuntimeModelIkLinkDescriptor,
+        {
+            bone_index: u32 => "uint32_t",
+            flags: u32 => "uint32_t",
+            angle_limit_min_xyz: [f32; 3] => "float[3]",
+            angle_limit_max_xyz: [f32; 3] => "float[3]",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_append_descriptor_t",
+        MmdRuntimeModelAppendDescriptor,
+        {
+            target_bone_index: u32 => "uint32_t",
+            source_bone_index: u32 => "uint32_t",
+            ratio: f32 => "float",
+            flags: u32 => "uint32_t",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_bone_morph_offset_descriptor_t",
+        MmdRuntimeModelBoneMorphOffsetDescriptor,
+        {
+            morph_index: u32 => "uint32_t",
+            target_bone_index: u32 => "uint32_t",
+            position_offset_xyz: [f32; 3] => "float[3]",
+            rotation_offset_xyzw: [f32; 4] => "float[4]",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_group_morph_offset_descriptor_t",
+        MmdRuntimeModelGroupMorphOffsetDescriptor,
+        {
+            morph_index: u32 => "uint32_t",
+            child_morph_index: u32 => "uint32_t",
+            ratio: f32 => "float",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_descriptor_t",
+        MmdRuntimeModelDescriptor,
+        {
+            struct_size: u32 => "uint32_t",
+            descriptor_version: u32 => "uint32_t",
+            flags: u32 => "uint32_t",
+            reserved: u32 => "uint32_t",
+            bones: *const MmdRuntimeModelBoneDescriptor => "const mmd_runtime_model_bone_descriptor_t*",
+            bone_count: usize => "size_t",
+            ik_solvers: *const MmdRuntimeModelIkSolverDescriptor => "const mmd_runtime_model_ik_solver_descriptor_t*",
+            ik_solver_count: usize => "size_t",
+            ik_links: *const MmdRuntimeModelIkLinkDescriptor => "const mmd_runtime_model_ik_link_descriptor_t*",
+            ik_link_count: usize => "size_t",
+            append_transforms: *const MmdRuntimeModelAppendDescriptor => "const mmd_runtime_model_append_descriptor_t*",
+            append_transform_count: usize => "size_t",
+            morph_count: u32 => "uint32_t",
+            bone_morph_offsets: *const MmdRuntimeModelBoneMorphOffsetDescriptor => "const mmd_runtime_model_bone_morph_offset_descriptor_t*",
+            bone_morph_offset_count: usize => "size_t",
+            group_morph_offsets: *const MmdRuntimeModelGroupMorphOffsetDescriptor => "const mmd_runtime_model_group_morph_offset_descriptor_t*",
+            group_morph_offset_count: usize => "size_t",
+        }
+    );
+}
+
 fn assert_near(actual: f32, expected: f32, tolerance: f32) {
     assert!(
         (actual - expected).abs() <= tolerance,

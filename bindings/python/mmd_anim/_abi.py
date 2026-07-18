@@ -1,17 +1,31 @@
 """Machine-readable ctypes subset of the experimental C ABI v2.
 
-This module is the single handwritten signature table used both to bind the
-native library and to check the declarations in ``mmd_runtime.h``.
+This module owns the existing handwritten ABI subset and loads the shared
+model-descriptor v1 manifest used to bind and check that declaration.
 """
 
 from __future__ import annotations
 
 import ctypes
+import json
+from pathlib import Path
 from typing import TypeAlias
 
 
 FieldSpec: TypeAlias = tuple[str, str]
 FunctionSpec: TypeAlias = tuple[str, tuple[str, ...]]
+
+
+MODEL_DESCRIPTOR_MANIFEST_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "crates"
+    / "mmd-anim-ffi"
+    / "abi"
+    / "model_descriptor_v1.json"
+)
+MODEL_DESCRIPTOR_MANIFEST: dict[str, object] = json.loads(
+    MODEL_DESCRIPTOR_MANIFEST_PATH.read_text(encoding="utf-8")
+)
 
 
 STRUCT_SPECS: dict[str, tuple[FieldSpec, ...]] = {
@@ -209,11 +223,46 @@ class IkSolveStats(ctypes.Structure):
     pass
 
 
+class ModelBoneDescriptor(ctypes.Structure):
+    pass
+
+
+class ModelIkSolverDescriptor(ctypes.Structure):
+    pass
+
+
+class ModelIkLinkDescriptor(ctypes.Structure):
+    pass
+
+
+class ModelAppendDescriptor(ctypes.Structure):
+    pass
+
+
+class ModelBoneMorphOffsetDescriptor(ctypes.Structure):
+    pass
+
+
+class ModelGroupMorphOffsetDescriptor(ctypes.Structure):
+    pass
+
+
+class ModelDescriptor(ctypes.Structure):
+    pass
+
+
 STRUCT_TYPES: dict[str, type[ctypes.Structure]] = {
     "mmd_runtime_ffi_byte_buffer_t": ByteBuffer,
     "mmd_runtime_ffi_rig_ik_link_t": RigIkLink,
     "mmd_runtime_ffi_rig_bone_t": RigBone,
     "mmd_runtime_ffi_ik_solve_stats_t": IkSolveStats,
+    "mmd_runtime_model_bone_descriptor_t": ModelBoneDescriptor,
+    "mmd_runtime_model_ik_solver_descriptor_t": ModelIkSolverDescriptor,
+    "mmd_runtime_model_ik_link_descriptor_t": ModelIkLinkDescriptor,
+    "mmd_runtime_model_append_descriptor_t": ModelAppendDescriptor,
+    "mmd_runtime_model_bone_morph_offset_descriptor_t": ModelBoneMorphOffsetDescriptor,
+    "mmd_runtime_model_group_morph_offset_descriptor_t": ModelGroupMorphOffsetDescriptor,
+    "mmd_runtime_model_descriptor_t": ModelDescriptor,
 }
 
 
@@ -227,6 +276,22 @@ _SCALARS: dict[str, object] = {
     "uint32_t": ctypes.c_uint32,
     "size_t": ctypes.c_size_t,
 }
+
+
+for _record in MODEL_DESCRIPTOR_MANIFEST["records"]:  # type: ignore[index]
+    _name = _record["name"]  # type: ignore[index]
+    STRUCT_SPECS[_name] = tuple(  # type: ignore[index]
+        (_field["name"], _field["type"])  # type: ignore[index]
+        for _field in _record["fields"]  # type: ignore[index]
+    )
+for _function in MODEL_DESCRIPTOR_MANIFEST["functions"]:  # type: ignore[index]
+    FUNCTION_SPECS[_function["name"]] = (  # type: ignore[index]
+        _function["return_type"],  # type: ignore[index]
+        tuple(  # type: ignore[index]
+            _argument["type"]  # type: ignore[index]
+            for _argument in _function["arguments"]  # type: ignore[index]
+        ),
+    )
 
 
 def ctypes_type(c_type: str) -> object:
@@ -263,6 +328,15 @@ def bind_functions(library: ctypes.CDLL) -> None:
     """Apply all manifest prototypes to a loaded runtime library."""
 
     for name, (return_type, argument_types) in FUNCTION_SPECS.items():
-        function = getattr(library, name)
+        try:
+            function = getattr(library, name)
+        except AttributeError:
+            # Model descriptors were added behind the existing ABI v2 feature
+            # bit.  Keep older ABI-v2 runtimes usable for the established
+            # binding surface; callers must check the feature bit before using
+            # this optional constructor.
+            if name == "mmd_runtime_model_create_from_descriptor":
+                continue
+            raise
         function.argtypes = [ctypes_type(value) for value in argument_types]
         function.restype = ctypes_type(return_type)

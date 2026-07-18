@@ -116,6 +116,7 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE    (1u << 1)
 #define MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR         (1u << 2)
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1      1u
+#define MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE     0u
 
 /* ------------------------------------------------------------------ */
 /*  Status and mode enums                                             */

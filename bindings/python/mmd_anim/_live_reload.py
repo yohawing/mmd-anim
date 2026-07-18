@@ -388,7 +388,12 @@ class LiveRuntime:
         self._runtime = runtime
         self._lock = threading.RLock()
         self._handles: RuntimeHandleSet | None = None
+        self._physics_definition: PhysicsDefinition | None = None
         self._closed = False
+        if not runtime.supports_native_host_pose_morphs():
+            raise NativeRuntimeError(
+                "live runtime requires native HostPose Group/Bone Morph expansion"
+            )
         if definition is not None:
             if current_pose is None:
                 raise ValueError("current_pose is required for initial model creation")
@@ -442,11 +447,7 @@ class LiveRuntime:
                 raise NativeRuntimeError("live runtime is closed")
             if not isinstance(current_pose, HostPose):
                 raise TypeError("current_pose must be a HostPose")
-            previous_physics = (
-                self._physics_definition
-                if hasattr(self, "_physics_definition")
-                else None
-            )
+            previous_physics = self._physics_definition
             selected_physics = (
                 previous_physics if physics_definition is _UNSET else physics_definition
             )
@@ -519,8 +520,6 @@ class LiveRuntime:
                 action=action,
                 dt_seconds=dt_seconds,
             )
-
-    apply_host_pose = evaluate_host_frame
 
     def close(self) -> None:
         with self._lock:

@@ -29,6 +29,7 @@ from ._model_descriptor import (
 
 EXPECTED_ABI_VERSION = 2
 FEATURE_PHYSICS_BULLET_NATIVE = 1 << 1
+FEATURE_HOST_POSE_NATIVE_MORPHS = 1 << 3
 LIBRARY_ENV = "MMD_RUNTIME_LIBRARY"
 
 
@@ -143,6 +144,11 @@ class RuntimeLibrary:
 
     def supports_native_physics(self) -> bool:
         return bool(self.feature_flags() & FEATURE_PHYSICS_BULLET_NATIVE)
+
+    def supports_native_host_pose_morphs(self) -> bool:
+        """Return whether HostPose weights expand Group/Bone Morphs natively."""
+
+        return bool(self.feature_flags() & FEATURE_HOST_POSE_NATIVE_MORPHS)
 
     def supports_model_descriptor(self) -> bool:
         """Return whether the optional typed descriptor constructor is usable."""

@@ -3695,6 +3695,18 @@ fn descriptor_v1_rejects_header_and_pointer_contracts() {
             .to_string_lossy()
             .contains("descriptor.bones")
     );
+
+    descriptor.bone_count = bones.len();
+    let model = unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) };
+    assert!(
+        !model.is_null(),
+        "a valid retry on the same thread must succeed"
+    );
+    assert!(
+        last_error_cstr().is_none(),
+        "a successful retry must clear the previous descriptor error"
+    );
+    unsafe { mmd_runtime_model_free(model) };
 }
 
 #[test]
@@ -3809,6 +3821,10 @@ fn descriptor_feature_flag_is_available_without_changing_abi() {
     assert_eq!(mmd_runtime_abi_version(), ABI_VERSION);
     assert_ne!(
         mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR,
+        0
+    );
+    assert_ne!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS,
         0
     );
 }

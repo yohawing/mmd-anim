@@ -56,7 +56,10 @@ with `SEED` before atomically swapping the handle set.  The old world, instance,
 and model are then closed in that order.  Per-frame pose/morph/IK updates use
 the host-pose API and do not rebuild descriptors.  `HostPose` local arrays are
 pre-morph base values; native runtime expansion applies Group/Bone morph
-deltas, so DCC hosts must not preapply those deltas.
+deltas, so DCC hosts must not preapply those deltas.  Hosts must check
+`MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS` (bit 3) before relying on this
+semantic correction; `LiveRuntime` rejects older ABI-v2 libraries that do not
+advertise it.
 
 The current pose remains host-owned and must be supplied by the DCC; no pose
 getter or live in-place model mutation is provided.  Physics continuity,

@@ -63,9 +63,8 @@ def _as_tuple(value: Iterable[float], *, name: str, length: int) -> tuple[float,
 
 
 def _as_bool(value: object, *, name: str) -> bool:
-    # ctypes accepts integers for c_bool, which can silently turn malformed
-    # descriptor metadata into a different flag.  Keep the native semantic
-    # checks authoritative, but reject this marshal-safety hazard early.
+    # Reject truthy integers before they silently select a descriptor flag.
+    # Native semantic checks remain authoritative for the resulting bitmask.
     if type(value) is not bool:
         raise TypeError(f"{name} must be bool")
     return value
@@ -304,16 +303,11 @@ def _marshal_bones(values: tuple[Bone, ...]) -> object | None:
             | (MODEL_BONE_FIXED_AXIS if bone.fixed_axis_xyz is not None else 0)
             | (MODEL_BONE_LOCAL_AXIS if local_x_present else 0)
         )
-        try:
-            transform_order = int(bone.transform_order)
-        except (TypeError, ValueError, OverflowError) as error:
-            raise TypeError(
-                f"bones[{index}].transform_order must be an integer"
-            ) from error
         if isinstance(bone.transform_order, bool) or not isinstance(
             bone.transform_order, int
         ):
             raise TypeError(f"bones[{index}].transform_order must be an integer")
+        transform_order = bone.transform_order
         if not -0x80000000 <= transform_order <= 0x7FFFFFFF:
             raise ValueError(f"bones[{index}].transform_order exceeds int32 range")
         records.append(

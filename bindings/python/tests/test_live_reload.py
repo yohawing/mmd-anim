@@ -26,7 +26,11 @@ from mmd_anim._model_descriptor import (  # noqa: E402
     BoneMorphOffset,
     ModelDefinition,
 )
-from mmd_anim._runtime import NativeRuntimeError, RuntimeLibrary  # noqa: E402
+from mmd_anim._runtime import (  # noqa: E402
+    FEATURE_HOST_POSE_NATIVE_MORPHS,
+    NativeRuntimeError,
+    RuntimeLibrary,
+)
 
 
 FEATURE_MODEL_DESCRIPTOR = int(MODEL_DESCRIPTOR_MANIFEST["feature"]["value"])
@@ -74,7 +78,11 @@ class FakeLiveLibrary:
         return 2
 
     def mmd_runtime_feature_flags(self) -> int:
-        return FEATURE_MODEL_DESCRIPTOR | FEATURE_PHYSICS
+        return (
+            FEATURE_MODEL_DESCRIPTOR
+            | FEATURE_PHYSICS
+            | FEATURE_HOST_POSE_NATIVE_MORPHS
+        )
 
     def mmd_runtime_last_error_message(self) -> bytes:
         return self.last_error
@@ -216,6 +224,12 @@ def _runtime(fake: FakeLiveLibrary) -> RuntimeLibrary:
 
 
 class FakeLiveReloadTests(unittest.TestCase):
+    def test_requires_native_host_pose_morph_capability(self) -> None:
+        fake = FakeLiveLibrary()
+        fake.mmd_runtime_feature_flags = lambda: FEATURE_MODEL_DESCRIPTOR  # type: ignore[method-assign]
+        with self.assertRaisesRegex(NativeRuntimeError, "native HostPose"):
+            LiveRuntime(_runtime(fake))
+
     def test_reload_serializes_close_and_terminal_close_rejects_reload(self) -> None:
         fake = FakeLiveLibrary()
         runtime = _runtime(fake)

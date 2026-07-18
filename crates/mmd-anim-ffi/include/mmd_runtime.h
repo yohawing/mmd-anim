@@ -26,7 +26,11 @@ extern "C" {
    the before/after-physics split evaluation API is available; bit 1
    (MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE) is set when the native Bullet
    physics world is available; bit 2 (MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR)
-   is set when the version 1 typed model descriptor constructor is available.
+   is set when the version 1 typed model descriptor constructor is available;
+   bit 3 (MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS) is set when HostPose
+   local arrays are pre-Morph base values and Group/Bone Morph expansion is
+   performed natively. Hosts that pre-apply Morph bone deltas must stop doing
+   so before using that contract.
    Check the relevant bit before calling any
    physics_world_* or evaluate_host_frame function; when the bit is unset
    those functions return MMD_RUNTIME_STATUS_UNSUPPORTED.
@@ -115,6 +119,7 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_SPLIT_PHYSICS_EVALUATION (1u << 0)
 #define MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE    (1u << 1)
 #define MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR         (1u << 2)
+#define MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS  (1u << 3)
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1      1u
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE     0u
 
@@ -987,6 +992,9 @@ mmd_runtime_model_t* mmd_runtime_model_create_full_with_morphs(
     const mmd_runtime_ffi_group_morph_offset_t* group_morph_offsets,
     size_t                                   group_morph_offset_count);
 
+/* Creates a model by copying a complete version 1 descriptor. Each pointer
+   field must be NULL exactly when its paired count is zero; otherwise it must
+   reference that many readable records for the duration of this call. */
 mmd_runtime_model_t* mmd_runtime_model_create_from_descriptor(
     const mmd_runtime_model_descriptor_t* descriptor);
 

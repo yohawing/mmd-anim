@@ -704,20 +704,25 @@ fn read_bones_with_local_axes(
             let append_parent = r.read_bone_index(header)?;
             let append_ratio = r.read_f32_le()?;
 
-            let source = append_parent.ok_or(ImportError::SectionOverflow)?;
-            let target_idx = bones.len();
-            append_transforms.push(RuntimeAppendTransformDescriptorV1 {
-                target_bone: BoneIndex(target_idx as u32),
-                source_bone: source,
-                ratio: append_ratio,
-                affect_rotation: flags & BONE_FLAG_APPEND_ROTATE != 0,
-                affect_translation: flags & BONE_FLAG_APPEND_TRANSLATE != 0,
-                local: flags & BONE_FLAG_LOCAL_APPEND != 0,
-            });
+            // Preserve the historical PMX import policy: malformed optional
+            // append metadata is ignored at the tolerant file-format boundary.
+            // Host-authored typed descriptors remain strictly validated.
+            if let Some(source) = append_parent {
+                let target_idx = bones.len();
+                append_transforms.push(RuntimeAppendTransformDescriptorV1 {
+                    target_bone: BoneIndex(target_idx as u32),
+                    source_bone: source,
+                    ratio: append_ratio,
+                    affect_rotation: flags & BONE_FLAG_APPEND_ROTATE != 0,
+                    affect_translation: flags & BONE_FLAG_APPEND_TRANSLATE != 0,
+                    local: flags & BONE_FLAG_LOCAL_APPEND != 0,
+                });
+            }
         }
 
         let fixed_axis = if flags & BONE_FLAG_FIXED_AXIS != 0 {
-            Some(r.read_vec3()?)
+            let axis = r.read_vec3()?;
+            (axis.is_finite() && axis.length_squared() > f32::EPSILON).then_some(axis)
         } else {
             None
         };
@@ -725,7 +730,8 @@ fn read_bones_with_local_axes(
         let local_axis = if flags & BONE_FLAG_LOCAL_AXIS != 0 {
             let x = r.read_vec3()?;
             let z = r.read_vec3()?;
-            Some(LocalAxis::new(x, z))
+            let axis = LocalAxis::new(x, z);
+            axis.basis_quat().is_some().then_some(axis)
         } else {
             None
         };
@@ -737,9 +743,6 @@ fn read_bones_with_local_axes(
         if flags & BONE_FLAG_IK != 0 {
             let ik_target = r.read_bone_index(header)?;
             let ik_loop_count = r.read_i32_le()?;
-            if ik_loop_count <= 0 {
-                return Err(ImportError::SectionOverflow);
-            }
             let ik_limit_angle = r.read_f32_le()?;
             let link_count = r.read_i32_le()?;
             if link_count < 0 {
@@ -749,9 +752,10 @@ fn read_bones_with_local_axes(
 
             let mut links = Vec::with_capacity(link_count as usize);
             for _ in 0..link_count {
-                let link_bone = r
-                    .read_bone_index(header)?
-                    .ok_or(ImportError::SectionOverflow)?;
+                // Match the legacy importer for malformed optional IK links.
+                // Bone 0 is the historical fallback and keeps such PMX files
+                // loadable without weakening direct descriptor validation.
+                let link_bone = r.read_bone_index(header)?.unwrap_or(BoneIndex(0));
                 let has_limit = r.read_u8()?;
                 let angle_limit = if has_limit != 0 {
                     let min = r.read_vec3()?;
@@ -767,14 +771,21 @@ fn read_bones_with_local_axes(
             }
 
             let ik_bone = BoneIndex(bones.len() as u32);
-            let target_bone = ik_target.ok_or(ImportError::SectionOverflow)?;
-            ik_solvers.push(RuntimeIkSolverDescriptorV1 {
-                ik_bone,
-                target_bone,
-                links,
-                iteration_count: ik_loop_count as u32,
-                limit_angle: ik_limit_angle,
-            });
+            // A missing target was historically treated as "no solver". A
+            // non-positive loop count is likewise sanitized to no solver,
+            // avoiding the old negative-i32-to-u32 explosion while preserving
+            // PMX import success.
+            if let Some(target_bone) = ik_target
+                && ik_loop_count > 0
+            {
+                ik_solvers.push(RuntimeIkSolverDescriptorV1 {
+                    ik_bone,
+                    target_bone,
+                    links,
+                    iteration_count: ik_loop_count as u32,
+                    limit_angle: ik_limit_angle,
+                });
+            }
         }
 
         bone_name_bytes.push(name_bytes);
@@ -6855,7 +6866,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_import_rejects_degenerate_local_axis() {
+    fn runtime_import_drops_degenerate_local_axis() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
         buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
@@ -6871,15 +6882,64 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&BONE_FLAG_LOCAL_AXIS.to_le_bytes());
         buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
-        // localAxis.x is zero, so shared descriptor validation must reject the import.
+        // localAxis.x is zero, so tolerant PMX normalization drops the axis
+        // before invoking the strict descriptor compiler.
         buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
         buf.extend_from_slice(&[0.0f32, 0.0, 1.0].map(f32::to_le_bytes).concat());
         buf.extend_from_slice(&0i32.to_le_bytes());
 
-        assert!(matches!(
-            import_pmx_runtime(&buf),
-            Err(ImportError::ModelDescriptorFailed(_))
-        ));
+        let imported = import_pmx_runtime(&buf).expect("degenerate PMX axis is tolerated");
+        assert!(imported.model.local_axis(BoneIndex(0)).is_none());
+    }
+
+    #[test]
+    fn runtime_import_drops_degenerate_fixed_axis() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(1));
+        buf.extend_from_slice(&build_bone_name_bytes("DegenerateFixed"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&BONE_FLAG_FIXED_AXIS.to_le_bytes());
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+
+        let imported = import_pmx_runtime(&buf).expect("degenerate PMX axis is tolerated");
+        assert!(imported.model.fixed_axis(BoneIndex(0)).is_none());
+    }
+
+    #[test]
+    fn nil_append_parent_is_sanitized_to_no_append() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(1));
+        buf.extend_from_slice(&build_bone_name_bytes("NilAppend"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&BONE_FLAG_APPEND_ROTATE.to_le_bytes());
+        // Tail offset, then the malformed optional append parent and ratio.
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0.5f32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+
+        let imported = import_pmx_runtime(&buf).expect("nil append parent is tolerated");
+        assert!(imported.model.append_transforms().is_empty());
     }
 
     #[test]
@@ -6961,15 +7021,33 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_positive_ik_loop_count() {
-        assert!(matches!(
-            import_pmx_runtime(&build_local_axis_limit_pmx_with_loop_count(false, 0)),
-            Err(ImportError::SectionOverflow)
-        ));
-        assert!(matches!(
-            import_pmx_runtime(&build_local_axis_limit_pmx_with_loop_count(false, -1)),
-            Err(ImportError::SectionOverflow)
-        ));
+    fn non_positive_ik_loop_count_is_sanitized_to_no_solver() {
+        for loop_count in [0, -1] {
+            let imported = import_pmx_runtime(&build_local_axis_limit_pmx_with_loop_count(
+                false, loop_count,
+            ))
+            .expect("malformed optional IK is tolerated");
+            assert_eq!(imported.model.ik_count(), 0);
+        }
+    }
+
+    #[test]
+    fn nil_ik_target_is_sanitized_to_no_solver() {
+        let imported = import_pmx_runtime(&build_local_axis_limit_pmx_with_ik_indices(
+            false, 16, -1, 0,
+        ))
+        .expect("nil optional IK target is tolerated");
+        assert_eq!(imported.model.ik_count(), 0);
+    }
+
+    #[test]
+    fn nil_ik_link_preserves_legacy_bone_zero_fallback() {
+        let imported = import_pmx_runtime(&build_local_axis_limit_pmx_with_ik_indices(
+            false, 16, 1, -1,
+        ))
+        .expect("nil optional IK link is tolerated");
+        assert_eq!(imported.model.ik_count(), 1);
+        assert_eq!(imported.model.ik_solvers()[0].links[0].bone, BoneIndex(0));
     }
 
     fn build_local_axis_limit_pmx(has_local_axis: bool) -> Vec<u8> {
@@ -6979,6 +7057,15 @@ mod tests {
     fn build_local_axis_limit_pmx_with_loop_count(
         has_local_axis: bool,
         ik_loop_count: i32,
+    ) -> Vec<u8> {
+        build_local_axis_limit_pmx_with_ik_indices(has_local_axis, ik_loop_count, 1, 0)
+    }
+
+    fn build_local_axis_limit_pmx_with_ik_indices(
+        has_local_axis: bool,
+        ik_loop_count: i32,
+        ik_target: i16,
+        ik_link: i16,
     ) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
@@ -7024,11 +7111,11 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&(BONE_FLAG_TAIL_INDEX | BONE_FLAG_IK).to_le_bytes());
         buf.extend_from_slice(&1i16.to_le_bytes());
-        buf.extend_from_slice(&1i16.to_le_bytes());
+        buf.extend_from_slice(&ik_target.to_le_bytes());
         buf.extend_from_slice(&ik_loop_count.to_le_bytes());
         buf.extend_from_slice(&std::f32::consts::PI.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes());
-        buf.extend_from_slice(&0i16.to_le_bytes());
+        buf.extend_from_slice(&ik_link.to_le_bytes());
         buf.push(1);
         buf.extend_from_slice(&(-std::f32::consts::FRAC_PI_2).to_le_bytes());
         buf.extend_from_slice(&0.0f32.to_le_bytes());

@@ -37,10 +37,12 @@ pub const ABI_VERSION: u32 = 2;
 const FEATURE_SPLIT_PHYSICS_EVALUATION: u32 = 1 << 0;
 const FEATURE_PHYSICS_BULLET_NATIVE: u32 = 1 << 1;
 pub const MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR: u32 = 1 << 2;
+pub const MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = 1 << 3;
 pub const MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1: u32 =
     mmd_anim_runtime::RUNTIME_MODEL_DESCRIPTOR_VERSION_V1;
 pub const MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE: u32 = 0;
 const FEATURE_MODEL_DESCRIPTOR: u32 = MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR;
+const FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -771,6 +773,7 @@ pub extern "C" fn mmd_runtime_feature_flags() -> u32 {
 fn runtime_feature_flags() -> u32 {
     FEATURE_SPLIT_PHYSICS_EVALUATION
         | FEATURE_MODEL_DESCRIPTOR
+        | FEATURE_HOST_POSE_NATIVE_MORPHS
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE
         } else {
@@ -3377,6 +3380,8 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full_with_morphs(
 /// owns its normalized runtime storage and does not retain any input pointer.
 /// Invalid descriptor metadata or compiler validation failures return NULL and
 /// set a concrete indexed thread-local error message.
+/// Every descriptor pointer must be null exactly when its paired count is zero;
+/// otherwise it must reference that many readable records.
 ///
 /// # Safety
 ///

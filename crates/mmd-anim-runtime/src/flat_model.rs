@@ -1,9 +1,12 @@
 use std::fmt;
 
 use crate::{
-    AppendTransformInit, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit,
-    IkLinkInit, IkSolverInit, MorphIndex, MorphInit, MorphOffsetSpan,
+    AppendTransformInit, BoneIndex, BoneInit, IkAngleLimit, IkLinkInit, IkSolverInit, MorphIndex,
+    MorphInit, build_morph_init_from_offsets,
 };
+
+#[cfg(test)]
+use crate::MorphOffsetSpan;
 
 pub struct FlatBoneInput<'a> {
     pub parent_indices: &'a [i32],
@@ -228,101 +231,53 @@ pub fn build_morph_init_from_flat_iter(
         }
         return Err(FlatModelInputError::MorphCountZeroWithData);
     }
-    let morph_count_usize = morph_count as usize;
-    let (bone_offsets, bone_spans) =
-        build_bone_morph_offset_tables(morph_count_usize, &bone_morphs)?;
-    let (group_offsets, group_spans) =
-        build_group_morph_offset_tables(morph_count_usize, &group_morphs)?;
-    Ok(MorphInit {
-        morph_count,
-        bone_offsets,
-        bone_spans,
-        group_offsets,
-        group_spans,
-        ..MorphInit::default()
+    let bone_offsets = bone_morphs
+        .iter()
+        .map(|entry| {
+            (
+                MorphIndex(entry.morph_index),
+                crate::BoneMorphOffset {
+                    target_bone: BoneIndex(entry.target_bone_index),
+                    position_offset: glam::Vec3A::from_array(entry.position_offset_xyz),
+                    rotation_offset: glam::Quat::from_xyzw(
+                        entry.rotation_offset_xyzw[0],
+                        entry.rotation_offset_xyzw[1],
+                        entry.rotation_offset_xyzw[2],
+                        entry.rotation_offset_xyzw[3],
+                    ),
+                },
+            )
+        })
+        .collect();
+    let group_offsets = group_morphs
+        .iter()
+        .map(|entry| {
+            (
+                MorphIndex(entry.morph_index),
+                crate::GroupMorphOffset {
+                    child_morph: MorphIndex(entry.child_morph_index),
+                    ratio: entry.ratio,
+                },
+            )
+        })
+        .collect();
+    build_morph_init_from_offsets(morph_count, bone_offsets, group_offsets).map_err(|error| {
+        match error {
+            crate::ModelBuildError::MorphCountZeroWithData => {
+                FlatModelInputError::MorphCountZeroWithData
+            }
+            crate::ModelBuildError::InvalidBoneMorphMorph { .. } => {
+                FlatModelInputError::BoneMorphIndexOutOfRange
+            }
+            crate::ModelBuildError::InvalidGroupMorph { .. }
+            | crate::ModelBuildError::InvalidGroupMorphChild { .. }
+            | crate::ModelBuildError::GroupMorphCycle { .. }
+            | crate::ModelBuildError::GroupMorphCycleAt { .. } => {
+                FlatModelInputError::GroupMorphIndexOutOfRange
+            }
+            _ => FlatModelInputError::RangeOverflow,
+        }
     })
-}
-
-fn build_bone_morph_offset_tables(
-    morph_count: usize,
-    bone_morphs: &[FlatBoneMorphInput],
-) -> Result<(Vec<BoneMorphOffset>, Vec<MorphOffsetSpan>), FlatModelInputError> {
-    if bone_morphs.is_empty() {
-        return Ok((Vec::new(), vec![MorphOffsetSpan::default(); morph_count]));
-    }
-
-    let mut sorted: Vec<&FlatBoneMorphInput> = bone_morphs.iter().collect();
-    sorted.sort_by_key(|entry| entry.morph_index);
-    if sorted.last().unwrap().morph_index as usize >= morph_count {
-        return Err(FlatModelInputError::BoneMorphIndexOutOfRange);
-    }
-
-    let mut offsets = Vec::with_capacity(bone_morphs.len());
-    let mut spans = vec![MorphOffsetSpan::default(); morph_count];
-    let mut index = 0;
-    while index < sorted.len() {
-        let morph = sorted[index].morph_index as usize;
-        let start = offsets.len() as u32;
-        let mut count = 0u32;
-        while index < sorted.len() && sorted[index].morph_index as usize == morph {
-            let entry = sorted[index];
-            offsets.push(BoneMorphOffset {
-                target_bone: BoneIndex(entry.target_bone_index),
-                position_offset: glam::Vec3A::new(
-                    entry.position_offset_xyz[0],
-                    entry.position_offset_xyz[1],
-                    entry.position_offset_xyz[2],
-                ),
-                rotation_offset: glam::Quat::from_xyzw(
-                    entry.rotation_offset_xyzw[0],
-                    entry.rotation_offset_xyzw[1],
-                    entry.rotation_offset_xyzw[2],
-                    entry.rotation_offset_xyzw[3],
-                ),
-            });
-            count += 1;
-            index += 1;
-        }
-        spans[morph] = MorphOffsetSpan { start, count };
-    }
-
-    Ok((offsets, spans))
-}
-
-fn build_group_morph_offset_tables(
-    morph_count: usize,
-    group_morphs: &[FlatGroupMorphInput],
-) -> Result<(Vec<GroupMorphOffset>, Vec<MorphOffsetSpan>), FlatModelInputError> {
-    if group_morphs.is_empty() {
-        return Ok((Vec::new(), vec![MorphOffsetSpan::default(); morph_count]));
-    }
-
-    let mut sorted: Vec<&FlatGroupMorphInput> = group_morphs.iter().collect();
-    sorted.sort_by_key(|entry| entry.morph_index);
-    if sorted.last().unwrap().morph_index as usize >= morph_count {
-        return Err(FlatModelInputError::GroupMorphIndexOutOfRange);
-    }
-
-    let mut offsets = Vec::with_capacity(group_morphs.len());
-    let mut spans = vec![MorphOffsetSpan::default(); morph_count];
-    let mut index = 0;
-    while index < sorted.len() {
-        let morph = sorted[index].morph_index as usize;
-        let start = offsets.len() as u32;
-        let mut count = 0u32;
-        while index < sorted.len() && sorted[index].morph_index as usize == morph {
-            let entry = sorted[index];
-            offsets.push(GroupMorphOffset {
-                child_morph: MorphIndex(entry.child_morph_index),
-                ratio: entry.ratio,
-            });
-            count += 1;
-            index += 1;
-        }
-        spans[morph] = MorphOffsetSpan { start, count };
-    }
-
-    Ok((offsets, spans))
 }
 
 pub fn build_append_transforms_from_flat(

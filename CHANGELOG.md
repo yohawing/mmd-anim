@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.1 - 2026-07-16
+
+Python host integration, consistent CLI exit behavior, and named physics
+parameter exchange for the experimental C ABI.
+
+### Added
+
+- Added an in-repository experimental Python binding based on `ctypes`, with a
+  model-create, frame-evaluate, and free smoke path plus explicit ownership,
+  opaque-handle, NULL/error, byte-buffer-free, and UTF-8 JSON policies.
+- Added a header-to-Python ABI drift check and Python smokes for PMX/VMD parser
+  JSON, geometry buffers, runtime frame evaluation, and IK primitives, including
+  CI coverage against a real native library build.
+- Added `mmd_runtime_physics_params_get_json` and
+  `mmd_runtime_physics_params_set_json` for schema-versioned, name-keyed rigid
+  body and joint parameter exchange through the experimental C ABI.
+
+### Changed
+
+- Standardized CLI process outcomes to exit `0` on success, `2` for argument
+  errors, and `1` for execution errors.
+
+### Fixed
+
+- Improved CLI failures to preserve the input path and distinguish an explicit
+  format selection from an automatically detected format.
+
+### Known limitations
+
+- The C ABI and Python binding remain experimental and may change before 1.0.
+- v0.3.1 does not provide Python wheels or a PyPI package; Python consumers use
+  the in-repository bridge and build or provide the native library themselves.
+
 ## 0.3.0 - 2026-07-16
 
 Sparse pose reduction, host-driven physics integration, and expanded FBX

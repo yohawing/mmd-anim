@@ -9,6 +9,7 @@ pub mod append_primitive;
 mod flat_model;
 pub mod ik_primitive;
 mod model;
+mod model_descriptor;
 mod pose;
 // The reducer remains crate-private until its Rust shape is stabilized by the
 // format targets and wrapper parity work in later POSE-REDUCE phases.
@@ -37,6 +38,14 @@ pub use model::{
     AppendTransform, AppendTransformInit, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset,
     IkAngleLimit, IkLink, IkLinkInit, IkSolver, IkSolverInit, LocalAxis, ModelArena,
     ModelBuildError, MorphIndex, MorphInit, MorphOffsetSpan, VertexMorphOffset,
+    build_morph_init_from_offsets,
+};
+pub use model_descriptor::{
+    RUNTIME_MODEL_DESCRIPTOR_VERSION_V1, RuntimeAppendTransformDescriptorV1,
+    RuntimeBoneDescriptorV1, RuntimeBoneMorphOffsetDescriptorV1,
+    RuntimeGroupMorphOffsetDescriptorV1, RuntimeIkLinkDescriptorV1, RuntimeIkSolverDescriptorV1,
+    RuntimeModelDescriptorError, RuntimeModelDescriptorErrorKind, RuntimeModelDescriptorV1,
+    RuntimeMorphDescriptorV1, compile_runtime_model_descriptor_v1,
 };
 pub use pose::PoseArena;
 pub use reduce::{

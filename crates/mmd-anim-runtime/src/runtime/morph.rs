@@ -17,8 +17,10 @@ impl RuntimeInstance {
 
     /// Pass 1: expand all group morph weights (updates morph_weights in-place).
     /// Group morph children may appear before or after their parents in PMX, so
-    /// expansion follows the graph recursively using the model-validated
-    /// cycle-free group morph spans.
+    /// expansion follows the graph in the same depth-first order as the former
+    /// recursive implementation, using a reusable heap scratch stack.  The
+    /// model has already rejected cycles, so the stack depth is bounded by the
+    /// morph count.
     fn expand_group_morphs(&mut self) {
         let spans = self.model.group_morph_spans();
         let offsets = self.model.group_morph_offsets();
@@ -31,19 +33,44 @@ impl RuntimeInstance {
             .expanded_weights
             .extend_from_slice(&self.pose.morph_weights()[..mc]);
 
+        let expanded_weights = &mut self.morph_scratch.expanded_weights;
+        let group_stack = &mut self.morph_scratch.group_stack;
+        group_stack.clear();
         for (morph_idx, &w) in self.pose.morph_weights()[..mc].iter().enumerate() {
             if w == 0.0 {
                 continue;
             }
-            expand_group_morph_weight(
+            group_stack.push(super::GroupMorphFrame {
                 morph_idx,
-                w,
-                spans,
-                offsets,
-                &mut self.morph_scratch.expanded_weights,
-            );
+                weight: w,
+                next_offset: 0,
+            });
+            while let Some(frame) = group_stack.last_mut() {
+                let span = spans[frame.morph_idx];
+                if frame.next_offset >= span.count {
+                    group_stack.pop();
+                    continue;
+                }
+
+                let offset_index = span.start as usize + frame.next_offset as usize;
+                frame.next_offset += 1;
+                let offset = offsets[offset_index];
+                let child = offset.child_morph.as_usize();
+                let contribution = frame.weight * offset.ratio;
+                // Keep this addition in the exact order used by the
+                // recursive implementation; callers may depend on f32
+                // rounding for overlapping group paths.
+                expanded_weights[child] += contribution;
+                if spans[child].count > 0 {
+                    group_stack.push(super::GroupMorphFrame {
+                        morph_idx: child,
+                        weight: contribution,
+                        next_offset: 0,
+                    });
+                }
+            }
         }
-        for (i, &w) in self.morph_scratch.expanded_weights.iter().enumerate() {
+        for (i, &w) in expanded_weights.iter().enumerate() {
             self.pose.set_morph_weight(MorphIndex(i as u32), w);
         }
     }
@@ -77,24 +104,5 @@ impl RuntimeInstance {
     #[inline]
     pub fn morph_weights(&self) -> &[f32] {
         self.pose.morph_weights()
-    }
-}
-
-fn expand_group_morph_weight(
-    morph_idx: usize,
-    weight: f32,
-    spans: &[crate::MorphOffsetSpan],
-    offsets: &[crate::GroupMorphOffset],
-    expanded_weights: &mut [f32],
-) {
-    let span = spans[morph_idx];
-    for i in span.start..span.start + span.count {
-        let off = &offsets[i as usize];
-        let child = off.child_morph.as_usize();
-        let contribution = weight * off.ratio;
-        expanded_weights[child] += contribution;
-        if spans[child].count > 0 {
-            expand_group_morph_weight(child, contribution, spans, offsets, expanded_weights);
-        }
     }
 }

@@ -38,6 +38,9 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Run shared native Python/C ABI release gate
+        run: python tools/check_python_ffi_release.py
+
       - name: Check lightweight builds
         run: |
           cargo check -p mmd-anim-physics-bullet --no-default-features

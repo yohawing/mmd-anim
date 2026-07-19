@@ -24,9 +24,6 @@ jobs:
           rustup default stable
           rustup component add rustfmt clippy
 
-      - name: Check FFI header symbols
-        run: python tools/check_ffi_header_symbols.py
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -40,3 +37,26 @@ jobs:
         run: |
           cargo check -p mmd-anim-physics-bullet --no-default-features
           cargo test -p mmd-anim-cli -p mmd-anim-ffi --no-default-features
+
+  python-ffi:
+    name: Python FFI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Configure MSVC developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Run shared native Python/C ABI release gate
+        run: python tools/check_python_ffi_release.py

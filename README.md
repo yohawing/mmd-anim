@@ -81,7 +81,7 @@ Format support overview. "Loading" means parsing a file into structured data.
 
 ```toml
 [dependencies]
-mmd-anim = "0.3"
+mmd-anim = "0.3.1"
 ```
 
 ## Native Hosts (C ABI)

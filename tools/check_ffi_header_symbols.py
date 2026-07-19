@@ -84,6 +84,21 @@ UNITY_FUNCTIONS = {
     ),
 }
 
+PHYSICS_PARAM_FUNCTIONS = {
+    "mmd_runtime_physics_params_get_json": (
+        "ffi_byte_buffer",
+        [("world", "const_physics_world_ptr")],
+    ),
+    "mmd_runtime_physics_params_set_json": (
+        "status",
+        [
+            ("world", "physics_world_ptr"),
+            ("data", "const_u8_ptr"),
+            ("len", "usize"),
+        ],
+    ),
+}
+
 
 def rust_exported_symbols(text: str) -> set[str]:
     lines = text.splitlines()
@@ -133,7 +148,11 @@ def canonical_rust_type(type_name: str) -> str:
         "f32": "f32",
         "bool": "bool",
         "MmdRuntimeStatus": "status",
+        "MmdRuntimeFfiByteBuffer": "ffi_byte_buffer",
         "*const MmdRuntimeReducedPose": "const_reduced_pose_ptr",
+        "*const MmdRuntimePhysicsWorld": "const_physics_world_ptr",
+        "*mut MmdRuntimePhysicsWorld": "physics_world_ptr",
+        "*const u8": "const_u8_ptr",
         "*mut usize": "usize_ptr",
         "*mut MmdRuntimeFfiUnityCurveDescriptor": "unity_descriptor_ptr",
         "*mut MmdRuntimeFfiUnityCurveKey": "unity_key_ptr",
@@ -148,7 +167,11 @@ def canonical_c_type(type_name: str) -> str:
         "float": "f32",
         "bool": "bool",
         "mmd_runtime_status_t": "status",
+        "mmd_runtime_ffi_byte_buffer_t": "ffi_byte_buffer",
         "const mmd_runtime_reduced_pose_t*": "const_reduced_pose_ptr",
+        "const mmd_runtime_physics_world_t*": "const_physics_world_ptr",
+        "mmd_runtime_physics_world_t*": "physics_world_ptr",
+        "const uint8_t*": "const_u8_ptr",
         "size_t*": "usize_ptr",
         "mmd_runtime_ffi_unity_curve_descriptor_t*": "unity_descriptor_ptr",
         "mmd_runtime_ffi_unity_curve_key_t*": "unity_key_ptr",
@@ -244,6 +267,13 @@ def check_unity_abi_shapes(rust_text: str, header_text: str) -> list[str]:
             errors.append(
                 f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
             )
+    for name, expected in PHYSICS_PARAM_FUNCTIONS.items():
+        rust_shape = rust_function_shape(rust_text, name)
+        c_shape = c_function_shape(header_text, name)
+        if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
+            errors.append(
+                f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
+            )
     return errors
 
 
@@ -281,7 +311,7 @@ def main() -> int:
         return 1
 
     print(
-        f"OK: {len(rust_symbols)} Rust FFI exports and Unity curve ABI shapes "
+        f"OK: {len(rust_symbols)} Rust FFI exports and tracked ABI shapes "
         "match mmd_runtime.h declarations."
     )
     return 0

@@ -47,14 +47,26 @@ impl IkScratch {
 }
 
 #[derive(Debug)]
+struct GroupMorphFrame {
+    morph_idx: usize,
+    weight: f32,
+    next_offset: u32,
+}
+
+#[derive(Debug)]
 struct MorphScratch {
     expanded_weights: Vec<f32>,
+    group_stack: Vec<GroupMorphFrame>,
 }
 
 impl MorphScratch {
     fn new(morph_count: usize) -> Self {
         Self {
             expanded_weights: vec![0.0; morph_count],
+            // Grow to the graph depth on first use, then reuse that allocation.
+            // Reserving morph_count here would penalize models with many
+            // non-group morphs and every additional runtime instance.
+            group_stack: Vec::new(),
         }
     }
 }
@@ -377,6 +389,11 @@ impl RuntimeInstance {
         self.evaluate_current_pose();
     }
 
+    /// Apply a complete host-owned pose and expand its morphs.
+    ///
+    /// The supplied local offsets are the base pose. Group morph weights are
+    /// expanded and bone-morph offsets are applied after all input validation
+    /// and pose slices have been copied, matching clip evaluation semantics.
     pub fn apply_host_pose(&mut self, view: &HostPoseView) -> Result<(), HostPoseError> {
         let bone_count = self.model.bone_count();
         let morph_count = self.pose.morph_weights().len();
@@ -456,6 +473,7 @@ impl RuntimeInstance {
         self.pose.set_local_scales_from_slice(view.local_scales);
         self.pose.set_morph_weights_from_slice(view.morph_weights);
         self.pose.set_ik_enabled_from_slice(view.ik_enabled);
+        self.expand_morphs();
 
         Ok(())
     }

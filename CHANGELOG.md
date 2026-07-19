@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.3.1 - 2026-07-19
+
+Python host integration, payload-free runtime model construction, consistent
+CLI exit behavior, and named physics parameter exchange for the experimental C
+ABI.
+
+### Added
+
+- Added an in-repository experimental Python binding based on `ctypes`, with a
+  model-create, frame-evaluate, and free smoke path plus explicit ownership,
+  opaque-handle, NULL/error, byte-buffer-free, and UTF-8 JSON policies.
+- Added a header-to-Python ABI drift check and Python smokes for PMX/VMD parser
+  JSON, geometry buffers, runtime frame evaluation, and IK primitives, including
+  CI coverage against a real native library build.
+- Added `mmd_runtime_physics_params_get_json` and
+  `mmd_runtime_physics_params_set_json` for schema-versioned, name-keyed rigid
+  body and joint parameter exchange through the experimental C ABI.
+- Added a versioned typed model descriptor compiler and C ABI constructor for
+  building runtime models without retaining PMX bytes, including bones, IK,
+  append transforms, bone/group morphs, axes, and transform phases.
+- Added Python helpers for typed model descriptors and fail-atomic live reload,
+  including model/instance/physics replacement under a serialized generation
+  lock.
+- Added caller-owned Python array readback for world/skinning matrices and
+  morph weights, plus low-level PMX/VMD evaluation and physics parameter APIs.
+- Added shared C/Rust/ctypes ABI manifests and native release checks for header
+  symbols, record layout, feature detection, and the complete Python test suite.
+
+### Changed
+
+- Standardized CLI process outcomes to exit `0` on success, `2` for argument
+  errors, and `1` for execution errors.
+- Unified PMX runtime import and host descriptors on the same canonical model
+  compiler while retaining tolerant PMX sanitization at the format boundary.
+
+### Fixed
+
+- Improved CLI failures to preserve the input path and distinguish an explicit
+  format selection from an automatically detected format.
+- Made deeply nested group morph expansion stack-safe and reusable after
+  warmup.
+- Serialized Python reload, evaluation, readback, and close operations; failed
+  physics replacement now poisons evaluation until a successful reload.
+- Preserved printable C ABI diagnostics when source names contain embedded NUL
+  bytes and included PMX object names in physics parameter errors.
+- Restored public Python descriptor properties and Rust error text compatibility
+  after descriptor validation consolidation.
+
+### Known limitations
+
+- The C ABI and Python binding remain experimental and may change before 1.0.
+- v0.3.1 does not provide Python wheels or a PyPI package; Python consumers use
+  the in-repository bridge and build or provide the native library themselves.
+
 ## 0.3.0 - 2026-07-16
 
 Sparse pose reduction, host-driven physics integration, and expanded FBX

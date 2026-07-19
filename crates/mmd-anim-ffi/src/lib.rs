@@ -2,10 +2,15 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(feature = "physics-bullet-native")]
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::{ptr, slice, str, sync::Arc};
+
+#[cfg(feature = "physics-bullet-native")]
+use serde::{Deserialize, Deserializer, Serialize};
 
 use mmd_anim_format::fbx::{
     UnityAnimationClipDto, UnityMorphBinding, UnityReducedPoseBindings,
@@ -16,18 +21,28 @@ use mmd_anim_runtime::{
     AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, DensePoseSequenceView,
     FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
     FlatIkLinkInput, FlatIkSolverInput, HostPoseView, IkAngleLimit, IkChainDefinition,
-    IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkSolveOptions, MorphAnimationBinding,
-    MorphIndex, MorphInit, MorphKeyframe, MorphTrack, MovableBoneKeyframe, MovableBoneTrack,
-    PhysicsMode, PhysicsStepStats, PhysicsTickConfig, PoseReductionReport,
+    IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkSolveOptions, LocalAxis,
+    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack, MovableBoneKeyframe,
+    MovableBoneTrack, PhysicsMode, PhysicsStepStats, PhysicsTickConfig, PoseReductionReport,
     PropertyAnimationBinding, PropertyKeyframe, ReducedPoseSequence, ReductionTarget,
-    ReductionTolerances, RuntimeInstance, SkeletonSnapshot, build_append_transforms_from_flat_iter,
-    build_bones_from_flat, build_ik_solvers_from_flat_iter, build_morph_init_from_flat_iter,
-    solve_append_transform,
+    ReductionTolerances, RuntimeAppendTransformDescriptorV1, RuntimeBoneDescriptorV1,
+    RuntimeBoneMorphOffsetDescriptorV1, RuntimeGroupMorphOffsetDescriptorV1,
+    RuntimeIkLinkDescriptorV1, RuntimeIkSolverDescriptorV1, RuntimeInstance,
+    RuntimeModelDescriptorV1, RuntimeMorphDescriptorV1, SkeletonSnapshot,
+    build_append_transforms_from_flat_iter, build_bones_from_flat, build_ik_solvers_from_flat_iter,
+    build_morph_init_from_flat_iter, compile_runtime_model_descriptor_v1, solve_append_transform,
 };
 
 pub const ABI_VERSION: u32 = 2;
 const FEATURE_SPLIT_PHYSICS_EVALUATION: u32 = 1 << 0;
 const FEATURE_PHYSICS_BULLET_NATIVE: u32 = 1 << 1;
+pub const MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR: u32 = 1 << 2;
+pub const MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = 1 << 3;
+pub const MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1: u32 =
+    mmd_anim_runtime::RUNTIME_MODEL_DESCRIPTOR_VERSION_V1;
+pub const MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE: u32 = 0;
+const FEATURE_MODEL_DESCRIPTOR: u32 = MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR;
+const FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -128,6 +143,10 @@ pub struct MmdRuntimeAppendSolver {
 pub struct MmdRuntimePhysicsWorld {
     #[cfg(feature = "physics-bullet-native")]
     world: mmd_anim_physics_bullet::PmxBulletWorld,
+    /// The name-bearing rebuild source is available only for PMX-created
+    /// worlds. Descriptor-created worlds intentionally remain unnamed.
+    #[cfg(feature = "physics-bullet-native")]
+    pmx_model: Option<mmd_anim_format::PmxParsedModel>,
     /// When true, the next bake sample reseeds the Bullet world from the
     /// evaluated pose and copies outputs without advancing either the solver or
     /// the normal forward physics clock.
@@ -138,6 +157,92 @@ pub struct MmdRuntimePhysicsWorld {
     /// `mmd_runtime_physics_world_step_runtime`.
     #[cfg(feature = "physics-bullet-native")]
     next_bake_sample_is_seed_only: bool,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+const PHYSICS_PARAMS_SCHEMA_VERSION: u32 = 1;
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Serialize)]
+struct PhysicsParamsSnapshot {
+    schema_version: u32,
+    rigid_bodies: BTreeMap<String, PhysicsRigidBodyParams>,
+    joints: BTreeMap<String, PhysicsJointParams>,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Serialize)]
+struct PhysicsRigidBodyParams {
+    mass: f32,
+    linear_damping: f32,
+    angular_damping: f32,
+    friction: f32,
+    restitution: f32,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Serialize)]
+struct PhysicsJointParams {
+    translation_lower_limit: [f32; 3],
+    translation_upper_limit: [f32; 3],
+    rotation_lower_limit: [f32; 3],
+    rotation_upper_limit: [f32; 3],
+    spring_translation_factor: [f32; 3],
+    spring_rotation_factor: [f32; 3],
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhysicsParamsUpdate {
+    schema_version: u32,
+    #[serde(default)]
+    rigid_bodies: BTreeMap<String, PhysicsRigidBodyParamsUpdate>,
+    #[serde(default)]
+    joints: BTreeMap<String, PhysicsJointParamsUpdate>,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhysicsRigidBodyParamsUpdate {
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    mass: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    linear_damping: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    angular_damping: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    friction: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    restitution: Option<f32>,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhysicsJointParamsUpdate {
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    translation_lower_limit: Option<[f32; 3]>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    translation_upper_limit: Option<[f32; 3]>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    rotation_lower_limit: Option<[f32; 3]>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    rotation_upper_limit: Option<[f32; 3]>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    spring_translation_factor: Option<[f32; 3]>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    spring_rotation_factor: Option<[f32; 3]>,
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[repr(C)]
@@ -198,6 +303,90 @@ pub struct MmdRuntimeFfiIkLink {
     pub flags: u32,
     pub angle_limit_min_xyz: [f32; 3],
     pub angle_limit_max_xyz: [f32; 3],
+}
+
+/// Complete per-bone v1 descriptor for payload-free runtime model construction.
+/// `rest_position_xyz` is the absolute PMX-space rest position; the runtime
+/// derives the parent-relative rest translation and inverse bind matrix.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MmdRuntimeModelBoneDescriptor {
+    pub parent_index: i32,
+    pub rest_position_xyz: [f32; 3],
+    pub transform_order: i32,
+    pub flags: u32,
+    pub fixed_axis_xyz: [f32; 3],
+    pub local_axis_x_xyz: [f32; 3],
+    pub local_axis_z_xyz: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MmdRuntimeModelIkSolverDescriptor {
+    pub ik_bone_index: u32,
+    pub target_bone_index: u32,
+    pub link_offset: usize,
+    pub link_count: usize,
+    pub iteration_count: u32,
+    pub limit_angle: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MmdRuntimeModelIkLinkDescriptor {
+    pub bone_index: u32,
+    pub flags: u32,
+    pub angle_limit_min_xyz: [f32; 3],
+    pub angle_limit_max_xyz: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MmdRuntimeModelAppendDescriptor {
+    pub target_bone_index: u32,
+    pub source_bone_index: u32,
+    pub ratio: f32,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MmdRuntimeModelBoneMorphOffsetDescriptor {
+    pub morph_index: u32,
+    pub target_bone_index: u32,
+    pub position_offset_xyz: [f32; 3],
+    pub rotation_offset_xyzw: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MmdRuntimeModelGroupMorphOffsetDescriptor {
+    pub morph_index: u32,
+    pub child_morph_index: u32,
+    pub ratio: f32,
+}
+
+/// Versioned, self-describing model descriptor.  All pointed-to records are
+/// borrowed only for the duration of the constructor call.
+#[repr(C)]
+pub struct MmdRuntimeModelDescriptor {
+    pub struct_size: u32,
+    pub descriptor_version: u32,
+    pub flags: u32,
+    pub reserved: u32,
+    pub bones: *const MmdRuntimeModelBoneDescriptor,
+    pub bone_count: usize,
+    pub ik_solvers: *const MmdRuntimeModelIkSolverDescriptor,
+    pub ik_solver_count: usize,
+    pub ik_links: *const MmdRuntimeModelIkLinkDescriptor,
+    pub ik_link_count: usize,
+    pub append_transforms: *const MmdRuntimeModelAppendDescriptor,
+    pub append_transform_count: usize,
+    pub morph_count: u32,
+    pub bone_morph_offsets: *const MmdRuntimeModelBoneMorphOffsetDescriptor,
+    pub bone_morph_offset_count: usize,
+    pub group_morph_offsets: *const MmdRuntimeModelGroupMorphOffsetDescriptor,
+    pub group_morph_offset_count: usize,
 }
 
 #[repr(C)]
@@ -454,6 +643,9 @@ const APPEND_FLAG_ROTATION: u32 = 1;
 const APPEND_FLAG_TRANSLATION: u32 = 1 << 1;
 const APPEND_FLAG_LOCAL: u32 = 1 << 2;
 const IK_LINK_FLAG_ANGLE_LIMIT: u32 = 1;
+const MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS: u32 = 1;
+const MODEL_BONE_FLAG_FIXED_AXIS: u32 = 1 << 1;
+const MODEL_BONE_FLAG_LOCAL_AXIS: u32 = 1 << 2;
 const RIG_BONE_FIXED_AXIS: u32 = 1;
 const FFI_PANIC_ERROR_MESSAGE: &str = "internal panic in mmd-anim-ffi";
 const FFI_ERR_INVALID_INPUT: &str = "invalid input";
@@ -478,7 +670,13 @@ fn clear_last_error() {
 
 fn set_last_error(message: impl AsRef<str>) {
     LAST_ERROR.with(|cell| {
-        *cell.borrow_mut() = CString::new(message.as_ref()).ok();
+        // C strings cannot carry an embedded NUL.  Preserve the diagnostic
+        // instead of silently dropping it when a PMX name (or another input
+        // field) contains one.  The escaped form remains recognizable while
+        // keeping the pointer valid for the documented C-string API.
+        let sanitized = message.as_ref().replace('\0', "\\0");
+        *cell.borrow_mut() =
+            Some(CString::new(sanitized).expect("NUL is escaped before CString construction"));
     });
 }
 
@@ -580,6 +778,8 @@ pub extern "C" fn mmd_runtime_feature_flags() -> u32 {
 
 fn runtime_feature_flags() -> u32 {
     FEATURE_SPLIT_PHYSICS_EVALUATION
+        | FEATURE_MODEL_DESCRIPTOR
+        | FEATURE_HOST_POSE_NATIVE_MORPHS
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE
         } else {
@@ -3180,6 +3380,32 @@ pub unsafe extern "C" fn mmd_runtime_model_create_full_with_morphs(
     )
 }
 
+/// Creates a complete runtime model from a versioned typed descriptor.
+///
+/// All input records are copied while this call is active. The returned model
+/// owns its normalized runtime storage and does not retain any input pointer.
+/// Invalid descriptor metadata or compiler validation failures return NULL and
+/// set a concrete indexed thread-local error message.
+/// Every descriptor pointer must be null exactly when its paired count is zero;
+/// otherwise it must reference that many readable records.
+///
+/// # Safety
+///
+/// `descriptor` must point to a readable, correctly aligned
+/// `MmdRuntimeModelDescriptor` whose pointed-to arrays remain readable for the
+/// duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_model_create_from_descriptor(
+    descriptor: *const MmdRuntimeModelDescriptor,
+) -> *mut MmdRuntimeModel {
+    ffi_guard(ptr::null_mut(), || {
+        let Some(model) = (unsafe { build_model_from_descriptor_ffi(descriptor) }) else {
+            return ptr::null_mut();
+        };
+        Box::into_raw(Box::new(model))
+    })
+}
+
 /// Creates a model by importing a PMX binary from byte slice, keeping only
 /// runtime-required data alive. The resulting model carries name maps needed
 /// to build VMD clips via `mmd_runtime_clip_create_from_vmd_bytes_for_model`.
@@ -3756,9 +3982,11 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_current_pose_before_physi
 
 /// Applies a host-provided local pose to the runtime instance.
 ///
-/// Validates counts, finiteness, and applies atomically - no partial
-/// mutation on failure. After success the pose is set but world matrices
-/// are NOT yet evaluated; call evaluate_current_pose_before_physics next.
+/// The local arrays are the pre-morph base pose. The runtime validates counts
+/// and finiteness, applies atomically - no partial mutation on failure - then
+/// expands group/bone morph weights natively. Hosts must not preapply morph
+/// bone deltas. After success the pose is set but world matrices are NOT yet
+/// evaluated; call evaluate_current_pose_before_physics next.
 ///
 /// # Safety
 ///
@@ -3783,9 +4011,11 @@ pub unsafe extern "C" fn mmd_runtime_instance_apply_host_pose(
 
 /// Applies a host pose and evaluates the before-physics phase in one call.
 ///
-/// Equivalent to apply_host_pose followed by
-/// evaluate_current_pose_before_physics. On failure, neither the pose nor
-/// the evaluation is applied.
+/// The local arrays follow the pre-morph base-pose contract of
+/// `mmd_runtime_instance_apply_host_pose`; group/bone morph expansion is
+/// native and hosts must not preapply morph bone deltas. Equivalent to
+/// apply_host_pose followed by evaluate_current_pose_before_physics. On
+/// failure, neither the pose nor the evaluation is applied.
 ///
 /// # Safety
 ///
@@ -4094,6 +4324,58 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_free(world: *mut MmdRuntimePh
     })
 }
 
+/// Returns a deterministic schema-v1 snapshot of editable PMX physics parameters.
+///
+/// The returned UTF-8 JSON buffer is Rust-owned and must be freed with
+/// `mmd_runtime_byte_buffer_free`. Only worlds created from PMX bytes have the
+/// original names required by this API; descriptor-created worlds are unsupported.
+///
+/// # Safety
+///
+/// `world` must be a valid physics-world handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_params_get_json(
+    world: *const MmdRuntimePhysicsWorld,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        let Some(world) = (unsafe { world.as_ref() }) else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        physics_params_get_json_impl(world)
+    })
+}
+
+/// Applies a partial schema-v1 named PMX physics-parameter update.
+///
+/// A successful update rebuilds the whole Bullet world, preserves gravity,
+/// resets simulation state, and re-arms seed-only behavior for the next
+/// seed/bake sample. Any parse, validation, or rebuild failure leaves the
+/// original world untouched.
+///
+/// # Safety
+///
+/// `world` must be a valid physics-world handle. `data` must point to `len`
+/// readable UTF-8 JSON bytes, and `len` must be non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_params_set_json(
+    world: *mut MmdRuntimePhysicsWorld,
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(world) = (unsafe { world.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(data) = (unsafe { checked_slice(data, len) }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if data.is_empty() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        physics_params_set_json_impl(world, data)
+    })
+}
+
 /// Resets the physics world and reseeds it from the runtime pose.
 ///
 /// Reset includes one fixed 1/60 second solver settle, static-body re-pinning,
@@ -4387,6 +4669,19 @@ fn physics_world_create_from_pmx_bytes_impl(
 }
 
 #[cfg(not(feature = "physics-bullet-native"))]
+fn physics_params_get_json_impl(_world: &MmdRuntimePhysicsWorld) -> MmdRuntimeFfiByteBuffer {
+    empty_byte_buffer_failure("physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_params_set_json_impl(
+    _world: &mut MmdRuntimePhysicsWorld,
+    _data: &[u8],
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
 fn physics_world_reset_impl(
     _world: *mut MmdRuntimePhysicsWorld,
     _instance: *mut MmdRuntimeInstance,
@@ -4415,12 +4710,18 @@ fn validate_host_frame_physics_impl(
         return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
     };
     let instance_bone_count = instance.runtime.world_matrices().len();
-    let required = world.world.required_bone_count();
-    if required > instance_bone_count {
-        return status_failure(
-            MmdRuntimeStatus::InvalidInput,
-            "physics world requires more bones than the instance provides",
-        );
+    for (rigidbody_index, binding) in world.world.rigidbody_bindings.iter().enumerate() {
+        let Some(bone_index) = binding.bone_index else {
+            continue;
+        };
+        if bone_index >= instance_bone_count {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                &format!(
+                    "physics_world.rigidbodies[{rigidbody_index}].bone_index: {bone_index} exceeds instance bone_count {instance_bone_count}"
+                ),
+            );
+        }
     }
     if action == MmdRuntimePhysicsFrameAction::Step
         && !instance.runtime.physics_mode().steps_backend()
@@ -4538,6 +4839,7 @@ fn physics_world_create_impl(
             unsafe {
                 *out_world = Box::into_raw(Box::new(MmdRuntimePhysicsWorld {
                     world,
+                    pmx_model: None,
                     next_bake_sample_is_seed_only: true,
                 }));
             }
@@ -4564,6 +4866,7 @@ fn physics_world_create_from_pmx_bytes_impl(
             unsafe {
                 *out_world = Box::into_raw(Box::new(MmdRuntimePhysicsWorld {
                     world,
+                    pmx_model: Some(model),
                     next_bake_sample_is_seed_only: true,
                 }));
             }
@@ -4571,6 +4874,246 @@ fn physics_world_create_from_pmx_bytes_impl(
         }
         Err(err) => status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
     }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn validate_physics_param_names(model: &mmd_anim_format::PmxParsedModel) -> Result<(), String> {
+    fn validate<'a>(kind: &str, names: impl Iterator<Item = &'a str>) -> Result<(), String> {
+        let mut seen = HashSet::new();
+        for name in names {
+            if name.is_empty() {
+                return Err(format!("PMX {kind} has an empty name"));
+            }
+            if !seen.insert(name) {
+                return Err(format!("PMX {kind} name is duplicated: {name}"));
+            }
+        }
+        Ok(())
+    }
+
+    validate(
+        "rigid body",
+        model.rigid_bodies.iter().map(|body| body.name.as_str()),
+    )?;
+    validate(
+        "joint",
+        model.joints.iter().map(|joint| joint.name.as_str()),
+    )
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_params_get_json_impl(world: &MmdRuntimePhysicsWorld) -> MmdRuntimeFfiByteBuffer {
+    let Some(model) = world.pmx_model.as_ref() else {
+        return empty_byte_buffer_failure("physics parameters require a PMX-created world");
+    };
+    if let Err(message) = validate_physics_param_names(model) {
+        set_last_error(message);
+        return empty_byte_buffer();
+    }
+
+    let rigid_bodies = model
+        .rigid_bodies
+        .iter()
+        .map(|body| {
+            (
+                body.name.clone(),
+                PhysicsRigidBodyParams {
+                    mass: body.mass,
+                    linear_damping: body.linear_damping,
+                    angular_damping: body.angular_damping,
+                    friction: body.friction,
+                    restitution: body.restitution,
+                },
+            )
+        })
+        .collect();
+    let joints = model
+        .joints
+        .iter()
+        .map(|joint| {
+            (
+                joint.name.clone(),
+                PhysicsJointParams {
+                    translation_lower_limit: joint.translation_lower_limit,
+                    translation_upper_limit: joint.translation_upper_limit,
+                    rotation_lower_limit: joint.rotation_lower_limit,
+                    rotation_upper_limit: joint.rotation_upper_limit,
+                    spring_translation_factor: joint.spring_translation_factor,
+                    spring_rotation_factor: joint.spring_rotation_factor,
+                },
+            )
+        })
+        .collect();
+    let snapshot = PhysicsParamsSnapshot {
+        schema_version: PHYSICS_PARAMS_SCHEMA_VERSION,
+        rigid_bodies,
+        joints,
+    };
+    match serde_json::to_vec(&snapshot) {
+        Ok(bytes) => byte_buffer_from_vec(bytes),
+        Err(error) => {
+            set_last_error(format!("physics parameter JSON encode failed: {error}"));
+            empty_byte_buffer()
+        }
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_params_set_json_impl(
+    world: &mut MmdRuntimePhysicsWorld,
+    data: &[u8],
+) -> MmdRuntimeStatus {
+    let Some(source_model) = world.pmx_model.as_ref() else {
+        return status_failure(
+            MmdRuntimeStatus::Unsupported,
+            "physics parameters require a PMX-created world",
+        );
+    };
+    if let Err(message) = validate_physics_param_names(source_model) {
+        set_last_error(message);
+        return MmdRuntimeStatus::InvalidInput;
+    }
+    let update: PhysicsParamsUpdate = match serde_json::from_slice(data) {
+        Ok(update) => update,
+        Err(error) => {
+            set_last_error(format!("invalid physics parameter JSON: {error}"));
+            return MmdRuntimeStatus::InvalidInput;
+        }
+    };
+    if update.schema_version != PHYSICS_PARAMS_SCHEMA_VERSION {
+        return status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "unsupported physics parameter schema_version",
+        );
+    }
+
+    let mut replacement_model = source_model.clone();
+    for (name, values) in update.rigid_bodies {
+        let Some(body) = replacement_model
+            .rigid_bodies
+            .iter_mut()
+            .find(|body| body.name == name)
+        else {
+            set_last_error(format!("unknown PMX rigid body name: {name}"));
+            return MmdRuntimeStatus::InvalidInput;
+        };
+        if let Some(value) = values.mass {
+            if !value.is_finite() || value < 0.0 {
+                return invalid_physics_param("mass must be finite and >= 0");
+            }
+            body.mass = value;
+        }
+        if let Some(value) = values.linear_damping {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return invalid_physics_param("linear_damping must be finite and in [0, 1]");
+            }
+            body.linear_damping = value;
+        }
+        if let Some(value) = values.angular_damping {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return invalid_physics_param("angular_damping must be finite and in [0, 1]");
+            }
+            body.angular_damping = value;
+        }
+        if let Some(value) = values.friction {
+            if !value.is_finite() || value < 0.0 {
+                return invalid_physics_param("friction must be finite and >= 0");
+            }
+            body.friction = value;
+        }
+        if let Some(value) = values.restitution {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return invalid_physics_param("restitution must be finite and in [0, 1]");
+            }
+            body.restitution = value;
+        }
+    }
+
+    for (name, values) in update.joints {
+        let Some(joint) = replacement_model
+            .joints
+            .iter_mut()
+            .find(|joint| joint.name == name)
+        else {
+            set_last_error(format!("unknown PMX joint name: {name}"));
+            return MmdRuntimeStatus::InvalidInput;
+        };
+        if let Some(value) = values.translation_lower_limit {
+            joint.translation_lower_limit = value;
+        }
+        if let Some(value) = values.translation_upper_limit {
+            joint.translation_upper_limit = value;
+        }
+        if let Some(value) = values.rotation_lower_limit {
+            joint.rotation_lower_limit = value;
+        }
+        if let Some(value) = values.rotation_upper_limit {
+            joint.rotation_upper_limit = value;
+        }
+        if let Some(value) = values.spring_translation_factor {
+            joint.spring_translation_factor = value;
+        }
+        if let Some(value) = values.spring_rotation_factor {
+            joint.spring_rotation_factor = value;
+        }
+        for (field, value) in [
+            ("translation_lower_limit", joint.translation_lower_limit),
+            ("translation_upper_limit", joint.translation_upper_limit),
+            ("rotation_lower_limit", joint.rotation_lower_limit),
+            ("rotation_upper_limit", joint.rotation_upper_limit),
+        ] {
+            if !all_finite(&value) {
+                return invalid_physics_param(&format!("{field} must contain finite values"));
+            }
+        }
+        for (field, value) in [
+            ("spring_translation_factor", joint.spring_translation_factor),
+            ("spring_rotation_factor", joint.spring_rotation_factor),
+        ] {
+            if !all_finite(&value) || value.iter().any(|component| *component < 0.0) {
+                return invalid_physics_param(&format!("{field} must contain finite values >= 0"));
+            }
+        }
+        if joint
+            .translation_lower_limit
+            .iter()
+            .zip(joint.translation_upper_limit)
+            .any(|(lower, upper)| *lower > upper)
+        {
+            return invalid_physics_param("translation lower limits must be <= upper limits");
+        }
+        if joint
+            .rotation_lower_limit
+            .iter()
+            .zip(joint.rotation_upper_limit)
+            .any(|(lower, upper)| *lower > upper)
+        {
+            return invalid_physics_param("rotation lower limits must be <= upper limits");
+        }
+    }
+
+    let gravity = match world.world.world.gravity() {
+        Ok(gravity) => gravity,
+        Err(error) => return status_failure(MmdRuntimeStatus::Error, &error.to_string()),
+    };
+    let mut replacement_world =
+        match mmd_anim_physics_bullet::build_bullet_world_from_pmx(&replacement_model) {
+            Ok(world) => world,
+            Err(error) => return status_failure(MmdRuntimeStatus::Error, &error.to_string()),
+        };
+    if let Err(error) = replacement_world.world.set_gravity(gravity) {
+        return status_failure(MmdRuntimeStatus::Error, &error.to_string());
+    }
+
+    world.world = replacement_world;
+    world.pmx_model = Some(replacement_model);
+    world.next_bake_sample_is_seed_only = true;
+    MmdRuntimeStatus::Ok
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn invalid_physics_param(message: &str) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::InvalidInput, message)
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -6612,6 +7155,265 @@ fn checked_range<T>(slice: &[T], offset: usize, count: usize) -> Option<&[T]> {
     slice.get(offset..end)
 }
 
+fn descriptor_failure<T>(message: impl AsRef<str>) -> Option<T> {
+    set_last_error(message);
+    None
+}
+
+unsafe fn copy_descriptor_array<T: Copy>(
+    path: &str,
+    ptr: *const T,
+    count: usize,
+) -> Option<Vec<T>> {
+    if ptr.is_null() != (count == 0) {
+        return descriptor_failure(format!(
+            "{path}: pointer/count mismatch (pointer is {}, count is {count})",
+            if ptr.is_null() { "null" } else { "non-null" }
+        ));
+    }
+    if count > u32::MAX as usize {
+        return descriptor_failure(format!("{path}: count exceeds u32::MAX"));
+    }
+    let Some(bytes) = count.checked_mul(std::mem::size_of::<T>()) else {
+        return descriptor_failure(format!("{path}: count byte-size overflow"));
+    };
+    if bytes > isize::MAX as usize {
+        return descriptor_failure(format!("{path}: count byte-size exceeds isize::MAX"));
+    }
+    if !ptr.is_null() {
+        let address = ptr as usize;
+        if !address.is_multiple_of(std::mem::align_of::<T>()) {
+            return descriptor_failure(format!("{path}: pointer is misaligned"));
+        }
+        if address.checked_add(bytes).is_none() {
+            return descriptor_failure(format!("{path}: pointer range overflows usize"));
+        }
+    }
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    Some(unsafe { slice::from_raw_parts(ptr, count) }.to_vec())
+}
+
+unsafe fn build_model_from_descriptor_ffi(
+    descriptor: *const MmdRuntimeModelDescriptor,
+) -> Option<MmdRuntimeModel> {
+    if descriptor.is_null() {
+        return descriptor_failure("descriptor: null pointer");
+    }
+    let address = descriptor as usize;
+    if !address.is_multiple_of(std::mem::align_of::<MmdRuntimeModelDescriptor>()) {
+        return descriptor_failure("descriptor: pointer is misaligned");
+    }
+    let descriptor = unsafe { &*descriptor };
+    let expected_size = std::mem::size_of::<MmdRuntimeModelDescriptor>();
+    if descriptor.struct_size as usize != expected_size {
+        return descriptor_failure(format!(
+            "descriptor.struct_size: expected {expected_size}, got {}",
+            descriptor.struct_size
+        ));
+    }
+    if descriptor.descriptor_version != MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1 {
+        return descriptor_failure(format!(
+            "descriptor.descriptor_version: expected {}, got {}",
+            MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1, descriptor.descriptor_version
+        ));
+    }
+    if descriptor.flags != 0 {
+        return descriptor_failure(format!(
+            "descriptor.flags: unknown bits 0x{:08x}",
+            descriptor.flags
+        ));
+    }
+    if descriptor.reserved != 0 {
+        return descriptor_failure(format!(
+            "descriptor.reserved: expected zero, got {}",
+            descriptor.reserved
+        ));
+    }
+
+    let bones = unsafe {
+        copy_descriptor_array("descriptor.bones", descriptor.bones, descriptor.bone_count)
+    }?;
+    let ik_solvers = unsafe {
+        copy_descriptor_array(
+            "descriptor.ik_solvers",
+            descriptor.ik_solvers,
+            descriptor.ik_solver_count,
+        )
+    }?;
+    let ik_links = unsafe {
+        copy_descriptor_array(
+            "descriptor.ik_links",
+            descriptor.ik_links,
+            descriptor.ik_link_count,
+        )
+    }?;
+    let append_transforms = unsafe {
+        copy_descriptor_array(
+            "descriptor.append_transforms",
+            descriptor.append_transforms,
+            descriptor.append_transform_count,
+        )
+    }?;
+    let bone_morph_offsets = unsafe {
+        copy_descriptor_array(
+            "descriptor.bone_morph_offsets",
+            descriptor.bone_morph_offsets,
+            descriptor.bone_morph_offset_count,
+        )
+    }?;
+    let group_morph_offsets = unsafe {
+        copy_descriptor_array(
+            "descriptor.group_morph_offsets",
+            descriptor.group_morph_offsets,
+            descriptor.group_morph_offset_count,
+        )
+    }?;
+
+    for (link_index, link) in ik_links.iter().enumerate() {
+        if link.flags & !IK_LINK_FLAG_ANGLE_LIMIT != 0 {
+            return descriptor_failure(format!(
+                "descriptor.ik_links[{link_index}].flags: unknown bits 0x{:08x}",
+                link.flags
+            ));
+        }
+    }
+
+    for (solver_index, solver) in ik_solvers.iter().enumerate() {
+        let Some(end) = solver.link_offset.checked_add(solver.link_count) else {
+            return descriptor_failure(format!(
+                "descriptor.ik_solvers[{solver_index}].link_offset: offset + count overflows usize"
+            ));
+        };
+        if end > ik_links.len() {
+            return descriptor_failure(format!(
+                "descriptor.ik_solvers[{solver_index}].links: range {}..{} exceeds link_count {}",
+                solver.link_offset,
+                end,
+                ik_links.len()
+            ));
+        }
+    }
+
+    let mut runtime_bones = Vec::with_capacity(bones.len());
+    for (bone_index, bone) in bones.iter().enumerate() {
+        if bone.flags
+            & !(MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS
+                | MODEL_BONE_FLAG_FIXED_AXIS
+                | MODEL_BONE_FLAG_LOCAL_AXIS)
+            != 0
+        {
+            return descriptor_failure(format!(
+                "descriptor.bones[{bone_index}].flags: unknown bits 0x{:08x}",
+                bone.flags
+            ));
+        }
+        let parent = match bone.parent_index {
+            -1 => None,
+            parent if parent >= 0 => Some(BoneIndex(parent as u32)),
+            _ => {
+                return descriptor_failure(format!(
+                    "descriptor.bones[{bone_index}].parent_index: expected -1 or non-negative index"
+                ));
+            }
+        };
+        runtime_bones.push(RuntimeBoneDescriptorV1 {
+            parent,
+            rest_position: glam::Vec3A::from_array(bone.rest_position_xyz),
+            transform_order: bone.transform_order,
+            transform_after_physics: bone.flags & MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS != 0,
+            fixed_axis: (bone.flags & MODEL_BONE_FLAG_FIXED_AXIS != 0)
+                .then(|| glam::Vec3A::from_array(bone.fixed_axis_xyz)),
+            local_axis: (bone.flags & MODEL_BONE_FLAG_LOCAL_AXIS != 0).then(|| LocalAxis {
+                x: glam::Vec3A::from_array(bone.local_axis_x_xyz),
+                z: glam::Vec3A::from_array(bone.local_axis_z_xyz),
+            }),
+        });
+    }
+
+    let mut runtime_solvers = Vec::with_capacity(ik_solvers.len());
+    for solver in ik_solvers.iter() {
+        let links = &ik_links[solver.link_offset..solver.link_offset + solver.link_count];
+        let mut runtime_links = Vec::with_capacity(links.len());
+        for link in links {
+            runtime_links.push(RuntimeIkLinkDescriptorV1 {
+                bone: BoneIndex(link.bone_index),
+                angle_limit: (link.flags & IK_LINK_FLAG_ANGLE_LIMIT != 0).then(|| IkAngleLimit {
+                    min: glam::Vec3A::from_array(link.angle_limit_min_xyz),
+                    max: glam::Vec3A::from_array(link.angle_limit_max_xyz),
+                }),
+            });
+        }
+        runtime_solvers.push(RuntimeIkSolverDescriptorV1 {
+            ik_bone: BoneIndex(solver.ik_bone_index),
+            target_bone: BoneIndex(solver.target_bone_index),
+            links: runtime_links,
+            iteration_count: solver.iteration_count,
+            limit_angle: solver.limit_angle,
+        });
+    }
+
+    let mut runtime_appends = Vec::with_capacity(append_transforms.len());
+    for (append_index, append) in append_transforms.iter().enumerate() {
+        if append.flags & !(APPEND_FLAG_ROTATION | APPEND_FLAG_TRANSLATION | APPEND_FLAG_LOCAL) != 0
+        {
+            return descriptor_failure(format!(
+                "descriptor.append_transforms[{append_index}].flags: unknown bits 0x{:08x}",
+                append.flags
+            ));
+        }
+        runtime_appends.push(RuntimeAppendTransformDescriptorV1 {
+            target_bone: BoneIndex(append.target_bone_index),
+            source_bone: BoneIndex(append.source_bone_index),
+            ratio: append.ratio,
+            affect_rotation: append.flags & APPEND_FLAG_ROTATION != 0,
+            affect_translation: append.flags & APPEND_FLAG_TRANSLATION != 0,
+            local: append.flags & APPEND_FLAG_LOCAL != 0,
+        });
+    }
+
+    let runtime_bone_morph_offsets = bone_morph_offsets
+        .iter()
+        .map(|offset| RuntimeBoneMorphOffsetDescriptorV1 {
+            morph_index: MorphIndex(offset.morph_index),
+            target_bone: BoneIndex(offset.target_bone_index),
+            position_offset: glam::Vec3A::from_array(offset.position_offset_xyz),
+            rotation_offset: glam::Quat::from_array(offset.rotation_offset_xyzw),
+        })
+        .collect();
+    let runtime_group_morph_offsets = group_morph_offsets
+        .iter()
+        .map(|offset| RuntimeGroupMorphOffsetDescriptorV1 {
+            morph_index: MorphIndex(offset.morph_index),
+            child_morph: MorphIndex(offset.child_morph_index),
+            ratio: offset.ratio,
+        })
+        .collect();
+
+    let runtime_descriptor = RuntimeModelDescriptorV1 {
+        descriptor_version: MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1,
+        bones: runtime_bones,
+        ik_solvers: runtime_solvers,
+        append_transforms: runtime_appends,
+        morphs: RuntimeMorphDescriptorV1 {
+            morph_count: descriptor.morph_count,
+            bone_offsets: runtime_bone_morph_offsets,
+            group_offsets: runtime_group_morph_offsets,
+        },
+    };
+    let model = match compile_runtime_model_descriptor_v1(&runtime_descriptor) {
+        Ok(model) => model,
+        Err(error) => return descriptor_failure(error.to_string()),
+    };
+    Some(MmdRuntimeModel {
+        model: Arc::new(model),
+        bone_name_to_index: HashMap::new(),
+        morph_name_to_index: HashMap::new(),
+        ik_solver_bone_name_to_index: HashMap::new(),
+    })
+}
+
 struct RawModelInput {
     parent_indices: *const i32,
     rest_positions_xyz: *const f32,
@@ -6683,9 +7485,6 @@ unsafe fn create_runtime_model_from_ffi_input(input: RawModelInput) -> *mut MmdR
 }
 
 unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
-    let parents = unsafe { slice::from_raw_parts(input.parent_indices, input.bone_count) };
-    let positions =
-        unsafe { slice::from_raw_parts(input.rest_positions_xyz, input.bone_count * 3) };
     let inverse_bind_matrices = if input.inverse_bind_matrices.is_null() {
         &[]
     } else {
@@ -6700,6 +7499,9 @@ unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
     let ik_links = unsafe { checked_slice(input.ik_links, input.ik_link_count) }?;
     let append_transforms =
         unsafe { checked_slice(input.append_transforms, input.append_transform_count) }?;
+    let parents = unsafe { slice::from_raw_parts(input.parent_indices, input.bone_count) };
+    let positions =
+        unsafe { slice::from_raw_parts(input.rest_positions_xyz, input.bone_count * 3) };
     let bones = build_bones_from_flat(FlatBoneInput {
         parent_indices: parents,
         rest_positions_xyz: positions,

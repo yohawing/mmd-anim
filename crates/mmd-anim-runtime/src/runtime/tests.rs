@@ -1464,6 +1464,43 @@ fn assert_near(actual: f32, expected: f32) {
     );
 }
 
+fn deep_group_morph_model(depth: usize) -> Arc<ModelArena> {
+    let group_offsets = (0..depth.saturating_sub(1))
+        .map(|index| crate::GroupMorphOffset {
+            child_morph: crate::MorphIndex((index + 1) as u32),
+            ratio: 1.0,
+        })
+        .collect();
+    let group_spans = (0..depth)
+        .map(|index| {
+            if index + 1 < depth {
+                crate::MorphOffsetSpan {
+                    start: index as u32,
+                    count: 1,
+                }
+            } else {
+                crate::MorphOffsetSpan::default()
+            }
+        })
+        .collect();
+    Arc::new(
+        ModelArena::new_with_morphs(
+            vec![BoneInit::new(None, Vec3A::ZERO)],
+            Vec::new(),
+            Vec::new(),
+            crate::MorphInit {
+                morph_count: depth as u32,
+                vertex_spans: vec![crate::MorphOffsetSpan::default(); depth],
+                bone_spans: vec![crate::MorphOffsetSpan::default(); depth],
+                group_offsets,
+                group_spans,
+                ..crate::MorphInit::default()
+            },
+        )
+        .unwrap(),
+    )
+}
+
 #[test]
 fn bone_morph_position_offset_drives_world_position() {
     let model = Arc::new(
@@ -1621,6 +1658,65 @@ fn group_morph_contributes_to_bone_morph_weight() {
 }
 
 #[test]
+fn host_pose_group_morph_contributes_to_bone_morph_weight() {
+    let model = Arc::new(
+        ModelArena::new_with_morphs(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::new(0.0, 1.0, 0.0)),
+            ],
+            Vec::new(),
+            Vec::new(),
+            crate::MorphInit {
+                morph_count: 2,
+                bone_offsets: vec![crate::BoneMorphOffset {
+                    target_bone: BoneIndex(1),
+                    position_offset: Vec3A::new(0.0, 0.0, 2.0),
+                    rotation_offset: Quat::IDENTITY,
+                }],
+                bone_spans: vec![
+                    crate::MorphOffsetSpan { start: 0, count: 1 },
+                    crate::MorphOffsetSpan::default(),
+                ],
+                group_offsets: vec![crate::GroupMorphOffset {
+                    child_morph: crate::MorphIndex(0),
+                    ratio: 0.5,
+                }],
+                group_spans: vec![
+                    crate::MorphOffsetSpan::default(),
+                    crate::MorphOffsetSpan { start: 0, count: 1 },
+                ],
+                ..crate::MorphInit::default()
+            },
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new_with_morph_count(model, 2);
+    let position_offsets = [Vec3A::ZERO; 2];
+    let rotations = [Quat::IDENTITY; 2];
+    let scales = [Vec3A::ONE; 2];
+    let morph_weights = [0.0, 1.0];
+    let ik_enabled: [u8; 0] = [];
+    let view = crate::HostPoseView {
+        local_position_offsets: &position_offsets,
+        local_rotations: &rotations,
+        local_scales: &scales,
+        morph_weights: &morph_weights,
+        ik_enabled: &ik_enabled,
+    };
+
+    runtime.apply_host_pose(&view).unwrap();
+    runtime.evaluate_current_pose_before_physics();
+
+    assert_near(runtime.morph_weights()[0], 0.5);
+    assert_near(runtime.morph_weights()[1], 1.0);
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[1]),
+        Vec3A::new(0.0, 1.0, 1.0),
+    );
+}
+
+#[test]
 fn group_morph_can_reference_later_child_morph() {
     let model = Arc::new(
         ModelArena::new_with_morphs(
@@ -1733,6 +1829,48 @@ fn chained_group_morphs_descend_to_bone_morph_weight() {
         translation(runtime.world_matrices()[1]),
         Vec3A::new(0.0, 1.0, 0.25),
     );
+}
+
+#[test]
+fn deep_group_morph_chain_expands_without_native_stack_recursion() {
+    const DEPTH: usize = 20_000;
+    let model = deep_group_morph_model(DEPTH);
+    let mut runtime = RuntimeInstance::new(model);
+    runtime
+        .pose_mut()
+        .set_morph_weight(crate::MorphIndex(0), 1.0);
+
+    runtime.expand_morphs();
+
+    assert_eq!(runtime.morph_weights()[0], 1.0);
+    assert_eq!(runtime.morph_weights()[DEPTH - 1], 1.0);
+    assert!(runtime.morph_scratch.group_stack.capacity() >= DEPTH);
+}
+
+#[test]
+fn host_pose_evaluates_deep_group_morph_chain_without_native_stack_recursion() {
+    const DEPTH: usize = 20_000;
+    let model = deep_group_morph_model(DEPTH);
+    let mut runtime = RuntimeInstance::new(model);
+    let position_offsets = [Vec3A::ZERO];
+    let rotations = [Quat::IDENTITY];
+    let scales = [Vec3A::ONE];
+    let mut morph_weights = vec![0.0; DEPTH];
+    morph_weights[0] = 1.0;
+    let ik_enabled: [u8; 0] = [];
+
+    runtime
+        .apply_host_pose(&crate::HostPoseView {
+            local_position_offsets: &position_offsets,
+            local_rotations: &rotations,
+            local_scales: &scales,
+            morph_weights: &morph_weights,
+            ik_enabled: &ik_enabled,
+        })
+        .unwrap();
+    runtime.evaluate_current_pose();
+
+    assert_eq!(runtime.morph_weights()[DEPTH - 1], 1.0);
 }
 
 #[test]
@@ -2824,6 +2962,7 @@ fn scratch_morph_capacity_stable_after_repeated_clip_frame() {
     runtime.evaluate_clip_frame(&clip, 5.0);
 
     let cap_expanded = runtime.morph_scratch.expanded_weights.capacity();
+    let cap_group_stack = runtime.morph_scratch.group_stack.capacity();
 
     for _ in 0..10 {
         runtime.evaluate_clip_frame(&clip, 5.0);
@@ -2832,6 +2971,10 @@ fn scratch_morph_capacity_stable_after_repeated_clip_frame() {
     assert_eq!(
         runtime.morph_scratch.expanded_weights.capacity(),
         cap_expanded
+    );
+    assert_eq!(
+        runtime.morph_scratch.group_stack.capacity(),
+        cap_group_stack
     );
 }
 
@@ -2869,52 +3012,54 @@ fn build_host_pose_model() -> Arc<ModelArena> {
     )
 }
 
-fn build_host_pose_clip() -> AnimationClip {
-    AnimationClip::new_with_morphs(
-        vec![BoneAnimationBinding {
-            bone: BoneIndex(3),
-            track: MovableBoneTrack::from_keyframes(vec![
-                MovableBoneKeyframe::new(0, Vec3A::ZERO, Quat::IDENTITY),
-                MovableBoneKeyframe::new(
-                    10,
-                    Vec3A::new(0.0, 0.0, 4.0),
-                    Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-                ),
-            ]),
-        }],
-        vec![crate::MorphAnimationBinding {
-            morph: crate::MorphIndex(0),
-            track: crate::MorphTrack::from_keyframes(vec![
-                crate::MorphKeyframe::new(0, 0.0),
-                crate::MorphKeyframe::new(10, 1.0),
-            ]),
-        }],
-    )
-}
-
 #[test]
-fn host_pose_round_trip_matches_clip_evaluation() {
+fn host_pose_round_trip_expands_bone_morphs_like_clip_evaluation() {
     let model = build_host_pose_model();
-    let clip = build_host_pose_clip();
 
     let mut source = RuntimeInstance::new_with_morph_count(model.clone(), 1);
     source
         .pose_mut()
+        .set_local_position_offset(BoneIndex(3), Vec3A::new(0.0, 0.0, 2.0));
+    source.pose_mut().set_local_rotation(
+        BoneIndex(3),
+        Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
+    );
+    source
+        .pose_mut()
         .set_local_scale(BoneIndex(3), Vec3A::new(1.5, 1.0, 1.0));
-    source.evaluate_clip_frame_before_physics(&clip, 5.0);
+    source
+        .pose_mut()
+        .set_morph_weight(crate::MorphIndex(0), 0.5);
+    source.expand_morphs();
+    source.evaluate_current_pose_before_physics();
+
+    let mut base_position_offsets = vec![Vec3A::ZERO; 4];
+    base_position_offsets[3] = Vec3A::new(0.0, 0.0, 2.0);
+    let mut base_rotations = vec![Quat::IDENTITY; 4];
+    base_rotations[3] = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+    let mut base_scales = vec![Vec3A::ONE; 4];
+    base_scales[3] = Vec3A::new(1.5, 1.0, 1.0);
+    let morph_weights = vec![0.5];
+    let ik_enabled = vec![1u8];
 
     let view = crate::HostPoseView {
-        local_position_offsets: source.pose().local_position_offsets(),
-        local_rotations: source.pose().local_rotations(),
-        local_scales: source.pose().local_scales(),
-        morph_weights: source.pose().morph_weights(),
-        ik_enabled: source.pose().ik_enabled(),
+        local_position_offsets: &base_position_offsets,
+        local_rotations: &base_rotations,
+        local_scales: &base_scales,
+        morph_weights: &morph_weights,
+        ik_enabled: &ik_enabled,
     };
 
     let mut target = RuntimeInstance::new_with_morph_count(model, 1);
     target.evaluate_rest_pose();
     target.apply_host_pose(&view).unwrap();
     target.evaluate_current_pose_before_physics();
+    let first_world = target.world_matrices().to_vec();
+    let first_morph_weights = target.morph_weights().to_vec();
+    target.apply_host_pose(&view).unwrap();
+    target.evaluate_current_pose_before_physics();
+    assert_eq!(target.world_matrices(), &first_world);
+    assert_eq!(target.morph_weights(), &first_morph_weights);
 
     for (actual, expected) in target
         .world_matrices()
@@ -2982,6 +3127,46 @@ fn host_pose_rejects_non_finite_values() {
             index: 2
         }
     );
+}
+
+#[test]
+fn host_pose_rejects_non_finite_morph_without_mutation() {
+    let model = build_host_pose_model();
+    let mut runtime = RuntimeInstance::new_with_morph_count(model, 1);
+    runtime
+        .pose_mut()
+        .set_local_position_offset(BoneIndex(3), Vec3A::new(0.0, 0.0, 1.0));
+    runtime
+        .pose_mut()
+        .set_morph_weight(crate::MorphIndex(0), 0.25);
+    runtime.evaluate_current_pose_before_physics();
+    let positions_before = runtime.pose().local_position_offsets().to_vec();
+    let morph_weights_before = runtime.morph_weights().to_vec();
+    let world_before = runtime.world_matrices().to_vec();
+
+    let position_offsets = vec![Vec3A::ZERO; 4];
+    let rotations = vec![Quat::IDENTITY; 4];
+    let scales = vec![Vec3A::ONE; 4];
+    let morph_weights = vec![f32::NAN];
+    let ik_enabled = vec![1u8; 1];
+    let view = crate::HostPoseView {
+        local_position_offsets: &position_offsets,
+        local_rotations: &rotations,
+        local_scales: &scales,
+        morph_weights: &morph_weights,
+        ik_enabled: &ik_enabled,
+    };
+
+    assert_eq!(
+        runtime.apply_host_pose(&view).unwrap_err(),
+        crate::HostPoseError::NonFiniteValue {
+            field: "morph_weights",
+            index: 0,
+        }
+    );
+    assert_eq!(runtime.pose().local_position_offsets(), &positions_before);
+    assert_eq!(runtime.morph_weights(), &morph_weights_before);
+    assert_eq!(runtime.world_matrices(), &world_before);
 }
 
 #[test]

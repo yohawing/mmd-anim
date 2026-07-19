@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 
-use glam::{Mat4, Quat, Vec3A};
+use glam::{Mat4, Quat};
 use serde::{Deserialize, Serialize};
 
 use mmd_anim_runtime::{
     AppendTransformInit, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit,
     IkLinkInit, IkSolverInit, LocalAxis, ModelArena, MorphIndex, MorphInit, MorphOffsetSpan,
+    RuntimeAppendTransformDescriptorV1, RuntimeBoneDescriptorV1,
+    RuntimeBoneMorphOffsetDescriptorV1, RuntimeGroupMorphOffsetDescriptorV1,
+    RuntimeIkLinkDescriptorV1, RuntimeIkSolverDescriptorV1, RuntimeModelDescriptorV1,
+    RuntimeMorphDescriptorV1, build_morph_init_from_offsets, compile_runtime_model_descriptor_v1,
 };
 
 use crate::binary::{
@@ -463,16 +467,15 @@ pub fn read_morph_names(
     Ok((PmxMorphNames { name_bytes, names }, r.pos))
 }
 
-/// Read morph names and extract bone/group offset payloads.
-///
-/// Returns names (same layout as [`read_morph_names`]) plus a [`MorphInit`]
-/// suitable for [`ModelArena::new_with_morphs`]. Unsupported morph types
-/// (vertex, UV, material, flip) have their payload skipped.
-pub fn read_morph_offsets(
+/// Parse morph names and the runtime-relevant bone/group offset payload.
+/// Unsupported morph types (vertex, UV, material, flip) have their payload
+/// skipped, while the descriptor compiler remains the only production
+/// normalization/validation point.
+fn read_runtime_morph_descriptor(
     data: &[u8],
     header: &PmxHeader,
     pos: usize,
-) -> Result<(PmxMorphNames, MorphInit, usize), ImportError> {
+) -> Result<(PmxMorphNames, RuntimeMorphDescriptorV1, usize), ImportError> {
     let mut r = Reader { data, pos };
     let count = r.read_i32_le()?;
     if count < 0 {
@@ -484,12 +487,10 @@ pub fn read_morph_offsets(
     let mut name_bytes = Vec::with_capacity(count);
     let mut names = Vec::with_capacity(count);
 
-    let mut bone_offsets_all: Vec<BoneMorphOffset> = Vec::new();
-    let mut bone_spans: Vec<MorphOffsetSpan> = Vec::with_capacity(count);
-    let mut group_offsets_all: Vec<GroupMorphOffset> = Vec::new();
-    let mut group_spans: Vec<MorphOffsetSpan> = Vec::with_capacity(count);
+    let mut bone_offsets = Vec::new();
+    let mut group_offsets = Vec::new();
 
-    for _ in 0..count {
+    for morph_index in 0..count {
         let (raw, name) = r.read_string_owned(header.encoding)?;
         let _english_name = r.read_string(header.encoding)?;
         name_bytes.push(raw);
@@ -505,26 +506,20 @@ pub fn read_morph_offsets(
 
         match morph_type {
             0 => {
-                let start = group_offsets_all.len() as u32;
                 for _ in 0..offset_count {
                     let child_raw = r.read_sized_index(header.morph_index_size)?;
                     if child_raw < 0 {
                         return Err(ImportError::SectionOverflow);
                     }
                     let ratio = r.read_f32_le()?;
-                    group_offsets_all.push(GroupMorphOffset {
+                    group_offsets.push(RuntimeGroupMorphOffsetDescriptorV1 {
+                        morph_index: MorphIndex(morph_index as u32),
                         child_morph: MorphIndex(child_raw as u32),
                         ratio,
                     });
                 }
-                group_spans.push(MorphOffsetSpan {
-                    start,
-                    count: offset_count as u32,
-                });
-                bone_spans.push(MorphOffsetSpan::default());
             }
             2 => {
-                let start = bone_offsets_all.len() as u32;
                 for _ in 0..offset_count {
                     let bone_raw = r.read_sized_index(header.bone_index_size)?;
                     if bone_raw < 0 {
@@ -535,17 +530,13 @@ pub fn read_morph_offsets(
                     let qy = r.read_f32_le()?;
                     let qz = r.read_f32_le()?;
                     let qw = r.read_f32_le()?;
-                    bone_offsets_all.push(BoneMorphOffset {
+                    bone_offsets.push(RuntimeBoneMorphOffsetDescriptorV1 {
+                        morph_index: MorphIndex(morph_index as u32),
                         target_bone: BoneIndex(bone_raw as u32),
                         position_offset: pos,
                         rotation_offset: Quat::from_xyzw(qx, qy, qz, qw),
                     });
                 }
-                bone_spans.push(MorphOffsetSpan {
-                    start,
-                    count: offset_count as u32,
-                });
-                group_spans.push(MorphOffsetSpan::default());
             }
             _ => {
                 let per_offset = match morph_type {
@@ -572,25 +563,63 @@ pub fn read_morph_offsets(
                         .checked_mul(per_offset)
                         .ok_or(ImportError::SectionOverflow)?,
                 )?;
-                bone_spans.push(MorphOffsetSpan::default());
-                group_spans.push(MorphOffsetSpan::default());
             }
         }
     }
 
     Ok((
         PmxMorphNames { name_bytes, names },
-        MorphInit {
+        RuntimeMorphDescriptorV1 {
             morph_count: count as u32,
-            vertex_spans: vec![MorphOffsetSpan::default(); count],
-            bone_offsets: bone_offsets_all,
-            bone_spans,
-            group_offsets: group_offsets_all,
-            group_spans,
-            ..MorphInit::default()
+            bone_offsets,
+            group_offsets,
         },
         r.pos,
     ))
+}
+
+/// Read morph names and adapt the runtime descriptor to the historical
+/// `MorphInit` representation for parser-facing callers and tests. Runtime
+/// import itself calls `read_runtime_morph_descriptor` directly.
+pub fn read_morph_offsets(
+    data: &[u8],
+    header: &PmxHeader,
+    pos: usize,
+) -> Result<(PmxMorphNames, MorphInit, usize), ImportError> {
+    let (names, descriptor, pos) = read_runtime_morph_descriptor(data, header, pos)?;
+    let morph_count = descriptor.morph_count as usize;
+    let bone_offsets = descriptor
+        .bone_offsets
+        .iter()
+        .map(|offset| {
+            (
+                offset.morph_index,
+                BoneMorphOffset {
+                    target_bone: offset.target_bone,
+                    position_offset: offset.position_offset,
+                    rotation_offset: offset.rotation_offset,
+                },
+            )
+        })
+        .collect();
+    let group_offsets = descriptor
+        .group_offsets
+        .iter()
+        .map(|offset| {
+            (
+                offset.morph_index,
+                GroupMorphOffset {
+                    child_morph: offset.child_morph,
+                    ratio: offset.ratio,
+                },
+            )
+        })
+        .collect();
+    let mut morph =
+        build_morph_init_from_offsets(descriptor.morph_count, bone_offsets, group_offsets)
+            .map_err(ImportError::ModelBuildFailed)?;
+    morph.vertex_spans = vec![MorphOffsetSpan::default(); morph_count];
+    Ok((names, morph, pos))
 }
 
 #[derive(Debug, Clone)]
@@ -603,8 +632,9 @@ pub struct PmxBoneImport {
 }
 
 struct PmxBoneRead {
-    import: PmxBoneImport,
-    local_axes: Vec<Option<LocalAxis>>,
+    descriptor: RuntimeModelDescriptorV1,
+    bone_name_bytes: Vec<Vec<u8>>,
+    bone_names: Vec<String>,
 }
 
 fn read_bones_with_local_axes(
@@ -621,20 +651,16 @@ fn read_bones_with_local_axes(
     r.require_record_bytes(count, 1)?;
 
     let mut bones = Vec::with_capacity(count);
-    let mut local_axes = Vec::with_capacity(count);
     let mut ik_solvers = Vec::new();
     let mut append_transforms = Vec::new();
 
     let mut bone_name_bytes = Vec::with_capacity(count);
     let mut bone_names = Vec::with_capacity(count);
 
-    let mut absolute_positions: Vec<Vec3A> = Vec::with_capacity(count);
-
     for _bone_i in 0..count {
         let (name_bytes, name) = r.read_string_owned(header.encoding)?;
         let _english_name = r.read_string(header.encoding)?;
         let position = r.read_vec3()?;
-        absolute_positions.push(position);
         let parent = r.read_bone_index(header)?;
         let transform_order = r.read_i32_le()?;
         let flags = r.read_u16_le()?;
@@ -652,19 +678,27 @@ fn read_bones_with_local_axes(
             let append_parent = r.read_bone_index(header)?;
             let append_ratio = r.read_f32_le()?;
 
-            if let Some(source) = append_parent {
+            // Preserve the historical PMX import policy: malformed optional
+            // append metadata is ignored at the tolerant file-format boundary.
+            // Host-authored typed descriptors remain strictly validated.
+            if let Some(source) = append_parent
+                && append_ratio.is_finite()
+            {
                 let target_idx = bones.len();
-                append_transforms.push(
-                    AppendTransformInit::new(BoneIndex(target_idx as u32), source, append_ratio)
-                        .with_rotation_if(flags & BONE_FLAG_APPEND_ROTATE != 0)
-                        .with_translation_if(flags & BONE_FLAG_APPEND_TRANSLATE != 0)
-                        .with_local_if(flags & BONE_FLAG_LOCAL_APPEND != 0),
-                );
+                append_transforms.push(RuntimeAppendTransformDescriptorV1 {
+                    target_bone: BoneIndex(target_idx as u32),
+                    source_bone: source,
+                    ratio: append_ratio,
+                    affect_rotation: flags & BONE_FLAG_APPEND_ROTATE != 0,
+                    affect_translation: flags & BONE_FLAG_APPEND_TRANSLATE != 0,
+                    local: flags & BONE_FLAG_LOCAL_APPEND != 0,
+                });
             }
         }
 
         let fixed_axis = if flags & BONE_FLAG_FIXED_AXIS != 0 {
-            Some(r.read_vec3()?)
+            let axis = r.read_vec3()?;
+            (axis.is_finite() && axis.length_squared() > f32::EPSILON).then_some(axis)
         } else {
             None
         };
@@ -672,7 +706,8 @@ fn read_bones_with_local_axes(
         let local_axis = if flags & BONE_FLAG_LOCAL_AXIS != 0 {
             let x = r.read_vec3()?;
             let z = r.read_vec3()?;
-            Some(LocalAxis::new(x, z))
+            let axis = LocalAxis::new(x, z);
+            axis.basis_quat().is_some().then_some(axis)
         } else {
             None
         };
@@ -693,26 +728,41 @@ fn read_bones_with_local_axes(
 
             let mut links = Vec::with_capacity(link_count as usize);
             for _ in 0..link_count {
+                // Match the legacy importer for malformed optional IK links.
+                // Bone 0 is the historical fallback and keeps such PMX files
+                // loadable without weakening direct descriptor validation.
                 let link_bone = r.read_bone_index(header)?.unwrap_or(BoneIndex(0));
                 let has_limit = r.read_u8()?;
                 let angle_limit = if has_limit != 0 {
                     let min = r.read_vec3()?;
                     let max = r.read_vec3()?;
-                    Some(IkAngleLimit::new(min, max))
+                    // Angle limits are optional metadata at the PMX boundary.
+                    // Keep the link, but drop a malformed limit before the
+                    // strict typed-descriptor compiler sees it.
+                    (min.is_finite() && max.is_finite() && min.cmple(max).bitmask() == 0b111)
+                        .then(|| IkAngleLimit::new(min, max))
                 } else {
                     None
                 };
-                links.push(match angle_limit {
-                    Some(lim) => IkLinkInit::new(link_bone).with_angle_limit(lim),
-                    None => IkLinkInit::new(link_bone),
+                links.push(RuntimeIkLinkDescriptorV1 {
+                    bone: link_bone,
+                    angle_limit,
                 });
             }
 
             let ik_bone = BoneIndex(bones.len() as u32);
-            if let Some(target) = ik_target {
-                ik_solvers.push(IkSolverInit {
+            // A missing target was historically treated as "no solver". A
+            // non-positive loop count is likewise sanitized to no solver,
+            // avoiding the old negative-i32-to-u32 explosion while preserving
+            // PMX import success.
+            if let Some(target_bone) = ik_target
+                && ik_loop_count > 0
+                && ik_limit_angle.is_finite()
+                && ik_limit_angle >= 0.0
+            {
+                ik_solvers.push(RuntimeIkSolverDescriptorV1 {
                     ik_bone,
-                    target_bone: target,
+                    target_bone,
                     links,
                     iteration_count: ik_loop_count as u32,
                     limit_angle: ik_limit_angle,
@@ -723,42 +773,98 @@ fn read_bones_with_local_axes(
         bone_name_bytes.push(name_bytes);
         bone_names.push(name);
 
-        bones.push(BoneInit {
+        bones.push(RuntimeBoneDescriptorV1 {
             parent,
             rest_position: position,
-            inverse_bind_matrix: Mat4::from_translation((-position).into()),
             transform_order,
             transform_after_physics: flags & BONE_FLAG_TRANSFORM_AFTER_PHYSICS != 0,
             fixed_axis,
-            // PMX fixed-axis is preserved as rig metadata. MMD-compatible pose evaluation
-            // does not project ordinary VMD/local rotations onto this axis; the runtime IK
-            // solver still uses fixed_axis to constrain the CCD rotation axis only.
-            enforce_fixed_axis: false,
+            local_axis,
         });
-        local_axes.push(local_axis);
-    }
-
-    for bone in bones.iter_mut() {
-        if let Some(parent_idx) = bone.parent
-            && let Some(parent_abs) = absolute_positions.get(parent_idx.as_usize())
-        {
-            bone.rest_position -= parent_abs;
-        }
     }
 
     Ok((
         PmxBoneRead {
-            import: PmxBoneImport {
+            descriptor: RuntimeModelDescriptorV1 {
                 bones,
                 ik_solvers,
                 append_transforms,
-                bone_name_bytes,
-                bone_names,
+                ..RuntimeModelDescriptorV1::default()
             },
-            local_axes,
+            bone_name_bytes,
+            bone_names,
         },
         r.pos,
     ))
+}
+
+/// Adapt the host-independent descriptor into the historical low-level
+/// `PmxBoneImport` shape.  Runtime model construction must use the descriptor
+/// compiler; this adapter exists only for callers of the parser-facing API.
+fn legacy_bone_import(read: &PmxBoneRead) -> PmxBoneImport {
+    let bones = read
+        .descriptor
+        .bones
+        .iter()
+        .map(|descriptor| {
+            let rest_position = descriptor
+                .parent
+                .and_then(|parent| read.descriptor.bones.get(parent.as_usize()))
+                .map_or(descriptor.rest_position, |parent| {
+                    descriptor.rest_position - parent.rest_position
+                });
+            BoneInit {
+                parent: descriptor.parent,
+                rest_position,
+                inverse_bind_matrix: Mat4::from_translation((-descriptor.rest_position).into()),
+                transform_order: descriptor.transform_order,
+                transform_after_physics: descriptor.transform_after_physics,
+                fixed_axis: descriptor.fixed_axis,
+                // PMX fixed-axis is metadata and an IK constraint; ordinary
+                // pose evaluation does not project rotations onto it.
+                enforce_fixed_axis: false,
+            }
+        })
+        .collect();
+    let ik_solvers = read
+        .descriptor
+        .ik_solvers
+        .iter()
+        .map(|solver| IkSolverInit {
+            ik_bone: solver.ik_bone,
+            target_bone: solver.target_bone,
+            links: solver
+                .links
+                .iter()
+                .map(|link| IkLinkInit {
+                    bone: link.bone,
+                    angle_limit: link.angle_limit,
+                })
+                .collect(),
+            iteration_count: solver.iteration_count,
+            limit_angle: solver.limit_angle,
+        })
+        .collect();
+    let append_transforms = read
+        .descriptor
+        .append_transforms
+        .iter()
+        .map(|append| AppendTransformInit {
+            target_bone: append.target_bone,
+            source_bone: append.source_bone,
+            ratio: append.ratio,
+            affect_rotation: append.affect_rotation,
+            affect_translation: append.affect_translation,
+            local: append.local,
+        })
+        .collect();
+    PmxBoneImport {
+        bones,
+        ik_solvers,
+        append_transforms,
+        bone_name_bytes: read.bone_name_bytes.clone(),
+        bone_names: read.bone_names.clone(),
+    }
 }
 
 pub fn read_bones(
@@ -767,7 +873,7 @@ pub fn read_bones(
     pos: usize,
 ) -> Result<(PmxBoneImport, usize), ImportError> {
     let (bone_read, pos) = read_bones_with_local_axes(data, header, pos)?;
-    Ok((bone_read.import, pos))
+    Ok((legacy_bone_import(&bone_read), pos))
 }
 
 pub fn import_pmx_model(data: &[u8]) -> Result<PmxBoneImport, ImportError> {
@@ -4630,16 +4736,17 @@ pub fn import_pmx_runtime(data: &[u8]) -> Result<PmxRuntimeImport, ImportError> 
     let pos = skip_materials(data, &header, pos)?;
     let (bone_read, pos) = read_bones_with_local_axes(data, &header, pos)?;
     let PmxBoneRead {
-        import: bone_import,
-        local_axes,
+        descriptor: bone_descriptor,
+        bone_name_bytes,
+        bone_names,
     } = bone_read;
-    let (morph_names, morph_init, _pos) = read_morph_offsets(data, &header, pos)?;
+    let (morph_names, morph_descriptor, _pos) = read_runtime_morph_descriptor(data, &header, pos)?;
 
-    let mut bone_name_to_index = HashMap::with_capacity(bone_import.bone_name_bytes.len() * 2);
-    for (i, bytes) in bone_import.bone_name_bytes.iter().enumerate() {
+    let mut bone_name_to_index = HashMap::with_capacity(bone_name_bytes.len() * 2);
+    for (i, bytes) in bone_name_bytes.iter().enumerate() {
         let index = BoneIndex(i as u32);
         bone_name_to_index.insert(bytes.clone(), index);
-        let decoded = bone_import.bone_names[i].as_bytes();
+        let decoded = bone_names[i].as_bytes();
         if decoded != bytes.as_slice() && !decoded.is_empty() {
             bone_name_to_index.insert(decoded.to_vec(), index);
         }
@@ -4655,70 +4762,46 @@ pub fn import_pmx_runtime(data: &[u8]) -> Result<PmxRuntimeImport, ImportError> 
         }
     }
 
-    let mut ik_solver_bone_name_to_index = HashMap::with_capacity(bone_import.ik_solvers.len() * 2);
-    for (solver_idx, solver) in bone_import.ik_solvers.iter().enumerate() {
+    let mut ik_solver_bone_name_to_index =
+        HashMap::with_capacity(bone_descriptor.ik_solvers.len() * 2);
+    for (solver_idx, solver) in bone_descriptor.ik_solvers.iter().enumerate() {
         let bone_idx = solver.ik_bone.as_usize();
-        if bone_idx < bone_import.bone_name_bytes.len() {
-            let bytes = &bone_import.bone_name_bytes[bone_idx];
+        if bone_idx < bone_name_bytes.len() {
+            let bytes = &bone_name_bytes[bone_idx];
             ik_solver_bone_name_to_index.insert(bytes.clone(), solver_idx);
-            let decoded = bone_import.bone_names[bone_idx].as_bytes();
+            let decoded = bone_names[bone_idx].as_bytes();
             if decoded != bytes.as_slice() && !decoded.is_empty() {
                 ik_solver_bone_name_to_index.insert(decoded.to_vec(), solver_idx);
             }
         }
     }
 
-    let model = ModelArena::new_with_morphs(
-        bone_import.bones,
-        bone_import.ik_solvers,
-        bone_import.append_transforms,
-        morph_init,
-    )
-    .map_err(ImportError::ModelBuildFailed)?
-    .with_local_axes(local_axes);
+    let descriptor = RuntimeModelDescriptorV1 {
+        morphs: morph_descriptor,
+        ..bone_descriptor
+    };
+    let model = compile_runtime_model_descriptor_v1(&descriptor).map_err(|error| {
+        ImportError::ModelBuildFailed(
+            mmd_anim_runtime::ModelBuildError::InvalidRuntimeDescriptor {
+                path: error.path,
+                reason: error.kind.to_string(),
+            },
+        )
+    })?;
 
     Ok(PmxRuntimeImport {
         model,
-        bone_names: bone_import.bone_names,
+        bone_names,
         bone_name_to_index,
         morph_name_to_index,
         ik_solver_bone_name_to_index,
     })
 }
 
-trait AppendTransformInitExt {
-    fn with_rotation_if(self, on: bool) -> Self;
-    fn with_translation_if(self, on: bool) -> Self;
-    fn with_local_if(self, on: bool) -> Self;
-}
-
-impl AppendTransformInitExt for AppendTransformInit {
-    fn with_rotation_if(mut self, on: bool) -> Self {
-        if on {
-            self.affect_rotation = true;
-        }
-        self
-    }
-
-    fn with_translation_if(mut self, on: bool) -> Self {
-        if on {
-            self.affect_translation = true;
-        }
-        self
-    }
-
-    fn with_local_if(mut self, on: bool) -> Self {
-        if on {
-            self.local = true;
-        }
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::Vec3;
+    use glam::{Vec3, Vec3A};
     use mmd_anim_runtime::RuntimeInstance;
     use std::sync::Arc;
 
@@ -5191,6 +5274,10 @@ mod tests {
         include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx")
     }
 
+    fn model_descriptor_parity_pmx_fixture() -> &'static [u8] {
+        include_bytes!("../../fixtures/pmx/model_descriptor_parity.pmx")
+    }
+
     fn assert_pmx_roundtrip_eq(left: &PmxParsedModel, right: &PmxParsedModel) {
         assert_eq!(
             serde_json::to_value(left).unwrap(),
@@ -5473,6 +5560,153 @@ mod tests {
         let limit = solver.links[0].angle_limit.unwrap();
         assert_eq!(limit.min.to_array(), [0.0, -1.0, -1.0]);
         assert_eq!(limit.max.to_array(), [0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn runtime_descriptor_compiler_matches_legacy_pmx_payload() {
+        let data = model_descriptor_parity_pmx_fixture();
+        let parsed = parse_pmx_model(data).unwrap();
+        assert_eq!(parsed.metadata.counts.bones, 3);
+        assert_eq!(parsed.metadata.counts.morphs, 2);
+        let imported = import_pmx_runtime(data).unwrap();
+        assert_eq!(imported.bone_names.len(), 3);
+        assert_eq!(
+            imported.bone_name_to_index.get(b"root".as_slice()),
+            Some(&BoneIndex(0))
+        );
+        assert_eq!(
+            imported.bone_name_to_index.get(b"append_after".as_slice()),
+            Some(&BoneIndex(1))
+        );
+        assert_eq!(
+            imported.bone_name_to_index.get(b"ik_controller".as_slice()),
+            Some(&BoneIndex(2))
+        );
+        assert_eq!(
+            imported.morph_name_to_index.get(b"bone_morph".as_slice()),
+            Some(&MorphIndex(0))
+        );
+        assert_eq!(
+            imported.morph_name_to_index.get(b"group_morph".as_slice()),
+            Some(&MorphIndex(1))
+        );
+        assert_eq!(
+            imported
+                .ik_solver_bone_name_to_index
+                .get(b"ik_controller".as_slice()),
+            Some(&0)
+        );
+        assert_eq!(imported.model.ik_count(), 1);
+        assert_eq!(imported.model.append_transforms().len(), 1);
+        assert_eq!(imported.model.morph_count(), 2);
+        assert_eq!(imported.model.bone_morph_offsets().len(), 1);
+        assert_eq!(imported.model.group_morph_offsets().len(), 1);
+        assert!(imported.model.transform_after_physics(BoneIndex(1)));
+        assert!(imported.model.fixed_axis(BoneIndex(0)).is_some());
+        assert_eq!(imported.model.local_axis_count(), 2);
+        let append = imported.model.append_transforms()[0];
+        assert!(append.affect_rotation);
+        assert!(append.affect_translation);
+        assert!(append.local);
+        let solver = &imported.model.ik_solvers()[0];
+        let limit = solver.links[0].angle_limit.unwrap();
+        assert_eq!(limit.min.to_array(), [0.0, -1.0, -1.0]);
+        assert_eq!(limit.max.to_array(), [0.0, 1.0, 1.0]);
+
+        // Test-only baseline for the pre-descriptor construction path. The
+        // production importer must use the shared descriptor compiler above.
+        let (header, pos) = read_header(data).unwrap();
+        let pos = skip_model_info(data, &header, pos).unwrap();
+        let pos = skip_vertices(data, &header, pos).unwrap();
+        let pos = skip_faces(data, header.vertex_index_size, pos).unwrap();
+        let pos = skip_textures(data, header.encoding, pos).unwrap();
+        let pos = skip_materials(data, &header, pos).unwrap();
+        let (bone_read, pos) = read_bones_with_local_axes(data, &header, pos).unwrap();
+        let local_axes = bone_read
+            .descriptor
+            .bones
+            .iter()
+            .map(|bone| bone.local_axis)
+            .collect::<Vec<_>>();
+        let legacy_import = legacy_bone_import(&bone_read);
+        let (_, morph, _) = read_morph_offsets(data, &header, pos).unwrap();
+        let legacy_model = ModelArena::new_with_morphs(
+            legacy_import.bones,
+            legacy_import.ik_solvers,
+            legacy_import.append_transforms,
+            morph,
+        )
+        .unwrap()
+        .with_local_axes(local_axes);
+
+        assert_eq!(imported.model.bone_count(), legacy_model.bone_count());
+        assert_eq!(imported.model.ik_count(), legacy_model.ik_count());
+        assert_eq!(
+            imported.model.append_transforms(),
+            legacy_model.append_transforms()
+        );
+        assert_eq!(imported.model.morph_count(), legacy_model.morph_count());
+        assert_eq!(
+            imported.model.bone_morph_spans(),
+            legacy_model.bone_morph_spans()
+        );
+        assert_eq!(
+            imported.model.bone_morph_offsets(),
+            legacy_model.bone_morph_offsets()
+        );
+        assert_eq!(
+            imported.model.group_morph_spans(),
+            legacy_model.group_morph_spans()
+        );
+        assert_eq!(
+            imported.model.group_morph_offsets(),
+            legacy_model.group_morph_offsets()
+        );
+        assert_eq!(imported.model.ik_solvers(), legacy_model.ik_solvers());
+        for bone_index in 0..imported.model.bone_count() {
+            let bone = BoneIndex(bone_index as u32);
+            assert_eq!(
+                imported.model.rest_position(bone),
+                legacy_model.rest_position(bone)
+            );
+            assert_eq!(
+                imported.model.inverse_bind_matrix(bone),
+                legacy_model.inverse_bind_matrix(bone)
+            );
+            assert_eq!(
+                imported.model.transform_order(bone),
+                legacy_model.transform_order(bone)
+            );
+            assert_eq!(
+                imported.model.transform_after_physics(bone),
+                legacy_model.transform_after_physics(bone)
+            );
+            assert_eq!(
+                imported.model.fixed_axis(bone),
+                legacy_model.fixed_axis(bone)
+            );
+            assert_eq!(
+                imported.model.local_axis(bone),
+                legacy_model.local_axis(bone)
+            );
+            assert_eq!(
+                imported.model.local_axis_basis(bone),
+                legacy_model.local_axis_basis(bone)
+            );
+        }
+
+        let mut shared_runtime = RuntimeInstance::new(Arc::new(imported.model));
+        let mut legacy_runtime = RuntimeInstance::new(Arc::new(legacy_model));
+        shared_runtime.evaluate_current_pose();
+        legacy_runtime.evaluate_current_pose();
+        assert_eq!(
+            shared_runtime.world_matrices(),
+            legacy_runtime.world_matrices()
+        );
+        assert_eq!(
+            shared_runtime.skinning_matrices(),
+            legacy_runtime.skinning_matrices()
+        );
     }
 
     #[test]
@@ -6636,14 +6870,92 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&BONE_FLAG_LOCAL_AXIS.to_le_bytes());
         buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
-        // localAxis.x is zero, so the runtime must reject it without failing import.
+        // localAxis.x is zero, so tolerant PMX normalization drops the axis
+        // before invoking the strict descriptor compiler.
         buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
         buf.extend_from_slice(&[0.0f32, 0.0, 1.0].map(f32::to_le_bytes).concat());
         buf.extend_from_slice(&0i32.to_le_bytes());
 
-        let imported = import_pmx_runtime(&buf).expect("degenerate localAxis must not reject PMX");
+        let imported = import_pmx_runtime(&buf).expect("degenerate PMX axis is tolerated");
         assert!(imported.model.local_axis(BoneIndex(0)).is_none());
-        assert!(imported.model.local_axis_basis(BoneIndex(0)).is_none());
+    }
+
+    #[test]
+    fn runtime_import_drops_degenerate_fixed_axis() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(1));
+        buf.extend_from_slice(&build_bone_name_bytes("DegenerateFixed"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&BONE_FLAG_FIXED_AXIS.to_le_bytes());
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+
+        let imported = import_pmx_runtime(&buf).expect("degenerate PMX axis is tolerated");
+        assert!(imported.model.fixed_axis(BoneIndex(0)).is_none());
+    }
+
+    #[test]
+    fn nil_append_parent_is_sanitized_to_no_append() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(1));
+        buf.extend_from_slice(&build_bone_name_bytes("NilAppend"));
+        buf.extend_from_slice(&build_bone_name_bytes(""));
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&BONE_FLAG_APPEND_ROTATE.to_le_bytes());
+        // Tail offset, then the malformed optional append parent and ratio.
+        buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        buf.extend_from_slice(&(-1i16).to_le_bytes());
+        buf.extend_from_slice(&0.5f32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+
+        let imported = import_pmx_runtime(&buf).expect("nil append parent is tolerated");
+        assert!(imported.model.append_transforms().is_empty());
+    }
+
+    #[test]
+    fn non_finite_append_ratio_is_sanitized_to_no_append() {
+        for ratio in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+            buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+            buf.extend_from_slice(&build_empty_vertex_section());
+            buf.extend_from_slice(&build_empty_face_section());
+            buf.extend_from_slice(&build_empty_texture_section());
+            buf.extend_from_slice(&build_empty_material_section());
+            buf.extend_from_slice(&build_bone_section_header(1));
+            buf.extend_from_slice(&build_bone_name_bytes("NonFiniteAppend"));
+            buf.extend_from_slice(&build_bone_name_bytes(""));
+            buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+            buf.extend_from_slice(&(-1i16).to_le_bytes());
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            buf.extend_from_slice(&BONE_FLAG_APPEND_ROTATE.to_le_bytes());
+            buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+            // The source index is structurally valid; only the optional ratio is malformed.
+            buf.extend_from_slice(&0i16.to_le_bytes());
+            buf.extend_from_slice(&ratio.to_le_bytes());
+            buf.extend_from_slice(&0i32.to_le_bytes());
+
+            let imported = import_pmx_runtime(&buf).expect("non-finite append ratio is tolerated");
+            assert!(imported.model.append_transforms().is_empty());
+        }
     }
 
     #[test]
@@ -6724,7 +7036,147 @@ mod tests {
         );
     }
 
+    #[test]
+    fn non_positive_ik_loop_count_is_sanitized_to_no_solver() {
+        for loop_count in [0, -1] {
+            let imported = import_pmx_runtime(&build_local_axis_limit_pmx_with_loop_count(
+                false, loop_count,
+            ))
+            .expect("malformed optional IK is tolerated");
+            assert_eq!(imported.model.ik_count(), 0);
+        }
+    }
+
+    #[test]
+    fn nil_ik_target_is_sanitized_to_no_solver() {
+        let imported = import_pmx_runtime(&build_local_axis_limit_pmx_with_ik_indices(
+            false, 16, -1, 0,
+        ))
+        .expect("nil optional IK target is tolerated");
+        assert_eq!(imported.model.ik_count(), 0);
+    }
+
+    #[test]
+    fn nil_ik_link_preserves_legacy_bone_zero_fallback() {
+        let imported = import_pmx_runtime(&build_local_axis_limit_pmx_with_ik_indices(
+            false, 16, 1, -1,
+        ))
+        .expect("nil optional IK link is tolerated");
+        assert_eq!(imported.model.ik_count(), 1);
+        assert_eq!(imported.model.ik_solvers()[0].links[0].bone, BoneIndex(0));
+    }
+
+    #[test]
+    fn invalid_ik_limit_angle_is_sanitized_to_no_solver() {
+        for limit_angle in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0] {
+            let imported = import_pmx_runtime(&build_local_axis_limit_pmx_with_metadata(
+                false,
+                16,
+                1,
+                0,
+                limit_angle,
+                [-std::f32::consts::FRAC_PI_2, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ))
+            .expect("invalid optional IK limit angle is tolerated");
+            assert_eq!(imported.model.ik_count(), 0);
+        }
+    }
+
+    #[test]
+    fn invalid_ik_angle_limit_is_dropped_but_solver_is_retained() {
+        let cases = [
+            ([f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            ([1.0, 0.0, 0.0], [0.0, 1.0, 1.0]),
+        ];
+        for (min, max) in cases {
+            let imported = import_pmx_runtime(&build_local_axis_limit_pmx_with_metadata(
+                false,
+                16,
+                1,
+                0,
+                std::f32::consts::PI,
+                min,
+                max,
+            ))
+            .expect("invalid optional IK angle limit is tolerated");
+            assert_eq!(imported.model.ik_count(), 1);
+            assert!(
+                imported.model.ik_solvers()[0].links[0]
+                    .angle_limit
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_import_rejects_non_finite_derived_local_rest_position() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(2));
+
+        for (name, position, parent) in [("Parent", f32::MAX, -1i16), ("Child", -f32::MAX, 0i16)] {
+            buf.extend_from_slice(&build_bone_name_bytes(name));
+            buf.extend_from_slice(&build_bone_name_bytes(""));
+            buf.extend_from_slice(&[position, 0.0, 0.0].map(f32::to_le_bytes).concat());
+            buf.extend_from_slice(&parent.to_le_bytes());
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        }
+        buf.extend_from_slice(&0i32.to_le_bytes());
+
+        let result = import_pmx_runtime(&buf);
+        assert!(matches!(
+            result,
+            Err(ImportError::ModelBuildFailed(
+                mmd_anim_runtime::ModelBuildError::InvalidRuntimeDescriptor { path, .. }
+            )) if path == "bones[1].rest_position"
+        ));
+    }
+
     fn build_local_axis_limit_pmx(has_local_axis: bool) -> Vec<u8> {
+        build_local_axis_limit_pmx_with_loop_count(has_local_axis, 16)
+    }
+
+    fn build_local_axis_limit_pmx_with_loop_count(
+        has_local_axis: bool,
+        ik_loop_count: i32,
+    ) -> Vec<u8> {
+        build_local_axis_limit_pmx_with_ik_indices(has_local_axis, ik_loop_count, 1, 0)
+    }
+
+    fn build_local_axis_limit_pmx_with_ik_indices(
+        has_local_axis: bool,
+        ik_loop_count: i32,
+        ik_target: i16,
+        ik_link: i16,
+    ) -> Vec<u8> {
+        build_local_axis_limit_pmx_with_metadata(
+            has_local_axis,
+            ik_loop_count,
+            ik_target,
+            ik_link,
+            std::f32::consts::PI,
+            [-std::f32::consts::FRAC_PI_2, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        )
+    }
+
+    fn build_local_axis_limit_pmx_with_metadata(
+        has_local_axis: bool,
+        ik_loop_count: i32,
+        ik_target: i16,
+        ik_link: i16,
+        ik_limit_angle: f32,
+        angle_limit_min: [f32; 3],
+        angle_limit_max: [f32; 3],
+    ) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
         buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
@@ -6769,18 +7221,18 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&(BONE_FLAG_TAIL_INDEX | BONE_FLAG_IK).to_le_bytes());
         buf.extend_from_slice(&1i16.to_le_bytes());
-        buf.extend_from_slice(&1i16.to_le_bytes());
-        buf.extend_from_slice(&16i32.to_le_bytes());
-        buf.extend_from_slice(&std::f32::consts::PI.to_le_bytes());
+        buf.extend_from_slice(&ik_target.to_le_bytes());
+        buf.extend_from_slice(&ik_loop_count.to_le_bytes());
+        buf.extend_from_slice(&ik_limit_angle.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes());
-        buf.extend_from_slice(&0i16.to_le_bytes());
+        buf.extend_from_slice(&ik_link.to_le_bytes());
         buf.push(1);
-        buf.extend_from_slice(&(-std::f32::consts::FRAC_PI_2).to_le_bytes());
-        buf.extend_from_slice(&0.0f32.to_le_bytes());
-        buf.extend_from_slice(&0.0f32.to_le_bytes());
-        buf.extend_from_slice(&0.0f32.to_le_bytes());
-        buf.extend_from_slice(&0.0f32.to_le_bytes());
-        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        for value in angle_limit_min {
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in angle_limit_max {
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf
     }

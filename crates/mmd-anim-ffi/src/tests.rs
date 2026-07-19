@@ -62,6 +62,206 @@ fn abi_version_matches_current_breaking_surface() {
     assert_eq!(mmd_runtime_abi_version(), ABI_VERSION);
 }
 
+#[test]
+fn descriptor_v1_layout_matches_shared_manifest() {
+    if std::mem::size_of::<usize>() != 8 {
+        // The manifest deliberately fixes only the supported Windows/Ubuntu
+        // x86_64 ABI.  Keep other targets buildable without claiming parity.
+        return;
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../abi/model_descriptor_v1.json"))
+            .expect("valid model descriptor ABI manifest");
+    assert_eq!(manifest["abi_version"].as_u64(), Some(ABI_VERSION as u64));
+    assert_eq!(
+        manifest["descriptor_version"].as_u64(),
+        Some(MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1 as u64)
+    );
+    assert_eq!(
+        manifest["feature"]["value"].as_u64(),
+        Some(MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR as u64)
+    );
+    let manifest_flags = &manifest["flags"];
+    for (name, value) in [
+        (
+            "MMD_RUNTIME_MODEL_BONE_TRANSFORM_AFTER_PHYSICS",
+            MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS,
+        ),
+        (
+            "MMD_RUNTIME_MODEL_BONE_FIXED_AXIS",
+            MODEL_BONE_FLAG_FIXED_AXIS,
+        ),
+        (
+            "MMD_RUNTIME_MODEL_BONE_LOCAL_AXIS",
+            MODEL_BONE_FLAG_LOCAL_AXIS,
+        ),
+        (
+            "MMD_RUNTIME_MODEL_IK_LINK_ANGLE_LIMIT",
+            IK_LINK_FLAG_ANGLE_LIMIT,
+        ),
+        ("MMD_RUNTIME_APPEND_ROTATION", APPEND_FLAG_ROTATION),
+        ("MMD_RUNTIME_APPEND_TRANSLATION", APPEND_FLAG_TRANSLATION),
+        ("MMD_RUNTIME_APPEND_LOCAL", APPEND_FLAG_LOCAL),
+        (
+            "MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE",
+            MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE,
+        ),
+    ] {
+        assert_eq!(manifest_flags[name].as_u64(), Some(value as u64), "{name}");
+    }
+    let function = &manifest["functions"][0];
+    assert_eq!(
+        function["name"].as_str(),
+        Some("mmd_runtime_model_create_from_descriptor")
+    );
+    assert_eq!(
+        function["return_type"].as_str(),
+        Some("mmd_runtime_model_t*")
+    );
+    assert_eq!(
+        function["arguments"][0]["type"].as_str(),
+        Some("const mmd_runtime_model_descriptor_t*")
+    );
+    assert_eq!(function["arguments"].as_array().map(Vec::len), Some(1));
+    let _: unsafe extern "C" fn(*const MmdRuntimeModelDescriptor) -> *mut MmdRuntimeModel =
+        mmd_runtime_model_create_from_descriptor;
+
+    fn assert_record(
+        manifest: &serde_json::Value,
+        name: &str,
+        size: usize,
+        align: usize,
+        fields: &[(&str, &str, usize)],
+    ) {
+        let record = manifest["records"]
+            .as_array()
+            .expect("records array")
+            .iter()
+            .find(|record| record["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("manifest record missing: {name}"));
+        assert_eq!(record["sizeof"].as_u64(), Some(size as u64), "{name} size");
+        assert_eq!(
+            record["alignof"].as_u64(),
+            Some(align as u64),
+            "{name} align"
+        );
+        let manifest_fields: Vec<(&str, &str, usize)> = record["fields"]
+            .as_array()
+            .expect("fields array")
+            .iter()
+            .map(|field| {
+                (
+                    field["name"].as_str().expect("field name"),
+                    field["type"].as_str().expect("field type"),
+                    field["offset"].as_u64().expect("field offset") as usize,
+                )
+            })
+            .collect();
+        assert_eq!(manifest_fields, fields, "{name} fields");
+    }
+
+    macro_rules! assert_record_types {
+        ($name:literal, $record:ty, { $($field:ident: $rust_type:ty => $c_type:literal),+ $(,)? }) => {{
+            $(let _: fn(&$record) -> &$rust_type = |value| &value.$field;)+
+            assert_record(
+                &manifest,
+                $name,
+                std::mem::size_of::<$record>(),
+                std::mem::align_of::<$record>(),
+                &[$((stringify!($field), $c_type, std::mem::offset_of!($record, $field))),+],
+            );
+        }};
+    }
+
+    assert_record_types!(
+        "mmd_runtime_model_bone_descriptor_t",
+        MmdRuntimeModelBoneDescriptor,
+        {
+            parent_index: i32 => "int32_t",
+            rest_position_xyz: [f32; 3] => "float[3]",
+            transform_order: i32 => "int32_t",
+            flags: u32 => "uint32_t",
+            fixed_axis_xyz: [f32; 3] => "float[3]",
+            local_axis_x_xyz: [f32; 3] => "float[3]",
+            local_axis_z_xyz: [f32; 3] => "float[3]",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_ik_solver_descriptor_t",
+        MmdRuntimeModelIkSolverDescriptor,
+        {
+            ik_bone_index: u32 => "uint32_t",
+            target_bone_index: u32 => "uint32_t",
+            link_offset: usize => "size_t",
+            link_count: usize => "size_t",
+            iteration_count: u32 => "uint32_t",
+            limit_angle: f32 => "float",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_ik_link_descriptor_t",
+        MmdRuntimeModelIkLinkDescriptor,
+        {
+            bone_index: u32 => "uint32_t",
+            flags: u32 => "uint32_t",
+            angle_limit_min_xyz: [f32; 3] => "float[3]",
+            angle_limit_max_xyz: [f32; 3] => "float[3]",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_append_descriptor_t",
+        MmdRuntimeModelAppendDescriptor,
+        {
+            target_bone_index: u32 => "uint32_t",
+            source_bone_index: u32 => "uint32_t",
+            ratio: f32 => "float",
+            flags: u32 => "uint32_t",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_bone_morph_offset_descriptor_t",
+        MmdRuntimeModelBoneMorphOffsetDescriptor,
+        {
+            morph_index: u32 => "uint32_t",
+            target_bone_index: u32 => "uint32_t",
+            position_offset_xyz: [f32; 3] => "float[3]",
+            rotation_offset_xyzw: [f32; 4] => "float[4]",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_group_morph_offset_descriptor_t",
+        MmdRuntimeModelGroupMorphOffsetDescriptor,
+        {
+            morph_index: u32 => "uint32_t",
+            child_morph_index: u32 => "uint32_t",
+            ratio: f32 => "float",
+        }
+    );
+    assert_record_types!(
+        "mmd_runtime_model_descriptor_t",
+        MmdRuntimeModelDescriptor,
+        {
+            struct_size: u32 => "uint32_t",
+            descriptor_version: u32 => "uint32_t",
+            flags: u32 => "uint32_t",
+            reserved: u32 => "uint32_t",
+            bones: *const MmdRuntimeModelBoneDescriptor => "const mmd_runtime_model_bone_descriptor_t*",
+            bone_count: usize => "size_t",
+            ik_solvers: *const MmdRuntimeModelIkSolverDescriptor => "const mmd_runtime_model_ik_solver_descriptor_t*",
+            ik_solver_count: usize => "size_t",
+            ik_links: *const MmdRuntimeModelIkLinkDescriptor => "const mmd_runtime_model_ik_link_descriptor_t*",
+            ik_link_count: usize => "size_t",
+            append_transforms: *const MmdRuntimeModelAppendDescriptor => "const mmd_runtime_model_append_descriptor_t*",
+            append_transform_count: usize => "size_t",
+            morph_count: u32 => "uint32_t",
+            bone_morph_offsets: *const MmdRuntimeModelBoneMorphOffsetDescriptor => "const mmd_runtime_model_bone_morph_offset_descriptor_t*",
+            bone_morph_offset_count: usize => "size_t",
+            group_morph_offsets: *const MmdRuntimeModelGroupMorphOffsetDescriptor => "const mmd_runtime_model_group_morph_offset_descriptor_t*",
+            group_morph_offset_count: usize => "size_t",
+        }
+    );
+}
+
 fn assert_near(actual: f32, expected: f32, tolerance: f32) {
     assert!(
         (actual - expected).abs() <= tolerance,
@@ -1460,6 +1660,24 @@ fn physics_world_abi_exports_unsupported_stubs_when_feature_is_off() {
         },
         MmdRuntimeStatus::Unsupported
     );
+
+    let get = unsafe { mmd_runtime_physics_params_get_json(ptr::null()) };
+    assert!(get.data.is_null());
+    assert_eq!(get.len, 0);
+    assert_eq!(
+        unsafe { mmd_runtime_physics_params_set_json(ptr::null_mut(), b"{}".as_ptr(), 2) },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    let world = Box::into_raw(Box::new(MmdRuntimePhysicsWorld {}));
+    let get = unsafe { mmd_runtime_physics_params_get_json(world) };
+    assert!(get.data.is_null());
+    assert_eq!(get.len, 0);
+    assert_eq!(
+        unsafe { mmd_runtime_physics_params_set_json(world, b"{}".as_ptr(), 2) },
+        MmdRuntimeStatus::Unsupported
+    );
+    unsafe { mmd_runtime_physics_world_free(world) };
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -1892,6 +2110,43 @@ fn create_physics_bake_clip() -> *mut MmdRuntimeClip {
             morph_tracks.len(),
             morph_keyframes.as_ptr(),
             morph_keyframes.len(),
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+        )
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn create_bone_only_physics_bake_clip() -> *mut MmdRuntimeClip {
+    let bone_tracks = [MmdRuntimeFfiBoneTrack {
+        bone_index: 0,
+        keyframe_offset: 0,
+        keyframe_count: 2,
+    }];
+    let bone_keyframes = [
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 0,
+            position_xyz: [0.0, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        },
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 30,
+            position_xyz: [0.0, 1.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        },
+    ];
+    unsafe {
+        mmd_runtime_clip_create(
+            bone_tracks.as_ptr(),
+            bone_tracks.len(),
+            bone_keyframes.as_ptr(),
+            bone_keyframes.len(),
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
             ptr::null(),
             0,
             ptr::null(),
@@ -3113,6 +3368,465 @@ fn applies_transform_order_to_append_chain_through_c_abi() {
         mmd_runtime_instance_free(instance);
         mmd_runtime_model_free(model);
     }
+}
+
+#[test]
+fn descriptor_v1_creates_owned_model_with_metadata() {
+    let model = {
+        let mut bones = vec![
+            MmdRuntimeModelBoneDescriptor {
+                parent_index: -1,
+                rest_position_xyz: [1.0, 2.0, 3.0],
+                transform_order: 4,
+                flags: MODEL_BONE_FLAG_FIXED_AXIS | MODEL_BONE_FLAG_LOCAL_AXIS,
+                fixed_axis_xyz: [0.0, 2.0, 0.0],
+                local_axis_x_xyz: [0.0, 1.0, 0.0],
+                local_axis_z_xyz: [0.0, 0.0, 1.0],
+            },
+            MmdRuntimeModelBoneDescriptor {
+                parent_index: 0,
+                rest_position_xyz: [5.0, 2.0, 3.0],
+                transform_order: 7,
+                flags: MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS,
+                fixed_axis_xyz: [0.0; 3],
+                local_axis_x_xyz: [0.0; 3],
+                local_axis_z_xyz: [0.0; 3],
+            },
+        ];
+        let mut links = vec![MmdRuntimeModelIkLinkDescriptor {
+            bone_index: 0,
+            flags: IK_LINK_FLAG_ANGLE_LIMIT,
+            angle_limit_min_xyz: [-1.0; 3],
+            angle_limit_max_xyz: [1.0; 3],
+        }];
+        let mut solvers = vec![MmdRuntimeModelIkSolverDescriptor {
+            ik_bone_index: 1,
+            target_bone_index: 0,
+            link_offset: 0,
+            link_count: 1,
+            iteration_count: 1,
+            limit_angle: 0.5,
+        }];
+        let mut appends = vec![MmdRuntimeModelAppendDescriptor {
+            target_bone_index: 1,
+            source_bone_index: 0,
+            ratio: 0.25,
+            flags: APPEND_FLAG_ROTATION | APPEND_FLAG_LOCAL,
+        }];
+        let mut bone_offsets = vec![MmdRuntimeModelBoneMorphOffsetDescriptor {
+            morph_index: 0,
+            target_bone_index: 1,
+            position_offset_xyz: [0.1, 0.0, 0.0],
+            rotation_offset_xyzw: [0.0, 0.0, 0.0, 1.0],
+        }];
+        let mut group_offsets = vec![MmdRuntimeModelGroupMorphOffsetDescriptor {
+            morph_index: 1,
+            child_morph_index: 0,
+            ratio: 0.5,
+        }];
+        let mut descriptor = MmdRuntimeModelDescriptor {
+            struct_size: std::mem::size_of::<MmdRuntimeModelDescriptor>() as u32,
+            descriptor_version: MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1,
+            flags: 0,
+            reserved: 0,
+            bones: bones.as_ptr(),
+            bone_count: bones.len(),
+            ik_solvers: solvers.as_ptr(),
+            ik_solver_count: solvers.len(),
+            ik_links: links.as_ptr(),
+            ik_link_count: links.len(),
+            append_transforms: appends.as_ptr(),
+            append_transform_count: appends.len(),
+            morph_count: 2,
+            bone_morph_offsets: bone_offsets.as_ptr(),
+            bone_morph_offset_count: bone_offsets.len(),
+            group_morph_offsets: group_offsets.as_ptr(),
+            group_morph_offset_count: group_offsets.len(),
+        };
+        let model = unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) };
+        assert!(!model.is_null());
+
+        bones.fill(MmdRuntimeModelBoneDescriptor {
+            parent_index: -1,
+            rest_position_xyz: [99.0; 3],
+            transform_order: -99,
+            flags: 0,
+            fixed_axis_xyz: [0.0; 3],
+            local_axis_x_xyz: [0.0; 3],
+            local_axis_z_xyz: [0.0; 3],
+        });
+        links.fill(MmdRuntimeModelIkLinkDescriptor {
+            bone_index: u32::MAX,
+            flags: 0,
+            angle_limit_min_xyz: [99.0; 3],
+            angle_limit_max_xyz: [99.0; 3],
+        });
+        solvers.fill(MmdRuntimeModelIkSolverDescriptor {
+            ik_bone_index: u32::MAX,
+            target_bone_index: u32::MAX,
+            link_offset: 0,
+            link_count: 0,
+            iteration_count: 0,
+            limit_angle: 99.0,
+        });
+        appends.fill(MmdRuntimeModelAppendDescriptor {
+            target_bone_index: u32::MAX,
+            source_bone_index: u32::MAX,
+            ratio: 99.0,
+            flags: 0,
+        });
+        bone_offsets.fill(MmdRuntimeModelBoneMorphOffsetDescriptor {
+            morph_index: u32::MAX,
+            target_bone_index: u32::MAX,
+            position_offset_xyz: [99.0; 3],
+            rotation_offset_xyzw: [99.0; 4],
+        });
+        group_offsets.fill(MmdRuntimeModelGroupMorphOffsetDescriptor {
+            morph_index: u32::MAX,
+            child_morph_index: u32::MAX,
+            ratio: 99.0,
+        });
+        descriptor.struct_size = 0;
+        descriptor.descriptor_version = 0;
+        descriptor.bones = ptr::null();
+        descriptor.bone_count = 0;
+        descriptor.ik_solvers = ptr::null();
+        descriptor.ik_solver_count = 0;
+        descriptor.ik_links = ptr::null();
+        descriptor.ik_link_count = 0;
+        descriptor.append_transforms = ptr::null();
+        descriptor.append_transform_count = 0;
+        descriptor.morph_count = 0;
+        descriptor.bone_morph_offsets = ptr::null();
+        descriptor.bone_morph_offset_count = 0;
+        descriptor.group_morph_offsets = ptr::null();
+        descriptor.group_morph_offset_count = 0;
+        std::hint::black_box((
+            &bones,
+            &links,
+            &solvers,
+            &appends,
+            &bone_offsets,
+            &group_offsets,
+            &descriptor,
+        ));
+        model
+    };
+    let arena = unsafe { &(*model).model };
+    assert_eq!(
+        arena.rest_position(BoneIndex(0)),
+        glam::Vec3A::new(1.0, 2.0, 3.0)
+    );
+    assert_eq!(
+        arena.rest_position(BoneIndex(1)),
+        glam::Vec3A::new(4.0, 0.0, 0.0)
+    );
+    assert_eq!(arena.transform_order(BoneIndex(0)), 4);
+    assert_eq!(arena.transform_order(BoneIndex(1)), 7);
+    assert!(arena.transform_after_physics(BoneIndex(1)));
+    assert_eq!(arena.fixed_axis(BoneIndex(0)), Some(glam::Vec3A::Y));
+    assert!(arena.local_axis(BoneIndex(0)).is_some());
+    assert_eq!(arena.ik_solvers().len(), 1);
+    assert_eq!(arena.append_transforms().len(), 1);
+    assert_eq!(arena.morph_count(), 2);
+
+    let instance = unsafe { mmd_runtime_instance_create(model, 0) };
+    assert!(!instance.is_null());
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    let mut world = [0.0f32; 32];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, world.as_mut_ptr(), world.len())
+    });
+    assert_eq!(&world[12..15], &[1.0, 2.0, 3.0]);
+    assert_eq!(&world[28..31], &[5.0, 2.0, 3.0]);
+    let mut skinning = [0.0f32; 32];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_skinning_matrices(instance, skinning.as_mut_ptr(), skinning.len())
+    });
+    assert_eq!(
+        &skinning[..16],
+        glam::Mat4::IDENTITY.to_cols_array().as_slice()
+    );
+    assert_eq!(
+        &skinning[16..],
+        glam::Mat4::IDENTITY.to_cols_array().as_slice()
+    );
+
+    unsafe {
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[test]
+fn descriptor_v1_rejects_invalid_parent_index_with_indexed_error() {
+    let bones = [MmdRuntimeModelBoneDescriptor {
+        parent_index: 1,
+        rest_position_xyz: [0.0; 3],
+        transform_order: 0,
+        flags: 0,
+        fixed_axis_xyz: [0.0; 3],
+        local_axis_x_xyz: [0.0; 3],
+        local_axis_z_xyz: [0.0; 3],
+    }];
+    let descriptor = MmdRuntimeModelDescriptor {
+        struct_size: std::mem::size_of::<MmdRuntimeModelDescriptor>() as u32,
+        descriptor_version: MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1,
+        flags: 0,
+        reserved: 0,
+        bones: bones.as_ptr(),
+        bone_count: bones.len(),
+        ik_solvers: ptr::null(),
+        ik_solver_count: 0,
+        ik_links: ptr::null(),
+        ik_link_count: 0,
+        append_transforms: ptr::null(),
+        append_transform_count: 0,
+        morph_count: 0,
+        bone_morph_offsets: ptr::null(),
+        bone_morph_offset_count: 0,
+        group_morph_offsets: ptr::null(),
+        group_morph_offset_count: 0,
+    };
+    let model = unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) };
+    assert!(model.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("indexed descriptor error")
+            .to_string_lossy()
+            .contains("bones[0].parent")
+    );
+}
+
+fn descriptor_v1_header_fixture() -> (
+    Vec<MmdRuntimeModelBoneDescriptor>,
+    MmdRuntimeModelDescriptor,
+) {
+    let bones = vec![MmdRuntimeModelBoneDescriptor {
+        parent_index: -1,
+        rest_position_xyz: [0.0; 3],
+        transform_order: 0,
+        flags: 0,
+        fixed_axis_xyz: [0.0; 3],
+        local_axis_x_xyz: [0.0; 3],
+        local_axis_z_xyz: [0.0; 3],
+    }];
+    let descriptor = MmdRuntimeModelDescriptor {
+        struct_size: std::mem::size_of::<MmdRuntimeModelDescriptor>() as u32,
+        descriptor_version: MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1,
+        flags: 0,
+        reserved: 0,
+        bones: bones.as_ptr(),
+        bone_count: bones.len(),
+        ik_solvers: ptr::null(),
+        ik_solver_count: 0,
+        ik_links: ptr::null(),
+        ik_link_count: 0,
+        append_transforms: ptr::null(),
+        append_transform_count: 0,
+        morph_count: 0,
+        bone_morph_offsets: ptr::null(),
+        bone_morph_offset_count: 0,
+        group_morph_offsets: ptr::null(),
+        group_morph_offset_count: 0,
+    };
+    (bones, descriptor)
+}
+
+#[test]
+fn descriptor_v1_rejects_header_and_pointer_contracts() {
+    let (bones, mut descriptor) = descriptor_v1_header_fixture();
+
+    descriptor.struct_size = 0;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("struct size error")
+            .to_string_lossy()
+            .contains("descriptor.struct_size")
+    );
+
+    descriptor.struct_size = std::mem::size_of::<MmdRuntimeModelDescriptor>() as u32;
+    descriptor.descriptor_version = 99;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("version error")
+            .to_string_lossy()
+            .contains("descriptor.descriptor_version")
+    );
+
+    descriptor.descriptor_version = MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1;
+    descriptor.flags = 1;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("flags error")
+            .to_string_lossy()
+            .contains("descriptor.flags")
+    );
+
+    descriptor.flags = 0;
+    descriptor.reserved = 1;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("reserved error")
+            .to_string_lossy()
+            .contains("descriptor.reserved")
+    );
+
+    descriptor.reserved = 0;
+    descriptor.bones = ptr::null();
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("pointer/count error")
+            .to_string_lossy()
+            .contains("descriptor.bones")
+    );
+
+    descriptor.bones = bones.as_ptr();
+    descriptor.bone_count = 0;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("empty bones error")
+            .to_string_lossy()
+            .contains("descriptor.bones")
+    );
+
+    descriptor.bone_count = bones.len();
+    let model = unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) };
+    assert!(
+        !model.is_null(),
+        "a valid retry on the same thread must succeed"
+    );
+    assert!(
+        last_error_cstr().is_none(),
+        "a successful retry must clear the previous descriptor error"
+    );
+    unsafe { mmd_runtime_model_free(model) };
+}
+
+#[test]
+fn descriptor_v1_rejects_unknown_record_flags_and_link_range() {
+    let (bones, mut descriptor) = descriptor_v1_header_fixture();
+    let bad_bones = [MmdRuntimeModelBoneDescriptor {
+        flags: 1 << 31,
+        ..bones[0]
+    }];
+    descriptor.bones = bad_bones.as_ptr();
+    descriptor.bone_count = bad_bones.len();
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("unknown bone flag error")
+            .to_string_lossy()
+            .contains("bones[0].flags")
+    );
+
+    descriptor.bones = bones.as_ptr();
+    let bad_link_flags = [MmdRuntimeModelIkLinkDescriptor {
+        bone_index: 0,
+        flags: 1 << 31,
+        angle_limit_min_xyz: [0.0; 3],
+        angle_limit_max_xyz: [0.0; 3],
+    }];
+    descriptor.ik_links = bad_link_flags.as_ptr();
+    descriptor.ik_link_count = bad_link_flags.len();
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("unreferenced IK link flag error")
+            .to_string_lossy()
+            .contains("ik_links[0].flags")
+    );
+
+    descriptor.ik_links = ptr::null();
+    descriptor.ik_link_count = 0;
+    let bad_append_flags = [MmdRuntimeModelAppendDescriptor {
+        target_bone_index: 0,
+        source_bone_index: 0,
+        ratio: 1.0,
+        flags: 1 << 31,
+    }];
+    descriptor.append_transforms = bad_append_flags.as_ptr();
+    descriptor.append_transform_count = bad_append_flags.len();
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("unknown append flag error")
+            .to_string_lossy()
+            .contains("append_transforms[0].flags")
+    );
+
+    descriptor.append_transforms = ptr::null();
+    descriptor.append_transform_count = 0;
+    let links = [MmdRuntimeModelIkLinkDescriptor {
+        bone_index: 0,
+        flags: 0,
+        angle_limit_min_xyz: [0.0; 3],
+        angle_limit_max_xyz: [0.0; 3],
+    }];
+    let solvers = [MmdRuntimeModelIkSolverDescriptor {
+        ik_bone_index: 0,
+        target_bone_index: 0,
+        link_offset: 1,
+        link_count: 1,
+        iteration_count: 1,
+        limit_angle: 0.0,
+    }];
+    descriptor.ik_links = links.as_ptr();
+    descriptor.ik_link_count = links.len();
+    descriptor.ik_solvers = solvers.as_ptr();
+    descriptor.ik_solver_count = solvers.len();
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("link range error")
+            .to_string_lossy()
+            .contains("ik_solvers[0].links")
+    );
+}
+
+#[test]
+fn descriptor_v1_rejects_misaligned_and_oversized_record_ranges_before_deref() {
+    let (bones, mut descriptor) = descriptor_v1_header_fixture();
+    let misaligned_bones =
+        unsafe { bones.as_ptr().cast::<u8>().add(1) as *const MmdRuntimeModelBoneDescriptor };
+    descriptor.bones = misaligned_bones;
+    descriptor.bone_count = 1;
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("misaligned record error")
+            .to_string_lossy()
+            .contains("descriptor.bones: pointer is misaligned")
+    );
+
+    descriptor.bones = bones.as_ptr();
+    descriptor.bone_count = (u32::MAX as usize).saturating_add(1);
+    assert!(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) }.is_null());
+    assert!(
+        last_error_cstr()
+            .expect("oversized count error")
+            .to_string_lossy()
+            .contains("descriptor.bones: count exceeds u32::MAX")
+    );
+}
+
+#[test]
+fn descriptor_feature_flag_is_available_without_changing_abi() {
+    assert_eq!(mmd_runtime_abi_version(), ABI_VERSION);
+    assert_ne!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR,
+        0
+    );
+    assert_ne!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS,
+        0
+    );
 }
 
 #[test]
@@ -5188,30 +5902,41 @@ fn host_frame_pmx_bytes() -> Vec<u8> {
             ],
             "rigidBodies": [
                 {
-                    "name": "anchorBody",
+                    "name": "アンカー剛体",
                     "boneIndex": 1,
                     "shape": "sphere",
                     "size": [0.5, 0.0, 0.0],
                     "position": [0.0, 10.0, 0.0],
+                    "friction": 0.25,
                     "mode": "static"
                 },
                 {
-                    "name": "physicsBody",
+                    "name": "物理剛体",
                     "boneIndex": 2,
                     "shape": "sphere",
                     "size": [0.5, 0.0, 0.0],
                     "position": [0.0, 8.0, 0.0],
                     "mass": 1.0,
+                    "linearDamping": 0.2,
+                    "angularDamping": 0.3,
+                    "friction": 0.4,
+                    "restitution": 0.1,
                     "mode": "dynamic"
                 }
             ],
             "joints": [
                 {
-                    "name": "joint",
+                    "name": "接続ジョイント",
                     "type": "generic6dofSpring",
                     "rigidBodyIndexA": 0,
                     "rigidBodyIndexB": 1,
-                    "position": [0.0, 9.0, 0.0]
+                    "position": [0.0, 9.0, 0.0],
+                    "translationLowerLimit": [-1.0, -2.0, -3.0],
+                    "translationUpperLimit": [1.0, 2.0, 3.0],
+                    "rotationLowerLimit": [-0.1, -0.2, -0.3],
+                    "rotationUpperLimit": [0.1, 0.2, 0.3],
+                    "springTranslationFactor": [1.0, 2.0, 3.0],
+                    "springRotationFactor": [4.0, 5.0, 6.0]
                 }
             ]
         }))
@@ -5235,6 +5960,358 @@ fn host_frame_pmx_bytes() -> Vec<u8> {
     .unwrap();
 
     mmd_anim_format::export_pmx_model(&model)
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_params_json_bytes(world: *const MmdRuntimePhysicsWorld) -> Vec<u8> {
+    let buffer = unsafe { mmd_runtime_physics_params_get_json(world) };
+    assert!(!buffer.data.is_null(), "{:?}", last_error_cstr());
+    assert!(buffer.len > 0);
+    let bytes = unsafe { slice::from_raw_parts(buffer.data, buffer.len).to_vec() };
+    unsafe { mmd_runtime_byte_buffer_free(buffer) };
+    bytes
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_gravity(world: *const MmdRuntimePhysicsWorld) -> [f32; 3] {
+    let mut gravity = [0.0; 3];
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_get_gravity(world, gravity.as_mut_ptr()) },
+        MmdRuntimeStatus::Ok
+    );
+    gravity
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_from_bytes(bytes: &[u8]) -> *mut MmdRuntimePhysicsWorld {
+    let mut world = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create_from_pmx_bytes(bytes.as_ptr(), bytes.len(), &mut world)
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(!world.is_null());
+    world
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_get_emits_complete_deterministic_utf8_schema_v1_snapshot() {
+    let bytes = host_frame_pmx_bytes();
+    let world = physics_world_from_bytes(&bytes);
+
+    let first = physics_params_json_bytes(world);
+    let second = physics_params_json_bytes(world);
+    assert_eq!(first, second);
+    let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(
+        value.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["joints", "rigid_bodies", "schema_version"]
+    );
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(
+        value["rigid_bodies"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["アンカー剛体", "物理剛体"]
+    );
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["mass"], 1.0);
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["linear_damping"], 0.2);
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["angular_damping"], 0.3);
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["friction"], 0.4);
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["restitution"], 0.1);
+    assert_eq!(
+        value["joints"]["接続ジョイント"]["translation_lower_limit"],
+        serde_json::json!([-1.0, -2.0, -3.0])
+    );
+    assert_eq!(
+        value["joints"]["接続ジョイント"]["spring_rotation_factor"],
+        serde_json::json!([4.0, 5.0, 6.0])
+    );
+
+    unsafe { mmd_runtime_physics_world_free(world) };
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_unchanged_roundtrip_is_stable() {
+    let bytes = host_frame_pmx_bytes();
+    let world = physics_world_from_bytes(&bytes);
+    let snapshot = physics_params_json_bytes(world);
+
+    assert_eq!(
+        unsafe { mmd_runtime_physics_params_set_json(world, snapshot.as_ptr(), snapshot.len()) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(physics_params_json_bytes(world), snapshot);
+
+    unsafe { mmd_runtime_physics_world_free(world) };
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_set_rearms_next_bake_sample_as_seed_only_via_abi() {
+    let (model, instance, world) = host_frame_fixture();
+    let clip = create_bone_only_physics_bake_clip();
+    assert!(!clip.is_null());
+
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_reset(world, instance, ptr::null_mut()) },
+        MmdRuntimeStatus::Ok
+    );
+    let mut report = zero_physics_step_report();
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_step_runtime(world, instance, 1.0 / 60.0, &mut report) },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(report.tick.substeps > 0 || report.bones_written_back > 0);
+
+    let snapshot = physics_params_json_bytes(world);
+    assert_eq!(
+        unsafe { mmd_runtime_physics_params_set_json(world, snapshot.as_ptr(), snapshot.len()) },
+        MmdRuntimeStatus::Ok
+    );
+
+    let mut world_out = [0.0f32; 48];
+    let morph_count = unsafe { mmd_runtime_model_morph_count(model) };
+    let mut morphs = vec![0.0f32; morph_count];
+    report = zero_physics_step_report();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_bake_clip_frames(
+                world,
+                instance,
+                clip,
+                0.0,
+                15.0,
+                1.0 / 60.0,
+                1,
+                world_out.as_mut_ptr(),
+                world_out.len(),
+                morphs.as_mut_ptr(),
+                morphs.len(),
+                &mut report,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_zero_physics_step_report(&report);
+
+    unsafe {
+        mmd_runtime_clip_free(clip);
+        mmd_runtime_physics_world_free(world);
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_partial_set_rebuilds_and_preserves_gravity() {
+    let bytes = host_frame_pmx_bytes();
+    let world = physics_world_from_bytes(&bytes);
+    let gravity = [1.0f32, -42.0, 3.0];
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_set_gravity(world, gravity.as_ptr()) },
+        MmdRuntimeStatus::Ok
+    );
+    unsafe {
+        (*world).next_bake_sample_is_seed_only = false;
+    }
+    let update = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "rigid_bodies": {
+            "物理剛体": {
+                "mass": 2.5,
+                "linear_damping": 0.6,
+                "angular_damping": 0.7,
+                "friction": 0.8,
+                "restitution": 0.9
+            }
+        },
+        "joints": {
+            "接続ジョイント": {
+                "translation_lower_limit": [-4.0, -5.0, -6.0],
+                "translation_upper_limit": [4.0, 5.0, 6.0],
+                "rotation_lower_limit": [-0.4, -0.5, -0.6],
+                "rotation_upper_limit": [0.4, 0.5, 0.6],
+                "spring_translation_factor": [7.0, 8.0, 9.0],
+                "spring_rotation_factor": [10.0, 11.0, 12.0]
+            }
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        unsafe { mmd_runtime_physics_params_set_json(world, update.as_ptr(), update.len()) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(physics_gravity(world), gravity);
+    assert!(unsafe { (*world).next_bake_sample_is_seed_only });
+    let value: serde_json::Value =
+        serde_json::from_slice(&physics_params_json_bytes(world)).unwrap();
+    assert_eq!(value["rigid_bodies"]["物理剛体"]["mass"], 2.5);
+    assert_eq!(
+        value["joints"]["接続ジョイント"]["translation_lower_limit"],
+        serde_json::json!([-4.0, -5.0, -6.0])
+    );
+    assert_eq!(
+        value["joints"]["接続ジョイント"]["spring_rotation_factor"],
+        serde_json::json!([10.0, 11.0, 12.0])
+    );
+
+    unsafe { mmd_runtime_physics_world_free(world) };
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_invalid_updates_are_fail_atomic() {
+    let bytes = host_frame_pmx_bytes();
+    let world = physics_world_from_bytes(&bytes);
+    let gravity = [2.0f32, -50.0, 4.0];
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_set_gravity(world, gravity.as_ptr()) },
+        MmdRuntimeStatus::Ok
+    );
+    let snapshot = physics_params_json_bytes(world);
+    unsafe {
+        (*world).next_bake_sample_is_seed_only = false;
+    }
+    let invalid_updates = [
+        r#"{"schema_version":2}"#.as_bytes().to_vec(),
+        r#"{"schema_version":1,"unknown":{}}"#.as_bytes().to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"missing":{"mass":1}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"物理剛体":{"unknown":1}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"物理剛体":{"mass":-1}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"物理剛体":{"mass":null}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"物理剛体":{"linear_damping":1.1}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"rigid_bodies":{"物理剛体":{"mass":1e999}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"joints":{"missing":{"spring_translation_factor":[0,0,0]}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"joints":{"接続ジョイント":{"spring_rotation_factor":[0,-1,0]}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"joints":{"接続ジョイント":{"spring_rotation_factor":null}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1,"joints":{"接続ジョイント":{"translation_lower_limit":[2,0,0]}}}"#
+            .as_bytes()
+            .to_vec(),
+        r#"{"schema_version":1"#.as_bytes().to_vec(),
+        vec![0xff, 0xfe],
+    ];
+
+    for update in &invalid_updates {
+        assert_eq!(
+            unsafe { mmd_runtime_physics_params_set_json(world, update.as_ptr(), update.len()) },
+            MmdRuntimeStatus::InvalidInput,
+            "update={:?}",
+            String::from_utf8_lossy(update)
+        );
+        assert!(last_error_cstr().is_some());
+        assert_eq!(physics_params_json_bytes(world), snapshot);
+        assert_eq!(physics_gravity(world), gravity);
+        assert!(!unsafe { (*world).next_bake_sample_is_seed_only });
+    }
+
+    unsafe { mmd_runtime_physics_world_free(world) };
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_params_reject_unnamed_and_ambiguous_worlds() {
+    let valid_update = br#"{"schema_version":1}"#;
+
+    let mut typed_world = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_create(ptr::null(), 0, ptr::null(), 0, &mut typed_world)
+        },
+        MmdRuntimeStatus::Ok
+    );
+    let get = unsafe { mmd_runtime_physics_params_get_json(typed_world) };
+    assert!(get.data.is_null());
+    assert_eq!(get.len, 0);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_params_set_json(
+                typed_world,
+                valid_update.as_ptr(),
+                valid_update.len(),
+            )
+        },
+        MmdRuntimeStatus::Unsupported
+    );
+    unsafe { mmd_runtime_physics_world_free(typed_world) };
+
+    let mutations: [fn(&mut mmd_anim_format::PmxParsedModel); 2] = [
+        |model: &mut mmd_anim_format::PmxParsedModel| {
+            model.rigid_bodies[1].name = model.rigid_bodies[0].name.clone();
+        },
+        |model: &mut mmd_anim_format::PmxParsedModel| {
+            model.joints[0].name.clear();
+        },
+    ];
+    for mutate in mutations {
+        let bytes = host_frame_pmx_bytes();
+        let mut model = mmd_anim_format::parse_pmx_model(&bytes).unwrap();
+        mutate(&mut model);
+        let bytes = mmd_anim_format::export_pmx_model(&model);
+        let world = physics_world_from_bytes(&bytes);
+        let get = unsafe { mmd_runtime_physics_params_get_json(world) };
+        assert!(get.data.is_null());
+        assert_eq!(get.len, 0);
+        assert!(last_error_cstr().is_some());
+        assert_eq!(
+            unsafe {
+                mmd_runtime_physics_params_set_json(
+                    world,
+                    valid_update.as_ptr(),
+                    valid_update.len(),
+                )
+            },
+            MmdRuntimeStatus::InvalidInput
+        );
+        unsafe { mmd_runtime_physics_world_free(world) };
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_param_error_preserves_embedded_nul_in_requested_pmx_name() {
+    let world = physics_world_from_bytes(&host_frame_pmx_bytes());
+    let update = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "rigid_bodies": {"missing\0rigid-body": {"mass": 1.0}}
+    }))
+    .unwrap();
+
+    let status =
+        unsafe { mmd_runtime_physics_params_set_json(world, update.as_ptr(), update.len()) };
+    assert_eq!(status, MmdRuntimeStatus::InvalidInput);
+    let message = last_error_cstr().expect("expected unknown-name diagnostic");
+    assert_eq!(
+        message.to_bytes(),
+        b"unknown PMX rigid body name: missing\\0rigid-body"
+    );
+
+    unsafe { mmd_runtime_physics_world_free(world) };
 }
 
 /// Builds a model + instance + physics world all derived from the same PMX
@@ -5931,7 +7008,7 @@ fn evaluate_host_frame_rejects_incompatible_world() {
     let message = last_error_cstr().expect("expected bone-count mismatch error message");
     assert_eq!(
         message.to_bytes(),
-        b"physics world requires more bones than the instance provides"
+        b"physics_world.rigidbodies[1].bone_index: 2 exceeds instance bone_count 2"
     );
 
     let mut matrices_after = vec![0.0f32; mat_len];
@@ -5977,4 +7054,878 @@ fn physics_driven_bone_mask_rejects_short_buffer() {
     unsafe {
         mmd_runtime_physics_world_free(world);
     }
+}
+
+struct DescriptorParityModel(*mut MmdRuntimeModel);
+
+impl Drop for DescriptorParityModel {
+    fn drop(&mut self) {
+        unsafe { mmd_runtime_model_free(self.0) };
+    }
+}
+
+struct DescriptorParityInstance(*mut MmdRuntimeInstance);
+
+impl Drop for DescriptorParityInstance {
+    fn drop(&mut self) {
+        unsafe { mmd_runtime_instance_free(self.0) };
+    }
+}
+
+struct DescriptorParityClip(*mut MmdRuntimeClip);
+
+impl Drop for DescriptorParityClip {
+    fn drop(&mut self) {
+        unsafe { mmd_runtime_clip_free(self.0) };
+    }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+struct DescriptorParityWorld(*mut MmdRuntimePhysicsWorld);
+
+#[cfg(feature = "physics-bullet-native")]
+impl Drop for DescriptorParityWorld {
+    fn drop(&mut self) {
+        unsafe { mmd_runtime_physics_world_free(self.0) };
+    }
+}
+
+struct OwnedDescriptorParityFixture {
+    parsed: mmd_anim_format::pmx::PmxParsedModel,
+    bones: Vec<MmdRuntimeModelBoneDescriptor>,
+    ik_solvers: Vec<MmdRuntimeModelIkSolverDescriptor>,
+    ik_links: Vec<MmdRuntimeModelIkLinkDescriptor>,
+    append_transforms: Vec<MmdRuntimeModelAppendDescriptor>,
+    bone_morph_offsets: Vec<MmdRuntimeModelBoneMorphOffsetDescriptor>,
+    group_morph_offsets: Vec<MmdRuntimeModelGroupMorphOffsetDescriptor>,
+}
+
+impl OwnedDescriptorParityFixture {
+    fn from_tracked_pmx() -> Self {
+        let bytes: &[u8] =
+            include_bytes!("../../mmd-anim-format/fixtures/pmx/model_descriptor_parity.pmx");
+        let parsed = mmd_anim_format::parse_pmx_model(bytes).expect("descriptor parity PMX");
+        let bones = parsed
+            .skeleton
+            .bones
+            .iter()
+            .map(|bone| {
+                let mut flags = 0;
+                if bone.flags.transform_after_physics {
+                    flags |= MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS;
+                }
+                if bone.flags.fixed_axis {
+                    flags |= MODEL_BONE_FLAG_FIXED_AXIS;
+                }
+                if bone.flags.local_axis {
+                    flags |= MODEL_BONE_FLAG_LOCAL_AXIS;
+                }
+                MmdRuntimeModelBoneDescriptor {
+                    parent_index: bone.parent_index,
+                    rest_position_xyz: bone.position,
+                    transform_order: bone.layer,
+                    flags,
+                    fixed_axis_xyz: bone.fixed_axis.unwrap_or([0.0; 3]),
+                    local_axis_x_xyz: bone.local_axis.as_ref().map_or([0.0; 3], |axis| axis.x),
+                    local_axis_z_xyz: bone.local_axis.as_ref().map_or([0.0; 3], |axis| axis.z),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut ik_solvers = Vec::new();
+        let mut ik_links = Vec::new();
+        let mut append_transforms = Vec::new();
+        for (bone_index, bone) in parsed.skeleton.bones.iter().enumerate() {
+            if let Some(ik) = &bone.ik {
+                let link_offset = ik_links.len();
+                for link in &ik.links {
+                    let (flags, min, max) = link
+                        .limits
+                        .as_ref()
+                        .map_or((0, [0.0; 3], [0.0; 3]), |limit| {
+                            (IK_LINK_FLAG_ANGLE_LIMIT, limit.lower, limit.upper)
+                        });
+                    ik_links.push(MmdRuntimeModelIkLinkDescriptor {
+                        bone_index: u32::try_from(link.bone_index).expect("valid IK link bone"),
+                        flags,
+                        angle_limit_min_xyz: min,
+                        angle_limit_max_xyz: max,
+                    });
+                }
+                ik_solvers.push(MmdRuntimeModelIkSolverDescriptor {
+                    ik_bone_index: bone_index as u32,
+                    target_bone_index: u32::try_from(ik.target_index)
+                        .expect("valid IK target bone"),
+                    link_offset,
+                    link_count: ik.links.len(),
+                    iteration_count: ik.loop_count.max(0) as u32,
+                    limit_angle: ik.limit_angle,
+                });
+            }
+            if let Some(append) = &bone.append_transform {
+                let mut flags = 0;
+                if bone.flags.append_rotate {
+                    flags |= APPEND_FLAG_ROTATION;
+                }
+                if bone.flags.append_translate {
+                    flags |= APPEND_FLAG_TRANSLATION;
+                }
+                if bone.flags.append_local {
+                    flags |= APPEND_FLAG_LOCAL;
+                }
+                append_transforms.push(MmdRuntimeModelAppendDescriptor {
+                    target_bone_index: bone_index as u32,
+                    source_bone_index: u32::try_from(append.parent_index)
+                        .expect("valid append source bone"),
+                    ratio: append.weight,
+                    flags,
+                });
+            }
+        }
+
+        let mut bone_morph_offsets = Vec::new();
+        let mut group_morph_offsets = Vec::new();
+        for (morph_index, morph) in parsed.morphs.iter().enumerate() {
+            for offset in &morph.bone_offsets {
+                bone_morph_offsets.push(MmdRuntimeModelBoneMorphOffsetDescriptor {
+                    morph_index: morph_index as u32,
+                    target_bone_index: u32::try_from(offset.bone_index)
+                        .expect("valid bone morph target"),
+                    position_offset_xyz: offset.translation,
+                    rotation_offset_xyzw: offset.rotation,
+                });
+            }
+            for offset in &morph.group_offsets {
+                group_morph_offsets.push(MmdRuntimeModelGroupMorphOffsetDescriptor {
+                    morph_index: morph_index as u32,
+                    child_morph_index: u32::try_from(offset.morph_index)
+                        .expect("valid group morph child"),
+                    ratio: offset.weight,
+                });
+            }
+        }
+        Self {
+            parsed,
+            bones,
+            ik_solvers,
+            ik_links,
+            append_transforms,
+            bone_morph_offsets,
+            group_morph_offsets,
+        }
+    }
+
+    fn descriptor(&self) -> MmdRuntimeModelDescriptor {
+        MmdRuntimeModelDescriptor {
+            struct_size: std::mem::size_of::<MmdRuntimeModelDescriptor>() as u32,
+            descriptor_version: MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1,
+            flags: MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE,
+            reserved: 0,
+            bones: self.bones.as_ptr(),
+            bone_count: self.bones.len(),
+            ik_solvers: self.ik_solvers.as_ptr(),
+            ik_solver_count: self.ik_solvers.len(),
+            ik_links: self.ik_links.as_ptr(),
+            ik_link_count: self.ik_links.len(),
+            append_transforms: self.append_transforms.as_ptr(),
+            append_transform_count: self.append_transforms.len(),
+            morph_count: self.parsed.morphs.len() as u32,
+            bone_morph_offsets: self.bone_morph_offsets.as_ptr(),
+            bone_morph_offset_count: self.bone_morph_offsets.len(),
+            group_morph_offsets: self.group_morph_offsets.as_ptr(),
+            group_morph_offset_count: self.group_morph_offsets.len(),
+        }
+    }
+
+    fn assert_shape(&self) {
+        assert_eq!(self.parsed.metadata.counts.bones, 3);
+        assert_eq!(self.parsed.metadata.counts.morphs, 2);
+        assert_eq!(
+            self.bones.len(),
+            3,
+            "fixture must exercise all bone metadata"
+        );
+        assert_eq!(self.ik_solvers.len(), 1, "fixture must exercise IK");
+        assert!(
+            !self.ik_links.is_empty(),
+            "fixture must exercise an IK link"
+        );
+        assert_eq!(
+            self.append_transforms.len(),
+            1,
+            "fixture must exercise append"
+        );
+        assert_eq!(
+            self.bone_morph_offsets.len(),
+            1,
+            "fixture must exercise bone morph"
+        );
+        assert_eq!(
+            self.group_morph_offsets.len(),
+            1,
+            "fixture must exercise group morph"
+        );
+        assert!(
+            self.bones
+                .iter()
+                .any(|bone| { bone.flags & MODEL_BONE_FLAG_FIXED_AXIS != 0 })
+        );
+        assert!(
+            self.bones
+                .iter()
+                .any(|bone| { bone.flags & MODEL_BONE_FLAG_LOCAL_AXIS != 0 })
+        );
+        assert!(
+            self.bones
+                .iter()
+                .any(|bone| { bone.flags & MODEL_BONE_FLAG_TRANSFORM_AFTER_PHYSICS != 0 })
+        );
+    }
+}
+
+#[test]
+fn model_descriptor_fixture_matches_pmx_model_arena_and_behavior() {
+    let bytes: &[u8] =
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/model_descriptor_parity.pmx");
+    let fixture = OwnedDescriptorParityFixture::from_tracked_pmx();
+    fixture.assert_shape();
+    let parsed = &fixture.parsed;
+    let bones = &fixture.bones;
+    let bone_morph_offsets = &fixture.bone_morph_offsets;
+    let group_morph_offsets = &fixture.group_morph_offsets;
+    let descriptor = fixture.descriptor();
+
+    let pmx_model = DescriptorParityModel(unsafe {
+        mmd_runtime_model_create_from_pmx_bytes(bytes.as_ptr(), bytes.len())
+    });
+    assert!(!pmx_model.0.is_null(), "PMX model fixture import failed");
+    let descriptor_model =
+        DescriptorParityModel(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) });
+    assert!(
+        !descriptor_model.0.is_null(),
+        "descriptor fixture compile failed"
+    );
+
+    let pmx_arena = unsafe { &(*pmx_model.0).model };
+    let descriptor_arena = unsafe { &(*descriptor_model.0).model };
+    assert_eq!(pmx_arena.bone_count(), descriptor_arena.bone_count());
+    assert_eq!(pmx_arena.eval_order(), descriptor_arena.eval_order());
+    assert_eq!(pmx_arena.ik_solvers(), descriptor_arena.ik_solvers());
+    assert_eq!(
+        pmx_arena.append_transforms(),
+        descriptor_arena.append_transforms()
+    );
+    assert_eq!(pmx_arena.morph_count(), descriptor_arena.morph_count());
+    assert_eq!(
+        pmx_arena.bone_morph_spans(),
+        descriptor_arena.bone_morph_spans()
+    );
+    assert_eq!(
+        pmx_arena.bone_morph_offsets(),
+        descriptor_arena.bone_morph_offsets()
+    );
+    assert_eq!(
+        pmx_arena.group_morph_spans(),
+        descriptor_arena.group_morph_spans()
+    );
+    assert_eq!(
+        pmx_arena.group_morph_offsets(),
+        descriptor_arena.group_morph_offsets()
+    );
+    for bone_index in 0..pmx_arena.bone_count() {
+        let bone = BoneIndex(bone_index as u32);
+        assert_eq!(
+            pmx_arena.parent_index(bone),
+            descriptor_arena.parent_index(bone)
+        );
+        assert_eq!(
+            pmx_arena.rest_position(bone),
+            descriptor_arena.rest_position(bone)
+        );
+        assert_eq!(
+            pmx_arena.inverse_bind_matrix(bone),
+            descriptor_arena.inverse_bind_matrix(bone)
+        );
+        assert_eq!(
+            pmx_arena.transform_order(bone),
+            descriptor_arena.transform_order(bone)
+        );
+        assert_eq!(
+            pmx_arena.fixed_axis(bone),
+            descriptor_arena.fixed_axis(bone)
+        );
+        assert_eq!(
+            pmx_arena.local_axis(bone),
+            descriptor_arena.local_axis(bone)
+        );
+        assert_eq!(
+            pmx_arena.local_axis_basis(bone),
+            descriptor_arena.local_axis_basis(bone)
+        );
+        assert_eq!(
+            pmx_arena.transform_after_physics(bone),
+            descriptor_arena.transform_after_physics(bone)
+        );
+        assert_eq!(
+            pmx_arena.append_transform_index(bone),
+            descriptor_arena.append_transform_index(bone)
+        );
+    }
+
+    let pmx_instance =
+        DescriptorParityInstance(unsafe { mmd_runtime_instance_create(pmx_model.0, 0) });
+    let descriptor_instance =
+        DescriptorParityInstance(unsafe { mmd_runtime_instance_create(descriptor_model.0, 0) });
+    assert!(!pmx_instance.0.is_null());
+    assert!(!descriptor_instance.0.is_null());
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(pmx_instance.0) });
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(descriptor_instance.0) });
+    let matrix_len = bones.len() * 16;
+    let mut pmx_world = vec![0.0; matrix_len];
+    let mut descriptor_world = vec![0.0; matrix_len];
+    let mut pmx_skinning = vec![0.0; matrix_len];
+    let mut descriptor_skinning = vec![0.0; matrix_len];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            pmx_instance.0,
+            pmx_world.as_mut_ptr(),
+            pmx_world.len(),
+        )
+    });
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            descriptor_instance.0,
+            descriptor_world.as_mut_ptr(),
+            descriptor_world.len(),
+        )
+    });
+    assert!(unsafe {
+        mmd_runtime_instance_copy_skinning_matrices(
+            pmx_instance.0,
+            pmx_skinning.as_mut_ptr(),
+            pmx_skinning.len(),
+        )
+    });
+    assert!(unsafe {
+        mmd_runtime_instance_copy_skinning_matrices(
+            descriptor_instance.0,
+            descriptor_skinning.as_mut_ptr(),
+            descriptor_skinning.len(),
+        )
+    });
+    assert_eq!(pmx_world, descriptor_world, "rest world matrix parity");
+    assert_eq!(
+        pmx_skinning, descriptor_skinning,
+        "rest skinning matrix parity"
+    );
+
+    let root_rotation = glam::Quat::from_rotation_z(0.31).to_array();
+    let controller_rotation = glam::Quat::from_rotation_x(-0.22).to_array();
+    let bone_tracks = [
+        MmdRuntimeFfiBoneTrack {
+            bone_index: 0,
+            keyframe_offset: 0,
+            keyframe_count: 1,
+        },
+        MmdRuntimeFfiBoneTrack {
+            bone_index: 1,
+            keyframe_offset: 1,
+            keyframe_count: 1,
+        },
+        MmdRuntimeFfiBoneTrack {
+            bone_index: 2,
+            keyframe_offset: 2,
+            keyframe_count: 1,
+        },
+    ];
+    let bone_keyframes = [
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 0,
+            position_xyz: [0.13, -0.04, 0.02],
+            rotation_xyzw: root_rotation,
+        },
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 0,
+            position_xyz: [0.0, 0.11, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        },
+        MmdRuntimeFfiBoneKeyframe {
+            frame: 0,
+            position_xyz: [0.06, 0.0, 0.0],
+            rotation_xyzw: controller_rotation,
+        },
+    ];
+    let morph_tracks = [
+        MmdRuntimeFfiMorphTrack {
+            morph_index: 0,
+            keyframe_offset: 0,
+            keyframe_count: 1,
+        },
+        MmdRuntimeFfiMorphTrack {
+            morph_index: 1,
+            keyframe_offset: 1,
+            keyframe_count: 1,
+        },
+    ];
+    let morph_keyframes = [
+        MmdRuntimeFfiMorphKeyframe {
+            frame: 0,
+            weight: 0.25,
+        },
+        MmdRuntimeFfiMorphKeyframe {
+            frame: 0,
+            weight: 0.75,
+        },
+    ];
+    let property_keyframes = [MmdRuntimeFfiPropertyKeyframe {
+        frame: 0,
+        ik_enabled_offset: 0,
+        ik_enabled_count: 1,
+    }];
+    let make_clip = |bone_keyframes: &[MmdRuntimeFfiBoneKeyframe],
+                     morph_keyframes: &[MmdRuntimeFfiMorphKeyframe],
+                     property_keyframes: &[MmdRuntimeFfiPropertyKeyframe],
+                     property_ik_enabled: &[u8]| {
+        DescriptorParityClip(unsafe {
+            mmd_runtime_clip_create(
+                bone_tracks.as_ptr(),
+                bone_tracks.len(),
+                bone_keyframes.as_ptr(),
+                bone_keyframes.len(),
+                morph_tracks.as_ptr(),
+                morph_tracks.len(),
+                morph_keyframes.as_ptr(),
+                morph_keyframes.len(),
+                property_keyframes.as_ptr(),
+                property_keyframes.len(),
+                property_ik_enabled.as_ptr(),
+                property_ik_enabled.len(),
+            )
+        })
+    };
+    let property_ik_enabled = [1u8];
+    let clip = make_clip(
+        &bone_keyframes,
+        &morph_keyframes,
+        &property_keyframes,
+        &property_ik_enabled,
+    );
+    assert!(!clip.0.is_null(), "typed parity clip creation failed");
+    assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(pmx_instance.0, clip.0, 0.0) });
+    assert!(unsafe {
+        mmd_runtime_instance_evaluate_clip_frame(descriptor_instance.0, clip.0, 0.0)
+    });
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            pmx_instance.0,
+            pmx_world.as_mut_ptr(),
+            pmx_world.len(),
+        )
+    });
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            descriptor_instance.0,
+            descriptor_world.as_mut_ptr(),
+            descriptor_world.len(),
+        )
+    });
+    assert_eq!(
+        pmx_world, descriptor_world,
+        "typed clip world matrix parity"
+    );
+    assert!(pmx_world.iter().any(|value| value.abs() > 1.0e-4));
+    let enabled_world = descriptor_world.clone();
+    let mut pmx_morphs = vec![0.0; parsed.morphs.len()];
+    let mut descriptor_morphs = vec![0.0; parsed.morphs.len()];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_morph_weights(
+            pmx_instance.0,
+            pmx_morphs.as_mut_ptr(),
+            pmx_morphs.len(),
+        )
+    });
+    assert!(unsafe {
+        mmd_runtime_instance_copy_morph_weights(
+            descriptor_instance.0,
+            descriptor_morphs.as_mut_ptr(),
+            descriptor_morphs.len(),
+        )
+    });
+    assert_eq!(pmx_morphs, descriptor_morphs, "morph expansion parity");
+    let group_offset = &group_morph_offsets[0];
+    assert!(
+        pmx_morphs[group_offset.child_morph_index as usize] > morph_keyframes[0].weight,
+        "group morph must propagate to bone morph child"
+    );
+
+    let disabled_ik_clip = make_clip(
+        &bone_keyframes,
+        &morph_keyframes,
+        &property_keyframes,
+        &[0u8],
+    );
+    assert!(!disabled_ik_clip.0.is_null());
+    assert!(unsafe {
+        mmd_runtime_instance_evaluate_clip_frame(descriptor_instance.0, disabled_ik_clip.0, 0.0)
+    });
+    let mut disabled_ik_world = vec![0.0; matrix_len];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            descriptor_instance.0,
+            disabled_ik_world.as_mut_ptr(),
+            disabled_ik_world.len(),
+        )
+    });
+    let ik_bone = fixture.ik_solvers[0].ik_bone_index as usize;
+    assert_ne!(
+        &enabled_world[ik_bone * 16..ik_bone * 16 + 16],
+        &disabled_ik_world[ik_bone * 16..ik_bone * 16 + 16],
+        "IK enabled/disabled must change controller matrix"
+    );
+
+    let mut no_append_descriptor = fixture.descriptor();
+    no_append_descriptor.append_transforms = ptr::null();
+    no_append_descriptor.append_transform_count = 0;
+    let no_append_model = DescriptorParityModel(unsafe {
+        mmd_runtime_model_create_from_descriptor(&no_append_descriptor)
+    });
+    let no_append_instance =
+        DescriptorParityInstance(unsafe { mmd_runtime_instance_create(no_append_model.0, 0) });
+    assert!(!no_append_model.0.is_null());
+    assert!(!no_append_instance.0.is_null());
+    assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(no_append_instance.0, clip.0, 0.0) });
+    let mut no_append_world = vec![0.0; matrix_len];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            no_append_instance.0,
+            no_append_world.as_mut_ptr(),
+            no_append_world.len(),
+        )
+    });
+    let append_target = fixture.append_transforms[0].target_bone_index as usize;
+    assert_ne!(
+        &enabled_world[append_target * 16..append_target * 16 + 16],
+        &no_append_world[append_target * 16..append_target * 16 + 16],
+        "append source input must affect target matrix"
+    );
+
+    let mut zero_morph_keyframes = morph_keyframes;
+    zero_morph_keyframes[0].weight = 0.0;
+    zero_morph_keyframes[1].weight = 0.0;
+    let zero_morph_clip = make_clip(
+        &bone_keyframes,
+        &zero_morph_keyframes,
+        &property_keyframes,
+        &property_ik_enabled,
+    );
+    assert!(!zero_morph_clip.0.is_null());
+    assert!(unsafe {
+        mmd_runtime_instance_evaluate_clip_frame(descriptor_instance.0, zero_morph_clip.0, 0.0)
+    });
+    let mut zero_morph_world = vec![0.0; matrix_len];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            descriptor_instance.0,
+            zero_morph_world.as_mut_ptr(),
+            zero_morph_world.len(),
+        )
+    });
+    let morph_target = bone_morph_offsets[0].target_bone_index as usize;
+    assert_ne!(
+        &enabled_world[morph_target * 16..morph_target * 16 + 16],
+        &zero_morph_world[morph_target * 16..morph_target * 16 + 16],
+        "bone morph zero/nonzero must change target matrix"
+    );
+
+    let host_positions = [0.02, 0.0, 0.0, 0.0, -0.03, 0.0, 0.05, 0.0, 0.0];
+    let host_rotations = [
+        0.0, 0.0, 0.0, 1.0, // root
+        0.0, 0.0, 0.0, 1.0, // append_after
+        0.0, 0.0, 0.0, 1.0, // ik_controller
+    ];
+    let host_scales = [1.0; 9];
+    let host_morph_weights = [0.0; 2];
+    let host_ik_enabled = [1u8];
+    let host_view = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: host_positions.as_ptr(),
+        local_rotation_xyzw: host_rotations.as_ptr(),
+        local_scales_xyz: host_scales.as_ptr(),
+        bone_count: bones.len(),
+        morph_weights: host_morph_weights.as_ptr(),
+        morph_count: host_morph_weights.len(),
+        ik_enabled: host_ik_enabled.as_ptr(),
+        ik_count: host_ik_enabled.len(),
+    };
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(
+                pmx_instance.0,
+                &host_view,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics(
+                descriptor_instance.0,
+                &host_view,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            pmx_instance.0,
+            pmx_world.as_mut_ptr(),
+            pmx_world.len(),
+        )
+    });
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(
+            descriptor_instance.0,
+            descriptor_world.as_mut_ptr(),
+            descriptor_world.len(),
+        )
+    });
+    assert_eq!(pmx_world, descriptor_world, "host pose world matrix parity");
+}
+
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn model_descriptor_fixture_physics_reset_and_steps_are_deterministic() {
+    let bytes: &[u8] =
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/model_descriptor_parity.pmx");
+    let fixture = OwnedDescriptorParityFixture::from_tracked_pmx();
+    fixture.assert_shape();
+    let descriptor = fixture.descriptor();
+    let bones = &fixture.bones;
+
+    let run = || {
+        let pmx_model = DescriptorParityModel(unsafe {
+            mmd_runtime_model_create_from_pmx_bytes(bytes.as_ptr(), bytes.len())
+        });
+        let descriptor_model =
+            DescriptorParityModel(unsafe { mmd_runtime_model_create_from_descriptor(&descriptor) });
+        assert!(!pmx_model.0.is_null());
+        assert!(!descriptor_model.0.is_null());
+        let pmx_instance =
+            DescriptorParityInstance(unsafe { mmd_runtime_instance_create(pmx_model.0, 0) });
+        let descriptor_instance =
+            DescriptorParityInstance(unsafe { mmd_runtime_instance_create(descriptor_model.0, 0) });
+        assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(pmx_instance.0) });
+        assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(descriptor_instance.0) });
+
+        let static_body = MmdRuntimeFfiPhysicsRigidBodyDesc {
+            bone_index: 0,
+            position_xyz: [0.0, 0.0, 0.0],
+            mode: MmdRuntimeFfiPhysicsRigidBodyMode::Static as u32,
+            body_from_bone_position_xyz: [10.0, 0.0, 0.0],
+            ..static_physics_body_desc_with_nonzero_input_mass()
+        };
+        let dynamic_body = MmdRuntimeFfiPhysicsRigidBodyDesc {
+            bone_index: 1,
+            position_xyz: [0.0, 8.0, 0.0],
+            mode: MmdRuntimeFfiPhysicsRigidBodyMode::Dynamic as u32,
+            ..dynamic_physics_body_desc()
+        };
+        let rigidbodies = [static_body, dynamic_body];
+        let joints: [MmdRuntimeFfiPhysicsJointDesc; 0] = [];
+        let mut pmx_world = ptr::null_mut();
+        let mut descriptor_world = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                mmd_runtime_physics_world_create(
+                    rigidbodies.as_ptr(),
+                    rigidbodies.len(),
+                    joints.as_ptr(),
+                    joints.len(),
+                    &mut pmx_world,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        let pmx_world = DescriptorParityWorld(pmx_world);
+        assert_eq!(
+            unsafe {
+                mmd_runtime_physics_world_create(
+                    rigidbodies.as_ptr(),
+                    rigidbodies.len(),
+                    joints.as_ptr(),
+                    joints.len(),
+                    &mut descriptor_world,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        let descriptor_world = DescriptorParityWorld(descriptor_world);
+        assert!(!pmx_world.0.is_null());
+        assert!(!descriptor_world.0.is_null());
+        assert_eq!(
+            unsafe {
+                mmd_runtime_instance_set_physics_mode(
+                    pmx_instance.0,
+                    MmdRuntimeFfiPhysicsMode::Live as u32,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                mmd_runtime_instance_set_physics_mode(
+                    descriptor_instance.0,
+                    MmdRuntimeFfiPhysicsMode::Live as u32,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        let mut seeded_pmx = usize::MAX;
+        let mut seeded_descriptor = usize::MAX;
+        assert_eq!(
+            unsafe {
+                mmd_runtime_physics_world_reset(pmx_world.0, pmx_instance.0, &mut seeded_pmx)
+            },
+            MmdRuntimeStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                mmd_runtime_physics_world_reset(
+                    descriptor_world.0,
+                    descriptor_instance.0,
+                    &mut seeded_descriptor,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        assert!(seeded_pmx > 0);
+        assert_eq!(seeded_pmx, seeded_descriptor);
+
+        let mut baseline_states = vec![0.0; rigidbodies.len() * 7];
+        assert_eq!(
+            unsafe {
+                mmd_runtime_physics_world_copy_rigidbody_states(
+                    pmx_world.0,
+                    baseline_states.as_mut_ptr(),
+                    baseline_states.len(),
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        let mut baseline = vec![0.0; bones.len() * 16];
+        assert!(unsafe {
+            mmd_runtime_instance_copy_world_matrices(
+                pmx_instance.0,
+                baseline.as_mut_ptr(),
+                baseline.len(),
+            )
+        });
+        assert_near(baseline[16 + 13], baseline_states[8], 1.0e-4);
+        let mut checkpoints = Vec::new();
+        let mut observed_step = false;
+        for step in 0..30 {
+            let mut pmx_report = zero_physics_step_report();
+            let mut descriptor_report = zero_physics_step_report();
+            assert_eq!(
+                unsafe {
+                    mmd_runtime_physics_world_step_runtime(
+                        pmx_world.0,
+                        pmx_instance.0,
+                        1.0 / 60.0,
+                        &mut pmx_report,
+                    )
+                },
+                MmdRuntimeStatus::Ok
+            );
+            assert_eq!(
+                unsafe {
+                    mmd_runtime_physics_world_step_runtime(
+                        descriptor_world.0,
+                        descriptor_instance.0,
+                        1.0 / 60.0,
+                        &mut descriptor_report,
+                    )
+                },
+                MmdRuntimeStatus::Ok
+            );
+            assert_eq!(
+                pmx_report, descriptor_report,
+                "physics report {step} parity"
+            );
+            assert_eq!(pmx_report.tick.substeps, 2);
+            assert_eq!(pmx_report.kinematic_rigidbodies_fed, 1);
+            assert_eq!(pmx_report.bones_written_back, 1);
+            observed_step |= pmx_report.tick.substeps > 0 || pmx_report.bones_written_back > 0;
+            if step == 9 || step == 29 {
+                let mut pmx = vec![0.0; bones.len() * 16];
+                let mut descriptor = vec![0.0; bones.len() * 16];
+                let mut pmx_states = vec![0.0; rigidbodies.len() * 7];
+                let mut descriptor_states = vec![0.0; rigidbodies.len() * 7];
+                assert!(unsafe {
+                    mmd_runtime_instance_copy_world_matrices(
+                        pmx_instance.0,
+                        pmx.as_mut_ptr(),
+                        pmx.len(),
+                    )
+                });
+                assert!(unsafe {
+                    mmd_runtime_instance_copy_world_matrices(
+                        descriptor_instance.0,
+                        descriptor.as_mut_ptr(),
+                        descriptor.len(),
+                    )
+                });
+                assert_eq!(
+                    unsafe {
+                        mmd_runtime_physics_world_copy_rigidbody_states(
+                            pmx_world.0,
+                            pmx_states.as_mut_ptr(),
+                            pmx_states.len(),
+                        )
+                    },
+                    MmdRuntimeStatus::Ok
+                );
+                assert_eq!(
+                    unsafe {
+                        mmd_runtime_physics_world_copy_rigidbody_states(
+                            descriptor_world.0,
+                            descriptor_states.as_mut_ptr(),
+                            descriptor_states.len(),
+                        )
+                    },
+                    MmdRuntimeStatus::Ok
+                );
+                assert_eq!(pmx, descriptor, "physics checkpoint {step} parity");
+                assert_eq!(
+                    pmx_states, descriptor_states,
+                    "physics rigidbody checkpoint {step} parity"
+                );
+                assert_near(pmx[16 + 13], pmx_states[8], 1.0e-4);
+                if step == 29 {
+                    assert_ne!(
+                        pmx_states, baseline_states,
+                        "dynamic rigidbody must advance after 30 steps"
+                    );
+                    assert!(
+                        pmx_states[8] < baseline_states[8] - 1.0e-4,
+                        "dynamic rigidbody y must fall: baseline={baseline_states:?} current={pmx_states:?}"
+                    );
+                    assert!(
+                        pmx[16 + 13] < baseline[16 + 13] - 1.0e-4,
+                        "after-physics bone y must receive dynamic readback"
+                    );
+                }
+                checkpoints.push(pmx);
+            }
+        }
+        assert!(
+            observed_step,
+            "physics step must advance or write back state"
+        );
+        checkpoints
+    };
+
+    let first = run();
+    let second = run();
+    assert_eq!(first, second, "fresh create/reset physics determinism");
+    assert_eq!(first.len(), 2);
 }

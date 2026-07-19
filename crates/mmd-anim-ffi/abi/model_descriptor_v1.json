@@ -1,0 +1,157 @@
+{
+  "schema": "mmd-runtime-model-descriptor-abi",
+  "abi_version": 2,
+  "descriptor_version": 1,
+  "feature": {
+    "name": "MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR",
+    "bit": 4,
+    "value": 4
+  },
+  "platforms": {
+    "windows-x86_64": {
+      "os": "windows",
+      "arch": "x86_64",
+      "pointer_size": 8,
+      "size_t_size": 8
+    },
+    "ubuntu-x86_64": {
+      "os": "linux",
+      "distribution": "ubuntu",
+      "arch": "x86_64",
+      "pointer_size": 8,
+      "size_t_size": 8
+    }
+  },
+  "flags": {
+    "MMD_RUNTIME_MODEL_BONE_TRANSFORM_AFTER_PHYSICS": 1,
+    "MMD_RUNTIME_MODEL_BONE_FIXED_AXIS": 2,
+    "MMD_RUNTIME_MODEL_BONE_LOCAL_AXIS": 4,
+    "MMD_RUNTIME_MODEL_IK_LINK_ANGLE_LIMIT": 1,
+    "MMD_RUNTIME_APPEND_ROTATION": 1,
+    "MMD_RUNTIME_APPEND_TRANSLATION": 2,
+    "MMD_RUNTIME_APPEND_LOCAL": 4,
+    "MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE": 0
+  },
+  "functions": [
+    {
+      "name": "mmd_runtime_model_create_from_descriptor",
+      "return_type": "mmd_runtime_model_t*",
+      "arguments": [
+        {
+          "name": "descriptor",
+          "type": "const mmd_runtime_model_descriptor_t*"
+        }
+      ]
+    }
+  ],
+  "records": [
+    {
+      "name": "mmd_runtime_model_bone_descriptor_t",
+      "rust_name": "MmdRuntimeModelBoneDescriptor",
+      "ctypes_name": "ModelBoneDescriptor",
+      "sizeof": 60,
+      "alignof": 4,
+      "fields": [
+        {"name": "parent_index", "type": "int32_t", "offset": 0},
+        {"name": "rest_position_xyz", "type": "float[3]", "offset": 4},
+        {"name": "transform_order", "type": "int32_t", "offset": 16},
+        {"name": "flags", "type": "uint32_t", "offset": 20},
+        {"name": "fixed_axis_xyz", "type": "float[3]", "offset": 24},
+        {"name": "local_axis_x_xyz", "type": "float[3]", "offset": 36},
+        {"name": "local_axis_z_xyz", "type": "float[3]", "offset": 48}
+      ]
+    },
+    {
+      "name": "mmd_runtime_model_ik_solver_descriptor_t",
+      "rust_name": "MmdRuntimeModelIkSolverDescriptor",
+      "ctypes_name": "ModelIkSolverDescriptor",
+      "sizeof": 32,
+      "alignof": 8,
+      "fields": [
+        {"name": "ik_bone_index", "type": "uint32_t", "offset": 0},
+        {"name": "target_bone_index", "type": "uint32_t", "offset": 4},
+        {"name": "link_offset", "type": "size_t", "offset": 8},
+        {"name": "link_count", "type": "size_t", "offset": 16},
+        {"name": "iteration_count", "type": "uint32_t", "offset": 24},
+        {"name": "limit_angle", "type": "float", "offset": 28}
+      ]
+    },
+    {
+      "name": "mmd_runtime_model_ik_link_descriptor_t",
+      "rust_name": "MmdRuntimeModelIkLinkDescriptor",
+      "ctypes_name": "ModelIkLinkDescriptor",
+      "sizeof": 32,
+      "alignof": 4,
+      "fields": [
+        {"name": "bone_index", "type": "uint32_t", "offset": 0},
+        {"name": "flags", "type": "uint32_t", "offset": 4},
+        {"name": "angle_limit_min_xyz", "type": "float[3]", "offset": 8},
+        {"name": "angle_limit_max_xyz", "type": "float[3]", "offset": 20}
+      ]
+    },
+    {
+      "name": "mmd_runtime_model_append_descriptor_t",
+      "rust_name": "MmdRuntimeModelAppendDescriptor",
+      "ctypes_name": "ModelAppendDescriptor",
+      "sizeof": 16,
+      "alignof": 4,
+      "fields": [
+        {"name": "target_bone_index", "type": "uint32_t", "offset": 0},
+        {"name": "source_bone_index", "type": "uint32_t", "offset": 4},
+        {"name": "ratio", "type": "float", "offset": 8},
+        {"name": "flags", "type": "uint32_t", "offset": 12}
+      ]
+    },
+    {
+      "name": "mmd_runtime_model_bone_morph_offset_descriptor_t",
+      "rust_name": "MmdRuntimeModelBoneMorphOffsetDescriptor",
+      "ctypes_name": "ModelBoneMorphOffsetDescriptor",
+      "sizeof": 36,
+      "alignof": 4,
+      "fields": [
+        {"name": "morph_index", "type": "uint32_t", "offset": 0},
+        {"name": "target_bone_index", "type": "uint32_t", "offset": 4},
+        {"name": "position_offset_xyz", "type": "float[3]", "offset": 8},
+        {"name": "rotation_offset_xyzw", "type": "float[4]", "offset": 20}
+      ]
+    },
+    {
+      "name": "mmd_runtime_model_group_morph_offset_descriptor_t",
+      "rust_name": "MmdRuntimeModelGroupMorphOffsetDescriptor",
+      "ctypes_name": "ModelGroupMorphOffsetDescriptor",
+      "sizeof": 12,
+      "alignof": 4,
+      "fields": [
+        {"name": "morph_index", "type": "uint32_t", "offset": 0},
+        {"name": "child_morph_index", "type": "uint32_t", "offset": 4},
+        {"name": "ratio", "type": "float", "offset": 8}
+      ]
+    },
+    {
+      "name": "mmd_runtime_model_descriptor_t",
+      "rust_name": "MmdRuntimeModelDescriptor",
+      "ctypes_name": "ModelDescriptor",
+      "sizeof": 120,
+      "alignof": 8,
+      "fields": [
+        {"name": "struct_size", "type": "uint32_t", "offset": 0},
+        {"name": "descriptor_version", "type": "uint32_t", "offset": 4},
+        {"name": "flags", "type": "uint32_t", "offset": 8},
+        {"name": "reserved", "type": "uint32_t", "offset": 12},
+        {"name": "bones", "type": "const mmd_runtime_model_bone_descriptor_t*", "offset": 16},
+        {"name": "bone_count", "type": "size_t", "offset": 24},
+        {"name": "ik_solvers", "type": "const mmd_runtime_model_ik_solver_descriptor_t*", "offset": 32},
+        {"name": "ik_solver_count", "type": "size_t", "offset": 40},
+        {"name": "ik_links", "type": "const mmd_runtime_model_ik_link_descriptor_t*", "offset": 48},
+        {"name": "ik_link_count", "type": "size_t", "offset": 56},
+        {"name": "append_transforms", "type": "const mmd_runtime_model_append_descriptor_t*", "offset": 64},
+        {"name": "append_transform_count", "type": "size_t", "offset": 72},
+        {"name": "morph_count", "type": "uint32_t", "offset": 80},
+        {"name": "bone_morph_offsets", "type": "const mmd_runtime_model_bone_morph_offset_descriptor_t*", "offset": 88},
+        {"name": "bone_morph_offset_count", "type": "size_t", "offset": 96},
+        {"name": "group_morph_offsets", "type": "const mmd_runtime_model_group_morph_offset_descriptor_t*", "offset": 104},
+        {"name": "group_morph_offset_count", "type": "size_t", "offset": 112}
+      ]
+    }
+  ]
+}

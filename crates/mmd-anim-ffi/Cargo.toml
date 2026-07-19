@@ -18,8 +18,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 glam.workspace = true
 mmd-anim-runtime.workspace = true
-mmd-anim-format = { path = "../mmd-anim-format", version = "0.3.0", features = ["fbx"] }
-mmd-anim-physics-bullet = { path = "../mmd-anim-physics-bullet", version = "0.3.0", optional = true, features = ["native", "runtime", "pmx-format"] }
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.3.1", features = ["fbx"] }
+mmd-anim-physics-bullet = { path = "../mmd-anim-physics-bullet", version = "0.3.1", optional = true, features = ["native", "runtime", "pmx-format"] }
+serde.workspace = true
 serde_json.workspace = true
 
 [features]

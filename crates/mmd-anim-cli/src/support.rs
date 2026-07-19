@@ -91,7 +91,7 @@ pub(crate) fn unsupported_format_operation_error(
     operation: &str,
 ) -> Box<dyn std::error::Error> {
     anyhow!(
-        "{command}: {operation} is not supported for {} file: {}",
+        "{command}: {operation} is not supported for file (detected={}): {}",
         format_kind_label(kind),
         path.display()
     )
@@ -105,7 +105,7 @@ pub(crate) fn parse_failure_error(
     error: impl std::fmt::Display,
 ) -> Box<dyn std::error::Error> {
     anyhow!(
-        "{command}: failed to parse {} file {}: {error}",
+        "{command}: failed to parse file (format={}): {}: {error}",
         format_kind_label(kind),
         path.display()
     )
@@ -119,7 +119,7 @@ pub(crate) fn import_failure_error(
     error: impl std::fmt::Display,
 ) -> Box<dyn std::error::Error> {
     anyhow!(
-        "{command}: failed to import {} file {}: {error}",
+        "{command}: failed to import file (format={}): {}: {error}",
         format_kind_label(kind),
         path.display()
     )
@@ -207,7 +207,8 @@ mod tests {
         let error = parse_failure_error("inspect", path, MmdFormatKind::Pmx, "bad header");
         let message = error.to_string();
         assert!(message.contains("inspect:"));
-        assert!(message.contains("failed to parse PMX file model.pmx"));
+        assert!(message.contains("failed to parse file (format=PMX): model.pmx"));
+        assert!(!message.contains("detected="));
         assert!(message.contains("bad header"));
     }
 
@@ -217,7 +218,8 @@ mod tests {
         let error = import_failure_error("import", path, MmdFormatKind::Vmd, "truncated frame");
         let message = error.to_string();
         assert!(message.contains("import:"));
-        assert!(message.contains("failed to import VMD file motion.vmd"));
+        assert!(message.contains("failed to import file (format=VMD): motion.vmd"));
+        assert!(!message.contains("detected="));
         assert!(message.contains("truncated frame"));
     }
 }

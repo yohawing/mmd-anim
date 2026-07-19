@@ -1,4 +1,4 @@
-use mmd_anim_runtime::ModelBuildError;
+use mmd_anim_runtime::{ModelBuildError, RuntimeModelDescriptorError};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq)]
@@ -28,4 +28,6 @@ pub enum ImportError {
     },
     #[error("model build failed: {0}")]
     ModelBuildFailed(ModelBuildError),
+    #[error("runtime model descriptor failed: {0}")]
+    ModelDescriptorFailed(RuntimeModelDescriptorError),
 }

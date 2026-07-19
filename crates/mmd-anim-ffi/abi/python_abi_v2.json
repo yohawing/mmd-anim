@@ -1,0 +1,826 @@
+{
+  "schema": "mmd-runtime-python-abi",
+  "abi_version": 2,
+  "structs": {
+    "mmd_runtime_ffi_byte_buffer_t": [
+      {
+        "name": "data",
+        "type": "uint8_t*"
+      },
+      {
+        "name": "len",
+        "type": "size_t"
+      }
+    ],
+    "mmd_runtime_ffi_rig_ik_link_t": [
+      {
+        "name": "bone_slot",
+        "type": "uint32_t"
+      },
+      {
+        "name": "has_angle_limit",
+        "type": "bool"
+      },
+      {
+        "name": "angle_limit_min_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "angle_limit_max_xyz",
+        "type": "float[3]"
+      }
+    ],
+    "mmd_runtime_ffi_rig_bone_t": [
+      {
+        "name": "parent_slot",
+        "type": "int32_t"
+      },
+      {
+        "name": "rest_position_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "flags",
+        "type": "uint32_t"
+      },
+      {
+        "name": "fixed_axis_xyz",
+        "type": "float[3]"
+      }
+    ],
+    "mmd_runtime_ffi_ik_solve_stats_t": [
+      {
+        "name": "executed_iterations",
+        "type": "uint32_t"
+      },
+      {
+        "name": "link_steps",
+        "type": "uint32_t"
+      },
+      {
+        "name": "final_distance",
+        "type": "float"
+      },
+      {
+        "name": "break_reason",
+        "type": "uint32_t"
+      }
+    ],
+    "mmd_runtime_ffi_physics_tick_config_t": [
+      {
+        "name": "fixed_substep_seconds",
+        "type": "float"
+      },
+      {
+        "name": "max_substeps_per_tick",
+        "type": "uint32_t"
+      }
+    ],
+    "mmd_runtime_ffi_physics_step_stats_t": [
+      {
+        "name": "input_dt_seconds",
+        "type": "float"
+      },
+      {
+        "name": "clamped_dt_seconds",
+        "type": "float"
+      },
+      {
+        "name": "substeps",
+        "type": "uint32_t"
+      },
+      {
+        "name": "accumulator_seconds",
+        "type": "float"
+      }
+    ],
+    "mmd_runtime_ffi_physics_rigidbody_desc_t": [
+      {
+        "name": "shape",
+        "type": "uint32_t"
+      },
+      {
+        "name": "shape_size",
+        "type": "float[3]"
+      },
+      {
+        "name": "position_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "rotation_euler_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "mass",
+        "type": "float"
+      },
+      {
+        "name": "linear_damping",
+        "type": "float"
+      },
+      {
+        "name": "angular_damping",
+        "type": "float"
+      },
+      {
+        "name": "friction",
+        "type": "float"
+      },
+      {
+        "name": "restitution",
+        "type": "float"
+      },
+      {
+        "name": "collision_group",
+        "type": "uint16_t"
+      },
+      {
+        "name": "collision_mask",
+        "type": "uint16_t"
+      },
+      {
+        "name": "bone_index",
+        "type": "int32_t"
+      },
+      {
+        "name": "mode",
+        "type": "uint32_t"
+      },
+      {
+        "name": "body_from_bone_position_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "body_from_bone_rotation_xyzw",
+        "type": "float[4]"
+      },
+      {
+        "name": "bone_from_body_position_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "bone_from_body_rotation_xyzw",
+        "type": "float[4]"
+      }
+    ],
+    "mmd_runtime_ffi_physics_joint_desc_t": [
+      {
+        "name": "kind",
+        "type": "uint32_t"
+      },
+      {
+        "name": "rigidbody_a",
+        "type": "size_t"
+      },
+      {
+        "name": "rigidbody_b",
+        "type": "size_t"
+      },
+      {
+        "name": "position_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "rotation_euler_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "translation_lower_limit_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "translation_upper_limit_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "rotation_lower_limit_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "rotation_upper_limit_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "spring_translation_factor_xyz",
+        "type": "float[3]"
+      },
+      {
+        "name": "spring_rotation_factor_xyz",
+        "type": "float[3]"
+      }
+    ],
+    "mmd_runtime_ffi_physics_world_step_report_t": [
+      {
+        "name": "tick",
+        "type": "mmd_runtime_ffi_physics_step_stats_t"
+      },
+      {
+        "name": "kinematic_rigidbodies_fed",
+        "type": "size_t"
+      },
+      {
+        "name": "bones_written_back",
+        "type": "size_t"
+      }
+    ],
+    "mmd_runtime_ffi_physics_rigidbody_binding_t": [
+      {
+        "name": "bone_index",
+        "type": "int32_t"
+      },
+      {
+        "name": "mode",
+        "type": "uint32_t"
+      }
+    ],
+    "mmd_runtime_ffi_host_pose_view_t": [
+      {
+        "name": "local_position_offsets_xyz",
+        "type": "const float*"
+      },
+      {
+        "name": "local_rotation_xyzw",
+        "type": "const float*"
+      },
+      {
+        "name": "local_scales_xyz",
+        "type": "const float*"
+      },
+      {
+        "name": "bone_count",
+        "type": "size_t"
+      },
+      {
+        "name": "morph_weights",
+        "type": "const float*"
+      },
+      {
+        "name": "morph_count",
+        "type": "size_t"
+      },
+      {
+        "name": "ik_enabled",
+        "type": "const uint8_t*"
+      },
+      {
+        "name": "ik_count",
+        "type": "size_t"
+      }
+    ]
+  },
+  "functions": {
+    "mmd_runtime_abi_version": {
+      "return_type": "uint32_t",
+      "arguments": []
+    },
+    "mmd_runtime_feature_flags": {
+      "return_type": "uint32_t",
+      "arguments": []
+    },
+    "mmd_runtime_last_error_message": {
+      "return_type": "const char*",
+      "arguments": []
+    },
+    "mmd_runtime_byte_buffer_free": {
+      "return_type": "void",
+      "arguments": [
+        {
+          "type": "mmd_runtime_ffi_byte_buffer_t"
+        }
+      ]
+    },
+    "mmd_runtime_parse_vmd_json": {
+      "return_type": "mmd_runtime_ffi_byte_buffer_t",
+      "arguments": [
+        {
+          "type": "const uint8_t*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_parse_pmx_non_geometry_json": {
+      "return_type": "mmd_runtime_ffi_byte_buffer_t",
+      "arguments": [
+        {
+          "type": "const uint8_t*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_pmx_geometry_create": {
+      "return_type": "mmd_runtime_pmx_geometry_t*",
+      "arguments": [
+        {
+          "type": "const uint8_t*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_pmx_geometry_free": {
+      "return_type": "void",
+      "arguments": [
+        {
+          "type": "mmd_runtime_pmx_geometry_t*"
+        }
+      ]
+    },
+    "mmd_runtime_pmx_geometry_positions_buffer": {
+      "return_type": "mmd_runtime_ffi_byte_buffer_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_pmx_geometry_t*"
+        }
+      ]
+    },
+    "mmd_runtime_model_create": {
+      "return_type": "mmd_runtime_model_t*",
+      "arguments": [
+        {
+          "type": "const int32_t*"
+        },
+        {
+          "type": "const float*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_model_create_from_pmx_bytes": {
+      "return_type": "mmd_runtime_model_t*",
+      "arguments": [
+        {
+          "type": "const uint8_t*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_model_bone_count": {
+      "return_type": "size_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_model_t*"
+        }
+      ]
+    },
+    "mmd_runtime_model_morph_count": {
+      "return_type": "size_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_model_t*"
+        }
+      ]
+    },
+    "mmd_runtime_model_ik_count": {
+      "return_type": "size_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_model_t*"
+        }
+      ]
+    },
+    "mmd_runtime_model_free": {
+      "return_type": "void",
+      "arguments": [
+        {
+          "type": "mmd_runtime_model_t*"
+        }
+      ]
+    },
+    "mmd_runtime_instance_create": {
+      "return_type": "mmd_runtime_instance_t*",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_model_t*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_instance_create_for_model": {
+      "return_type": "mmd_runtime_instance_t*",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_model_t*"
+        }
+      ]
+    },
+    "mmd_runtime_instance_free": {
+      "return_type": "void",
+      "arguments": [
+        {
+          "type": "mmd_runtime_instance_t*"
+        }
+      ]
+    },
+    "mmd_runtime_instance_evaluate_rest_pose": {
+      "return_type": "bool",
+      "arguments": [
+        {
+          "type": "mmd_runtime_instance_t*"
+        }
+      ]
+    },
+    "mmd_runtime_instance_evaluate_clip_frame": {
+      "return_type": "bool",
+      "arguments": [
+        {
+          "type": "mmd_runtime_instance_t*"
+        },
+        {
+          "type": "const mmd_runtime_clip_t*"
+        },
+        {
+          "type": "float"
+        }
+      ]
+    },
+    "mmd_runtime_instance_apply_host_pose": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "mmd_runtime_instance_t*"
+        },
+        {
+          "type": "const mmd_runtime_ffi_host_pose_view_t*"
+        }
+      ]
+    },
+    "mmd_runtime_instance_apply_host_pose_and_evaluate_before_physics": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "mmd_runtime_instance_t*"
+        },
+        {
+          "type": "const mmd_runtime_ffi_host_pose_view_t*"
+        }
+      ]
+    },
+    "mmd_runtime_instance_evaluate_current_pose_after_physics": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "mmd_runtime_instance_t*"
+        }
+      ]
+    },
+    "mmd_runtime_instance_world_matrix_f32_len": {
+      "return_type": "size_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_instance_t*"
+        }
+      ]
+    },
+    "mmd_runtime_instance_copy_world_matrices": {
+      "return_type": "bool",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_instance_t*"
+        },
+        {
+          "type": "float*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_instance_skinning_matrix_f32_len": {
+      "return_type": "size_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_instance_t*"
+        }
+      ]
+    },
+    "mmd_runtime_instance_copy_skinning_matrices": {
+      "return_type": "bool",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_instance_t*"
+        },
+        {
+          "type": "float*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_instance_morph_weight_len": {
+      "return_type": "size_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_instance_t*"
+        }
+      ]
+    },
+    "mmd_runtime_instance_copy_morph_weights": {
+      "return_type": "bool",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_instance_t*"
+        },
+        {
+          "type": "float*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_clip_create": {
+      "return_type": "mmd_runtime_clip_t*",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_ffi_bone_track_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "const mmd_runtime_ffi_bone_keyframe_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "const mmd_runtime_ffi_morph_track_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "const mmd_runtime_ffi_morph_keyframe_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "const mmd_runtime_ffi_property_keyframe_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "const uint8_t*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_clip_free": {
+      "return_type": "void",
+      "arguments": [
+        {
+          "type": "mmd_runtime_clip_t*"
+        }
+      ]
+    },
+    "mmd_runtime_clip_create_from_vmd_bytes_for_model": {
+      "return_type": "mmd_runtime_clip_t*",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_model_t*"
+        },
+        {
+          "type": "const uint8_t*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_clip_frame_range": {
+      "return_type": "bool",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_clip_t*"
+        },
+        {
+          "type": "uint32_t*"
+        },
+        {
+          "type": "uint32_t*"
+        }
+      ]
+    },
+    "mmd_runtime_physics_world_create_from_pmx_bytes": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "const uint8_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "mmd_runtime_physics_world_t**"
+        }
+      ]
+    },
+    "mmd_runtime_physics_world_free": {
+      "return_type": "void",
+      "arguments": [
+        {
+          "type": "mmd_runtime_physics_world_t*"
+        }
+      ]
+    },
+    "mmd_runtime_physics_params_get_json": {
+      "return_type": "mmd_runtime_ffi_byte_buffer_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_physics_world_t*"
+        }
+      ]
+    },
+    "mmd_runtime_physics_params_set_json": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "mmd_runtime_physics_world_t*"
+        },
+        {
+          "type": "const uint8_t*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_physics_world_create": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_ffi_physics_rigidbody_desc_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "const mmd_runtime_ffi_physics_joint_desc_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "mmd_runtime_physics_world_t**"
+        }
+      ]
+    },
+    "mmd_runtime_evaluate_host_frame": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "mmd_runtime_instance_t*"
+        },
+        {
+          "type": "mmd_runtime_physics_world_t*"
+        },
+        {
+          "type": "const mmd_runtime_ffi_host_pose_view_t*"
+        },
+        {
+          "type": "mmd_runtime_physics_frame_action_t"
+        },
+        {
+          "type": "float"
+        },
+        {
+          "type": "float"
+        },
+        {
+          "type": "uint32_t"
+        },
+        {
+          "type": "mmd_runtime_ffi_physics_world_step_report_t*"
+        }
+      ]
+    },
+    "mmd_runtime_physics_world_rigidbody_count": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_physics_world_t*"
+        },
+        {
+          "type": "size_t*"
+        }
+      ]
+    },
+    "mmd_runtime_physics_world_copy_rigidbody_bindings": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_physics_world_t*"
+        },
+        {
+          "type": "mmd_runtime_ffi_physics_rigidbody_binding_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "size_t*"
+        }
+      ]
+    },
+    "mmd_runtime_physics_world_copy_rigidbody_states": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_physics_world_t*"
+        },
+        {
+          "type": "float*"
+        },
+        {
+          "type": "size_t"
+        }
+      ]
+    },
+    "mmd_runtime_ik_chain_create": {
+      "return_type": "mmd_runtime_ik_chain_t*",
+      "arguments": [
+        {
+          "type": "const mmd_runtime_ffi_rig_bone_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "uint32_t"
+        },
+        {
+          "type": "const mmd_runtime_ffi_rig_ik_link_t*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "uint32_t"
+        },
+        {
+          "type": "float"
+        }
+      ]
+    },
+    "mmd_runtime_ik_chain_free": {
+      "return_type": "void",
+      "arguments": [
+        {
+          "type": "mmd_runtime_ik_chain_t*"
+        }
+      ]
+    },
+    "mmd_runtime_ik_chain_solve": {
+      "return_type": "bool",
+      "arguments": [
+        {
+          "type": "mmd_runtime_ik_chain_t*"
+        },
+        {
+          "type": "const float*"
+        },
+        {
+          "type": "const float*"
+        },
+        {
+          "type": "const float*"
+        },
+        {
+          "type": "const float*"
+        },
+        {
+          "type": "float"
+        },
+        {
+          "type": "uint32_t"
+        },
+        {
+          "type": "float*"
+        },
+        {
+          "type": "size_t"
+        },
+        {
+          "type": "mmd_runtime_ffi_ik_solve_stats_t*"
+        }
+      ]
+    }
+  }
+}

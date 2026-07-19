@@ -24,9 +24,6 @@ jobs:
           rustup default stable
           rustup component add rustfmt clippy
 
-      - name: Check FFI header symbols
-        run: python tools/check_ffi_header_symbols.py
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -57,27 +54,9 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - name: Check Python ABI drift
-        run: python tools/check_python_abi_drift.py
-
       - name: Configure MSVC developer environment
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Check model descriptor ABI layout (MSVC)
-        if: runner.os == 'Windows'
-        env:
-          CC: cl
-        run: python tools/check_model_descriptor_abi.py --require-c-compiler
-
-      - name: Check model descriptor ABI layout (GCC)
-        if: runner.os != 'Windows'
-        env:
-          CC: gcc
-        run: python tools/check_model_descriptor_abi.py --require-c-compiler
-
-      - name: Build release C ABI library
-        run: cargo build -p mmd-anim-ffi --release
-
-      - name: Run Python binding tests with native library
-        run: python -m unittest discover -s bindings/python/tests -v
+      - name: Run shared native Python/C ABI release gate
+        run: python tools/check_python_ffi_release.py

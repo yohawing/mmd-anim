@@ -398,15 +398,12 @@ class RuntimeLibrary:
         return json.loads(copied.decode("utf-8", errors="strict"))
 
 
-class Model:
-    """Owned opaque model handle."""
+class _OwnedHandle:
+    """Shared context-manager/open-state behavior for opaque handles."""
 
-    def __init__(self, runtime: RuntimeLibrary, handle: int) -> None:
-        self._runtime = runtime
-        self._handle: int | None = handle
-        self._instances: set[Instance] = set()
+    _closed_handle_message = "native handle is closed"
 
-    def __enter__(self) -> Model:
+    def __enter__(self):
         self._require_open()
         return self
 
@@ -415,8 +412,19 @@ class Model:
 
     def _require_open(self) -> int:
         if self._handle is None:
-            raise NativeRuntimeError("model handle is closed")
+            raise NativeRuntimeError(self._closed_handle_message)
         return self._handle
+
+
+class Model(_OwnedHandle):
+    """Owned opaque model handle."""
+
+    def __init__(self, runtime: RuntimeLibrary, handle: int) -> None:
+        self._runtime = runtime
+        self._handle: int | None = handle
+        self._instances: set[Instance] = set()
+
+    _closed_handle_message = "model handle is closed"
 
     def create_instance(self, morph_count: int = 0) -> Instance:
         if morph_count < 0:
@@ -462,24 +470,14 @@ class Model:
         self._handle = None
 
 
-class Instance:
+class Instance(_OwnedHandle):
     """Owned opaque runtime-instance handle."""
 
     def __init__(self, model: Model, handle: int) -> None:
         self._model = model
         self._handle: int | None = handle
 
-    def __enter__(self) -> Instance:
-        self._require_open()
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
-
-    def _require_open(self) -> int:
-        if self._handle is None:
-            raise NativeRuntimeError("instance handle is closed")
-        return self._handle
+    _closed_handle_message = "instance handle is closed"
 
     def evaluate_rest_pose(self) -> None:
         if not self._model._runtime._lib.mmd_runtime_instance_evaluate_rest_pose(
@@ -579,24 +577,14 @@ class Instance:
         self._model._instances.discard(self)
 
 
-class Clip:
+class Clip(_OwnedHandle):
     """Owned opaque clip handle used by the minimal frame-evaluation smoke."""
 
     def __init__(self, runtime: RuntimeLibrary, handle: int) -> None:
         self._runtime = runtime
         self._handle: int | None = handle
 
-    def __enter__(self) -> Clip:
-        self._require_open()
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
-
-    def _require_open(self) -> int:
-        if self._handle is None:
-            raise NativeRuntimeError("clip handle is closed")
-        return self._handle
+    _closed_handle_message = "clip handle is closed"
 
     def frame_range(self) -> tuple[int, int]:
         first = ctypes.c_uint32()
@@ -614,24 +602,14 @@ class Clip:
         self._handle = None
 
 
-class PhysicsWorld:
+class PhysicsWorld(_OwnedHandle):
     """Owned opaque PMX-derived physics world for parameter inspection."""
 
     def __init__(self, runtime: RuntimeLibrary, handle: int) -> None:
         self._runtime = runtime
         self._handle: int | None = handle
 
-    def __enter__(self) -> PhysicsWorld:
-        self._require_open()
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
-
-    def _require_open(self) -> int:
-        if self._handle is None:
-            raise NativeRuntimeError("physics world handle is closed")
-        return self._handle
+    _closed_handle_message = "physics world handle is closed"
 
     def params_json(self) -> dict[str, object]:
         operation = "mmd_runtime_physics_params_get_json"
@@ -707,24 +685,14 @@ class PhysicsWorld:
         self._handle = None
 
 
-class PmxGeometry:
+class PmxGeometry(_OwnedHandle):
     """Owned parsed-PMX geometry handle."""
 
     def __init__(self, runtime: RuntimeLibrary, handle: int) -> None:
         self._runtime = runtime
         self._handle: int | None = handle
 
-    def __enter__(self) -> PmxGeometry:
-        self._require_open()
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
-
-    def _require_open(self) -> int:
-        if self._handle is None:
-            raise NativeRuntimeError("PMX geometry handle is closed")
-        return self._handle
+    _closed_handle_message = "PMX geometry handle is closed"
 
     def positions_bytes(self) -> bytes:
         return self._runtime.copy_owned_bytes(
@@ -741,7 +709,7 @@ class PmxGeometry:
         self._handle = None
 
 
-class IkChain:
+class IkChain(_OwnedHandle):
     """Owned IK-chain primitive with caller-owned solve output."""
 
     def __init__(
@@ -752,17 +720,7 @@ class IkChain:
         self._bone_count = bone_count
         self._link_count = link_count
 
-    def __enter__(self) -> IkChain:
-        self._require_open()
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
-
-    def _require_open(self) -> int:
-        if self._handle is None:
-            raise NativeRuntimeError("IK chain handle is closed")
-        return self._handle
+    _closed_handle_message = "IK chain handle is closed"
 
     def solve(
         self,

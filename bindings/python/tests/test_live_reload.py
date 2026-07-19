@@ -67,6 +67,9 @@ class FakeLiveLibrary:
         self.block_create = False
         self.create_entered = threading.Event()
         self.allow_create = threading.Event()
+        self.block_copy = False
+        self.copy_entered = threading.Event()
+        self.allow_copy = threading.Event()
         self.fail_close = False
         self.mmd_runtime_model_create_from_descriptor = self._model_create
 
@@ -148,6 +151,45 @@ class FakeLiveLibrary:
         del instance
         return 0
 
+    def _instance_shape(self, instance: int) -> tuple[int, int]:
+        model = self.models[self.instances[instance]]
+        return model[0], model[1]
+
+    def mmd_runtime_instance_world_matrix_f32_len(self, instance: int) -> int:
+        return self._instance_shape(instance)[0] * 16
+
+    def mmd_runtime_instance_skinning_matrix_f32_len(self, instance: int) -> int:
+        return self._instance_shape(instance)[0] * 16
+
+    def mmd_runtime_instance_morph_weight_len(self, instance: int) -> int:
+        return self._instance_shape(instance)[1]
+
+    def _copy_zeros(self, output: object, length: int) -> int:
+        if self.block_copy:
+            self.copy_entered.set()
+            self.allow_copy.wait(timeout=5)
+        for index in range(length):
+            output[index] = 0.0
+        return 1
+
+    def mmd_runtime_instance_copy_world_matrices(
+        self, instance: int, output: object, length: int
+    ) -> int:
+        del instance
+        return self._copy_zeros(output, length)
+
+    def mmd_runtime_instance_copy_skinning_matrices(
+        self, instance: int, output: object, length: int
+    ) -> int:
+        del instance
+        return self._copy_zeros(output, length)
+
+    def mmd_runtime_instance_copy_morph_weights(
+        self, instance: int, output: object, length: int
+    ) -> int:
+        del instance
+        return self._copy_zeros(output, length)
+
     def mmd_runtime_physics_world_create(
         self,
         rigidbodies: object,
@@ -214,6 +256,9 @@ class FakeLiveLibrary:
             return 1
         if self.fail == "seed":
             return 1
+        if self.fail == "step":
+            self.last_error = b"fake physics step failure"
+            return 1
         return 0
 
 
@@ -229,6 +274,19 @@ class FakeLiveReloadTests(unittest.TestCase):
         fake.mmd_runtime_feature_flags = lambda: FEATURE_MODEL_DESCRIPTOR  # type: ignore[method-assign]
         with self.assertRaisesRegex(NativeRuntimeError, "native HostPose"):
             LiveRuntime(_runtime(fake))
+
+    def test_readback_copies_one_generation_without_exposing_handles(self) -> None:
+        live = LiveRuntime(_runtime(FakeLiveLibrary()), _two_bones(), _pose(2, 1))
+
+        readback = live.readback()
+
+        self.assertEqual((readback.bone_count, readback.morph_count), (2, 1))
+        self.assertEqual(len(readback.world_matrices_f32), 32)
+        self.assertEqual(len(readback.skinning_matrices_f32), 32)
+        self.assertEqual(list(readback.morph_weights_f32), [0.0])
+        live.close()
+        with self.assertRaisesRegex(NativeRuntimeError, "no active handle set"):
+            live.readback()
 
     def test_reload_serializes_close_and_terminal_close_rejects_reload(self) -> None:
         fake = FakeLiveLibrary()
@@ -256,6 +314,35 @@ class FakeLiveReloadTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeRuntimeError, "closed"):
             live.reload(_one_bone(), _pose(1))
 
+    def test_readback_serializes_with_reload_under_generation_lock(self) -> None:
+        fake = FakeLiveLibrary()
+        live = LiveRuntime(_runtime(fake), _one_bone(), _pose(1))
+        fake.block_copy = True
+        readback_done = threading.Event()
+        reload_done = threading.Event()
+
+        def do_readback() -> None:
+            live.readback()
+            readback_done.set()
+
+        def do_reload() -> None:
+            live.reload(_two_bones(), _pose(2, 1))
+            reload_done.set()
+
+        readback_thread = threading.Thread(target=do_readback)
+        readback_thread.start()
+        self.assertTrue(fake.copy_entered.wait(timeout=2))
+        reload_thread = threading.Thread(target=do_reload)
+        reload_thread.start()
+        self.assertFalse(reload_done.wait(timeout=0.05))
+        fake.allow_copy.set()
+        readback_thread.join(timeout=2)
+        reload_thread.join(timeout=2)
+        self.assertTrue(readback_done.is_set())
+        self.assertTrue(reload_done.is_set())
+        self.assertEqual(live._handles.model.bone_count(), 2)
+        live.close()
+
     def test_successful_swap_is_atomic_and_closes_old_world_instance_model(
         self,
     ) -> None:
@@ -267,7 +354,7 @@ class FakeLiveReloadTests(unittest.TestCase):
             _pose(1),
             PhysicsDefinition((PhysicsRigidbody(bone_index=0),)),
         )
-        old = live.handle_set
+        old = live._handles
         fake.models[old.model._handle] = (1, 0, 0)
         old_ids = (old.model._handle, old.instance._handle)
 
@@ -276,7 +363,7 @@ class FakeLiveReloadTests(unittest.TestCase):
             _pose(2, 1),
             PhysicsDefinition((PhysicsRigidbody(bone_index=0),)),
         )
-        current = live.handle_set
+        current = live._handles
         self.assertIsNot(current, old)
         self.assertEqual((old.model._handle, old.instance._handle), (None, None))
         self.assertEqual(
@@ -293,9 +380,9 @@ class FakeLiveReloadTests(unittest.TestCase):
         live = LiveRuntime(runtime, _one_bone(), _pose(1), physics)
 
         live.reload(_two_bones(), _pose(2, 1))
-        self.assertIsNotNone(live.physics_world)
+        self.assertIsNotNone(live._handles.physics_world)
         live.reload(_one_bone(), _pose(1), None)
-        self.assertIsNone(live.physics_world)
+        self.assertIsNone(live._handles.physics_world)
         live.close()
 
     def test_swap_keeps_new_generation_when_old_cleanup_raises(self) -> None:
@@ -306,7 +393,7 @@ class FakeLiveReloadTests(unittest.TestCase):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ResourceWarning)
             live.reload(_two_bones(), _pose(2, 1))
-        self.assertEqual(live.model.bone_count(), 2)
+        self.assertEqual(live._handles.model.bone_count(), 2)
         self.assertTrue(
             any("old handle cleanup failed" in str(item.message) for item in caught)
         )
@@ -325,7 +412,7 @@ class FakeLiveReloadTests(unittest.TestCase):
                 fake = FakeLiveLibrary()
                 runtime = _runtime(fake)
                 live = LiveRuntime(runtime, _one_bone(), _pose(1))
-                old = live.handle_set
+                old = live._handles
                 fake.fail = failure
                 with self.assertRaises(NativeRuntimeError):
                     live.reload(
@@ -333,7 +420,7 @@ class FakeLiveReloadTests(unittest.TestCase):
                         _pose(2, 1),
                         PhysicsDefinition((PhysicsRigidbody(bone_index=0),)),
                     )
-                self.assertIs(live.handle_set, old)
+                self.assertIs(live._handles, old)
                 self.assertEqual(
                     [event[0] for event in fake.events[-len(expected) :]], expected
                 )
@@ -343,7 +430,7 @@ class FakeLiveReloadTests(unittest.TestCase):
         fake = FakeLiveLibrary()
         runtime = _runtime(fake)
         live = LiveRuntime(runtime, _one_bone(), _pose(1))
-        old = live.handle_set
+        old = live._handles
         with self.assertRaisesRegex(
             NativeRuntimeError,
             r"physics_world\.rigidbodies\[0\]\.bone_index: 1 exceeds instance bone_count 1",
@@ -353,8 +440,42 @@ class FakeLiveReloadTests(unittest.TestCase):
                 _pose(1),
                 PhysicsDefinition((PhysicsRigidbody(bone_index=1),)),
             )
-        self.assertIs(live.handle_set, old)
+        self.assertIs(live._handles, old)
         self.assertIsNotNone(old.model._handle)
+        live.close()
+
+    def test_physics_failure_poisons_generation_until_successful_reload(self) -> None:
+        fake = FakeLiveLibrary()
+        runtime = _runtime(fake)
+        physics = PhysicsDefinition((PhysicsRigidbody(bone_index=0),))
+        pose = _pose(1)
+        live = LiveRuntime(runtime, _one_bone(), pose, physics)
+
+        fake.fail = "step"
+        with self.assertRaisesRegex(NativeRuntimeError, "step failure"):
+            live.evaluate_host_frame(pose)
+        fake.fail = None
+        with self.assertRaisesRegex(NativeRuntimeError, "poisoned.*reload"):
+            live.evaluate_host_frame(pose)
+        with self.assertRaisesRegex(NativeRuntimeError, "poisoned.*reload"):
+            live.readback()
+
+        live.reload(_one_bone(), pose, physics)
+        self.assertIsNotNone(live.evaluate_host_frame(pose))
+        live.close()
+
+    def test_host_pose_validation_failure_does_not_poison_physics_generation(
+        self,
+    ) -> None:
+        fake = FakeLiveLibrary()
+        runtime = _runtime(fake)
+        physics = PhysicsDefinition((PhysicsRigidbody(bone_index=0),))
+        pose = _pose(1)
+        live = LiveRuntime(runtime, _one_bone(), pose, physics)
+
+        with self.assertRaises(TypeError):
+            live.evaluate_host_frame(object())
+        self.assertIsNotNone(live.evaluate_host_frame(pose))
         live.close()
 
 
@@ -383,10 +504,10 @@ class NativeLiveReloadTests(unittest.TestCase):
         independent_world_before = list(independent_instance.world_matrices_f32())
         independent_morph_before = list(independent_instance.morph_weights_f32())
         live = LiveRuntime(self.runtime, _one_bone(), _pose(1))
-        old_model = live.model
-        old_instance = live.instance
+        old_model = live._handles.model
+        old_instance = live._handles.instance
         live.reload(_two_bones(), _pose(2, 1))
-        self.assertEqual((live.model.bone_count(), live.model.morph_count()), (2, 1))
+        self.assertEqual((live._handles.model.bone_count(), live._handles.model.morph_count()), (2, 1))
         self.assertIsNone(old_model._handle)
         self.assertIsNone(old_instance._handle)
         zero_morph_pose = HostPose(
@@ -396,8 +517,8 @@ class NativeLiveReloadTests(unittest.TestCase):
             morph_weights=(0.0,),
         )
         live.evaluate_host_frame(zero_morph_pose)
-        self.assertEqual(len(live.instance.morph_weights_f32()), 1)
-        world_zero = live.instance.world_matrices_f32()
+        self.assertEqual(len(live._handles.instance.morph_weights_f32()), 1)
+        world_zero = live._handles.instance.world_matrices_f32()
         self.assertAlmostEqual(world_zero[28], 1.0, places=6)
         one_morph_pose = HostPose(
             local_position_offsets_xyz=(0.0, 0.0, 0.0, 1.0, 0.0, 0.0),
@@ -406,8 +527,8 @@ class NativeLiveReloadTests(unittest.TestCase):
             morph_weights=(1.0,),
         )
         live.evaluate_host_frame(one_morph_pose)
-        self.assertEqual(live.instance.morph_weights_f32().tolist(), [1.0])
-        world_morph = live.instance.world_matrices_f32()
+        self.assertEqual(live._handles.instance.morph_weights_f32().tolist(), [1.0])
+        world_morph = live._handles.instance.world_matrices_f32()
         self.assertAlmostEqual(world_morph[28], 3.0, places=6)
         self.assertEqual(
             independent_world_before, list(independent_instance.world_matrices_f32())
@@ -421,18 +542,18 @@ class NativeLiveReloadTests(unittest.TestCase):
 
     def test_invalid_descriptor_preserves_old_generation(self) -> None:
         live = LiveRuntime(self.runtime, _one_bone(), _pose(1))
-        old = live.handle_set
+        old = live._handles
         with self.assertRaises(NativeRuntimeError):
             live.reload(ModelDefinition((Bone(4, (0.0, 0.0, 0.0)),)), _pose(1))
-        self.assertIs(live.handle_set, old)
-        self.assertIsNotNone(live.model._handle)
+        self.assertIs(live._handles, old)
+        self.assertIsNotNone(live._handles.model._handle)
         live.close()
 
     def test_physics_binding_mismatch_is_indexed_and_candidate_is_freed(self) -> None:
         if not self.runtime.supports_native_physics():
             self.skipTest("release cdylib lacks Bullet physics")
         live = LiveRuntime(self.runtime, _one_bone(), _pose(1))
-        old = live.handle_set
+        old = live._handles
         old_world = list(old.instance.world_matrices_f32())
         with self.assertRaisesRegex(
             NativeRuntimeError,
@@ -443,7 +564,7 @@ class NativeLiveReloadTests(unittest.TestCase):
                 _pose(1),
                 PhysicsDefinition((PhysicsRigidbody(bone_index=1),)),
             )
-        self.assertIs(live.handle_set, old)
+        self.assertIs(live._handles, old)
         self.assertIsNotNone(old.model._handle)
         old.instance.apply_host_pose_and_evaluate_before_physics(_pose(1))
         old.instance.evaluate_current_pose_after_physics()
@@ -468,13 +589,13 @@ class NativeLiveReloadTests(unittest.TestCase):
             local_scales_xyz=(1.0, 1.0, 1.0),
         )
         live = LiveRuntime(self.runtime, _one_bone(), pose, physics)
-        old_world = live.physics_world
+        old_world = live._handles.physics_world
         self.assertEqual(old_world.rigidbody_count(), 1)
         self.assertEqual(old_world.rigidbody_bindings()[0].bone_index, 0)
         self.assertEqual(
             old_world.rigidbody_bindings()[0].mode, PHYSICS_RIGIDBODY_MODE_DYNAMIC
         )
-        checkpoint_one = list(live.instance.world_matrices_f32())
+        checkpoint_one = list(live._handles.instance.world_matrices_f32())
         state_one = list(old_world.rigidbody_states_f32())
         self.assertAlmostEqual(checkpoint_one[13], 4.0, places=6)
         self.assertAlmostEqual(state_one[1], 4.0, places=6)
@@ -485,16 +606,16 @@ class NativeLiveReloadTests(unittest.TestCase):
         self.assertEqual(seed_report.bones_written_back, 0)
 
         live.reload(_one_bone(), pose, physics)
-        self.assertIsNot(live.physics_world, old_world)
+        self.assertIsNot(live._handles.physics_world, old_world)
         self.assertIsNone(old_world._handle)
-        self.assertEqual(live.physics_world.rigidbody_count(), 1)
-        self.assertEqual(live.physics_world.rigidbody_bindings()[0].bone_index, 0)
+        self.assertEqual(live._handles.physics_world.rigidbody_count(), 1)
+        self.assertEqual(live._handles.physics_world.rigidbody_bindings()[0].bone_index, 0)
         self.assertEqual(
-            live.physics_world.rigidbody_bindings()[0].mode,
+            live._handles.physics_world.rigidbody_bindings()[0].mode,
             PHYSICS_RIGIDBODY_MODE_DYNAMIC,
         )
-        checkpoint_two = list(live.instance.world_matrices_f32())
-        state_two = list(live.physics_world.rigidbody_states_f32())
+        checkpoint_two = list(live._handles.instance.world_matrices_f32())
+        state_two = list(live._handles.physics_world.rigidbody_states_f32())
         self.assertEqual(checkpoint_one, checkpoint_two)
         self.assertEqual(state_one, state_two)
         live.close()

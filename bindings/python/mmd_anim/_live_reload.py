@@ -11,8 +11,10 @@ from __future__ import annotations
 import ctypes
 import threading
 import warnings
+from array import array
+from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Iterable, TypeAlias
+from typing import TypeAlias
 
 from ._abi import (
     HostPoseView,
@@ -20,7 +22,14 @@ from ._abi import (
     PhysicsRigidbodyDescriptor,
     PhysicsWorldStepReport,
 )
-from ._runtime import Instance, Model, NativeRuntimeError, PhysicsWorld, RuntimeLibrary
+from ._runtime import (
+    Instance,
+    Model,
+    NativeRuntimeError,
+    PhysicsWorld,
+    RuntimeLibrary,
+)
+from ._validation import flat_tuple, fixed_tuple, nonnegative_size, uint32
 
 
 _Vec3: TypeAlias = tuple[float, float, float]
@@ -37,40 +46,10 @@ PHYSICS_JOINT_GENERIC_6DOF_SPRING = 0
 _UNSET = object()
 
 
-def _tuple(value: Iterable[float], *, name: str, length: int) -> tuple[float, ...]:
-    try:
-        result = tuple(value)
-    except TypeError as error:
-        raise TypeError(f"{name} must be iterable") from error
-    if len(result) != length:
-        raise ValueError(f"{name} must contain exactly {length} values")
-    return result
-
-
-def _flat(value: Iterable[float], *, name: str, stride: int) -> tuple[float, ...]:
-    try:
-        result = tuple(value)
-    except TypeError as error:
-        raise TypeError(f"{name} must be iterable") from error
-    if len(result) % stride:
-        raise ValueError(f"{name} length must be a multiple of {stride}")
-    return result
-
-
-def _uint(value: object, *, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"{name} must be an integer")
-    if not 0 <= value <= 0xFFFFFFFF:
-        raise ValueError(f"{name} must fit uint32")
-    return value
-
-
-def _size(value: object, *, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"{name} must be an integer")
-    if value < 0:
-        raise ValueError(f"{name} must be non-negative")
-    return value
+_tuple = fixed_tuple
+_flat = flat_tuple
+_uint = uint32
+_size = nonnegative_size
 
 
 @dataclass(frozen=True)
@@ -140,7 +119,7 @@ class PhysicsRigidbody:
             ("bone_from_body_position_xyz", self.bone_from_body_position_xyz, 3),
             ("bone_from_body_rotation_xyzw", self.bone_from_body_rotation_xyzw, 4),
         ):
-            object.__setattr__(self, name, tuple(value))
+            object.__setattr__(self, name, fixed_tuple(value, name=name, length=length))
 
 
 @dataclass(frozen=True)
@@ -168,7 +147,9 @@ class PhysicsJoint:
             "spring_translation_factor_xyz",
             "spring_rotation_factor_xyz",
         ):
-            object.__setattr__(self, name, tuple(getattr(self, name)))
+            object.__setattr__(
+                self, name, fixed_tuple(getattr(self, name), name=name, length=3)
+            )
 
 
 @dataclass(frozen=True)
@@ -354,7 +335,7 @@ def marshal_physics_definition(
 
 
 @dataclass(frozen=True)
-class RuntimeHandleSet:
+class _RuntimeHandleSet:
     """One owned model/instance/world generation."""
 
     model: Model
@@ -362,17 +343,49 @@ class RuntimeHandleSet:
     physics_world: PhysicsWorld | None = None
 
     def close(self) -> None:
-        first_error: Exception | None = None
-        for handle in (self.physics_world, self.instance, self.model):
-            if handle is None:
-                continue
-            try:
-                handle.close()
-            except Exception as error:  # pragma: no cover - defensive fake cleanup
-                if first_error is None:
-                    first_error = error
-        if first_error is not None:
-            raise first_error
+        _close_handles((self.physics_world, self.instance, self.model))
+
+
+def _close_handles(
+    handles: tuple[Model | Instance | PhysicsWorld | None, ...],
+    *,
+    suppress_errors: bool = False,
+) -> None:
+    """Close a generation in reverse ownership order.
+
+    Candidate cleanup suppresses secondary close failures so construction
+    errors remain authoritative; old-generation cleanup reports its first
+    failure after the atomic swap.
+    """
+
+    first_error: Exception | None = None
+    for handle in handles:
+        if handle is None:
+            continue
+        try:
+            handle.close()
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None and not suppress_errors:
+        raise first_error
+
+
+def _close_suppressing(handle: Model | Instance | PhysicsWorld) -> None:
+    """Close a rejected candidate without masking its construction error."""
+
+    _close_handles((handle,), suppress_errors=True)
+
+
+@dataclass(frozen=True)
+class LiveRuntimeReadback:
+    """Caller-owned snapshot copied from one live runtime generation."""
+
+    bone_count: int
+    morph_count: int
+    world_matrices_f32: array
+    skinning_matrices_f32: array
+    morph_weights_f32: array
 
 
 class LiveRuntime:
@@ -387,8 +400,9 @@ class LiveRuntime:
     ) -> None:
         self._runtime = runtime
         self._lock = threading.RLock()
-        self._handles: RuntimeHandleSet | None = None
+        self._handles: _RuntimeHandleSet | None = None
         self._physics_definition: PhysicsDefinition | None = None
+        self._physics_poisoned = False
         self._closed = False
         if not runtime.supports_native_host_pose_morphs():
             raise NativeRuntimeError(
@@ -398,43 +412,6 @@ class LiveRuntime:
             if current_pose is None:
                 raise ValueError("current_pose is required for initial model creation")
             self.reload(definition, current_pose, physics_definition)
-
-    @property
-    def handle_set(self) -> RuntimeHandleSet:
-        with self._lock:
-            if self._handles is None:
-                raise NativeRuntimeError("live runtime has no active handle set")
-            return self._handles
-
-    @property
-    def model(self) -> Model:
-        return self.handle_set.model
-
-    @property
-    def instance(self) -> Instance:
-        return self.handle_set.instance
-
-    @property
-    def physics_world(self) -> PhysicsWorld | None:
-        return self.handle_set.physics_world
-
-    def _cleanup_candidate(
-        self,
-        world: PhysicsWorld | None,
-        instance: Instance | None,
-        model: Model | None,
-    ) -> None:
-        first_error: Exception | None = None
-        for handle in (world, instance, model):
-            if handle is None:
-                continue
-            try:
-                handle.close()
-            except Exception as error:
-                if first_error is None:
-                    first_error = error
-        # Candidate cleanup must never mask the construction failure.
-        del first_error
 
     def reload(
         self,
@@ -458,23 +435,20 @@ class LiveRuntime:
                     "physics_definition must be a PhysicsDefinition or None"
                 )
 
-            model: Model | None = None
-            instance: Instance | None = None
-            world: PhysicsWorld | None = None
-            try:
+            with ExitStack() as candidate_cleanup:
                 model = self._runtime.create_model_from_descriptor(definition)  # type: ignore[arg-type]
+                candidate_cleanup.callback(_close_suppressing, model)
                 instance = model.create_instance_for_model()
+                candidate_cleanup.callback(_close_suppressing, instance)
+                world: PhysicsWorld | None = None
                 if selected_physics is None:
                     instance.apply_host_pose_and_evaluate_before_physics(current_pose)
                     instance.evaluate_current_pose_after_physics()
                 else:
-                    # Apply the DCC's committed pose before constructing the fresh
-                    # world; the SEED call below repeats the validated view as one
-                    # atomic physics/evaluation operation.
-                    instance.apply_host_pose(current_pose)
                     world = self._runtime.create_physics_world_from_descriptors(
                         selected_physics
                     )
+                    candidate_cleanup.callback(_close_suppressing, world)
                     self._runtime.evaluate_host_frame(
                         instance,
                         world,
@@ -482,14 +456,13 @@ class LiveRuntime:
                         action=PHYSICS_FRAME_ACTION_SEED,
                         dt_seconds=0.0,
                     )
-                candidate = RuntimeHandleSet(model, instance, world)
-            except Exception:
-                self._cleanup_candidate(world, instance, model)
-                raise
+                candidate = _RuntimeHandleSet(model, instance, world)
+                candidate_cleanup.pop_all()
 
             old = self._handles
             self._handles = candidate
             self._physics_definition = selected_physics
+            self._physics_poisoned = False
             if old is not None:
                 try:
                     old.close()
@@ -508,17 +481,46 @@ class LiveRuntime:
         dt_seconds: float = 1.0 / 60.0,
     ) -> PhysicsWorldStepReport | None:
         with self._lock:
-            handles = self.handle_set
+            handles = self._handles
+            if handles is None:
+                raise NativeRuntimeError("live runtime has no active handle set")
+            if handles.physics_world is not None and self._physics_poisoned:
+                raise NativeRuntimeError(
+                    "live runtime physics generation is poisoned; successful reload required"
+                )
             if handles.physics_world is None:
                 handles.instance.apply_host_pose_and_evaluate_before_physics(pose)
                 handles.instance.evaluate_current_pose_after_physics()
                 return None
-            return self._runtime.evaluate_host_frame(
-                handles.instance,
-                handles.physics_world,
-                pose,
-                action=action,
-                dt_seconds=dt_seconds,
+            try:
+                return self._runtime.evaluate_host_frame(
+                    handles.instance,
+                    handles.physics_world,
+                    pose,
+                    action=action,
+                    dt_seconds=dt_seconds,
+                )
+            except NativeRuntimeError:
+                self._physics_poisoned = True
+                raise
+
+    def readback(self) -> LiveRuntimeReadback:
+        """Copy one generation's evaluated outputs while holding the swap lock."""
+
+        with self._lock:
+            handles = self._handles
+            if handles is None:
+                raise NativeRuntimeError("live runtime has no active handle set")
+            if handles.physics_world is not None and self._physics_poisoned:
+                raise NativeRuntimeError(
+                    "live runtime physics generation is poisoned; successful reload required"
+                )
+            return LiveRuntimeReadback(
+                bone_count=handles.model.bone_count(),
+                morph_count=handles.model.morph_count(),
+                world_matrices_f32=handles.instance.world_matrices_f32(),
+                skinning_matrices_f32=handles.instance.skinning_matrices_f32(),
+                morph_weights_f32=handles.instance.morph_weights_f32(),
             )
 
     def close(self) -> None:
@@ -529,6 +531,7 @@ class LiveRuntime:
             old = self._handles
             self._handles = None
             self._physics_definition = None
+            self._physics_poisoned = False
             if old is not None:
                 try:
                     old.close()
@@ -543,6 +546,7 @@ class LiveRuntime:
 __all__ = [
     "HostPose",
     "LiveRuntime",
+    "LiveRuntimeReadback",
     "PHYSICS_FRAME_ACTION_SEED",
     "PHYSICS_FRAME_ACTION_STEP",
     "PHYSICS_JOINT_GENERIC_6DOF_SPRING",
@@ -553,7 +557,6 @@ __all__ = [
     "PhysicsDefinition",
     "PhysicsJoint",
     "PhysicsRigidbody",
-    "RuntimeHandleSet",
     "marshal_host_pose",
     "marshal_physics_definition",
 ]

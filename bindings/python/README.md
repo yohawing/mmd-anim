@@ -48,7 +48,7 @@ it to `create_clip_from_vmd_bytes` preserves the explicit native name-resolution
 error.
 
 `mmd_anim._live_reload` adds the host-neutral `HostPose`,
-`RuntimeHandleSet`, and `LiveRuntime` helpers for DCC integrations.  A
+`LiveRuntime` helpers for DCC integrations.  A
 `LiveRuntime.reload(definition, current_pose, physics_definition)` builds a new
 model and instance, applies the caller-owned current pose, and (when physics is
 provided) always creates a fresh typed physics world and validates/reseeds it
@@ -60,6 +60,19 @@ deltas, so DCC hosts must not preapply those deltas.  Hosts must check
 `MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS` (bit 3) before relying on this
 semantic correction; `LiveRuntime` rejects older ABI-v2 libraries that do not
 advertise it.
+
+`LiveRuntime.readback()` copies bone/morph counts, world/skinning matrices, and
+morph weights from one generation under the same lock without exposing
+closeable native handles.
+
+`LiveRuntime` is the owner of its active generation: callers must use
+`reload()`, `evaluate_host_frame()`, and `readback()` rather than retaining or
+closing the private model/instance/world handles.  A native physics evaluation
+failure poisons that generation; a successful `reload()` is required before
+the next physics frame or readback.  The lower-level `RuntimeLibrary` physics
+API is experimental and caller-paired: keep the instance and world from the
+same model generation, use one owner thread (or an external lock), and do not
+close either handle while a call is in flight.
 
 The current pose remains host-owned and must be supplied by the DCC; no pose
 getter or live in-place model mutation is provided.  Physics continuity,

@@ -36,6 +36,8 @@ crates/mmd-anim-wasm/harness/pkg/
 crates/mmd-anim-wasm/harness/pkg-web/
 
 # local dev artifacts
+__pycache__/
+*.py[cod]
 artifacts/
 viewer/
 .venv-fbx/

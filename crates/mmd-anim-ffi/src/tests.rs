@@ -6292,6 +6292,28 @@ fn physics_params_reject_unnamed_and_ambiguous_worlds() {
     }
 }
 
+#[cfg(feature = "physics-bullet-native")]
+#[test]
+fn physics_param_error_preserves_embedded_nul_in_requested_pmx_name() {
+    let world = physics_world_from_bytes(&host_frame_pmx_bytes());
+    let update = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "rigid_bodies": {"missing\0rigid-body": {"mass": 1.0}}
+    }))
+    .unwrap();
+
+    let status =
+        unsafe { mmd_runtime_physics_params_set_json(world, update.as_ptr(), update.len()) };
+    assert_eq!(status, MmdRuntimeStatus::InvalidInput);
+    let message = last_error_cstr().expect("expected unknown-name diagnostic");
+    assert_eq!(
+        message.to_bytes(),
+        b"unknown PMX rigid body name: missing\\0rigid-body"
+    );
+
+    unsafe { mmd_runtime_physics_world_free(world) };
+}
+
 /// Builds a model + instance + physics world all derived from the same PMX
 /// bytes, so rigidbody bone indices line up with the runtime skeleton. Bone 0
 /// (`root`) is not bound to any rigidbody; bones 1 (`anchor`, static) and 2

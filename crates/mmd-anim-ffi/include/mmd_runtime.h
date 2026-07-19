@@ -488,7 +488,8 @@ uint32_t mmd_runtime_feature_flags(void);
 
 /* Returns the most recent FFI error message for the calling thread, or NULL.
    The returned pointer is valid only until the next FFI call on the same
-   thread. Do not store or free it. */
+   thread. Do not store or free it. Embedded NUL characters in input-derived
+   diagnostics are represented as the two printable characters "\\0". */
 const char* mmd_runtime_last_error_message(void);
 
 void mmd_runtime_byte_buffer_free(

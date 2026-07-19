@@ -670,7 +670,13 @@ fn clear_last_error() {
 
 fn set_last_error(message: impl AsRef<str>) {
     LAST_ERROR.with(|cell| {
-        *cell.borrow_mut() = CString::new(message.as_ref()).ok();
+        // C strings cannot carry an embedded NUL.  Preserve the diagnostic
+        // instead of silently dropping it when a PMX name (or another input
+        // field) contains one.  The escaped form remains recognizable while
+        // keeping the pointer valid for the documented C-string API.
+        let sanitized = message.as_ref().replace('\0', "\\0");
+        *cell.borrow_mut() =
+            Some(CString::new(sanitized).expect("NUL is escaped before CString construction"));
     });
 }
 

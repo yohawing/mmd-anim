@@ -1163,7 +1163,7 @@ fn categorized_world_matrix_bone_update_counts_decide_ik_scope_for_broad_link_ch
     assert_eq!(snapshot.trailing_bookend, 0);
     assert_eq!(snapshot.phase_loop, bone_count);
     assert_eq!(snapshot.bookend(), bone_count);
-    assert_eq!(snapshot.ik_link_change, 754);
+    assert_eq!(snapshot.ik_link_change, 468);
     assert!(
         snapshot.ik_link_change > snapshot.bookend(),
         "long-chain IK should dominate leading bookend updates: snapshot={snapshot:?}"

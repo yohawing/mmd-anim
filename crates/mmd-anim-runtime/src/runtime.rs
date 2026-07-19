@@ -12,9 +12,9 @@ mod world;
 
 #[cfg(test)]
 use crate::ik_primitive::{
-    axis_vec, decompose_euler_xyz, euler_xyz_to_quat, limit_axis_bounds, quat_to_rotation_mat3,
-    signed_projected_angle, solve_limited_axes_link_step, solve_plane_link_step,
-    LimitedAxesLinkStepInput, PlaneLinkStepInput,
+    LimitedAxesLinkStepInput, PlaneLinkStepInput, axis_vec, decompose_euler_xyz, euler_xyz_to_quat,
+    limit_axis_bounds, quat_to_rotation_mat3, signed_projected_angle, solve_limited_axes_link_step,
+    solve_plane_link_step,
 };
 
 #[derive(Debug)]

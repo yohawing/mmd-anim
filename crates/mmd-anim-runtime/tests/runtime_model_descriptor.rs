@@ -457,6 +457,39 @@ fn late_parent_and_group_cycles_are_indexed_without_stack_overflow() {
 }
 
 #[test]
+fn group_cycle_reports_actual_back_edge_when_child_is_reused() {
+    let descriptor = RuntimeModelDescriptorV1 {
+        bones: vec![RuntimeBoneDescriptorV1::new(None, Vec3A::ZERO)],
+        morphs: RuntimeMorphDescriptorV1 {
+            morph_count: 3,
+            group_offsets: vec![
+                RuntimeGroupMorphOffsetDescriptorV1 {
+                    morph_index: MorphIndex(0),
+                    child_morph: MorphIndex(2),
+                    ratio: 1.0,
+                },
+                RuntimeGroupMorphOffsetDescriptorV1 {
+                    morph_index: MorphIndex(1),
+                    child_morph: MorphIndex(2),
+                    ratio: 1.0,
+                },
+                RuntimeGroupMorphOffsetDescriptorV1 {
+                    morph_index: MorphIndex(2),
+                    child_morph: MorphIndex(1),
+                    ratio: 1.0,
+                },
+            ],
+            ..RuntimeMorphDescriptorV1::default()
+        },
+        ..RuntimeModelDescriptorV1::default()
+    };
+
+    let error = compile_runtime_model_descriptor_v1(&descriptor).unwrap_err();
+    assert_eq!(error.path, "morphs.group_offsets[1].child_morph");
+    assert_eq!(error.kind, RuntimeModelDescriptorErrorKind::GroupMorphCycle);
+}
+
+#[test]
 fn rejects_remaining_descriptor_validation_categories() {
     let base = || {
         RuntimeModelDescriptorV1::new(vec![

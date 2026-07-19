@@ -38,6 +38,7 @@ pub use model::{
     AppendTransform, AppendTransformInit, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset,
     IkAngleLimit, IkLink, IkLinkInit, IkSolver, IkSolverInit, LocalAxis, ModelArena,
     ModelBuildError, MorphIndex, MorphInit, MorphOffsetSpan, VertexMorphOffset,
+    build_morph_init_from_offsets,
 };
 pub use model_descriptor::{
     RUNTIME_MODEL_DESCRIPTOR_VERSION_V1, RuntimeAppendTransformDescriptorV1,

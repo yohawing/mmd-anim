@@ -141,7 +141,15 @@ class ModelDescriptorPureTests(unittest.TestCase):
 
     def test_marshal_safety_rejects_bad_shapes_and_unpaired_axes(self) -> None:
         with self.assertRaises(ValueError):
-            marshal_model_definition(ModelDefinition((Bone(None, (0, 0)),)))
+            Bone(None, (0, 0))
+        with self.assertRaises(ValueError):
+            Bone(None, (0, 0, 0), fixed_axis_xyz=(1, 0))
+        with self.assertRaises(ValueError):
+            IkLink(0, angle_limit_min_xyz=(0, 0), angle_limit_max_xyz=(1, 1, 1))
+        with self.assertRaises(ValueError):
+            BoneMorphOffset(0, 0, (0, 0), (0, 0, 0, 1))
+        with self.assertRaises(ValueError):
+            BoneMorphOffset(0, 0, (0, 0, 0), (0, 0, 0))
         with self.assertRaises(ValueError):
             marshal_model_definition(
                 ModelDefinition((Bone(None, (0, 0, 0), local_axis_x_xyz=(1, 0, 0)),))

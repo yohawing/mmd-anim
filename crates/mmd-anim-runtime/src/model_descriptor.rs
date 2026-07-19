@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     AppendTransformInit, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit,
-    IkLinkInit, IkSolverInit, LocalAxis, ModelArena, MorphIndex, MorphInit, MorphOffsetSpan,
+    IkLinkInit, IkSolverInit, LocalAxis, ModelArena, MorphIndex, MorphInit,
 };
 
 /// The only descriptor version understood by this crate.
@@ -249,20 +249,13 @@ pub fn compile_runtime_model_descriptor_v1(
     validate_ik_solvers(&descriptor.ik_solvers, bone_count)?;
     validate_append_transforms(&descriptor.append_transforms, bone_count)?;
 
-    let mut absolute_positions = Vec::with_capacity(bone_count);
-    for (bone_index, bone) in descriptor.bones.iter().enumerate() {
-        let path = format!("bones[{bone_index}].rest_position");
-        validate_vec3(path, bone.rest_position)?;
-        absolute_positions.push(bone.rest_position);
-    }
-
     let mut bones = Vec::with_capacity(bone_count);
     let mut local_axes = Vec::with_capacity(bone_count);
     for (bone_index, descriptor_bone) in descriptor.bones.iter().enumerate() {
         let parent = descriptor_bone.parent;
-        let absolute_position = absolute_positions[bone_index];
+        let absolute_position = descriptor_bone.rest_position;
         let rest_position = parent
-            .map(|index| absolute_position - absolute_positions[index.as_usize()])
+            .map(|index| absolute_position - descriptor.bones[index.as_usize()].rest_position)
             .unwrap_or(absolute_position);
         validate_vec3(format!("bones[{bone_index}].rest_position"), rest_position)?;
         bones.push(BoneInit {
@@ -476,60 +469,43 @@ fn compile_morphs(
         ));
     }
 
-    let mut bone_counts = try_zeroed_usize_vec(morph_count, "morphs.morph_count")?;
+    let mut bone_offsets = Vec::new();
+    bone_offsets
+        .try_reserve_exact(descriptor.bone_offsets.len())
+        .map_err(|_| allocation_error("morphs.bone_offsets"))?;
     for (offset_index, offset) in descriptor.bone_offsets.iter().enumerate() {
         validate_morph_index(
             format!("morphs.bone_offsets[{offset_index}].morph_index"),
             offset.morph_index,
             morph_count,
         )?;
-        bone_counts[offset.morph_index.as_usize()] = bone_counts[offset.morph_index.as_usize()]
-            .checked_add(1)
-            .ok_or_else(|| allocation_error("morphs.bone_offsets"))?;
-    }
-    let mut bone_buckets = try_empty_buckets::<(usize, &RuntimeBoneMorphOffsetDescriptorV1)>(
-        bone_counts.len(),
-        "morphs.bone_offsets",
-    )?;
-    for (bucket, count) in bone_buckets.iter_mut().zip(&bone_counts) {
-        bucket
-            .try_reserve_exact(*count)
-            .map_err(|_| allocation_error("morphs.bone_offsets"))?;
-    }
-    for (offset_index, offset) in descriptor.bone_offsets.iter().enumerate() {
-        bone_buckets[offset.morph_index.as_usize()].push((offset_index, offset));
-    }
-    let mut bone_offsets = Vec::new();
-    bone_offsets
-        .try_reserve_exact(descriptor.bone_offsets.len())
-        .map_err(|_| allocation_error("morphs.bone_offsets"))?;
-    let mut bone_spans = try_spans(morph_count, "morphs.bone_spans")?;
-    for (morph_index, offsets) in bone_buckets.into_iter().enumerate() {
-        let start = checked_offset_start(bone_offsets.len(), morph_index)?;
-        for (offset_index, offset) in offsets {
-            validate_bone_index(
-                format!("morphs.bone_offsets[{offset_index}].target_bone"),
-                offset.target_bone,
-                bone_count,
-            )?;
-            validate_vec3(
-                format!("morphs.bone_offsets[{offset_index}].position_offset"),
-                offset.position_offset,
-            )?;
-            let rotation_offset = validate_quaternion(
-                format!("morphs.bone_offsets[{offset_index}].rotation_offset"),
-                offset.rotation_offset,
-            )?;
-            bone_offsets.push(BoneMorphOffset {
+        validate_bone_index(
+            format!("morphs.bone_offsets[{offset_index}].target_bone"),
+            offset.target_bone,
+            bone_count,
+        )?;
+        validate_vec3(
+            format!("morphs.bone_offsets[{offset_index}].position_offset"),
+            offset.position_offset,
+        )?;
+        bone_offsets.push((
+            offset_index,
+            offset.morph_index,
+            BoneMorphOffset {
                 target_bone: offset.target_bone,
                 position_offset: offset.position_offset,
-                rotation_offset,
-            });
-        }
-        bone_spans[morph_index] = span_from_range(start, bone_offsets.len())?;
+                rotation_offset: validate_quaternion(
+                    format!("morphs.bone_offsets[{offset_index}].rotation_offset"),
+                    offset.rotation_offset,
+                )?,
+            },
+        ));
     }
 
-    let mut group_counts = try_zeroed_usize_vec(morph_count, "morphs.morph_count")?;
+    let mut group_offsets = Vec::new();
+    group_offsets
+        .try_reserve_exact(descriptor.group_offsets.len())
+        .map_err(|_| allocation_error("morphs.group_offsets"))?;
     for (offset_index, offset) in descriptor.group_offsets.iter().enumerate() {
         validate_morph_index(
             format!("morphs.group_offsets[{offset_index}].morph_index"),
@@ -547,165 +523,42 @@ fn compile_morphs(
                 RuntimeModelDescriptorErrorKind::NonFinite,
             ));
         }
-        group_counts[offset.morph_index.as_usize()] = group_counts[offset.morph_index.as_usize()]
-            .checked_add(1)
-            .ok_or_else(|| allocation_error("morphs.group_offsets"))?;
-    }
-    let mut group_buckets = try_empty_buckets::<(usize, &RuntimeGroupMorphOffsetDescriptorV1)>(
-        group_counts.len(),
-        "morphs.group_offsets",
-    )?;
-    for (bucket, count) in group_buckets.iter_mut().zip(&group_counts) {
-        bucket
-            .try_reserve_exact(*count)
-            .map_err(|_| allocation_error("morphs.group_offsets"))?;
-    }
-    for (offset_index, offset) in descriptor.group_offsets.iter().enumerate() {
-        group_buckets[offset.morph_index.as_usize()].push((offset_index, offset));
-    }
-    let mut group_offsets = Vec::new();
-    group_offsets
-        .try_reserve_exact(descriptor.group_offsets.len())
-        .map_err(|_| allocation_error("morphs.group_offsets"))?;
-    let mut group_source_indices = Vec::new();
-    group_source_indices
-        .try_reserve_exact(descriptor.group_offsets.len())
-        .map_err(|_| allocation_error("morphs.group_offsets"))?;
-    let mut group_spans = try_spans(morph_count, "morphs.group_spans")?;
-    for (morph_index, offsets) in group_buckets.into_iter().enumerate() {
-        let start = checked_offset_start(group_offsets.len(), morph_index)?;
-        for (offset_index, offset) in offsets {
-            group_offsets.push(GroupMorphOffset {
+        group_offsets.push((
+            offset_index,
+            offset.morph_index,
+            GroupMorphOffset {
                 child_morph: offset.child_morph,
                 ratio: offset.ratio,
-            });
-            group_source_indices.push(offset_index);
-        }
-        group_spans[morph_index] = span_from_range(start, group_offsets.len())?;
+            },
+        ));
     }
 
-    validate_group_morph_cycles(&group_spans, &group_offsets, &group_source_indices)?;
-
-    Ok(MorphInit {
-        morph_count: descriptor.morph_count,
+    crate::model::build_morph_init_from_indexed_offsets(
+        descriptor.morph_count,
         bone_offsets,
-        bone_spans,
         group_offsets,
-        group_spans,
-        ..MorphInit::default()
+    )
+    .map_err(|error| match error {
+        crate::ModelBuildError::GroupMorphCycleAt { offset, .. } => {
+            RuntimeModelDescriptorError::new(
+                format!("morphs.group_offsets[{offset}].child_morph"),
+                RuntimeModelDescriptorErrorKind::GroupMorphCycle,
+            )
+        }
+        crate::ModelBuildError::MorphCountZeroWithData => RuntimeModelDescriptorError::new(
+            "morphs.morph_count",
+            RuntimeModelDescriptorErrorKind::EmptyMorphSet,
+        ),
+        crate::ModelBuildError::MorphStorageAllocation => allocation_error("morphs"),
+        other => RuntimeModelDescriptorError::new(
+            "morphs",
+            RuntimeModelDescriptorErrorKind::ModelBuild(other.to_string()),
+        ),
     })
 }
 
-fn validate_group_morph_cycles(
-    group_spans: &[MorphOffsetSpan],
-    group_offsets: &[GroupMorphOffset],
-    group_source_indices: &[usize],
-) -> Result<(), RuntimeModelDescriptorError> {
-    let mut states = try_zeroed_u8_vec(group_spans.len(), "morphs.group_offsets")?;
-    let mut stack = Vec::new();
-    stack
-        .try_reserve_exact(group_spans.len())
-        .map_err(|_| allocation_error("morphs.group_offsets"))?;
-
-    for root in 0..group_spans.len() {
-        if states[root] != 0 {
-            continue;
-        }
-        states[root] = 1;
-        stack.push((root, 0usize));
-        while let Some((morph, next_offset)) = stack.last_mut() {
-            let span = group_spans[*morph];
-            if *next_offset >= span.count as usize {
-                states[*morph] = 2;
-                stack.pop();
-                continue;
-            }
-            let offset_index = span.start as usize + *next_offset;
-            *next_offset += 1;
-            let child = group_offsets[offset_index].child_morph.as_usize();
-            match states[child] {
-                0 => {
-                    states[child] = 1;
-                    stack.push((child, 0));
-                }
-                1 => {
-                    let source_index = group_source_indices[offset_index];
-                    return Err(RuntimeModelDescriptorError::new(
-                        format!("morphs.group_offsets[{source_index}].child_morph"),
-                        RuntimeModelDescriptorErrorKind::GroupMorphCycle,
-                    ));
-                }
-                2 => {}
-                _ => unreachable!("group morph traversal state is invalid"),
-            }
-        }
-    }
-    Ok(())
-}
-
-fn allocation_error(path: &str) -> RuntimeModelDescriptorError {
+fn allocation_error(path: impl Into<String>) -> RuntimeModelDescriptorError {
     RuntimeModelDescriptorError::new(path, RuntimeModelDescriptorErrorKind::AllocationFailed)
-}
-
-fn try_zeroed_usize_vec(
-    length: usize,
-    path: &str,
-) -> Result<Vec<usize>, RuntimeModelDescriptorError> {
-    let mut values = Vec::new();
-    values
-        .try_reserve_exact(length)
-        .map_err(|_| allocation_error(path))?;
-    values.resize(length, 0);
-    Ok(values)
-}
-
-fn try_zeroed_u8_vec(length: usize, path: &str) -> Result<Vec<u8>, RuntimeModelDescriptorError> {
-    let mut values = Vec::new();
-    values
-        .try_reserve_exact(length)
-        .map_err(|_| allocation_error(path))?;
-    values.resize(length, 0);
-    Ok(values)
-}
-
-fn try_empty_buckets<T>(
-    length: usize,
-    path: &str,
-) -> Result<Vec<Vec<T>>, RuntimeModelDescriptorError> {
-    let mut buckets = Vec::new();
-    buckets
-        .try_reserve_exact(length)
-        .map_err(|_| allocation_error(path))?;
-    buckets.resize_with(length, Vec::new);
-    Ok(buckets)
-}
-
-fn try_spans(
-    length: usize,
-    path: &str,
-) -> Result<Vec<MorphOffsetSpan>, RuntimeModelDescriptorError> {
-    let mut spans = Vec::new();
-    spans
-        .try_reserve_exact(length)
-        .map_err(|_| allocation_error(path))?;
-    spans.resize(length, MorphOffsetSpan::default());
-    Ok(spans)
-}
-
-fn checked_offset_start(
-    offset_count: usize,
-    morph_index: usize,
-) -> Result<u32, RuntimeModelDescriptorError> {
-    u32::try_from(offset_count)
-        .map_err(|_| allocation_error(&format!("morphs[{morph_index}].offsets")))
-}
-
-fn span_from_range(start: u32, end: usize) -> Result<MorphOffsetSpan, RuntimeModelDescriptorError> {
-    let end = u32::try_from(end).map_err(|_| allocation_error("morphs.offsets"))?;
-    let count = end
-        .checked_sub(start)
-        .ok_or_else(|| allocation_error("morphs.offsets"))?;
-    Ok(MorphOffsetSpan { start, count })
 }
 
 fn validate_bone_index(

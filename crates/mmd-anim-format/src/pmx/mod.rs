@@ -9,7 +9,7 @@ use mmd_anim_runtime::{
     RuntimeAppendTransformDescriptorV1, RuntimeBoneDescriptorV1,
     RuntimeBoneMorphOffsetDescriptorV1, RuntimeGroupMorphOffsetDescriptorV1,
     RuntimeIkLinkDescriptorV1, RuntimeIkSolverDescriptorV1, RuntimeModelDescriptorV1,
-    RuntimeMorphDescriptorV1, compile_runtime_model_descriptor_v1,
+    RuntimeMorphDescriptorV1, build_morph_init_from_offsets, compile_runtime_model_descriptor_v1,
 };
 
 use crate::binary::{
@@ -580,7 +580,7 @@ fn read_runtime_morph_descriptor(
 
 /// Read morph names and adapt the runtime descriptor to the historical
 /// `MorphInit` representation for parser-facing callers and tests. Runtime
-/// import itself calls [`read_runtime_morph_descriptor`] directly.
+/// import itself calls `read_runtime_morph_descriptor` directly.
 pub fn read_morph_offsets(
     data: &[u8],
     header: &PmxHeader,
@@ -588,64 +588,38 @@ pub fn read_morph_offsets(
 ) -> Result<(PmxMorphNames, MorphInit, usize), ImportError> {
     let (names, descriptor, pos) = read_runtime_morph_descriptor(data, header, pos)?;
     let morph_count = descriptor.morph_count as usize;
-    let mut bone_buckets = vec![Vec::new(); morph_count];
-    for offset in &descriptor.bone_offsets {
-        bone_buckets
-            .get_mut(offset.morph_index.as_usize())
-            .ok_or(ImportError::SectionOverflow)?
-            .push(offset);
-    }
-    let mut bone_offsets = Vec::with_capacity(descriptor.bone_offsets.len());
-    let mut bone_spans = vec![MorphOffsetSpan::default(); morph_count];
-    for (offsets, span) in bone_buckets.into_iter().zip(&mut bone_spans) {
-        let start = bone_offsets.len();
-        for offset in offsets {
-            bone_offsets.push(BoneMorphOffset {
-                target_bone: offset.target_bone,
-                position_offset: offset.position_offset,
-                rotation_offset: offset.rotation_offset,
-            });
-        }
-        *span = MorphOffsetSpan {
-            start: start as u32,
-            count: (bone_offsets.len() - start) as u32,
-        };
-    }
-    let mut group_buckets = vec![Vec::new(); morph_count];
-    for offset in &descriptor.group_offsets {
-        group_buckets
-            .get_mut(offset.morph_index.as_usize())
-            .ok_or(ImportError::SectionOverflow)?
-            .push(offset);
-    }
-    let mut group_offsets = Vec::with_capacity(descriptor.group_offsets.len());
-    let mut group_spans = vec![MorphOffsetSpan::default(); morph_count];
-    for (offsets, span) in group_buckets.into_iter().zip(&mut group_spans) {
-        let start = group_offsets.len();
-        for offset in offsets {
-            group_offsets.push(GroupMorphOffset {
-                child_morph: offset.child_morph,
-                ratio: offset.ratio,
-            });
-        }
-        *span = MorphOffsetSpan {
-            start: start as u32,
-            count: (group_offsets.len() - start) as u32,
-        };
-    }
-    Ok((
-        names,
-        MorphInit {
-            morph_count: descriptor.morph_count,
-            vertex_spans: vec![MorphOffsetSpan::default(); morph_count],
-            bone_offsets,
-            bone_spans,
-            group_offsets,
-            group_spans,
-            ..MorphInit::default()
-        },
-        pos,
-    ))
+    let bone_offsets = descriptor
+        .bone_offsets
+        .iter()
+        .map(|offset| {
+            (
+                offset.morph_index,
+                BoneMorphOffset {
+                    target_bone: offset.target_bone,
+                    position_offset: offset.position_offset,
+                    rotation_offset: offset.rotation_offset,
+                },
+            )
+        })
+        .collect();
+    let group_offsets = descriptor
+        .group_offsets
+        .iter()
+        .map(|offset| {
+            (
+                offset.morph_index,
+                GroupMorphOffset {
+                    child_morph: offset.child_morph,
+                    ratio: offset.ratio,
+                },
+            )
+        })
+        .collect();
+    let mut morph =
+        build_morph_init_from_offsets(descriptor.morph_count, bone_offsets, group_offsets)
+            .map_err(ImportError::ModelBuildFailed)?;
+    morph.vertex_spans = vec![MorphOffsetSpan::default(); morph_count];
+    Ok((names, morph, pos))
 }
 
 #[derive(Debug, Clone)]
@@ -4807,10 +4781,12 @@ pub fn import_pmx_runtime(data: &[u8]) -> Result<PmxRuntimeImport, ImportError> 
         ..bone_descriptor
     };
     let model = compile_runtime_model_descriptor_v1(&descriptor).map_err(|error| {
-        ImportError::ModelBuildFailed(mmd_anim_runtime::ModelBuildError::InvalidRuntimeDescriptor {
-            path: error.path,
-            reason: error.kind.to_string(),
-        })
+        ImportError::ModelBuildFailed(
+            mmd_anim_runtime::ModelBuildError::InvalidRuntimeDescriptor {
+                path: error.path,
+                reason: error.kind.to_string(),
+            },
+        )
     })?;
 
     Ok(PmxRuntimeImport {

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import ctypes
 from dataclasses import dataclass
-from typing import Iterable, TypeAlias
+from typing import TypeAlias
 
 from ._abi import (
     MODEL_DESCRIPTOR_MANIFEST,
@@ -22,6 +22,7 @@ from ._abi import (
     ModelIkLinkDescriptor,
     ModelIkSolverDescriptor,
 )
+from ._validation import fixed_tuple, strict_bool, uint32
 
 
 _Vec3: TypeAlias = tuple[float, float, float]
@@ -50,34 +51,9 @@ APPEND_TRANSLATION = _manifest_flag("MMD_RUNTIME_APPEND_TRANSLATION")
 APPEND_LOCAL = _manifest_flag("MMD_RUNTIME_APPEND_LOCAL")
 
 
-def _as_tuple(value: Iterable[float], *, name: str, length: int) -> tuple[float, ...]:
-    """Copy a tuple-like value without imposing semantic numeric validation."""
-
-    try:
-        values = tuple(value)
-    except TypeError as error:
-        raise TypeError(f"{name} must be an iterable of {length} numbers") from error
-    if len(values) != length:
-        raise ValueError(f"{name} must contain exactly {length} values")
-    return values
-
-
-def _as_bool(value: object, *, name: str) -> bool:
-    # Reject truthy integers before they silently select a descriptor flag.
-    # Native semantic checks remain authoritative for the resulting bitmask.
-    if type(value) is not bool:
-        raise TypeError(f"{name} must be bool")
-    return value
-
-
-def _as_nonnegative_int(value: object, *, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"{name} must be an integer")
-    if value < 0:
-        raise ValueError(f"{name} must be non-negative")
-    if value > 0xFFFFFFFF:
-        raise ValueError(f"{name} exceeds uint32 range")
-    return value
+_as_tuple = fixed_tuple
+_as_bool = strict_bool
+_as_nonnegative_int = uint32
 
 
 @dataclass(frozen=True)
@@ -101,25 +77,52 @@ class Bone:
         object.__setattr__(
             self,
             "rest_position_pmx_xyz",
-            tuple(self.rest_position_pmx_xyz),
+            fixed_tuple(
+                self.rest_position_pmx_xyz,
+                name="rest_position_pmx_xyz",
+                length=3,
+            ),
         )
         if self.fixed_axis_xyz is not None:
-            object.__setattr__(self, "fixed_axis_xyz", tuple(self.fixed_axis_xyz))
+            object.__setattr__(
+                self,
+                "fixed_axis_xyz",
+                fixed_tuple(self.fixed_axis_xyz, name="fixed_axis_xyz", length=3),
+            )
         if self.local_axis_x_xyz is not None:
-            object.__setattr__(self, "local_axis_x_xyz", tuple(self.local_axis_x_xyz))
+            object.__setattr__(
+                self,
+                "local_axis_x_xyz",
+                fixed_tuple(
+                    self.local_axis_x_xyz,
+                    name="local_axis_x_xyz",
+                    length=3,
+                ),
+            )
         if self.local_axis_z_xyz is not None:
-            object.__setattr__(self, "local_axis_z_xyz", tuple(self.local_axis_z_xyz))
+            object.__setattr__(
+                self,
+                "local_axis_z_xyz",
+                fixed_tuple(
+                    self.local_axis_z_xyz,
+                    name="local_axis_z_xyz",
+                    length=3,
+                ),
+            )
 
     @property
     def fixed_axis(self) -> _Vec3 | None:
+        """Backward-compatible alias for ``fixed_axis_xyz``."""
+
         return self.fixed_axis_xyz
 
     @property
     def local_axis(self) -> tuple[_Vec3, _Vec3] | None:
+        """Backward-compatible pair of local X/Z axes."""
+
         if self.local_axis_x_xyz is None and self.local_axis_z_xyz is None:
             return None
         return self.local_axis_x_xyz, self.local_axis_z_xyz  # type: ignore[return-value]
-
 
 @dataclass(frozen=True)
 class IkLink:
@@ -130,19 +133,32 @@ class IkLink:
     def __post_init__(self) -> None:
         if self.angle_limit_min_xyz is not None:
             object.__setattr__(
-                self, "angle_limit_min_xyz", tuple(self.angle_limit_min_xyz)
+                self,
+                "angle_limit_min_xyz",
+                fixed_tuple(
+                    self.angle_limit_min_xyz,
+                    name="angle_limit_min_xyz",
+                    length=3,
+                ),
             )
         if self.angle_limit_max_xyz is not None:
             object.__setattr__(
-                self, "angle_limit_max_xyz", tuple(self.angle_limit_max_xyz)
+                self,
+                "angle_limit_max_xyz",
+                fixed_tuple(
+                    self.angle_limit_max_xyz,
+                    name="angle_limit_max_xyz",
+                    length=3,
+                ),
             )
 
     @property
     def angle_limit(self) -> tuple[_Vec3, _Vec3] | None:
+        """Backward-compatible pair of minimum/maximum angle limits."""
+
         if self.angle_limit_min_xyz is None and self.angle_limit_max_xyz is None:
             return None
         return self.angle_limit_min_xyz, self.angle_limit_max_xyz  # type: ignore[return-value]
-
 
 @dataclass(frozen=True)
 class IkSolver:
@@ -174,9 +190,19 @@ class BoneMorphOffset:
     rotation_offset_xyzw: _Vec4
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "position_offset_xyz", tuple(self.position_offset_xyz))
         object.__setattr__(
-            self, "rotation_offset_xyzw", tuple(self.rotation_offset_xyzw)
+            self,
+            "position_offset_xyz",
+            fixed_tuple(self.position_offset_xyz, name="position_offset_xyz", length=3),
+        )
+        object.__setattr__(
+            self,
+            "rotation_offset_xyzw",
+            fixed_tuple(
+                self.rotation_offset_xyzw,
+                name="rotation_offset_xyzw",
+                length=4,
+            ),
         )
 
 

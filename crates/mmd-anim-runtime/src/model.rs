@@ -50,6 +50,160 @@ pub struct MorphInit {
     pub group_spans: Vec<MorphOffsetSpan>,
 }
 
+/// Build the canonical grouped morph tables used by every runtime input
+/// adapter.  Inputs retain their source order within each morph bucket while
+/// this function owns span construction, index checking, and cycle traversal.
+pub fn build_morph_init_from_offsets(
+    morph_count: u32,
+    bone_offsets: Vec<(MorphIndex, BoneMorphOffset)>,
+    group_offsets: Vec<(MorphIndex, GroupMorphOffset)>,
+) -> Result<MorphInit, ModelBuildError> {
+    let bone_offsets = index_morph_offsets(bone_offsets)?;
+    let group_offsets = index_morph_offsets(group_offsets)?;
+    build_morph_init_from_indexed_offsets(morph_count, bone_offsets, group_offsets).map_err(
+        |error| match error {
+            ModelBuildError::GroupMorphCycleAt { morph, .. } => {
+                ModelBuildError::GroupMorphCycle { morph }
+            }
+            other => other,
+        },
+    )
+}
+
+pub(crate) fn build_morph_init_from_indexed_offsets(
+    morph_count: u32,
+    bone_offsets: Vec<(usize, MorphIndex, BoneMorphOffset)>,
+    group_offsets: Vec<(usize, MorphIndex, GroupMorphOffset)>,
+) -> Result<MorphInit, ModelBuildError> {
+    let count = morph_count as usize;
+    if count == 0 && (!bone_offsets.is_empty() || !group_offsets.is_empty()) {
+        return Err(ModelBuildError::MorphCountZeroWithData);
+    }
+
+    let mut bone_counts = try_zeroed_vec(count)?;
+    for (_, index, _) in &bone_offsets {
+        let count = bone_counts
+            .get_mut(index.as_usize())
+            .ok_or(ModelBuildError::InvalidBoneMorphMorph { offset: index.0 })?;
+        *count = count
+            .checked_add(1)
+            .ok_or(ModelBuildError::MorphStorageAllocation)?;
+    }
+    let mut bone_buckets = try_empty_buckets(count)?;
+    reserve_bucket_storage(&mut bone_buckets, &bone_counts)?;
+    for (_, index, offset) in bone_offsets {
+        let bucket = bone_buckets
+            .get_mut(index.as_usize())
+            .ok_or(ModelBuildError::InvalidBoneMorphMorph { offset: index.0 })?;
+        bucket.push(offset);
+    }
+    let mut group_counts = try_zeroed_vec(count)?;
+    for (_, index, offset) in &group_offsets {
+        if offset.child_morph.as_usize() >= count {
+            return Err(ModelBuildError::InvalidGroupMorphChild {
+                morph: index.as_usize(),
+                child: offset.child_morph.0,
+            });
+        }
+        let count = group_counts
+            .get_mut(index.as_usize())
+            .ok_or(ModelBuildError::InvalidGroupMorph { morph: index.0 })?;
+        *count = count
+            .checked_add(1)
+            .ok_or(ModelBuildError::MorphStorageAllocation)?;
+    }
+    let mut group_buckets = try_empty_buckets(count)?;
+    let mut group_sources = try_empty_buckets(count)?;
+    reserve_bucket_storage(&mut group_buckets, &group_counts)?;
+    reserve_bucket_storage(&mut group_sources, &group_counts)?;
+    for (source, index, offset) in group_offsets {
+        let bucket = group_buckets
+            .get_mut(index.as_usize())
+            .ok_or(ModelBuildError::InvalidGroupMorph { morph: index.0 })?;
+        bucket.push(offset);
+        group_sources[index.as_usize()].push(source);
+    }
+
+    let mut bone_flat = try_vec_with_capacity(bone_counts.iter().sum())?;
+    let mut bone_spans = try_vec_with_capacity(count)?;
+    for bucket in bone_buckets {
+        let start =
+            u32::try_from(bone_flat.len()).map_err(|_| ModelBuildError::MorphStorageOverflow)?;
+        bone_flat.extend(bucket);
+        let count = u32::try_from(bone_flat.len() - start as usize)
+            .map_err(|_| ModelBuildError::MorphStorageOverflow)?;
+        bone_spans.push(MorphOffsetSpan { start, count });
+    }
+
+    let mut group_flat = try_vec_with_capacity(group_counts.iter().sum())?;
+    let mut group_source_flat = try_vec_with_capacity(group_counts.iter().sum())?;
+    let mut group_spans = try_vec_with_capacity(count)?;
+    for (bucket, sources) in group_buckets.into_iter().zip(group_sources) {
+        let start =
+            u32::try_from(group_flat.len()).map_err(|_| ModelBuildError::MorphStorageOverflow)?;
+        group_flat.extend(bucket);
+        group_source_flat.extend(sources);
+        let count = u32::try_from(group_flat.len() - start as usize)
+            .map_err(|_| ModelBuildError::MorphStorageOverflow)?;
+        group_spans.push(MorphOffsetSpan { start, count });
+    }
+    let morph = MorphInit {
+        morph_count,
+        bone_offsets: bone_flat,
+        bone_spans,
+        group_offsets: group_flat,
+        group_spans,
+        ..MorphInit::default()
+    };
+    validate_group_morph_cycles_with_sources(&morph, &group_source_flat)?;
+    Ok(morph)
+}
+
+fn index_morph_offsets<T>(
+    offsets: Vec<(MorphIndex, T)>,
+) -> Result<Vec<(usize, MorphIndex, T)>, ModelBuildError> {
+    let mut indexed = try_vec_with_capacity(offsets.len())?;
+    indexed.extend(
+        offsets
+            .into_iter()
+            .enumerate()
+            .map(|(source, (morph, offset))| (source, morph, offset)),
+    );
+    Ok(indexed)
+}
+
+fn try_vec_with_capacity<T>(capacity: usize) -> Result<Vec<T>, ModelBuildError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(capacity)
+        .map_err(|_| ModelBuildError::MorphStorageAllocation)?;
+    Ok(values)
+}
+
+fn try_zeroed_vec(length: usize) -> Result<Vec<usize>, ModelBuildError> {
+    let mut values = try_vec_with_capacity(length)?;
+    values.resize(length, 0);
+    Ok(values)
+}
+
+fn try_empty_buckets<T>(length: usize) -> Result<Vec<Vec<T>>, ModelBuildError> {
+    let mut buckets = try_vec_with_capacity(length)?;
+    buckets.resize_with(length, Vec::new);
+    Ok(buckets)
+}
+
+fn reserve_bucket_storage<T>(
+    buckets: &mut [Vec<T>],
+    counts: &[usize],
+) -> Result<(), ModelBuildError> {
+    for (bucket, &count) in buckets.iter_mut().zip(counts) {
+        bucket
+            .try_reserve_exact(count)
+            .map_err(|_| ModelBuildError::MorphStorageAllocation)?;
+    }
+    Ok(())
+}
+
 impl BoneIndex {
     #[inline]
     pub fn as_usize(self) -> usize {
@@ -279,6 +433,18 @@ pub enum ModelBuildError {
     InvalidGroupMorphChild { morph: usize, child: u32 },
     #[error("group morph cycle detected at morph {morph}")]
     GroupMorphCycle { morph: usize },
+    #[error("group morph cycle detected at morph {morph} (offset {offset})")]
+    GroupMorphCycleAt { morph: usize, offset: usize },
+    #[error("morph count is zero but morph offsets are present")]
+    MorphCountZeroWithData,
+    #[error("bone morph references invalid morph {offset}")]
+    InvalidBoneMorphMorph { offset: u32 },
+    #[error("group morph references invalid morph {morph}")]
+    InvalidGroupMorph { morph: u32 },
+    #[error("morph storage exceeds u32 span capacity")]
+    MorphStorageOverflow,
+    #[error("morph storage allocation failed")]
+    MorphStorageAllocation,
 }
 
 #[derive(Debug)]
@@ -960,9 +1126,25 @@ fn validate_morph_init(morph: &MorphInit, bone_count: usize) -> Result<(), Model
 }
 
 fn validate_group_morph_cycles(morph: &MorphInit) -> Result<(), ModelBuildError> {
-    let mut state = vec![VisitState::Unvisited; morph.morph_count as usize];
+    let mut sources = try_vec_with_capacity(morph.group_offsets.len())?;
+    sources.extend(0..morph.group_offsets.len());
+    validate_group_morph_cycles_with_sources(morph, &sources).map_err(|error| match error {
+        ModelBuildError::GroupMorphCycleAt { morph, .. } => {
+            ModelBuildError::GroupMorphCycle { morph }
+        }
+        other => other,
+    })
+}
+
+fn validate_group_morph_cycles_with_sources(
+    morph: &MorphInit,
+    sources: &[usize],
+) -> Result<(), ModelBuildError> {
+    let mut state = try_vec_with_capacity(morph.morph_count as usize)?;
+    state.resize(morph.morph_count as usize, VisitState::Unvisited);
+    let mut stack = try_vec_with_capacity(morph.morph_count as usize)?;
     for morph_index in 0..morph.morph_count as usize {
-        visit_group_morph(morph_index, morph, &mut state)?;
+        visit_group_morph(morph_index, morph, &mut state, sources, &mut stack)?;
     }
     Ok(())
 }
@@ -971,6 +1153,8 @@ fn visit_group_morph(
     morph_index: usize,
     morph: &MorphInit,
     state: &mut [VisitState],
+    sources: &[usize],
+    stack: &mut Vec<(usize, usize)>,
 ) -> Result<(), ModelBuildError> {
     if state[morph_index] == VisitState::Visited {
         return Ok(());
@@ -978,7 +1162,8 @@ fn visit_group_morph(
 
     // Iterative DFS equivalent to the previous recursive walk.  The second
     // tuple member is the next offset in this morph's span to inspect.
-    let mut stack = vec![(morph_index, 0usize)];
+    stack.clear();
+    stack.push((morph_index, 0usize));
     state[morph_index] = VisitState::Visiting;
     while let Some((current, next_offset)) = stack.last_mut() {
         let span = morph.group_spans[*current];
@@ -997,7 +1182,10 @@ fn visit_group_morph(
         match state[child] {
             VisitState::Visited => {}
             VisitState::Visiting => {
-                return Err(ModelBuildError::GroupMorphCycle { morph: child });
+                return Err(ModelBuildError::GroupMorphCycleAt {
+                    morph: child,
+                    offset: sources[offset_index],
+                });
             }
             VisitState::Unvisited => {
                 state[child] = VisitState::Visiting;
@@ -1042,6 +1230,14 @@ fn validate_morph_spans(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_capacity_overflow_as_morph_storage_allocation_error() {
+        assert_eq!(
+            try_vec_with_capacity::<u8>(usize::MAX).unwrap_err(),
+            ModelBuildError::MorphStorageAllocation
+        );
+    }
 
     #[test]
     fn rejects_invalid_parent() {

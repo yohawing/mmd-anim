@@ -1283,6 +1283,8 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 pub struct PmxParsedMorph {
     pub name: String,
     pub english_name: String,
+    #[serde(default = "default_pmx_morph_panel")]
+    pub panel: String,
     #[serde(rename = "type")]
     pub kind: String,
     pub vertex_offsets: Vec<PmxParsedVertexMorphOffset>,
@@ -1671,6 +1673,8 @@ pub struct PmxPartsMorphDescriptor {
     pub name: String,
     #[serde(default)]
     pub english_name: String,
+    #[serde(default = "default_pmx_morph_panel")]
+    pub panel: String,
     #[serde(default = "default_pmx_parts_morph_kind", alias = "type")]
     pub kind: String,
     #[serde(default)]
@@ -1875,6 +1879,10 @@ fn default_pmx_parts_display_frame_kind() -> String {
 
 fn default_pmx_parts_morph_kind() -> String {
     "vertex".to_owned()
+}
+
+fn default_pmx_morph_panel() -> String {
+    "other".to_owned()
 }
 
 fn default_pmx_parts_rigid_body_shape() -> String {
@@ -2699,6 +2707,7 @@ fn pmx_parts_morph_from_descriptor(morph: &PmxPartsMorphDescriptor) -> PmxParsed
     let mut parsed = PmxParsedMorph {
         name: morph.name.clone(),
         english_name: morph.english_name.clone(),
+        panel: morph.panel.clone(),
         kind: morph.kind.clone(),
         vertex_offsets: Vec::new(),
         group_offsets: Vec::new(),
@@ -3100,7 +3109,7 @@ pub fn export_pmx_model(model: &PmxParsedModel) -> Vec<u8> {
     for morph in &model.morphs {
         write_pmx_string(&mut out, &morph.name, encoding);
         write_pmx_string(&mut out, &morph.english_name, encoding);
-        out.push(0);
+        out.push(morph_panel_byte(&morph.panel));
         let morph_type = morph_type_byte(morph);
         out.push(morph_type);
         write_i32(&mut out, morph_offset_count(morph, morph_type) as i32);
@@ -3868,6 +3877,7 @@ fn empty_pmx_material_split_morph_like(morph: &PmxParsedMorph) -> PmxParsedMorph
     PmxParsedMorph {
         name: morph.name.clone(),
         english_name: morph.english_name.clone(),
+        panel: morph.panel.clone(),
         kind: morph.kind.clone(),
         vertex_offsets: Vec::new(),
         group_offsets: Vec::new(),
@@ -4269,6 +4279,29 @@ fn morph_type_byte(morph: &PmxParsedMorph) -> u8 {
     }
 }
 
+fn morph_panel_name(panel: u8) -> String {
+    match panel {
+        0 => "system",
+        1 => "brow",
+        2 => "eye",
+        3 => "mouth",
+        4 => "other",
+        _ => "unknown",
+    }
+    .to_owned()
+}
+
+fn morph_panel_byte(panel: &str) -> u8 {
+    match panel {
+        "system" => 0,
+        "brow" => 1,
+        "eye" => 2,
+        "mouth" => 3,
+        "other" => 4,
+        _ => 4,
+    }
+}
+
 fn morph_offset_count(morph: &PmxParsedMorph, morph_type: u8) -> usize {
     match morph_type {
         0 => morph.group_offsets.len(),
@@ -4428,7 +4461,7 @@ fn read_parsed_morphs(
     for _ in 0..count {
         let name = r.read_string(header.encoding)?;
         let english_name = r.read_string(header.encoding)?;
-        let _panel = r.read_u8()?;
+        let panel = morph_panel_name(r.read_u8()?);
         let morph_type = r.read_u8()?;
         let min_offset_size = match morph_type {
             0 => header.morph_index_size as usize + 4,
@@ -4444,6 +4477,7 @@ fn read_parsed_morphs(
         let mut morph = PmxParsedMorph {
             name,
             english_name,
+            panel,
             kind: match morph_type {
                 0 => "group",
                 1 => "vertex",
@@ -5021,6 +5055,7 @@ mod tests {
             morphs: vec![PmxParsedMorph {
                 name: "Smile".to_owned(),
                 english_name: "SmileEn".to_owned(),
+                panel: "eye".to_owned(),
                 kind: "vertex".to_owned(),
                 vertex_offsets: vec![PmxParsedVertexMorphOffset {
                     vertex_index: 0,
@@ -5181,6 +5216,7 @@ mod tests {
             PmxParsedMorph {
                 name: "left-raise".to_owned(),
                 english_name: "left-raise-en".to_owned(),
+                panel: "brow".to_owned(),
                 kind: "vertex".to_owned(),
                 vertex_offsets: vec![PmxParsedVertexMorphOffset {
                     vertex_index: 1,
@@ -5197,6 +5233,7 @@ mod tests {
             PmxParsedMorph {
                 name: "right-raise".to_owned(),
                 english_name: "right-raise-en".to_owned(),
+                panel: "eye".to_owned(),
                 kind: "vertex".to_owned(),
                 vertex_offsets: vec![PmxParsedVertexMorphOffset {
                     vertex_index: 3,
@@ -5213,6 +5250,7 @@ mod tests {
             PmxParsedMorph {
                 name: "right-material".to_owned(),
                 english_name: "right-material-en".to_owned(),
+                panel: "other".to_owned(),
                 kind: "material".to_owned(),
                 vertex_offsets: Vec::new(),
                 group_offsets: Vec::new(),
@@ -5226,6 +5264,7 @@ mod tests {
             PmxParsedMorph {
                 name: "all-material".to_owned(),
                 english_name: "all-material-en".to_owned(),
+                panel: "other".to_owned(),
                 kind: "material".to_owned(),
                 vertex_offsets: Vec::new(),
                 group_offsets: Vec::new(),
@@ -5239,6 +5278,7 @@ mod tests {
             PmxParsedMorph {
                 name: "combo".to_owned(),
                 english_name: "combo-en".to_owned(),
+                panel: "other".to_owned(),
                 kind: "group".to_owned(),
                 vertex_offsets: Vec::new(),
                 group_offsets: vec![
@@ -5410,6 +5450,7 @@ mod tests {
         model.morphs.push(PmxParsedMorph {
             name: "forward-combo".to_owned(),
             english_name: "forward-combo-en".to_owned(),
+            panel: "other".to_owned(),
             kind: "group".to_owned(),
             vertex_offsets: Vec::new(),
             group_offsets: vec![PmxParsedGroupMorphOffset {
@@ -5426,6 +5467,7 @@ mod tests {
         model.morphs.push(PmxParsedMorph {
             name: "later-combo".to_owned(),
             english_name: "later-combo-en".to_owned(),
+            panel: "other".to_owned(),
             kind: "group".to_owned(),
             vertex_offsets: Vec::new(),
             group_offsets: vec![PmxParsedGroupMorphOffset {
@@ -6237,6 +6279,19 @@ mod tests {
         let reparsed = parse_pmx_model(&exported).unwrap();
 
         assert_pmx_roundtrip_eq(&parsed, &reparsed);
+    }
+
+    #[test]
+    fn exports_all_pmx_morph_panels_without_falling_back_to_other() {
+        for panel in ["system", "brow", "eye", "mouth", "other"] {
+            let mut parsed = parsed_pmx_fixture();
+            parsed.morphs[0].panel = panel.to_owned();
+
+            let exported = export_pmx_model(&parsed);
+            let reparsed = parse_pmx_model(&exported).unwrap();
+
+            assert_eq!(reparsed.morphs[0].panel, panel);
+        }
     }
 
     #[test]

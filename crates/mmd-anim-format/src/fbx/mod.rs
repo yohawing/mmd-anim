@@ -4526,6 +4526,7 @@ mod tests {
             PmxParsedMorph {
                 name: "Smile".to_owned(),
                 english_name: "smile".to_owned(),
+                panel: "mouth".to_owned(),
                 kind: "vertex".to_owned(),
                 vertex_offsets: vec![PmxParsedVertexMorphOffset {
                     vertex_index: 1,
@@ -4542,6 +4543,7 @@ mod tests {
             PmxParsedMorph {
                 name: "BoneMorph".to_owned(),
                 english_name: "bone".to_owned(),
+                panel: "other".to_owned(),
                 kind: "bone".to_owned(),
                 vertex_offsets: Vec::new(),
                 group_offsets: Vec::new(),
@@ -4662,6 +4664,7 @@ mod tests {
         model.morphs = vec![PmxParsedMorph {
             name: "Smile".to_owned(),
             english_name: "smile".to_owned(),
+            panel: "mouth".to_owned(),
             kind: "vertex".to_owned(),
             vertex_offsets: vec![PmxParsedVertexMorphOffset {
                 vertex_index: 1,
@@ -4804,6 +4807,7 @@ mod tests {
         model.morphs = vec![PmxParsedMorph {
             name: "Smile".to_owned(),
             english_name: "smile".to_owned(),
+            panel: "mouth".to_owned(),
             kind: "vertex".to_owned(),
             vertex_offsets: vec![PmxParsedVertexMorphOffset {
                 vertex_index: 1,

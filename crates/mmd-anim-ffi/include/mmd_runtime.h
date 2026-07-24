@@ -30,7 +30,9 @@ extern "C" {
    bit 3 (MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS) is set when HostPose
    local arrays are pre-Morph base values and Group/Bone Morph expansion is
    performed natively. Hosts that pre-apply Morph bone deltas must stop doing
-   so before using that contract.
+   so before using that contract; bit 4
+   (MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES) is set when runtime-neutral
+   reduced-pose sparse tracks are available.
    Check the relevant bit before calling any
    physics_world_* or evaluate_host_frame function; when the bit is unset
    those functions return MMD_RUNTIME_STATUS_UNSUPPORTED.
@@ -119,6 +121,8 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_PHYSICS_BULLET_NATIVE    (1u << 1)
 #define MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR         (1u << 2)
 #define MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS  (1u << 3)
+#define MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES (1u << 4)
+#define MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1      1u
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE     0u
 
@@ -172,6 +176,76 @@ typedef struct mmd_runtime_ffi_pose_reduction_report {
     float max_world_rotation_error_radians;
     float max_morph_weight_error;
 } mmd_runtime_ffi_pose_reduction_report_t;
+
+typedef enum mmd_runtime_generic_curve_kind {
+    MMD_RUNTIME_GENERIC_CURVE_BONE_LOCAL = 0,
+    MMD_RUNTIME_GENERIC_CURVE_MORPH_WEIGHT = 1
+} mmd_runtime_generic_curve_kind_t;
+
+enum {
+    MMD_RUNTIME_GENERIC_VALUE_TRANSLATION = 1u << 0,
+    MMD_RUNTIME_GENERIC_VALUE_QUATERNION = 1u << 1,
+    MMD_RUNTIME_GENERIC_VALUE_SCALAR = 1u << 2
+};
+
+enum {
+    MMD_RUNTIME_GENERIC_COORDINATE_MMD_RUNTIME_NATIVE = 0,
+    MMD_RUNTIME_GENERIC_LENGTH_MODEL_UNITS = 0,
+    MMD_RUNTIME_GENERIC_ANGLE_RADIANS = 0,
+    MMD_RUNTIME_GENERIC_TIME_SAMPLE_FRAMES = 0,
+    MMD_RUNTIME_GENERIC_TANGENT_VALUE_PER_SAMPLE_FRAME = 0
+};
+
+enum {
+    MMD_RUNTIME_GENERIC_ROTATION_BASIS_NONE = 0,
+    MMD_RUNTIME_GENERIC_ROTATION_BASIS_RUNTIME_QUATERNION = 1,
+    MMD_RUNTIME_GENERIC_ROTATION_BASIS_EULER_XYZ_RADIANS_PER_FRAME = 2
+};
+
+typedef struct mmd_runtime_ffi_generic_curve_info {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t reduction_target;
+    uint32_t coordinate_system;
+    uint32_t length_unit;
+    uint32_t angle_unit;
+    uint32_t time_unit;
+    uint32_t tangent_unit;
+    uint64_t model_identity;
+    float    start_frame;
+    float    frame_step;
+    size_t   frame_count;
+    size_t   bone_count;
+    size_t   morph_count;
+} mmd_runtime_ffi_generic_curve_info_t;
+
+typedef struct mmd_runtime_ffi_generic_curve_descriptor {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t kind;
+    uint32_t target_index;
+    int32_t  parent_index;
+    uint32_t value_flags;
+    uint32_t interpolation;
+    uint32_t rotation_basis;
+    size_t   key_count;
+} mmd_runtime_ffi_generic_curve_descriptor_t;
+
+typedef struct mmd_runtime_ffi_generic_curve_key {
+    size_t sample_index;
+    float  frame;
+    float  translation_xyz[3];
+    float  rotation_xyzw[4];
+    float  scalar;
+    float  segment_prev_out_translation_xyz[3];
+    float  segment_current_in_translation_xyz[3];
+    float  segment_from_previous_start_euler_xyz[3];
+    float  segment_from_previous_end_euler_xyz[3];
+    float  segment_prev_out_rotation_xyz[3];
+    float  segment_current_in_rotation_xyz[3];
+    float  segment_prev_out_scalar;
+    float  segment_current_in_scalar;
+} mmd_runtime_ffi_generic_curve_key_t;
 
 typedef struct mmd_runtime_ffi_unity_curve_descriptor {
     uint32_t semantic;    /* mmd_runtime_unity_curve_semantic_t */
@@ -1295,7 +1369,40 @@ mmd_runtime_status_t mmd_runtime_reduced_pose_report(
     const mmd_runtime_reduced_pose_t*               pose,
     mmd_runtime_ffi_pose_reduction_report_t*        out_report);
 
-/* Enumerates target-native Unity scalar curves from a DCC_CUBIC reduced pose.
+/* Runtime-neutral sparse tracks from a DCC_CUBIC reduced pose. Values remain in
+   the dense/runtime numeric basis: model units, radians, source sample frames,
+   tangent value per sample frame, and unscaled morph weights. Bone tracks are
+   enumerated first in model index order, followed by morph tracks. Rotation
+   values are normalized local quaternions; Euler XYZ segment fields are
+   diagnostic DCC fit data and are not target-channel rotations. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_generic_curve_info(
+    const mmd_runtime_reduced_pose_t*            pose,
+    mmd_runtime_ffi_generic_curve_info_t*        out_info);
+
+mmd_runtime_status_t mmd_runtime_reduced_pose_generic_curve_count(
+    const mmd_runtime_reduced_pose_t* pose,
+    size_t*                           out_curve_count);
+
+mmd_runtime_status_t mmd_runtime_reduced_pose_generic_curve_descriptor(
+    const mmd_runtime_reduced_pose_t*             pose,
+    size_t                                        curve_index,
+    mmd_runtime_ffi_generic_curve_descriptor_t*   out_descriptor);
+
+/* Two-call, caller-owned retrieval. Pass out_keys = NULL, capacity = 0, and
+   key_stride_bytes = sizeof(mmd_runtime_ffi_generic_curve_key_t) to receive
+   BUFFER_TOO_SMALL plus the required count. Short buffers are not partially
+   written. A larger aligned stride permits caller-side tail extension. */
+mmd_runtime_status_t mmd_runtime_reduced_pose_generic_curve_keys(
+    const mmd_runtime_reduced_pose_t* pose,
+    size_t                            curve_index,
+    mmd_runtime_ffi_generic_curve_key_t* out_keys,
+    size_t                            out_key_capacity,
+    size_t                            key_stride_bytes,
+    size_t*                           out_required_count);
+
+/* Deprecated compatibility adapter. New consumers, including Unity, must use
+   the generic curve API above and perform target conversion in the consumer.
+   Enumerates target-native Unity scalar curves from a DCC_CUBIC reduced pose.
    Curves are translation XYZ then local Euler XYZ for each bone, followed by
    one weight curve for each morph. frames_per_second must be finite and > 0;
    flip_z is uint8_t and must be exactly 0 or 1; other values return

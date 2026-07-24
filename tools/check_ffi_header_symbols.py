@@ -84,6 +84,104 @@ UNITY_FUNCTIONS = {
     ),
 }
 
+GENERIC_CONSTANTS = {
+    "MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1": 1,
+    "MMD_RUNTIME_GENERIC_CURVE_BONE_LOCAL": 0,
+    "MMD_RUNTIME_GENERIC_CURVE_MORPH_WEIGHT": 1,
+    "MMD_RUNTIME_GENERIC_COORDINATE_MMD_RUNTIME_NATIVE": 0,
+    "MMD_RUNTIME_GENERIC_LENGTH_MODEL_UNITS": 0,
+    "MMD_RUNTIME_GENERIC_ANGLE_RADIANS": 0,
+    "MMD_RUNTIME_GENERIC_TIME_SAMPLE_FRAMES": 0,
+    "MMD_RUNTIME_GENERIC_TANGENT_VALUE_PER_SAMPLE_FRAME": 0,
+    "MMD_RUNTIME_GENERIC_ROTATION_BASIS_NONE": 0,
+    "MMD_RUNTIME_GENERIC_ROTATION_BASIS_RUNTIME_QUATERNION": 1,
+    "MMD_RUNTIME_GENERIC_ROTATION_BASIS_EULER_XYZ_RADIANS_PER_FRAME": 2,
+}
+
+GENERIC_STRUCTS = {
+    "MmdRuntimeFfiGenericCurveInfo": (
+        "mmd_runtime_ffi_generic_curve_info_t",
+        [
+            ("struct_size", "u32"),
+            ("abi_version", "u32"),
+            ("reduction_target", "u32"),
+            ("coordinate_system", "u32"),
+            ("length_unit", "u32"),
+            ("angle_unit", "u32"),
+            ("time_unit", "u32"),
+            ("tangent_unit", "u32"),
+            ("model_identity", "u64"),
+            ("start_frame", "f32"),
+            ("frame_step", "f32"),
+            ("frame_count", "usize"),
+            ("bone_count", "usize"),
+            ("morph_count", "usize"),
+        ],
+    ),
+    "MmdRuntimeFfiGenericCurveDescriptor": (
+        "mmd_runtime_ffi_generic_curve_descriptor_t",
+        [
+            ("struct_size", "u32"),
+            ("abi_version", "u32"),
+            ("kind", "u32"),
+            ("target_index", "u32"),
+            ("parent_index", "i32"),
+            ("value_flags", "u32"),
+            ("interpolation", "u32"),
+            ("rotation_basis", "u32"),
+            ("key_count", "usize"),
+        ],
+    ),
+    "MmdRuntimeFfiGenericCurveKey": (
+        "mmd_runtime_ffi_generic_curve_key_t",
+        [
+            ("sample_index", "usize"),
+            ("frame", "f32"),
+            ("translation_xyz", "f32[3]"),
+            ("rotation_xyzw", "f32[4]"),
+            ("scalar", "f32"),
+            ("segment_prev_out_translation_xyz", "f32[3]"),
+            ("segment_current_in_translation_xyz", "f32[3]"),
+            ("segment_from_previous_start_euler_xyz", "f32[3]"),
+            ("segment_from_previous_end_euler_xyz", "f32[3]"),
+            ("segment_prev_out_rotation_xyz", "f32[3]"),
+            ("segment_current_in_rotation_xyz", "f32[3]"),
+            ("segment_prev_out_scalar", "f32"),
+            ("segment_current_in_scalar", "f32"),
+        ],
+    ),
+}
+
+GENERIC_FUNCTIONS = {
+    "mmd_runtime_reduced_pose_generic_curve_info": (
+        "status",
+        [("pose", "const_reduced_pose_ptr"), ("out_info", "generic_info_ptr")],
+    ),
+    "mmd_runtime_reduced_pose_generic_curve_count": (
+        "status",
+        [("pose", "const_reduced_pose_ptr"), ("out_curve_count", "usize_ptr")],
+    ),
+    "mmd_runtime_reduced_pose_generic_curve_descriptor": (
+        "status",
+        [
+            ("pose", "const_reduced_pose_ptr"),
+            ("curve_index", "usize"),
+            ("out_descriptor", "generic_descriptor_ptr"),
+        ],
+    ),
+    "mmd_runtime_reduced_pose_generic_curve_keys": (
+        "status",
+        [
+            ("pose", "const_reduced_pose_ptr"),
+            ("curve_index", "usize"),
+            ("out_keys", "generic_key_ptr"),
+            ("out_key_capacity", "usize"),
+            ("key_stride_bytes", "usize"),
+            ("out_required_count", "usize_ptr"),
+        ],
+    ),
+}
+
 PHYSICS_PARAM_FUNCTIONS = {
     "mmd_runtime_physics_params_get_json": (
         "ffi_byte_buffer",
@@ -142,9 +240,14 @@ def strip_c_comments(text: str) -> str:
 
 def canonical_rust_type(type_name: str) -> str:
     compact = " ".join(type_name.split())
+    array_match = re.fullmatch(r"\[f32;\s*(\d+)\]", compact)
+    if array_match:
+        return f"f32[{array_match.group(1)}]"
     return {
         "u8": "u8",
         "u32": "u32",
+        "u64": "u64",
+        "i32": "i32",
         "usize": "usize",
         "f32": "f32",
         "bool": "bool",
@@ -157,6 +260,9 @@ def canonical_rust_type(type_name: str) -> str:
         "*mut usize": "usize_ptr",
         "*mut MmdRuntimeFfiUnityCurveDescriptor": "unity_descriptor_ptr",
         "*mut MmdRuntimeFfiUnityCurveKey": "unity_key_ptr",
+        "*mut MmdRuntimeFfiGenericCurveInfo": "generic_info_ptr",
+        "*mut MmdRuntimeFfiGenericCurveDescriptor": "generic_descriptor_ptr",
+        "*mut MmdRuntimeFfiGenericCurveKey": "generic_key_ptr",
     }.get(compact, compact)
 
 
@@ -165,6 +271,8 @@ def canonical_c_type(type_name: str) -> str:
     return {
         "uint8_t": "u8",
         "uint32_t": "u32",
+        "uint64_t": "u64",
+        "int32_t": "i32",
         "size_t": "usize",
         "float": "f32",
         "bool": "bool",
@@ -177,6 +285,9 @@ def canonical_c_type(type_name: str) -> str:
         "size_t*": "usize_ptr",
         "mmd_runtime_ffi_unity_curve_descriptor_t*": "unity_descriptor_ptr",
         "mmd_runtime_ffi_unity_curve_key_t*": "unity_key_ptr",
+        "mmd_runtime_ffi_generic_curve_info_t*": "generic_info_ptr",
+        "mmd_runtime_ffi_generic_curve_descriptor_t*": "generic_descriptor_ptr",
+        "mmd_runtime_ffi_generic_curve_key_t*": "generic_key_ptr",
     }.get(compact, compact)
 
 
@@ -205,10 +316,13 @@ def c_struct_fields(text: str, alias: str) -> list[tuple[str, str]]:
         declaration = declaration.strip()
         if not declaration:
             continue
-        field_match = re.fullmatch(r"(.+?)\s+(\w+)", declaration)
+        field_match = re.fullmatch(r"(.+?)\s+(\w+)(?:\[(\d+)\])?", declaration)
         if field_match is None:
             raise ValueError(f"could not parse C field in {alias}: {declaration!r}")
-        fields.append((field_match.group(2), canonical_c_type(field_match.group(1))))
+        field_type = canonical_c_type(field_match.group(1))
+        if field_match.group(3):
+            field_type = f"{field_type}[{field_match.group(3)}]"
+        fields.append((field_match.group(2), field_type))
     return fields
 
 
@@ -244,7 +358,7 @@ def c_function_shape(text: str, name: str) -> tuple[str, list[tuple[str, str]]]:
     return canonical_c_type(match.group(1)), params
 
 
-def check_unity_abi_shapes(rust_text: str, header_text: str) -> list[str]:
+def check_abi_shapes(rust_text: str, header_text: str) -> list[str]:
     errors: list[str] = []
     for name, expected in UNITY_CONSTANTS.items():
         rust_match = re.search(rf"pub const {name}: u32 = (\d+);", rust_text)
@@ -263,6 +377,29 @@ def check_unity_abi_shapes(rust_text: str, header_text: str) -> list[str]:
                 f"struct {rust_name}/{c_alias}: Rust={rust_fields}, header={c_fields}, expected={expected}"
             )
     for name, expected in UNITY_FUNCTIONS.items():
+        rust_shape = rust_function_shape(rust_text, name)
+        c_shape = c_function_shape(header_text, name)
+        if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
+            errors.append(
+                f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
+            )
+    for name, expected in GENERIC_CONSTANTS.items():
+        rust_match = re.search(rf"pub const {name}: u32 = (\d+);", rust_text)
+        header_match = re.search(rf"\b{name}(?:\s+|\s*=\s*)(\d+)(?:u)?\b", header_text)
+        rust_value = int(rust_match.group(1)) if rust_match else None
+        header_value = int(header_match.group(1)) if header_match else None
+        if rust_value != expected or header_value != expected or rust_value != header_value:
+            errors.append(
+                f"constant {name}: Rust={rust_value}, header={header_value}, expected={expected}"
+            )
+    for rust_name, (c_alias, expected) in GENERIC_STRUCTS.items():
+        rust_fields = rust_struct_fields(rust_text, rust_name)
+        c_fields = c_struct_fields(header_text, c_alias)
+        if rust_fields != expected or c_fields != expected or rust_fields != c_fields:
+            errors.append(
+                f"struct {rust_name}/{c_alias}: Rust={rust_fields}, header={c_fields}, expected={expected}"
+            )
+    for name, expected in GENERIC_FUNCTIONS.items():
         rust_shape = rust_function_shape(rust_text, name)
         c_shape = c_function_shape(header_text, name)
         if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
@@ -290,7 +427,7 @@ def main() -> int:
     missing_in_rust = sorted(header_symbols - rust_symbols)
     forbidden_in_rust = sorted(FORBIDDEN_DENSE_REDUCED_POSE_SYMBOLS & rust_symbols)
     forbidden_in_header = sorted(FORBIDDEN_DENSE_REDUCED_POSE_SYMBOLS & header_symbols)
-    shape_errors = check_unity_abi_shapes(rust_text, header_text)
+    shape_errors = check_abi_shapes(rust_text, header_text)
 
     if missing_in_header or missing_in_rust or forbidden_in_rust or forbidden_in_header or shape_errors:
         print("FFI header symbol mismatch detected.", file=sys.stderr)
@@ -307,7 +444,7 @@ def main() -> int:
             for symbol in sorted(set(forbidden_in_rust + forbidden_in_header)):
                 print(f"  - {symbol}", file=sys.stderr)
         if shape_errors:
-            print("\nUnity reduced-curve ABI shape drift:", file=sys.stderr)
+            print("\nTracked reduced-curve ABI shape drift:", file=sys.stderr)
             for error in shape_errors:
                 print(f"  - {error}", file=sys.stderr)
         return 1

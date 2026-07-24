@@ -329,6 +329,403 @@ fn reduced_pose_curve_fixture(target: u32) -> *mut MmdRuntimeReducedPose {
     reduced
 }
 
+fn copy_generic_curve_keys(
+    reduced: *const MmdRuntimeReducedPose,
+    curve_index: usize,
+) -> Vec<MmdRuntimeFfiGenericCurveKey> {
+    let stride = std::mem::size_of::<MmdRuntimeFfiGenericCurveKey>();
+    let mut required = usize::MAX;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                curve_index,
+                ptr::null_mut(),
+                0,
+                stride,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    let mut keys = vec![MmdRuntimeFfiGenericCurveKey::default(); required];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                curve_index,
+                keys.as_mut_ptr(),
+                keys.len(),
+                stride,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(required, keys.len());
+    keys
+}
+
+#[test]
+fn reduced_pose_generic_curves_match_raw_tracks_after_model_free() {
+    if std::mem::size_of::<usize>() == 8 {
+        assert_eq!(std::mem::size_of::<MmdRuntimeFfiGenericCurveInfo>(), 72);
+        assert_eq!(std::mem::align_of::<MmdRuntimeFfiGenericCurveInfo>(), 8);
+        assert_eq!(
+            std::mem::offset_of!(MmdRuntimeFfiGenericCurveInfo, model_identity),
+            32
+        );
+        assert_eq!(
+            std::mem::offset_of!(MmdRuntimeFfiGenericCurveInfo, frame_count),
+            48
+        );
+        assert_eq!(
+            std::mem::size_of::<MmdRuntimeFfiGenericCurveDescriptor>(),
+            40
+        );
+        assert_eq!(
+            std::mem::offset_of!(MmdRuntimeFfiGenericCurveDescriptor, key_count),
+            32
+        );
+        assert_eq!(std::mem::size_of::<MmdRuntimeFfiGenericCurveKey>(), 128);
+        assert_eq!(std::mem::align_of::<MmdRuntimeFfiGenericCurveKey>(), 8);
+        assert_eq!(
+            std::mem::offset_of!(MmdRuntimeFfiGenericCurveKey, rotation_xyzw),
+            24
+        );
+        assert_eq!(
+            std::mem::offset_of!(MmdRuntimeFfiGenericCurveKey, segment_current_in_scalar),
+            120
+        );
+    }
+    let reduced = reduced_pose_curve_fixture(MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC);
+    assert_eq!(mmd_runtime_abi_version(), 2);
+    assert_eq!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES,
+        MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES
+    );
+
+    let mut info = MmdRuntimeFfiGenericCurveInfo::default();
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_info(reduced, &mut info) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        info.struct_size as usize,
+        std::mem::size_of::<MmdRuntimeFfiGenericCurveInfo>()
+    );
+    assert_eq!(
+        info.abi_version,
+        MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1
+    );
+    assert_eq!(
+        info.reduction_target,
+        MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC
+    );
+    assert_eq!(info.coordinate_system, 0);
+    assert_eq!(info.length_unit, 0);
+    assert_eq!(info.angle_unit, 0);
+    assert_eq!(info.time_unit, 0);
+    assert_eq!(info.tangent_unit, 0);
+    assert_eq!(info.model_identity, 77);
+    assert_eq!(info.start_frame, 0.0);
+    assert_eq!(info.frame_step, 1.0);
+    assert_eq!(info.frame_count, 5);
+    assert_eq!(info.bone_count, 1);
+    assert_eq!(info.morph_count, 1);
+
+    let mut curve_count = usize::MAX;
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_count(reduced, &mut curve_count) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(curve_count, info.bone_count + info.morph_count);
+
+    let sequence = unsafe { &(*reduced).sequence };
+    for curve_index in 0..curve_count {
+        let mut descriptor = MmdRuntimeFfiGenericCurveDescriptor::default();
+        assert_eq!(
+            unsafe {
+                mmd_runtime_reduced_pose_generic_curve_descriptor(
+                    reduced,
+                    curve_index,
+                    &mut descriptor,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        assert_eq!(
+            descriptor.struct_size as usize,
+            std::mem::size_of::<MmdRuntimeFfiGenericCurveDescriptor>()
+        );
+        assert_eq!(
+            descriptor.abi_version,
+            MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1
+        );
+        assert_eq!(
+            descriptor.interpolation,
+            MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC
+        );
+        let keys = copy_generic_curve_keys(reduced, curve_index);
+        assert_eq!(keys.len(), descriptor.key_count);
+        assert!(
+            keys.iter()
+                .all(|key| key.frame == sequence.sample_frames()[key.sample_index])
+        );
+
+        if curve_index < info.bone_count {
+            assert_eq!(descriptor.kind, MMD_RUNTIME_GENERIC_CURVE_BONE_LOCAL);
+            assert_eq!(descriptor.target_index as usize, curve_index);
+            assert_eq!(descriptor.parent_index, -1);
+            assert_eq!(
+                descriptor.value_flags,
+                MMD_RUNTIME_GENERIC_VALUE_TRANSLATION | MMD_RUNTIME_GENERIC_VALUE_QUATERNION
+            );
+            assert_eq!(
+                descriptor.rotation_basis,
+                MMD_RUNTIME_GENERIC_ROTATION_BASIS_RUNTIME_QUATERNION
+            );
+            let raw_keys = sequence.bone_tracks()[curve_index].keys();
+            for (key, raw) in keys.iter().zip(raw_keys) {
+                assert_eq!(key.sample_index, raw.sample_index);
+                assert_slice_near(&key.translation_xyz, &raw.translation.to_array(), 1.0e-7);
+                assert_slice_near(&key.rotation_xyzw, &raw.rotation.to_array(), 1.0e-7);
+                assert_near(
+                    key.rotation_xyzw
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f32>(),
+                    1.0,
+                    1.0e-5,
+                );
+                assert_slice_near(
+                    &key.segment_prev_out_translation_xyz,
+                    &raw.dcc_segment.translation_out_tangent.to_array(),
+                    1.0e-7,
+                );
+                assert_slice_near(
+                    &key.segment_current_in_translation_xyz,
+                    &raw.dcc_segment.translation_in_tangent.to_array(),
+                    1.0e-7,
+                );
+                assert_slice_near(
+                    &key.segment_from_previous_start_euler_xyz,
+                    &raw.dcc_segment.rotation_start_euler_xyz.to_array(),
+                    1.0e-7,
+                );
+                assert_slice_near(
+                    &key.segment_from_previous_end_euler_xyz,
+                    &raw.dcc_segment.rotation_end_euler_xyz.to_array(),
+                    1.0e-7,
+                );
+            }
+            assert_eq!(keys[0].segment_prev_out_translation_xyz, [0.0; 3]);
+            assert_eq!(
+                keys.last().unwrap().segment_current_in_translation_xyz,
+                raw_keys
+                    .last()
+                    .unwrap()
+                    .dcc_segment
+                    .translation_in_tangent
+                    .to_array()
+            );
+        } else {
+            let morph_index = curve_index - info.bone_count;
+            assert_eq!(descriptor.kind, MMD_RUNTIME_GENERIC_CURVE_MORPH_WEIGHT);
+            assert_eq!(descriptor.target_index as usize, morph_index);
+            assert_eq!(descriptor.parent_index, -1);
+            assert_eq!(descriptor.value_flags, MMD_RUNTIME_GENERIC_VALUE_SCALAR);
+            assert_eq!(
+                descriptor.rotation_basis,
+                MMD_RUNTIME_GENERIC_ROTATION_BASIS_NONE
+            );
+            let raw_keys = sequence.morph_tracks()[morph_index].keys();
+            for (key, raw) in keys.iter().zip(raw_keys) {
+                assert_eq!(key.sample_index, raw.sample_index);
+                assert_near(key.scalar, raw.weight, 1.0e-7);
+                assert_near(
+                    key.segment_prev_out_scalar,
+                    raw.dcc_segment.out_tangent,
+                    1.0e-7,
+                );
+                assert_near(
+                    key.segment_current_in_scalar,
+                    raw.dcc_segment.in_tangent,
+                    1.0e-7,
+                );
+                assert_eq!(key.translation_xyz, [0.0; 3]);
+                assert_eq!(key.rotation_xyzw, [0.0; 4]);
+            }
+            assert_eq!(keys[0].segment_prev_out_scalar, 0.0);
+            assert_eq!(
+                keys.last().unwrap().segment_current_in_scalar,
+                raw_keys.last().unwrap().dcc_segment.in_tangent
+            );
+        }
+    }
+
+    unsafe { mmd_runtime_reduced_pose_free(reduced) };
+}
+
+#[repr(C)]
+struct PaddedGenericCurveKey {
+    key: MmdRuntimeFfiGenericCurveKey,
+    tail: [u64; 2],
+}
+
+#[test]
+fn reduced_pose_generic_curves_validate_sized_outputs_stride_and_short_buffers() {
+    let reduced = reduced_pose_curve_fixture(MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC);
+    let key_size = std::mem::size_of::<MmdRuntimeFfiGenericCurveKey>();
+
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_info(reduced, ptr::null_mut()) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_count(reduced, ptr::null_mut()) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_descriptor(reduced, 0, ptr::null_mut(),) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    let mut info = MmdRuntimeFfiGenericCurveInfo::default();
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_info(ptr::null(), &mut info) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(info.abi_version, 0);
+    let mut null_pose_count = usize::MAX;
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_count(ptr::null(), &mut null_pose_count) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(null_pose_count, 0);
+
+    let mut descriptor = MmdRuntimeFfiGenericCurveDescriptor::default();
+    descriptor.struct_size -= 1;
+    let undersized = descriptor.struct_size;
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_descriptor(reduced, 0, &mut descriptor) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(descriptor.struct_size, undersized);
+
+    let mut required = usize::MAX;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                0,
+                ptr::null_mut(),
+                0,
+                key_size - 1,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(required, 0);
+    let overflowing_capacity = usize::MAX / key_size + 1;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                0,
+                ptr::null_mut(),
+                overflowing_capacity,
+                key_size,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(required, 0);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                0,
+                ptr::null_mut(),
+                0,
+                key_size + 1,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    let keys = copy_generic_curve_keys(reduced, 0);
+    let sentinel = MmdRuntimeFfiGenericCurveKey {
+        frame: -123.0,
+        ..MmdRuntimeFfiGenericCurveKey::default()
+    };
+    let mut short = vec![sentinel; keys.len().saturating_sub(1)];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                0,
+                short.as_mut_ptr(),
+                short.len(),
+                key_size,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(required, keys.len());
+    assert!(short.iter().all(|key| *key == sentinel));
+
+    let mut padded = (0..keys.len())
+        .map(|_| PaddedGenericCurveKey {
+            key: MmdRuntimeFfiGenericCurveKey::default(),
+            tail: [u64::MAX; 2],
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                0,
+                padded.as_mut_ptr().cast(),
+                padded.len(),
+                std::mem::size_of::<PaddedGenericCurveKey>(),
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(padded.iter().map(|slot| slot.key).collect::<Vec<_>>(), keys);
+    assert!(padded.iter().all(|slot| slot.tail == [u64::MAX; 2]));
+
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                usize::MAX,
+                ptr::null_mut(),
+                0,
+                key_size,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(required, 0);
+    unsafe { mmd_runtime_reduced_pose_free(reduced) };
+
+    let linear = reduced_pose_curve_fixture(0);
+    let mut count = usize::MAX;
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_count(linear, &mut count) },
+        MmdRuntimeStatus::Unsupported
+    );
+    assert_eq!(count, 0);
+    unsafe { mmd_runtime_reduced_pose_free(linear) };
+}
+
 fn copy_unity_curve_keys(
     reduced: *const MmdRuntimeReducedPose,
     frames_per_second: f32,

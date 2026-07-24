@@ -38,11 +38,15 @@ const FEATURE_SPLIT_PHYSICS_EVALUATION: u32 = 1 << 0;
 const FEATURE_PHYSICS_BULLET_NATIVE: u32 = 1 << 1;
 pub const MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR: u32 = 1 << 2;
 pub const MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = 1 << 3;
+pub const MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES: u32 = 1 << 4;
+pub const MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC: u32 = 2;
 pub const MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1: u32 =
     mmd_anim_runtime::RUNTIME_MODEL_DESCRIPTOR_VERSION_V1;
 pub const MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE: u32 = 0;
 const FEATURE_MODEL_DESCRIPTOR: u32 = MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR;
 const FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS;
+const FEATURE_REDUCED_POSE_GENERIC_CURVES: u32 = MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -477,6 +481,111 @@ pub struct MmdRuntimeFfiPoseReductionReport {
     pub max_morph_weight_error: f32,
 }
 
+pub const MMD_RUNTIME_GENERIC_CURVE_BONE_LOCAL: u32 = 0;
+pub const MMD_RUNTIME_GENERIC_CURVE_MORPH_WEIGHT: u32 = 1;
+
+pub const MMD_RUNTIME_GENERIC_VALUE_TRANSLATION: u32 = 1 << 0;
+pub const MMD_RUNTIME_GENERIC_VALUE_QUATERNION: u32 = 1 << 1;
+pub const MMD_RUNTIME_GENERIC_VALUE_SCALAR: u32 = 1 << 2;
+
+pub const MMD_RUNTIME_GENERIC_COORDINATE_MMD_RUNTIME_NATIVE: u32 = 0;
+pub const MMD_RUNTIME_GENERIC_LENGTH_MODEL_UNITS: u32 = 0;
+pub const MMD_RUNTIME_GENERIC_ANGLE_RADIANS: u32 = 0;
+pub const MMD_RUNTIME_GENERIC_TIME_SAMPLE_FRAMES: u32 = 0;
+pub const MMD_RUNTIME_GENERIC_TANGENT_VALUE_PER_SAMPLE_FRAME: u32 = 0;
+
+pub const MMD_RUNTIME_GENERIC_ROTATION_BASIS_NONE: u32 = 0;
+pub const MMD_RUNTIME_GENERIC_ROTATION_BASIS_RUNTIME_QUATERNION: u32 = 1;
+pub const MMD_RUNTIME_GENERIC_ROTATION_BASIS_EULER_XYZ_RADIANS_PER_FRAME: u32 = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MmdRuntimeFfiGenericCurveInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub reduction_target: u32,
+    pub coordinate_system: u32,
+    pub length_unit: u32,
+    pub angle_unit: u32,
+    pub time_unit: u32,
+    pub tangent_unit: u32,
+    pub model_identity: u64,
+    pub start_frame: f32,
+    pub frame_step: f32,
+    pub frame_count: usize,
+    pub bone_count: usize,
+    pub morph_count: usize,
+}
+
+impl Default for MmdRuntimeFfiGenericCurveInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: 0,
+            reduction_target: 0,
+            coordinate_system: 0,
+            length_unit: 0,
+            angle_unit: 0,
+            time_unit: 0,
+            tangent_unit: 0,
+            model_identity: 0,
+            start_frame: 0.0,
+            frame_step: 0.0,
+            frame_count: 0,
+            bone_count: 0,
+            morph_count: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmdRuntimeFfiGenericCurveDescriptor {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub kind: u32,
+    pub target_index: u32,
+    pub parent_index: i32,
+    pub value_flags: u32,
+    pub interpolation: u32,
+    pub rotation_basis: u32,
+    pub key_count: usize,
+}
+
+impl Default for MmdRuntimeFfiGenericCurveDescriptor {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: 0,
+            kind: 0,
+            target_index: 0,
+            parent_index: 0,
+            value_flags: 0,
+            interpolation: 0,
+            rotation_basis: 0,
+            key_count: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiGenericCurveKey {
+    pub sample_index: usize,
+    pub frame: f32,
+    pub translation_xyz: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+    pub scalar: f32,
+    pub segment_prev_out_translation_xyz: [f32; 3],
+    pub segment_current_in_translation_xyz: [f32; 3],
+    pub segment_from_previous_start_euler_xyz: [f32; 3],
+    pub segment_from_previous_end_euler_xyz: [f32; 3],
+    pub segment_prev_out_rotation_xyz: [f32; 3],
+    pub segment_current_in_rotation_xyz: [f32; 3],
+    pub segment_prev_out_scalar: f32,
+    pub segment_current_in_scalar: f32,
+}
+
 pub const MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION: u32 = 0;
 pub const MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER: u32 = 1;
 pub const MMD_RUNTIME_UNITY_CURVE_MORPH_WEIGHT: u32 = 2;
@@ -780,6 +889,7 @@ fn runtime_feature_flags() -> u32 {
     FEATURE_SPLIT_PHYSICS_EVALUATION
         | FEATURE_MODEL_DESCRIPTOR
         | FEATURE_HOST_POSE_NATIVE_MORPHS
+        | FEATURE_REDUCED_POSE_GENERIC_CURVES
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE
         } else {
@@ -6032,6 +6142,455 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_report(
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
         }
         unsafe { ptr::write(out_report, ffi_reduction_report(pose.sequence.report())) };
+        MmdRuntimeStatus::Ok
+    })
+}
+
+unsafe fn initialize_sized_ffi_output<T: Default>(out: *mut T) -> Result<(), MmdRuntimeStatus> {
+    if out.is_null() || !(out as usize).is_multiple_of(std::mem::align_of::<T>()) {
+        return Err(status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            FFI_ERR_INVALID_INPUT,
+        ));
+    }
+    let declared_size = unsafe { ptr::read(out.cast::<u32>()) } as usize;
+    if declared_size < std::mem::size_of::<T>() {
+        return Err(status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "output struct_size is smaller than the v1 structure",
+        ));
+    }
+    unsafe { ptr::write(out, T::default()) };
+    Ok(())
+}
+
+fn validate_generic_curve_request(pose: &MmdRuntimeReducedPose) -> Result<(), MmdRuntimeStatus> {
+    if pose.sequence.target() != ReductionTarget::DccCubic {
+        return Err(status_failure(
+            MmdRuntimeStatus::Unsupported,
+            "generic curve enumeration requires a DccCubic reduced pose",
+        ));
+    }
+    if !pose.sequence.start_frame().is_finite()
+        || !pose.sequence.frame_step().is_finite()
+        || pose
+            .sequence
+            .sample_frames()
+            .iter()
+            .any(|frame| !frame.is_finite())
+    {
+        return Err(status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "generic curve metadata must be finite",
+        ));
+    }
+    Ok(())
+}
+
+fn generic_curve_count(sequence: &ReducedPoseSequence) -> Option<usize> {
+    sequence
+        .bone_tracks()
+        .len()
+        .checked_add(sequence.morph_tracks().len())
+}
+
+fn generic_curve_descriptor(
+    sequence: &ReducedPoseSequence,
+    curve_index: usize,
+) -> Result<MmdRuntimeFfiGenericCurveDescriptor, MmdRuntimeStatus> {
+    if let Some(track) = sequence.bone_tracks().get(curve_index) {
+        let target_index = u32::try_from(curve_index).map_err(|_| {
+            status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "bone index exceeds uint32_t",
+            )
+        })?;
+        let parent_index = *sequence
+            .snapshot()
+            .parent_indices()
+            .get(curve_index)
+            .ok_or_else(|| {
+                status_failure(
+                    MmdRuntimeStatus::Error,
+                    "generic bone descriptor has no matching parent index",
+                )
+            })?;
+        return Ok(MmdRuntimeFfiGenericCurveDescriptor {
+            struct_size: std::mem::size_of::<MmdRuntimeFfiGenericCurveDescriptor>() as u32,
+            abi_version: MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1,
+            kind: MMD_RUNTIME_GENERIC_CURVE_BONE_LOCAL,
+            target_index,
+            parent_index,
+            value_flags: MMD_RUNTIME_GENERIC_VALUE_TRANSLATION
+                | MMD_RUNTIME_GENERIC_VALUE_QUATERNION,
+            interpolation: MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC,
+            rotation_basis: MMD_RUNTIME_GENERIC_ROTATION_BASIS_RUNTIME_QUATERNION,
+            key_count: track.keys().len(),
+        });
+    }
+
+    let morph_index = curve_index
+        .checked_sub(sequence.bone_tracks().len())
+        .ok_or_else(|| {
+            status_failure(MmdRuntimeStatus::InvalidInput, "curve index out of range")
+        })?;
+    let track = sequence.morph_tracks().get(morph_index).ok_or_else(|| {
+        status_failure(MmdRuntimeStatus::InvalidInput, "curve index out of range")
+    })?;
+    let target_index = u32::try_from(morph_index).map_err(|_| {
+        status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "morph index exceeds uint32_t",
+        )
+    })?;
+    Ok(MmdRuntimeFfiGenericCurveDescriptor {
+        struct_size: std::mem::size_of::<MmdRuntimeFfiGenericCurveDescriptor>() as u32,
+        abi_version: MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1,
+        kind: MMD_RUNTIME_GENERIC_CURVE_MORPH_WEIGHT,
+        target_index,
+        parent_index: -1,
+        value_flags: MMD_RUNTIME_GENERIC_VALUE_SCALAR,
+        interpolation: MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC,
+        rotation_basis: MMD_RUNTIME_GENERIC_ROTATION_BASIS_NONE,
+        key_count: track.keys().len(),
+    })
+}
+
+fn generic_curve_key(
+    sequence: &ReducedPoseSequence,
+    curve_index: usize,
+    key_index: usize,
+) -> Result<MmdRuntimeFfiGenericCurveKey, MmdRuntimeStatus> {
+    if let Some(track) = sequence.bone_tracks().get(curve_index) {
+        let key = track.keys().get(key_index).ok_or_else(|| {
+            status_failure(MmdRuntimeStatus::Error, "generic bone key index mismatch")
+        })?;
+        let frame = *sequence
+            .sample_frames()
+            .get(key.sample_index)
+            .ok_or_else(|| {
+                status_failure(
+                    MmdRuntimeStatus::Error,
+                    "generic bone key sample index is out of range",
+                )
+            })?;
+        let result = MmdRuntimeFfiGenericCurveKey {
+            sample_index: key.sample_index,
+            frame,
+            translation_xyz: key.translation.to_array(),
+            rotation_xyzw: key.rotation.to_array(),
+            scalar: 0.0,
+            segment_prev_out_translation_xyz: key.dcc_segment.translation_out_tangent.to_array(),
+            segment_current_in_translation_xyz: key.dcc_segment.translation_in_tangent.to_array(),
+            segment_from_previous_start_euler_xyz: key
+                .dcc_segment
+                .rotation_start_euler_xyz
+                .to_array(),
+            segment_from_previous_end_euler_xyz: key.dcc_segment.rotation_end_euler_xyz.to_array(),
+            segment_prev_out_rotation_xyz: key.dcc_segment.rotation_out_tangent.to_array(),
+            segment_current_in_rotation_xyz: key.dcc_segment.rotation_in_tangent.to_array(),
+            segment_prev_out_scalar: 0.0,
+            segment_current_in_scalar: 0.0,
+        };
+        if !generic_curve_key_is_finite(&result) {
+            return Err(status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "generic bone key contains a non-finite value",
+            ));
+        }
+        return Ok(result);
+    }
+
+    let morph_index = curve_index
+        .checked_sub(sequence.bone_tracks().len())
+        .ok_or_else(|| {
+            status_failure(MmdRuntimeStatus::InvalidInput, "curve index out of range")
+        })?;
+    let track = sequence.morph_tracks().get(morph_index).ok_or_else(|| {
+        status_failure(MmdRuntimeStatus::InvalidInput, "curve index out of range")
+    })?;
+    let key = track.keys().get(key_index).ok_or_else(|| {
+        status_failure(MmdRuntimeStatus::Error, "generic morph key index mismatch")
+    })?;
+    let frame = *sequence
+        .sample_frames()
+        .get(key.sample_index)
+        .ok_or_else(|| {
+            status_failure(
+                MmdRuntimeStatus::Error,
+                "generic morph key sample index is out of range",
+            )
+        })?;
+    let result = MmdRuntimeFfiGenericCurveKey {
+        sample_index: key.sample_index,
+        frame,
+        scalar: key.weight,
+        segment_prev_out_scalar: key.dcc_segment.out_tangent,
+        segment_current_in_scalar: key.dcc_segment.in_tangent,
+        ..MmdRuntimeFfiGenericCurveKey::default()
+    };
+    if !generic_curve_key_is_finite(&result) {
+        return Err(status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "generic morph key contains a non-finite value",
+        ));
+    }
+    Ok(result)
+}
+
+fn generic_curve_key_is_finite(key: &MmdRuntimeFfiGenericCurveKey) -> bool {
+    key.frame.is_finite()
+        && key.translation_xyz.iter().all(|value| value.is_finite())
+        && key.rotation_xyzw.iter().all(|value| value.is_finite())
+        && key.scalar.is_finite()
+        && key
+            .segment_prev_out_translation_xyz
+            .iter()
+            .all(|value| value.is_finite())
+        && key
+            .segment_current_in_translation_xyz
+            .iter()
+            .all(|value| value.is_finite())
+        && key
+            .segment_from_previous_start_euler_xyz
+            .iter()
+            .all(|value| value.is_finite())
+        && key
+            .segment_from_previous_end_euler_xyz
+            .iter()
+            .all(|value| value.is_finite())
+        && key
+            .segment_prev_out_rotation_xyz
+            .iter()
+            .all(|value| value.is_finite())
+        && key
+            .segment_current_in_rotation_xyz
+            .iter()
+            .all(|value| value.is_finite())
+        && key.segment_prev_out_scalar.is_finite()
+        && key.segment_current_in_scalar.is_finite()
+}
+
+/// Copies runtime-neutral metadata for a DCC cubic reduced pose.
+///
+/// # Safety
+///
+/// `pose` must be a live reduced-pose handle. `out_info` must point to writable,
+/// naturally aligned storage whose leading `struct_size` is at least the v1 size.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_generic_curve_info(
+    pose: *const MmdRuntimeReducedPose,
+    out_info: *mut MmdRuntimeFfiGenericCurveInfo,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(status) = unsafe { initialize_sized_ffi_output(out_info) } {
+            return status;
+        }
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if let Err(status) = validate_generic_curve_request(pose) {
+            return status;
+        }
+        unsafe {
+            ptr::write(
+                out_info,
+                MmdRuntimeFfiGenericCurveInfo {
+                    struct_size: std::mem::size_of::<MmdRuntimeFfiGenericCurveInfo>() as u32,
+                    abi_version: MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1,
+                    reduction_target: MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC,
+                    coordinate_system: MMD_RUNTIME_GENERIC_COORDINATE_MMD_RUNTIME_NATIVE,
+                    length_unit: MMD_RUNTIME_GENERIC_LENGTH_MODEL_UNITS,
+                    angle_unit: MMD_RUNTIME_GENERIC_ANGLE_RADIANS,
+                    time_unit: MMD_RUNTIME_GENERIC_TIME_SAMPLE_FRAMES,
+                    tangent_unit: MMD_RUNTIME_GENERIC_TANGENT_VALUE_PER_SAMPLE_FRAME,
+                    model_identity: pose.sequence.snapshot().model_identity(),
+                    start_frame: pose.sequence.start_frame(),
+                    frame_step: pose.sequence.frame_step(),
+                    frame_count: pose.sequence.frame_count(),
+                    bone_count: pose.sequence.bone_tracks().len(),
+                    morph_count: pose.sequence.morph_tracks().len(),
+                },
+            )
+        };
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Returns the number of runtime-neutral sparse tracks.
+///
+/// # Safety
+///
+/// `pose` must be a live reduced-pose handle and `out_curve_count` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_generic_curve_count(
+    pose: *const MmdRuntimeReducedPose,
+    out_curve_count: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if out_curve_count.is_null()
+            || !(out_curve_count as usize).is_multiple_of(std::mem::align_of::<usize>())
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        unsafe { ptr::write(out_curve_count, 0) };
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if let Err(status) = validate_generic_curve_request(pose) {
+            return status;
+        }
+        let Some(count) = generic_curve_count(&pose.sequence) else {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "generic curve count overflow",
+            );
+        };
+        unsafe { ptr::write(out_curve_count, count) };
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Copies one runtime-neutral sparse-track descriptor.
+///
+/// # Safety
+///
+/// `pose` must be a live reduced-pose handle. `out_descriptor` must point to
+/// writable, naturally aligned storage whose leading `struct_size` is at least
+/// the v1 size.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_generic_curve_descriptor(
+    pose: *const MmdRuntimeReducedPose,
+    curve_index: usize,
+    out_descriptor: *mut MmdRuntimeFfiGenericCurveDescriptor,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(status) = unsafe { initialize_sized_ffi_output(out_descriptor) } {
+            return status;
+        }
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if let Err(status) = validate_generic_curve_request(pose) {
+            return status;
+        }
+        let descriptor = match generic_curve_descriptor(&pose.sequence, curve_index) {
+            Ok(descriptor) => descriptor,
+            Err(status) => return status,
+        };
+        unsafe { ptr::write(out_descriptor, descriptor) };
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Copies one runtime-neutral sparse track into a strided caller-owned buffer.
+///
+/// # Safety
+///
+/// `pose` must be a live reduced-pose handle and `out_required_count` writable.
+/// A non-empty output region must be writable, naturally aligned, large enough
+/// for `out_key_capacity * key_stride_bytes`, and must not alias the count.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_reduced_pose_generic_curve_keys(
+    pose: *const MmdRuntimeReducedPose,
+    curve_index: usize,
+    out_keys: *mut MmdRuntimeFfiGenericCurveKey,
+    out_key_capacity: usize,
+    key_stride_bytes: usize,
+    out_required_count: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if out_required_count.is_null()
+            || !(out_required_count as usize).is_multiple_of(std::mem::align_of::<usize>())
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        unsafe { ptr::write(out_required_count, 0) };
+        let key_size = std::mem::size_of::<MmdRuntimeFfiGenericCurveKey>();
+        let key_align = std::mem::align_of::<MmdRuntimeFfiGenericCurveKey>();
+        if key_stride_bytes < key_size || !key_stride_bytes.is_multiple_of(key_align) {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "key stride is smaller than or misaligned for the v1 key",
+            );
+        }
+        let Some(output_bytes) = out_key_capacity.checked_mul(key_stride_bytes) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, "key buffer size overflow");
+        };
+        if output_bytes > isize::MAX as usize {
+            return status_failure(MmdRuntimeStatus::InvalidInput, "key buffer is too large");
+        }
+        let Some(pose) = (unsafe { pose.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if let Err(status) = validate_generic_curve_request(pose) {
+            return status;
+        }
+        let descriptor = match generic_curve_descriptor(&pose.sequence, curve_index) {
+            Ok(descriptor) => descriptor,
+            Err(status) => return status,
+        };
+        if descriptor
+            .key_count
+            .checked_mul(key_stride_bytes)
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, "required key size overflow");
+        }
+        if !out_keys.is_null() {
+            if !(out_keys as usize).is_multiple_of(key_align) {
+                return status_failure(MmdRuntimeStatus::InvalidInput, "key buffer is misaligned");
+            }
+            let start = out_keys as usize;
+            let Some(end) = start.checked_add(output_bytes) else {
+                return status_failure(MmdRuntimeStatus::InvalidInput, "key buffer range overflow");
+            };
+            let count_start = out_required_count as usize;
+            let Some(count_end) = count_start.checked_add(std::mem::size_of::<usize>()) else {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "required-count range overflow",
+                );
+            };
+            if start < count_end && count_start < end {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "key buffer must not alias out_required_count",
+                );
+            }
+        }
+        unsafe { ptr::write(out_required_count, descriptor.key_count) };
+        if descriptor.key_count == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() || out_key_capacity < descriptor.key_count {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+
+        // Validate every source key before the first write so errors never leave
+        // a partially initialized caller buffer.
+        for key_index in 0..descriptor.key_count {
+            if let Err(status) = generic_curve_key(&pose.sequence, curve_index, key_index) {
+                unsafe { ptr::write(out_required_count, 0) };
+                return status;
+            }
+        }
+        for key_index in 0..descriptor.key_count {
+            let key = match generic_curve_key(&pose.sequence, curve_index, key_index) {
+                Ok(key) => key,
+                Err(status) => {
+                    unsafe { ptr::write(out_required_count, 0) };
+                    return status;
+                }
+            };
+            let destination = unsafe {
+                out_keys
+                    .cast::<u8>()
+                    .add(key_index * key_stride_bytes)
+                    .cast::<MmdRuntimeFfiGenericCurveKey>()
+            };
+            unsafe { ptr::write(destination, key) };
+        }
         MmdRuntimeStatus::Ok
     })
 }

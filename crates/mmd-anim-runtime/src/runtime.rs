@@ -96,7 +96,9 @@ impl IkSolverRuntimeStats {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IkSolveOptions {
+    /// Goal distance at or below which the solver stops. Defaults to `1e-4` model units.
     pub tolerance: f32,
+    /// Optional per-chain iteration cap. Defaults to the iteration count stored in the model.
     pub max_iterations_cap: Option<u32>,
 }
 
@@ -105,7 +107,10 @@ pub use physics::{PhysicsMode, PhysicsStepStats, PhysicsTickConfig};
 impl Default for IkSolveOptions {
     fn default() -> Self {
         Self {
-            tolerance: 0.0,
+            // A zero tolerance effectively disables convergence breaks for ordinary floating-point
+            // poses. This matches the TypeScript runtime while leaving slow-converging chains free
+            // to use the full iteration count authored in the model.
+            tolerance: 1.0e-4,
             max_iterations_cap: None,
         }
     }

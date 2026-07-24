@@ -9,6 +9,14 @@ use crate::{
     PhysicsMode, PhysicsTickConfig, RuntimeInstance,
 };
 
+#[test]
+fn default_ik_options_enable_convergence_without_capping_authored_iterations() {
+    let options = IkSolveOptions::default();
+
+    assert_eq!(options.tolerance, 1.0e-4);
+    assert_eq!(options.max_iterations_cap, None);
+}
+
 fn translation(matrix: glam::Mat4) -> Vec3A {
     Vec3A::from_vec4(matrix.w_axis)
 }
@@ -513,7 +521,14 @@ fn primitive_ik_solver_matches_runtime_ik_driver_for_two_link_chain() {
         max_iterations_cap: None,
     });
 
-    runtime.solve_ik_solver(0, IkSolveOptions::default(), false);
+    runtime.solve_ik_solver(
+        0,
+        IkSolveOptions {
+            tolerance: 0.0,
+            max_iterations_cap: None,
+        },
+        false,
+    );
 
     assert_quat_near(
         runtime.pose().local_rotation(BoneIndex(1)),
@@ -1116,10 +1131,34 @@ fn evaluate_pose_category_snapshot(
     runtime: &mut RuntimeInstance,
 ) -> WorldMatrixBoneUpdateCategorySnapshot {
     runtime.reset_world_matrix_bone_update_count();
-    runtime.evaluate_current_pose();
+    // Preserve the worst-case full-iteration characterization independently of the
+    // user-facing default convergence tolerance.
+    runtime.evaluate_current_pose_with_ik_options(IkSolveOptions {
+        tolerance: 0.0,
+        max_iterations_cap: None,
+    });
     let snapshot = WorldMatrixBoneUpdateCategorySnapshot::from_runtime(runtime);
     snapshot.assert_matches_total(runtime.world_matrix_bone_update_count());
     snapshot
+}
+
+#[test]
+fn default_ik_tolerance_stops_converged_chains_without_capping_authored_iterations() {
+    let model = build_late_chain_multi_link_ik_model(32, 3, 20);
+    let mut default_runtime = RuntimeInstance::new(Arc::clone(&model));
+    default_runtime.evaluate_current_pose();
+    let default_stats = default_runtime.ik_runtime_stats()[0];
+
+    let mut exact_runtime = RuntimeInstance::new(model);
+    exact_runtime.evaluate_current_pose_with_ik_options(IkSolveOptions {
+        tolerance: 0.0,
+        max_iterations_cap: None,
+    });
+    let exact_stats = exact_runtime.ik_runtime_stats()[0];
+
+    assert!(default_stats.final_distance_max <= IkSolveOptions::default().tolerance);
+    assert!(default_stats.executed_iterations < exact_stats.executed_iterations);
+    assert_eq!(default_stats.max_iteration_exhaustions, 0);
 }
 
 #[test]

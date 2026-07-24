@@ -1,6 +1,6 @@
 {
   "schema": "mmd-runtime-model-descriptor-abi",
-  "abi_version": 2,
+  "abi_version": 3,
   "descriptor_version": 1,
   "feature": {
     "name": "MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR",

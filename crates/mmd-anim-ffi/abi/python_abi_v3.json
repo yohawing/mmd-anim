@@ -1,6 +1,6 @@
 {
   "schema": "mmd-runtime-python-abi",
-  "abi_version": 2,
+  "abi_version": 3,
   "structs": {
     "mmd_runtime_ffi_byte_buffer_t": [
       {
@@ -19,7 +19,7 @@
       },
       {
         "name": "has_angle_limit",
-        "type": "bool"
+        "type": "uint8_t"
       },
       {
         "name": "angle_limit_min_xyz",

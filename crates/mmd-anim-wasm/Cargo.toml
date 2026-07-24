@@ -17,7 +17,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 glam.workspace = true
 mmd-anim-runtime.workspace = true
-mmd-anim-format = { path = "../mmd-anim-format", version = "0.3.1" }
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.3.2" }
 wasm-bindgen.workspace = true
 js-sys.workspace = true
+serde.workspace = true
 serde_json.workspace = true

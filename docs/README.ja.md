@@ -74,7 +74,7 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 
 ```toml
 [dependencies]
-mmd-anim = "0.3.1"
+mmd-anim = "0.3.2"
 ```
 
 ## ネイティブ (C ABI) から使う

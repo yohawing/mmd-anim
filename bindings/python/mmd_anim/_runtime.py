@@ -1,4 +1,4 @@
-"""Minimal, internal ctypes binding for the mmd-anim runtime C ABI v2."""
+"""Minimal, internal ctypes binding for the mmd-anim runtime C ABI v3."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from ._model_descriptor import (
 )
 
 
-EXPECTED_ABI_VERSION = 2
+EXPECTED_ABI_VERSION = 3
 FEATURE_PHYSICS_BULLET_NATIVE = 1 << 1
 FEATURE_HOST_POSE_NATIVE_MORPHS = 1 << 3
 LIBRARY_ENV = "MMD_RUNTIME_LIBRARY"
@@ -61,7 +61,7 @@ class NativeStatusError(NativeRuntimeError):
 
 
 class AbiVersionError(NativeRuntimeError):
-    """Raised when the loaded native library does not implement ABI v2."""
+    """Raised when the loaded native library does not implement ABI v3."""
 
 
 def _require_abi_version(actual: int) -> None:
@@ -117,7 +117,7 @@ def _copy_and_free_byte_buffer(
 
 
 class RuntimeLibrary:
-    """Loaded ABI v2 function table; internal and experimental."""
+    """Loaded ABI v3 function table; internal and experimental."""
 
     def __init__(self, path: os.PathLike[str] | str | None = None) -> None:
         self.path = resolve_library_path(path)
@@ -131,7 +131,7 @@ class RuntimeLibrary:
             self._bind()
         except AttributeError as error:
             raise NativeRuntimeError(
-                f"mmd-anim runtime library is missing a required ABI v2 symbol: {error}"
+                f"mmd-anim runtime library is missing a required ABI v3 symbol: {error}"
             ) from error
 
     def _bind(self) -> None:

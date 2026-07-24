@@ -1,4 +1,4 @@
-"""Manifest-driven ctypes subset of the experimental C ABI v2."""
+"""Manifest-driven ctypes subset of the experimental C ABI v3."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ FieldSpec: TypeAlias = tuple[str, str]
 FunctionSpec: TypeAlias = tuple[str, tuple[str, ...]]
 
 _ABI_DIR = Path(__file__).resolve().parents[3] / "crates" / "mmd-anim-ffi" / "abi"
-PYTHON_ABI_MANIFEST_PATH = _ABI_DIR / "python_abi_v2.json"
+PYTHON_ABI_MANIFEST_PATH = _ABI_DIR / "python_abi_v3.json"
 MODEL_DESCRIPTOR_MANIFEST_PATH = _ABI_DIR / "model_descriptor_v1.json"
 MODEL_DESCRIPTOR_MANIFEST: dict[str, object] = json.loads(
     MODEL_DESCRIPTOR_MANIFEST_PATH.read_text(encoding="utf-8")

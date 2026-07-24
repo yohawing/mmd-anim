@@ -1,5 +1,6 @@
 use super::*;
 use std::ffi::CStr;
+use std::mem::MaybeUninit;
 
 fn last_error_cstr() -> Option<&'static CStr> {
     let ptr = mmd_runtime_last_error_message();
@@ -58,7 +59,7 @@ fn failing_ffi_import_sets_last_error_message() {
 
 #[test]
 fn abi_version_matches_current_breaking_surface() {
-    assert_eq!(ABI_VERSION, 2);
+    assert_eq!(ABI_VERSION, 3);
     assert_eq!(mmd_runtime_abi_version(), ABI_VERSION);
 }
 
@@ -302,7 +303,7 @@ fn reduced_pose_curve_fixture(target: u32) -> *mut MmdRuntimeReducedPose {
         world_rotation_radians: 1.0e-5,
         morph_weight: 1.0e-5,
     };
-    let mut reduced = ptr::null_mut();
+    let mut reduced = MaybeUninit::<*mut MmdRuntimeReducedPose>::uninit();
     assert_eq!(
         unsafe {
             mmd_runtime_reduced_pose_create_from_dense(
@@ -317,311 +318,412 @@ fn reduced_pose_curve_fixture(target: u32) -> *mut MmdRuntimeReducedPose {
                 1.0,
                 target,
                 tolerances,
-                &mut reduced,
+                reduced.as_mut_ptr(),
             )
         },
         MmdRuntimeStatus::Ok
     );
     unsafe { mmd_runtime_model_free(model) };
+    let reduced = unsafe { reduced.assume_init() };
     assert!(!reduced.is_null());
     reduced
 }
 
-fn copy_unity_curve_keys(
+fn copy_generic_curve_keys(
     reduced: *const MmdRuntimeReducedPose,
-    frames_per_second: f32,
-    flip_z: bool,
     curve_index: usize,
-) -> Vec<MmdRuntimeFfiUnityCurveKey> {
-    let mut required = 0;
+) -> Vec<MmdRuntimeFfiGenericCurveKey> {
+    let stride = std::mem::size_of::<MmdRuntimeFfiGenericCurveKey>();
+    let mut required = usize::MAX;
     assert_eq!(
         unsafe {
-            mmd_runtime_reduced_pose_unity_curve_keys(
+            mmd_runtime_reduced_pose_generic_curve_keys(
                 reduced,
-                frames_per_second,
-                flip_z,
                 curve_index,
                 ptr::null_mut(),
                 0,
+                stride,
                 &mut required,
             )
         },
         MmdRuntimeStatus::BufferTooSmall
     );
-    let mut keys = vec![MmdRuntimeFfiUnityCurveKey::default(); required];
+    let mut keys = vec![MmdRuntimeFfiGenericCurveKey::default(); required];
     assert_eq!(
         unsafe {
-            mmd_runtime_reduced_pose_unity_curve_keys(
+            mmd_runtime_reduced_pose_generic_curve_keys(
                 reduced,
-                frames_per_second,
-                flip_z,
                 curve_index,
                 keys.as_mut_ptr(),
                 keys.len(),
+                stride,
                 &mut required,
             )
         },
         MmdRuntimeStatus::Ok
     );
+    assert_eq!(required, keys.len());
     keys
 }
 
 #[test]
-fn reduced_pose_unity_curves_are_two_call_and_match_rust_dto_after_model_free() {
-    let reduced = reduced_pose_curve_fixture(2);
-    let frames_per_second = 60.0;
-    let flip_z = true;
+fn reduced_pose_generic_curves_match_raw_tracks_after_model_free() {
+    if std::mem::size_of::<usize>() == 8 {
+        assert_eq!(std::mem::size_of::<MmdRuntimeFfiGenericCurveInfo>(), 72);
+        assert_eq!(std::mem::align_of::<MmdRuntimeFfiGenericCurveInfo>(), 8);
+        assert_eq!(
+            std::mem::offset_of!(MmdRuntimeFfiGenericCurveInfo, model_identity),
+            32
+        );
+        assert_eq!(
+            std::mem::offset_of!(MmdRuntimeFfiGenericCurveInfo, frame_count),
+            48
+        );
+        assert_eq!(
+            std::mem::size_of::<MmdRuntimeFfiGenericCurveDescriptor>(),
+            40
+        );
+        assert_eq!(
+            std::mem::offset_of!(MmdRuntimeFfiGenericCurveDescriptor, key_count),
+            32
+        );
+        assert_eq!(std::mem::size_of::<MmdRuntimeFfiGenericCurveKey>(), 128);
+        assert_eq!(std::mem::align_of::<MmdRuntimeFfiGenericCurveKey>(), 8);
+        assert_eq!(
+            std::mem::offset_of!(MmdRuntimeFfiGenericCurveKey, rotation_xyzw),
+            24
+        );
+        assert_eq!(
+            std::mem::offset_of!(MmdRuntimeFfiGenericCurveKey, segment_current_in_scalar),
+            120
+        );
+    }
+    let reduced = reduced_pose_curve_fixture(MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC);
+    assert_eq!(mmd_runtime_abi_version(), 3);
+    assert_eq!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES,
+        MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES
+    );
+
+    let mut info = MmdRuntimeFfiGenericCurveInfo::default();
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_info(reduced, &mut info) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        info.struct_size as usize,
+        std::mem::size_of::<MmdRuntimeFfiGenericCurveInfo>()
+    );
+    assert_eq!(
+        info.abi_version,
+        MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1
+    );
+    assert_eq!(
+        info.reduction_target,
+        MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC
+    );
+    assert_eq!(info.coordinate_system, 0);
+    assert_eq!(info.length_unit, 0);
+    assert_eq!(info.angle_unit, 0);
+    assert_eq!(info.time_unit, 0);
+    assert_eq!(info.tangent_unit, 0);
+    assert_eq!(info.model_identity, 77);
+    assert_eq!(info.start_frame, 0.0);
+    assert_eq!(info.frame_step, 1.0);
+    assert_eq!(info.frame_count, 5);
+    assert_eq!(info.bone_count, 1);
+    assert_eq!(info.morph_count, 1);
 
     let mut curve_count = usize::MAX;
     assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_count(reduced, &mut curve_count) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(curve_count, info.bone_count + info.morph_count);
+
+    let sequence = unsafe { &(*reduced).sequence };
+    for curve_index in 0..curve_count {
+        let mut descriptor = MmdRuntimeFfiGenericCurveDescriptor::default();
+        assert_eq!(
+            unsafe {
+                mmd_runtime_reduced_pose_generic_curve_descriptor(
+                    reduced,
+                    curve_index,
+                    &mut descriptor,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        assert_eq!(
+            descriptor.struct_size as usize,
+            std::mem::size_of::<MmdRuntimeFfiGenericCurveDescriptor>()
+        );
+        assert_eq!(
+            descriptor.abi_version,
+            MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1
+        );
+        assert_eq!(
+            descriptor.interpolation,
+            MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC
+        );
+        let keys = copy_generic_curve_keys(reduced, curve_index);
+        assert_eq!(keys.len(), descriptor.key_count);
+        assert!(
+            keys.iter()
+                .all(|key| key.frame == sequence.sample_frames()[key.sample_index])
+        );
+
+        if curve_index < info.bone_count {
+            assert_eq!(descriptor.kind, MMD_RUNTIME_GENERIC_CURVE_BONE_LOCAL);
+            assert_eq!(descriptor.target_index as usize, curve_index);
+            assert_eq!(descriptor.parent_index, -1);
+            assert_eq!(
+                descriptor.value_flags,
+                MMD_RUNTIME_GENERIC_VALUE_TRANSLATION | MMD_RUNTIME_GENERIC_VALUE_QUATERNION
+            );
+            assert_eq!(
+                descriptor.rotation_basis,
+                MMD_RUNTIME_GENERIC_ROTATION_BASIS_RUNTIME_QUATERNION
+            );
+            let raw_keys = sequence.bone_tracks()[curve_index].keys();
+            for (key, raw) in keys.iter().zip(raw_keys) {
+                assert_eq!(key.sample_index, raw.sample_index);
+                assert_slice_near(&key.translation_xyz, &raw.translation.to_array(), 1.0e-7);
+                assert_slice_near(&key.rotation_xyzw, &raw.rotation.to_array(), 1.0e-7);
+                assert_near(
+                    key.rotation_xyzw
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f32>(),
+                    1.0,
+                    1.0e-5,
+                );
+                assert_slice_near(
+                    &key.segment_prev_out_translation_xyz,
+                    &raw.dcc_segment.translation_out_tangent.to_array(),
+                    1.0e-7,
+                );
+                assert_slice_near(
+                    &key.segment_current_in_translation_xyz,
+                    &raw.dcc_segment.translation_in_tangent.to_array(),
+                    1.0e-7,
+                );
+                assert_slice_near(
+                    &key.segment_from_previous_start_euler_xyz,
+                    &raw.dcc_segment.rotation_start_euler_xyz.to_array(),
+                    1.0e-7,
+                );
+                assert_slice_near(
+                    &key.segment_from_previous_end_euler_xyz,
+                    &raw.dcc_segment.rotation_end_euler_xyz.to_array(),
+                    1.0e-7,
+                );
+            }
+            assert_eq!(keys[0].segment_prev_out_translation_xyz, [0.0; 3]);
+            assert_eq!(
+                keys.last().unwrap().segment_current_in_translation_xyz,
+                raw_keys
+                    .last()
+                    .unwrap()
+                    .dcc_segment
+                    .translation_in_tangent
+                    .to_array()
+            );
+        } else {
+            let morph_index = curve_index - info.bone_count;
+            assert_eq!(descriptor.kind, MMD_RUNTIME_GENERIC_CURVE_MORPH_WEIGHT);
+            assert_eq!(descriptor.target_index as usize, morph_index);
+            assert_eq!(descriptor.parent_index, -1);
+            assert_eq!(descriptor.value_flags, MMD_RUNTIME_GENERIC_VALUE_SCALAR);
+            assert_eq!(
+                descriptor.rotation_basis,
+                MMD_RUNTIME_GENERIC_ROTATION_BASIS_NONE
+            );
+            let raw_keys = sequence.morph_tracks()[morph_index].keys();
+            for (key, raw) in keys.iter().zip(raw_keys) {
+                assert_eq!(key.sample_index, raw.sample_index);
+                assert_near(key.scalar, raw.weight, 1.0e-7);
+                assert_near(
+                    key.segment_prev_out_scalar,
+                    raw.dcc_segment.out_tangent,
+                    1.0e-7,
+                );
+                assert_near(
+                    key.segment_current_in_scalar,
+                    raw.dcc_segment.in_tangent,
+                    1.0e-7,
+                );
+                assert_eq!(key.translation_xyz, [0.0; 3]);
+                assert_eq!(key.rotation_xyzw, [0.0; 4]);
+            }
+            assert_eq!(keys[0].segment_prev_out_scalar, 0.0);
+            assert_eq!(
+                keys.last().unwrap().segment_current_in_scalar,
+                raw_keys.last().unwrap().dcc_segment.in_tangent
+            );
+        }
+    }
+
+    unsafe { mmd_runtime_reduced_pose_free(reduced) };
+}
+
+#[repr(C)]
+struct PaddedGenericCurveKey {
+    key: MmdRuntimeFfiGenericCurveKey,
+    tail: [u64; 2],
+}
+
+#[test]
+fn reduced_pose_generic_curves_validate_sized_outputs_stride_and_short_buffers() {
+    let reduced = reduced_pose_curve_fixture(MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC);
+    let key_size = std::mem::size_of::<MmdRuntimeFfiGenericCurveKey>();
+
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_info(reduced, ptr::null_mut()) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_count(reduced, ptr::null_mut()) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_descriptor(reduced, 0, ptr::null_mut(),) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    let mut info = MmdRuntimeFfiGenericCurveInfo::default();
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_info(ptr::null(), &mut info) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(info.abi_version, 0);
+    let mut null_pose_count = usize::MAX;
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_count(ptr::null(), &mut null_pose_count) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(null_pose_count, 0);
+
+    let mut descriptor = MmdRuntimeFfiGenericCurveDescriptor::default();
+    descriptor.struct_size -= 1;
+    let undersized = descriptor.struct_size;
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_generic_curve_descriptor(reduced, 0, &mut descriptor) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(descriptor.struct_size, undersized);
+
+    let mut required = usize::MAX;
+    assert_eq!(
         unsafe {
-            mmd_runtime_reduced_pose_unity_curve_count(
+            mmd_runtime_reduced_pose_generic_curve_keys(
                 reduced,
-                frames_per_second,
-                flip_z,
-                &mut curve_count,
+                0,
+                ptr::null_mut(),
+                0,
+                key_size - 1,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(required, 0);
+    let overflowing_capacity = usize::MAX / key_size + 1;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                0,
+                ptr::null_mut(),
+                overflowing_capacity,
+                key_size,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(required, 0);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                0,
+                ptr::null_mut(),
+                0,
+                key_size + 1,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    let keys = copy_generic_curve_keys(reduced, 0);
+    let sentinel = MmdRuntimeFfiGenericCurveKey {
+        frame: -123.0,
+        ..MmdRuntimeFfiGenericCurveKey::default()
+    };
+    let mut short = vec![sentinel; keys.len().saturating_sub(1)];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                0,
+                short.as_mut_ptr(),
+                short.len(),
+                key_size,
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(required, keys.len());
+    assert!(short.iter().all(|key| *key == sentinel));
+
+    let mut padded = (0..keys.len())
+        .map(|_| PaddedGenericCurveKey {
+            key: MmdRuntimeFfiGenericCurveKey::default(),
+            tail: [u64::MAX; 2],
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_generic_curve_keys(
+                reduced,
+                0,
+                padded.as_mut_ptr().cast(),
+                padded.len(),
+                std::mem::size_of::<PaddedGenericCurveKey>(),
+                &mut required,
             )
         },
         MmdRuntimeStatus::Ok
     );
-    assert_eq!(curve_count, 7);
+    assert_eq!(padded.iter().map(|slot| slot.key).collect::<Vec<_>>(), keys);
+    assert!(padded.iter().all(|slot| slot.tail == [u64::MAX; 2]));
 
-    let sequence = unsafe { &(*reduced).sequence };
-    let expected = mmd_anim_format::fbx::reduced_pose_to_unity_animation_clip_with_fps(
-        sequence,
-        &mmd_anim_format::fbx::UnityReducedPoseBindings {
-            model_identity: 77,
-            bone_paths: vec![String::new()],
-            morph_bindings: vec![Some(mmd_anim_format::fbx::UnityMorphBinding {
-                path: String::new(),
-                property: String::new(),
-            })],
-        },
-        frames_per_second,
-        flip_z,
-    )
-    .unwrap();
-    assert_eq!(expected.curves.len(), curve_count);
-
-    for (curve_index, expected_curve) in expected.curves.iter().enumerate() {
-        let mut descriptor = MmdRuntimeFfiUnityCurveDescriptor::default();
-        assert_eq!(
-            unsafe {
-                mmd_runtime_reduced_pose_unity_curve_descriptor(
-                    reduced,
-                    frames_per_second,
-                    flip_z,
-                    curve_index,
-                    &mut descriptor,
-                )
-            },
-            MmdRuntimeStatus::Ok
-        );
-        assert_eq!(descriptor.key_count, expected_curve.keys.len());
-        if curve_index < 3 {
-            assert_eq!(
-                descriptor.semantic,
-                MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION
-            );
-            assert_eq!(descriptor.target_index, 0);
-            assert_eq!(descriptor.axis, curve_index as u32);
-        } else if curve_index < 6 {
-            assert_eq!(
-                descriptor.semantic,
-                MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER
-            );
-            assert_eq!(descriptor.target_index, 0);
-            assert_eq!(descriptor.axis, (curve_index - 3) as u32);
-        } else {
-            assert_eq!(descriptor.semantic, MMD_RUNTIME_UNITY_CURVE_MORPH_WEIGHT);
-            assert_eq!(descriptor.target_index, 0);
-            assert_eq!(descriptor.axis, MMD_RUNTIME_UNITY_CURVE_AXIS_NONE);
-        }
-
-        let mut required = usize::MAX;
-        assert_eq!(
-            unsafe {
-                mmd_runtime_reduced_pose_unity_curve_keys(
-                    reduced,
-                    frames_per_second,
-                    flip_z,
-                    curve_index,
-                    ptr::null_mut(),
-                    0,
-                    &mut required,
-                )
-            },
-            MmdRuntimeStatus::BufferTooSmall
-        );
-        assert_eq!(required, descriptor.key_count);
-
-        let mut keys = vec![MmdRuntimeFfiUnityCurveKey::default(); required];
-        if required > 0 {
-            assert_eq!(
-                unsafe {
-                    mmd_runtime_reduced_pose_unity_curve_keys(
-                        reduced,
-                        frames_per_second,
-                        flip_z,
-                        curve_index,
-                        keys.as_mut_ptr(),
-                        required - 1,
-                        &mut required,
-                    )
-                },
-                MmdRuntimeStatus::BufferTooSmall
-            );
-        }
-        assert_eq!(
-            unsafe {
-                mmd_runtime_reduced_pose_unity_curve_keys(
-                    reduced,
-                    frames_per_second,
-                    flip_z,
-                    curve_index,
-                    keys.as_mut_ptr(),
-                    keys.len(),
-                    &mut required,
-                )
-            },
-            MmdRuntimeStatus::Ok
-        );
-        for (actual, expected) in keys.iter().zip(&expected_curve.keys) {
-            assert_eq!(actual.time_seconds, expected.time_seconds);
-            assert_eq!(actual.value, expected.value);
-            assert_eq!(actual.in_tangent, expected.in_tangent);
-            assert_eq!(actual.out_tangent, expected.out_tangent);
-        }
-    }
-
-    let mut descriptor = MmdRuntimeFfiUnityCurveDescriptor::default();
     assert_eq!(
         unsafe {
-            mmd_runtime_reduced_pose_unity_curve_descriptor(
+            mmd_runtime_reduced_pose_generic_curve_keys(
                 reduced,
-                frames_per_second,
-                flip_z,
-                curve_count,
-                &mut descriptor,
+                usize::MAX,
+                ptr::null_mut(),
+                0,
+                key_size,
+                &mut required,
             )
         },
         MmdRuntimeStatus::InvalidInput
     );
+    assert_eq!(required, 0);
     unsafe { mmd_runtime_reduced_pose_free(reduced) };
-}
-
-#[test]
-fn reduced_pose_unity_curves_validate_handle_fps_outputs_and_target() {
-    let dcc = reduced_pose_curve_fixture(2);
-    let mut count = usize::MAX;
-    assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_unity_curve_count(ptr::null(), 30.0, false, &mut count) },
-        MmdRuntimeStatus::InvalidInput
-    );
-    assert_eq!(count, 0);
-    assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_unity_curve_count(dcc, f32::NAN, false, &mut count) },
-        MmdRuntimeStatus::InvalidInput
-    );
-    assert_eq!(count, 0);
-    assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_unity_curve_count(dcc, 0.0, false, &mut count) },
-        MmdRuntimeStatus::InvalidInput
-    );
-    for frames_per_second in [f32::MAX, f32::from_bits(1)] {
-        let mut descriptor = MmdRuntimeFfiUnityCurveDescriptor {
-            semantic: u32::MAX,
-            target_index: u32::MAX,
-            axis: u32::MAX,
-            key_count: usize::MAX,
-        };
-        let mut required = usize::MAX;
-        assert_eq!(
-            unsafe {
-                mmd_runtime_reduced_pose_unity_curve_count(
-                    dcc,
-                    frames_per_second,
-                    false,
-                    &mut count,
-                )
-            },
-            MmdRuntimeStatus::InvalidInput
-        );
-        assert_eq!(count, 0);
-        assert_eq!(
-            unsafe {
-                mmd_runtime_reduced_pose_unity_curve_descriptor(
-                    dcc,
-                    frames_per_second,
-                    false,
-                    0,
-                    &mut descriptor,
-                )
-            },
-            MmdRuntimeStatus::InvalidInput
-        );
-        assert_eq!(descriptor, MmdRuntimeFfiUnityCurveDescriptor::default());
-        assert_eq!(
-            unsafe {
-                mmd_runtime_reduced_pose_unity_curve_keys(
-                    dcc,
-                    frames_per_second,
-                    false,
-                    0,
-                    ptr::null_mut(),
-                    0,
-                    &mut required,
-                )
-            },
-            MmdRuntimeStatus::InvalidInput
-        );
-        assert_eq!(required, 0);
-    }
-    assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_unity_curve_count(dcc, 30.0, false, ptr::null_mut()) },
-        MmdRuntimeStatus::InvalidInput
-    );
-    unsafe { mmd_runtime_reduced_pose_free(dcc) };
 
     let linear = reduced_pose_curve_fixture(0);
+    let mut count = usize::MAX;
     assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_unity_curve_count(linear, 30.0, false, &mut count) },
+        unsafe { mmd_runtime_reduced_pose_generic_curve_count(linear, &mut count) },
         MmdRuntimeStatus::Unsupported
     );
     assert_eq!(count, 0);
     unsafe { mmd_runtime_reduced_pose_free(linear) };
-}
-
-#[test]
-fn reduced_pose_unity_curve_cache_invalidates_for_fps_and_flip_z() {
-    let reduced = reduced_pose_curve_fixture(2);
-    let z_30 = copy_unity_curve_keys(reduced, 30.0, false, 2);
-    let z_60 = copy_unity_curve_keys(reduced, 60.0, false, 2);
-    let z_60_flipped = copy_unity_curve_keys(reduced, 60.0, true, 2);
-    let z_30_again = copy_unity_curve_keys(reduced, 30.0, false, 2);
-
-    assert_eq!(z_30_again, z_30);
-    assert_near(z_30.last().unwrap().time_seconds, 4.0 / 30.0, 1.0e-7);
-    assert_near(z_60.last().unwrap().time_seconds, 4.0 / 60.0, 1.0e-7);
-    assert_near(z_30.last().unwrap().value, 0.5, 1.0e-6);
-    assert_near(z_60_flipped.last().unwrap().value, -0.5, 1.0e-6);
-
-    let tangent_index = z_30
-        .iter()
-        .position(|key| key.out_tangent.abs() > 1.0e-5)
-        .expect("fixture must contain a non-zero translation tangent");
-    assert_near(
-        z_60[tangent_index].out_tangent,
-        z_30[tangent_index].out_tangent * 2.0,
-        1.0e-5,
-    );
-    assert_near(
-        z_60_flipped[tangent_index].out_tangent,
-        -z_60[tangent_index].out_tangent,
-        1.0e-5,
-    );
-
-    unsafe { mmd_runtime_reduced_pose_free(reduced) };
 }
 
 #[test]
@@ -687,11 +789,12 @@ fn reduced_pose_handle_reports_and_enumerates_sparse_curves_after_model_free() {
     assert!(invalid.is_null());
     unsafe { mmd_runtime_model_free(model) };
 
-    let mut report = MmdRuntimeFfiPoseReductionReport::default();
+    let mut report = MaybeUninit::<MmdRuntimeFfiPoseReductionReport>::uninit();
     assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_report(reduced, &mut report) },
+        unsafe { mmd_runtime_reduced_pose_report(reduced, report.as_mut_ptr()) },
         MmdRuntimeStatus::Ok
     );
+    let report = unsafe { report.assume_init() };
     assert_eq!(report.source_bone_key_count, 3);
     assert_eq!(report.reduced_bone_key_count, 2);
     assert_eq!(report.source_morph_key_count, 3);
@@ -699,16 +802,14 @@ fn reduced_pose_handle_reports_and_enumerates_sparse_curves_after_model_free() {
 
     let mut curve_count = 0;
     assert_eq!(
-        unsafe {
-            mmd_runtime_reduced_pose_unity_curve_count(reduced, 30.0, false, &mut curve_count)
-        },
+        unsafe { mmd_runtime_reduced_pose_generic_curve_count(reduced, &mut curve_count) },
         MmdRuntimeStatus::Ok
     );
-    assert_eq!(curve_count, 7);
-    let morph_keys = copy_unity_curve_keys(reduced, 30.0, false, curve_count - 1);
+    assert_eq!(curve_count, 2);
+    let morph_keys = copy_generic_curve_keys(reduced, curve_count - 1);
     assert_eq!(morph_keys.len(), 2);
-    assert_near(morph_keys[0].value, 0.0, 1.0e-5);
-    assert_near(morph_keys[1].value, 100.0, 1.0e-5);
+    assert_near(morph_keys[0].scalar, 0.0, 1.0e-5);
+    assert_near(morph_keys[1].scalar, 1.0, 1.0e-5);
     unsafe { mmd_runtime_reduced_pose_free(reduced) };
     unsafe { mmd_runtime_reduced_pose_free(ptr::null_mut()) };
 }
@@ -730,7 +831,7 @@ fn simple_ik_chain() -> *mut MmdRuntimeIkChain {
     ];
     let links = [MmdRuntimeFfiRigIkLink {
         bone_slot: 0,
-        has_angle_limit: false,
+        has_angle_limit: 0,
         angle_limit_min_xyz: [0.0, 0.0, 0.0],
         angle_limit_max_xyz: [0.0, 0.0, 0.0],
     }];
@@ -748,11 +849,106 @@ fn simple_ik_chain() -> *mut MmdRuntimeIkChain {
 }
 
 #[test]
+fn flat_model_create_rejects_misaligned_and_oversized_slices_before_deref() {
+    let parent = [-1_i32];
+    let rest = [0.0_f32; 3];
+    let storage = [0_u8; 8];
+    let misaligned_offset = (0..std::mem::align_of::<i32>())
+        .find(|offset| {
+            !(storage.as_ptr() as usize + offset).is_multiple_of(std::mem::align_of::<i32>())
+        })
+        .expect("an i32 alignment always has misaligned byte offsets");
+    let misaligned_parent = unsafe { storage.as_ptr().add(misaligned_offset).cast::<i32>() };
+    assert!(unsafe { mmd_runtime_model_create(misaligned_parent, rest.as_ptr(), 1) }.is_null());
+    assert!(
+        unsafe { mmd_runtime_model_create(parent.as_ptr(), rest.as_ptr(), usize::MAX) }.is_null()
+    );
+
+    let inverse_bind = [0.0_f32; 16];
+    let overflowing_bone_count = usize::MAX / 16 + 1;
+    assert!(
+        unsafe {
+            mmd_runtime_model_create_with_inverse_bind(
+                parent.as_ptr(),
+                rest.as_ptr(),
+                inverse_bind.as_ptr(),
+                overflowing_bone_count,
+            )
+        }
+        .is_null()
+    );
+}
+
+#[test]
+fn primitive_creators_reject_noncanonical_boolean_bytes() {
+    let invalid_append = MmdRuntimeFfiAppendConfig {
+        ratio: 1.0,
+        affect_rotation: 2,
+        affect_translation: 1,
+    };
+    assert!(unsafe { mmd_runtime_append_solver_create(&invalid_append) }.is_null());
+
+    let bones = [MmdRuntimeFfiRigBone {
+        parent_slot: -1,
+        rest_position_xyz: [0.0, 0.0, 0.0],
+        flags: 0,
+        fixed_axis_xyz: [0.0, 0.0, 0.0],
+    }];
+    let invalid_link = [MmdRuntimeFfiRigIkLink {
+        bone_slot: 0,
+        has_angle_limit: 2,
+        angle_limit_min_xyz: [0.0; 3],
+        angle_limit_max_xyz: [0.0; 3],
+    }];
+    assert!(
+        unsafe {
+            mmd_runtime_ik_chain_create(
+                bones.as_ptr(),
+                bones.len(),
+                0,
+                invalid_link.as_ptr(),
+                invalid_link.len(),
+                1,
+                0.0,
+            )
+        }
+        .is_null()
+    );
+
+    let valid_link = [MmdRuntimeFfiRigIkLink {
+        bone_slot: 0,
+        has_angle_limit: 0,
+        angle_limit_min_xyz: [0.0; 3],
+        angle_limit_max_xyz: [0.0; 3],
+    }];
+    let invalid_local_axis = [MmdRuntimeFfiRigBoneLocalAxisV2 {
+        has_local_axis: 2,
+        local_axis_x_xyz: [0.0; 3],
+        local_axis_z_xyz: [0.0; 3],
+    }];
+    assert!(
+        unsafe {
+            mmd_runtime_ik_chain_create_v2(
+                bones.as_ptr(),
+                bones.len(),
+                invalid_local_axis.as_ptr(),
+                0,
+                valid_link.as_ptr(),
+                valid_link.len(),
+                1,
+                0.0,
+            )
+        }
+        .is_null()
+    );
+}
+
+#[test]
 fn append_solver_lifecycle_and_expected_output_use_xyzw_quaternion() {
     let config = MmdRuntimeFfiAppendConfig {
         ratio: 0.5,
-        affect_rotation: true,
-        affect_translation: true,
+        affect_rotation: 1,
+        affect_translation: 1,
     };
     let solver = unsafe { mmd_runtime_append_solver_create(&config) };
     assert!(!solver.is_null());
@@ -790,8 +986,8 @@ fn append_solver_lifecycle_and_expected_output_use_xyzw_quaternion() {
 fn append_solver_rejects_null_inputs() {
     let config = MmdRuntimeFfiAppendConfig {
         ratio: 1.0,
-        affect_rotation: true,
-        affect_translation: true,
+        affect_rotation: 1,
+        affect_translation: 1,
     };
     assert!(unsafe { mmd_runtime_append_solver_create(ptr::null()) }.is_null());
     let solver = unsafe { mmd_runtime_append_solver_create(&config) };
@@ -906,7 +1102,7 @@ fn ik_chain_create_v2_null_local_axes_matches_v1() {
     ];
     let links = [MmdRuntimeFfiRigIkLink {
         bone_slot: 0,
-        has_angle_limit: false,
+        has_angle_limit: 0,
         angle_limit_min_xyz: [0.0, 0.0, 0.0],
         angle_limit_max_xyz: [0.0, 0.0, 0.0],
     }];
@@ -996,19 +1192,19 @@ fn ik_chain_create_v2_local_axis_changes_limited_solve() {
     let half_pi = std::f32::consts::FRAC_PI_2;
     let links = [MmdRuntimeFfiRigIkLink {
         bone_slot: 0,
-        has_angle_limit: true,
+        has_angle_limit: 1,
         angle_limit_min_xyz: [-half_pi, 0.0, 0.0],
         angle_limit_max_xyz: [half_pi, 0.0, 0.0],
     }];
     // localAxis x=(0,0,1), z=(0,1,0) rebuilds a non-identity LA frame.
     let local_axes = [
         MmdRuntimeFfiRigBoneLocalAxisV2 {
-            has_local_axis: true,
+            has_local_axis: 1,
             local_axis_x_xyz: [0.0, 0.0, 1.0],
             local_axis_z_xyz: [0.0, 1.0, 0.0],
         },
         MmdRuntimeFfiRigBoneLocalAxisV2 {
-            has_local_axis: false,
+            has_local_axis: 0,
             local_axis_x_xyz: [0.0, 0.0, 0.0],
             local_axis_z_xyz: [0.0, 0.0, 0.0],
         },
@@ -1296,6 +1492,39 @@ fn evaluates_rest_pose_through_c_abi() {
         mmd_runtime_instance_free(instance);
         mmd_runtime_model_free(model);
     }
+}
+
+#[test]
+fn instance_remains_valid_when_model_handle_is_freed_first() {
+    let parents = [-1_i32];
+    let rest_positions = [1.0_f32, 2.0, 3.0];
+    let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
+    assert!(!model.is_null());
+    let instance = unsafe { mmd_runtime_instance_create(model, 1) };
+    assert!(!instance.is_null());
+
+    unsafe { mmd_runtime_model_free(model) };
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    assert_eq!(unsafe { mmd_runtime_instance_bone_count(instance) }, 1);
+    let world_view = unsafe { mmd_runtime_instance_world_matrices(instance) };
+    assert!(!unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, world_view.cast_mut(), 16)
+    });
+    let skinning_view = unsafe { mmd_runtime_instance_skinning_matrices(instance) };
+    assert!(!unsafe {
+        mmd_runtime_instance_copy_skinning_matrices(instance, skinning_view.cast_mut(), 16)
+    });
+    let morph_view = unsafe { mmd_runtime_instance_morph_weights(instance) };
+    assert!(!unsafe {
+        mmd_runtime_instance_copy_morph_weights(instance, morph_view.cast_mut(), 1)
+    });
+    let mut world = [0.0_f32; 16];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, world.as_mut_ptr(), world.len())
+    });
+    assert_slice_near(&world[12..15], &rest_positions, 0.0);
+
+    unsafe { mmd_runtime_instance_free(instance) };
 }
 
 #[test]
@@ -3033,6 +3262,20 @@ fn evaluates_clip_frame_batch_through_c_abi_without_mutating_source_instance() {
         mmd_runtime_instance_evaluate_clip_frame_batch(
             instance,
             clip,
+            0.0,
+            30.0,
+            3,
+            2,
+            batch_world.as_mut_ptr(),
+            batch_world.len(),
+            batch_world.as_mut_ptr(),
+            3,
+        )
+    });
+    assert!(!unsafe {
+        mmd_runtime_instance_evaluate_clip_frame_batch(
+            instance,
+            clip,
             f32::NAN,
             30.0,
             3,
@@ -3817,7 +4060,7 @@ fn descriptor_v1_rejects_misaligned_and_oversized_record_ranges_before_deref() {
 }
 
 #[test]
-fn descriptor_feature_flag_is_available_without_changing_abi() {
+fn descriptor_feature_flag_is_available_in_current_abi() {
     assert_eq!(mmd_runtime_abi_version(), ABI_VERSION);
     assert_ne!(
         mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR,

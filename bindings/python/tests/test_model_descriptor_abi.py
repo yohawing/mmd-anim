@@ -66,7 +66,7 @@ class NativeModelDescriptorAbiTests(unittest.TestCase):
         cls.library = ctypes.CDLL(str(_library_path().resolve()))
         bind_functions(cls.library)
         if cls.library.mmd_runtime_abi_version() != EXPECTED_ABI_VERSION:
-            raise RuntimeError("release cdylib is not ABI v2")
+            raise RuntimeError("release cdylib is not ABI v3")
         if not cls.library.mmd_runtime_feature_flags() & FEATURE_MODEL_DESCRIPTOR:
             raise RuntimeError("release cdylib lacks model-descriptor feature")
         if not hasattr(cls.library, "mmd_runtime_model_create_from_descriptor"):

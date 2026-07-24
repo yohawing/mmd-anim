@@ -25,7 +25,9 @@ WASM payloads, and PMX morph metadata preservation.
 ### Fixed
 
 - Preserved all five PMX morph panel categories across binary parse/export,
-  JSON compatibility defaults, FBX material splitting, and parts workflows.
+  JSON compatibility defaults, FBX material splitting, and parts workflows;
+  parts export now rejects unknown panel labels instead of coercing them to
+  `other`.
 - Rejected non-canonical boolean and curve-flag bytes, invalid or overlapping
   pointer ranges, aliased instance output views, undersized structs, and
   misaligned or overflowing caller-owned buffers in the experimental C ABI.

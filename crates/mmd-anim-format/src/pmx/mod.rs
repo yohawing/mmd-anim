@@ -2371,6 +2371,12 @@ fn validate_pmx_parts_morphs(
         ));
     }
     for (morph_index, morph) in descriptor.morphs.iter().enumerate() {
+        if morph_panel_byte_checked(&morph.panel).is_none() {
+            return Err(format!(
+                "morphs[{morph_index}].panel must be system, brow, eye, mouth, or other, got {}",
+                morph.panel
+            ));
+        }
         match morph.kind.as_str() {
             "vertex" => {
                 for (offset_index, offset) in morph.vertex_offsets.iter().enumerate() {
@@ -4292,13 +4298,17 @@ fn morph_panel_name(panel: u8) -> String {
 }
 
 fn morph_panel_byte(panel: &str) -> u8 {
+    morph_panel_byte_checked(panel).unwrap_or(4)
+}
+
+fn morph_panel_byte_checked(panel: &str) -> Option<u8> {
     match panel {
-        "system" => 0,
-        "brow" => 1,
-        "eye" => 2,
-        "mouth" => 3,
-        "other" => 4,
-        _ => 4,
+        "system" => Some(0),
+        "brow" => Some(1),
+        "eye" => Some(2),
+        "mouth" => Some(3),
+        "other" => Some(4),
+        _ => None,
     }
 }
 
@@ -6556,6 +6566,30 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("materials faceCount sum"));
+    }
+
+    #[test]
+    fn rejects_invalid_pmx_parts_morph_panel() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(serde_json::json!({
+            "morphs": [{ "name": "typo", "kind": "vertex", "panel": "moutn" }]
+        }))
+        .unwrap();
+        let error = build_pmx_model_from_parts(PmxPartsInput {
+            descriptor,
+            positions_xyz: &[0.0, 0.0, 0.0],
+            normals_xyz: &[0.0, 1.0, 0.0],
+            uvs_xy: &[0.0, 0.0],
+            indices: &[],
+            skin_indices: &[],
+            skin_weights: &[],
+            edge_scale: &[],
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "morphs[0].panel must be system, brow, eye, mouth, or other, got moutn"
+        );
     }
 
     #[test]

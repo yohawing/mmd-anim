@@ -56,7 +56,7 @@ UNITY_FUNCTIONS = {
         [
             ("pose", "const_reduced_pose_ptr"),
             ("frames_per_second", "f32"),
-            ("flip_z", "bool"),
+            ("flip_z", "u8"),
             ("out_curve_count", "usize_ptr"),
         ],
     ),
@@ -65,7 +65,7 @@ UNITY_FUNCTIONS = {
         [
             ("pose", "const_reduced_pose_ptr"),
             ("frames_per_second", "f32"),
-            ("flip_z", "bool"),
+            ("flip_z", "u8"),
             ("curve_index", "usize"),
             ("out_descriptor", "unity_descriptor_ptr"),
         ],
@@ -75,7 +75,7 @@ UNITY_FUNCTIONS = {
         [
             ("pose", "const_reduced_pose_ptr"),
             ("frames_per_second", "f32"),
-            ("flip_z", "bool"),
+            ("flip_z", "u8"),
             ("curve_index", "usize"),
             ("out_keys", "unity_key_ptr"),
             ("out_key_capacity", "usize"),
@@ -143,6 +143,7 @@ def strip_c_comments(text: str) -> str:
 def canonical_rust_type(type_name: str) -> str:
     compact = " ".join(type_name.split())
     return {
+        "u8": "u8",
         "u32": "u32",
         "usize": "usize",
         "f32": "f32",
@@ -162,6 +163,7 @@ def canonical_rust_type(type_name: str) -> str:
 def canonical_c_type(type_name: str) -> str:
     compact = re.sub(r"\s*\*\s*", "*", " ".join(type_name.split()))
     return {
+        "uint8_t": "u8",
         "uint32_t": "u32",
         "size_t": "usize",
         "float": "f32",

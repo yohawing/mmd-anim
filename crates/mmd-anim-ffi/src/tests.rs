@@ -1,5 +1,6 @@
 use super::*;
 use std::ffi::CStr;
+use std::mem::MaybeUninit;
 
 fn last_error_cstr() -> Option<&'static CStr> {
     let ptr = mmd_runtime_last_error_message();
@@ -339,7 +340,7 @@ fn copy_unity_curve_keys(
             mmd_runtime_reduced_pose_unity_curve_keys(
                 reduced,
                 frames_per_second,
-                flip_z,
+                u8::from(flip_z),
                 curve_index,
                 ptr::null_mut(),
                 0,
@@ -354,7 +355,7 @@ fn copy_unity_curve_keys(
             mmd_runtime_reduced_pose_unity_curve_keys(
                 reduced,
                 frames_per_second,
-                flip_z,
+                u8::from(flip_z),
                 curve_index,
                 keys.as_mut_ptr(),
                 keys.len(),
@@ -378,7 +379,7 @@ fn reduced_pose_unity_curves_are_two_call_and_match_rust_dto_after_model_free() 
             mmd_runtime_reduced_pose_unity_curve_count(
                 reduced,
                 frames_per_second,
-                flip_z,
+                u8::from(flip_z),
                 &mut curve_count,
             )
         },
@@ -410,7 +411,7 @@ fn reduced_pose_unity_curves_are_two_call_and_match_rust_dto_after_model_free() 
                 mmd_runtime_reduced_pose_unity_curve_descriptor(
                     reduced,
                     frames_per_second,
-                    flip_z,
+                    u8::from(flip_z),
                     curve_index,
                     &mut descriptor,
                 )
@@ -444,7 +445,7 @@ fn reduced_pose_unity_curves_are_two_call_and_match_rust_dto_after_model_free() 
                 mmd_runtime_reduced_pose_unity_curve_keys(
                     reduced,
                     frames_per_second,
-                    flip_z,
+                    u8::from(flip_z),
                     curve_index,
                     ptr::null_mut(),
                     0,
@@ -462,7 +463,7 @@ fn reduced_pose_unity_curves_are_two_call_and_match_rust_dto_after_model_free() 
                     mmd_runtime_reduced_pose_unity_curve_keys(
                         reduced,
                         frames_per_second,
-                        flip_z,
+                        u8::from(flip_z),
                         curve_index,
                         keys.as_mut_ptr(),
                         required - 1,
@@ -477,7 +478,7 @@ fn reduced_pose_unity_curves_are_two_call_and_match_rust_dto_after_model_free() 
                 mmd_runtime_reduced_pose_unity_curve_keys(
                     reduced,
                     frames_per_second,
-                    flip_z,
+                    u8::from(flip_z),
                     curve_index,
                     keys.as_mut_ptr(),
                     keys.len(),
@@ -500,7 +501,7 @@ fn reduced_pose_unity_curves_are_two_call_and_match_rust_dto_after_model_free() 
             mmd_runtime_reduced_pose_unity_curve_descriptor(
                 reduced,
                 frames_per_second,
-                flip_z,
+                u8::from(flip_z),
                 curve_count,
                 &mut descriptor,
             )
@@ -515,17 +516,17 @@ fn reduced_pose_unity_curves_validate_handle_fps_outputs_and_target() {
     let dcc = reduced_pose_curve_fixture(2);
     let mut count = usize::MAX;
     assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_unity_curve_count(ptr::null(), 30.0, false, &mut count) },
+        unsafe { mmd_runtime_reduced_pose_unity_curve_count(ptr::null(), 30.0, 0, &mut count) },
         MmdRuntimeStatus::InvalidInput
     );
     assert_eq!(count, 0);
     assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_unity_curve_count(dcc, f32::NAN, false, &mut count) },
+        unsafe { mmd_runtime_reduced_pose_unity_curve_count(dcc, f32::NAN, 0, &mut count) },
         MmdRuntimeStatus::InvalidInput
     );
     assert_eq!(count, 0);
     assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_unity_curve_count(dcc, 0.0, false, &mut count) },
+        unsafe { mmd_runtime_reduced_pose_unity_curve_count(dcc, 0.0, 0, &mut count) },
         MmdRuntimeStatus::InvalidInput
     );
     for frames_per_second in [f32::MAX, f32::from_bits(1)] {
@@ -538,12 +539,7 @@ fn reduced_pose_unity_curves_validate_handle_fps_outputs_and_target() {
         let mut required = usize::MAX;
         assert_eq!(
             unsafe {
-                mmd_runtime_reduced_pose_unity_curve_count(
-                    dcc,
-                    frames_per_second,
-                    false,
-                    &mut count,
-                )
+                mmd_runtime_reduced_pose_unity_curve_count(dcc, frames_per_second, 0, &mut count)
             },
             MmdRuntimeStatus::InvalidInput
         );
@@ -553,7 +549,7 @@ fn reduced_pose_unity_curves_validate_handle_fps_outputs_and_target() {
                 mmd_runtime_reduced_pose_unity_curve_descriptor(
                     dcc,
                     frames_per_second,
-                    false,
+                    0,
                     0,
                     &mut descriptor,
                 )
@@ -566,7 +562,7 @@ fn reduced_pose_unity_curves_validate_handle_fps_outputs_and_target() {
                 mmd_runtime_reduced_pose_unity_curve_keys(
                     dcc,
                     frames_per_second,
-                    false,
+                    0,
                     0,
                     ptr::null_mut(),
                     0,
@@ -578,18 +574,219 @@ fn reduced_pose_unity_curves_validate_handle_fps_outputs_and_target() {
         assert_eq!(required, 0);
     }
     assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_unity_curve_count(dcc, 30.0, false, ptr::null_mut()) },
+        unsafe { mmd_runtime_reduced_pose_unity_curve_count(dcc, 30.0, 0, ptr::null_mut()) },
         MmdRuntimeStatus::InvalidInput
     );
     unsafe { mmd_runtime_reduced_pose_free(dcc) };
 
     let linear = reduced_pose_curve_fixture(0);
     assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_unity_curve_count(linear, 30.0, false, &mut count) },
+        unsafe { mmd_runtime_reduced_pose_unity_curve_count(linear, 30.0, 0, &mut count) },
         MmdRuntimeStatus::Unsupported
     );
     assert_eq!(count, 0);
     unsafe { mmd_runtime_reduced_pose_free(linear) };
+}
+
+#[test]
+fn reduced_pose_unity_curves_validate_raw_flip_z_flags() {
+    let reduced = reduced_pose_curve_fixture(2);
+    let mut keys_by_flag = Vec::new();
+
+    for flip_z in [0_u8, 1] {
+        let mut count = usize::MAX;
+        assert_eq!(
+            unsafe {
+                mmd_runtime_reduced_pose_unity_curve_count(reduced, 30.0, flip_z, &mut count)
+            },
+            MmdRuntimeStatus::Ok
+        );
+        assert_eq!(count, 7);
+
+        let mut descriptor = MmdRuntimeFfiUnityCurveDescriptor::default();
+        assert_eq!(
+            unsafe {
+                mmd_runtime_reduced_pose_unity_curve_descriptor(
+                    reduced,
+                    30.0,
+                    flip_z,
+                    2,
+                    &mut descriptor,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        assert_eq!(
+            descriptor.semantic,
+            MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION
+        );
+        assert_eq!(descriptor.axis, MMD_RUNTIME_UNITY_CURVE_AXIS_Z);
+
+        let mut required = usize::MAX;
+        assert_eq!(
+            unsafe {
+                mmd_runtime_reduced_pose_unity_curve_keys(
+                    reduced,
+                    30.0,
+                    flip_z,
+                    2,
+                    ptr::null_mut(),
+                    0,
+                    &mut required,
+                )
+            },
+            MmdRuntimeStatus::BufferTooSmall
+        );
+        assert!(required > 0);
+        let mut keys = vec![MmdRuntimeFfiUnityCurveKey::default(); required];
+        assert_eq!(
+            unsafe {
+                mmd_runtime_reduced_pose_unity_curve_keys(
+                    reduced,
+                    30.0,
+                    flip_z,
+                    2,
+                    keys.as_mut_ptr(),
+                    keys.len(),
+                    &mut required,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        keys_by_flag.push(keys);
+    }
+
+    assert!(
+        keys_by_flag[0]
+            .iter()
+            .zip(&keys_by_flag[1])
+            .any(|(unflipped, flipped)| unflipped.value != flipped.value)
+    );
+
+    let mut count = usize::MAX;
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_unity_curve_count(reduced, 30.0, 2, &mut count) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(count, 0);
+
+    let mut descriptor = MmdRuntimeFfiUnityCurveDescriptor {
+        semantic: u32::MAX,
+        target_index: u32::MAX,
+        axis: u32::MAX,
+        key_count: usize::MAX,
+    };
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_unity_curve_descriptor(reduced, 30.0, 2, 2, &mut descriptor)
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(descriptor, MmdRuntimeFfiUnityCurveDescriptor::default());
+
+    let sentinel = MmdRuntimeFfiUnityCurveKey {
+        time_seconds: 9.0,
+        value: 8.0,
+        in_tangent: 7.0,
+        out_tangent: 6.0,
+    };
+    let mut keys = [sentinel];
+    let mut required = usize::MAX;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_unity_curve_keys(
+                reduced,
+                30.0,
+                2,
+                2,
+                keys.as_mut_ptr(),
+                keys.len(),
+                &mut required,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(required, 0);
+    assert_eq!(keys, [sentinel]);
+
+    unsafe { mmd_runtime_reduced_pose_free(reduced) };
+}
+
+#[test]
+fn reduced_pose_unity_curves_initialize_maybe_uninit_outputs() {
+    let reduced = reduced_pose_curve_fixture(2);
+
+    let mut count = MaybeUninit::<usize>::uninit();
+    assert_eq!(
+        unsafe { mmd_runtime_reduced_pose_unity_curve_count(reduced, 30.0, 0, count.as_mut_ptr()) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(unsafe { count.assume_init() }, 7);
+
+    let mut descriptor = MaybeUninit::<MmdRuntimeFfiUnityCurveDescriptor>::uninit();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_unity_curve_descriptor(
+                reduced,
+                30.0,
+                0,
+                2,
+                descriptor.as_mut_ptr(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    let descriptor = unsafe { descriptor.assume_init() };
+    assert!(descriptor.key_count > 0);
+
+    let mut required = MaybeUninit::<usize>::uninit();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_unity_curve_keys(
+                reduced,
+                30.0,
+                0,
+                2,
+                ptr::null_mut(),
+                0,
+                required.as_mut_ptr(),
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    let required = unsafe { required.assume_init() };
+    assert_eq!(required, descriptor.key_count);
+
+    let mut keys = vec![MaybeUninit::<MmdRuntimeFfiUnityCurveKey>::uninit(); required];
+    let mut written_required = MaybeUninit::<usize>::uninit();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_reduced_pose_unity_curve_keys(
+                reduced,
+                30.0,
+                0,
+                2,
+                keys.as_mut_ptr().cast(),
+                keys.len(),
+                written_required.as_mut_ptr(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(unsafe { written_required.assume_init() }, required);
+    let keys = keys
+        .into_iter()
+        .map(|key| unsafe { key.assume_init() })
+        .collect::<Vec<_>>();
+    assert_eq!(keys.len(), required);
+    assert!(keys.iter().all(|key| {
+        key.time_seconds.is_finite()
+            && key.value.is_finite()
+            && key.in_tangent.is_finite()
+            && key.out_tangent.is_finite()
+    }));
+
+    unsafe { mmd_runtime_reduced_pose_free(reduced) };
 }
 
 #[test]
@@ -699,9 +896,7 @@ fn reduced_pose_handle_reports_and_enumerates_sparse_curves_after_model_free() {
 
     let mut curve_count = 0;
     assert_eq!(
-        unsafe {
-            mmd_runtime_reduced_pose_unity_curve_count(reduced, 30.0, false, &mut curve_count)
-        },
+        unsafe { mmd_runtime_reduced_pose_unity_curve_count(reduced, 30.0, 0, &mut curve_count) },
         MmdRuntimeStatus::Ok
     );
     assert_eq!(curve_count, 7);

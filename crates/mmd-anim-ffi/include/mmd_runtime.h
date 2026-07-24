@@ -1299,20 +1299,22 @@ mmd_runtime_status_t mmd_runtime_reduced_pose_report(
 /* Enumerates target-native Unity scalar curves from a DCC_CUBIC reduced pose.
    Curves are translation XYZ then local Euler XYZ for each bone, followed by
    one weight curve for each morph. frames_per_second must be finite and > 0;
-   flip_z selects Unity handedness conversion. LINEAR_SLERP and VMD_BEZIER
+   flip_z is uint8_t and must be exactly 0 or 1; other values return
+   MMD_RUNTIME_STATUS_INVALID_INPUT. It selects Unity handedness conversion.
+   LINEAR_SLERP and VMD_BEZIER
    reduced poses return MMD_RUNTIME_STATUS_UNSUPPORTED rather than being
    silently converted to Hermite curves. The reduced handle owns its skeleton
    snapshot, so these calls remain valid after the source model is freed. */
 mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_count(
     const mmd_runtime_reduced_pose_t* pose,
     float                             frames_per_second,
-    bool                              flip_z,
+    uint8_t                           flip_z,
     size_t*                           out_curve_count);
 
 mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_descriptor(
     const mmd_runtime_reduced_pose_t*             pose,
     float                                         frames_per_second,
-    bool                                          flip_z,
+    uint8_t                                       flip_z,
     size_t                                        curve_index,
     mmd_runtime_ffi_unity_curve_descriptor_t*     out_descriptor);
 
@@ -1324,7 +1326,7 @@ mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_descriptor(
 mmd_runtime_status_t mmd_runtime_reduced_pose_unity_curve_keys(
     const mmd_runtime_reduced_pose_t* pose,
     float                             frames_per_second,
-    bool                              flip_z,
+    uint8_t                           flip_z,
     size_t                            curve_index,
     mmd_runtime_ffi_unity_curve_key_t* out_keys,
     size_t                            out_key_capacity,

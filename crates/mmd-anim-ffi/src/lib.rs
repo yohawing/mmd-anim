@@ -6039,6 +6039,17 @@ fn validate_unity_curve_request(
     Ok(())
 }
 
+fn parse_unity_curve_flip_z(raw: u8) -> Result<bool, MmdRuntimeStatus> {
+    match raw {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "flip_z must be 0 or 1",
+        )),
+    }
+}
+
 fn unity_curve_count(sequence: &ReducedPoseSequence) -> Option<usize> {
     sequence
         .bone_tracks()
@@ -6129,19 +6140,24 @@ fn ensure_unity_curve_cache(
 ///
 /// # Safety
 ///
-/// `pose` must be a live reduced-pose handle and `out_curve_count` writable.
+/// `pose` must be a live reduced-pose handle, `flip_z` must be 0 or 1, and
+/// `out_curve_count` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_count(
     pose: *const MmdRuntimeReducedPose,
     frames_per_second: f32,
-    flip_z: bool,
+    flip_z: u8,
     out_curve_count: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        let Some(out_curve_count) = (unsafe { out_curve_count.as_mut() }) else {
+        if out_curve_count.is_null() {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        unsafe { ptr::write(out_curve_count, 0) };
+        let flip_z = match parse_unity_curve_flip_z(flip_z) {
+            Ok(flip_z) => flip_z,
+            Err(status) => return status,
         };
-        *out_curve_count = 0;
         let Some(pose) = (unsafe { pose.as_ref() }) else {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
         };
@@ -6151,7 +6167,7 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_count(
         let Some(count) = unity_curve_count(&pose.sequence) else {
             return status_failure(MmdRuntimeStatus::Error, "Unity curve count overflow");
         };
-        *out_curve_count = count;
+        unsafe { ptr::write(out_curve_count, count) };
         MmdRuntimeStatus::Ok
     })
 }
@@ -6163,20 +6179,25 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_count(
 ///
 /// # Safety
 ///
-/// `pose` must be a live reduced-pose handle and `out_descriptor` writable.
+/// `pose` must be a live reduced-pose handle, `flip_z` must be 0 or 1, and
+/// `out_descriptor` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_descriptor(
     pose: *const MmdRuntimeReducedPose,
     frames_per_second: f32,
-    flip_z: bool,
+    flip_z: u8,
     curve_index: usize,
     out_descriptor: *mut MmdRuntimeFfiUnityCurveDescriptor,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        let Some(out_descriptor) = (unsafe { out_descriptor.as_mut() }) else {
+        if out_descriptor.is_null() {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        unsafe { ptr::write(out_descriptor, MmdRuntimeFfiUnityCurveDescriptor::default()) };
+        let flip_z = match parse_unity_curve_flip_z(flip_z) {
+            Ok(flip_z) => flip_z,
+            Err(status) => return status,
         };
-        *out_descriptor = MmdRuntimeFfiUnityCurveDescriptor::default();
         let Some(pose) = (unsafe { pose.as_ref() }) else {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
         };
@@ -6186,7 +6207,7 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_descriptor(
         let Some(descriptor) = unity_curve_descriptor(&pose.sequence, curve_index) else {
             return status_failure(MmdRuntimeStatus::InvalidInput, "curve index out of range");
         };
-        *out_descriptor = descriptor;
+        unsafe { ptr::write(out_descriptor, descriptor) };
         MmdRuntimeStatus::Ok
     })
 }
@@ -6199,24 +6220,28 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_descriptor(
 ///
 /// # Safety
 ///
-/// `pose` must be a live reduced-pose handle. `out_required_count` must be
-/// writable. A non-empty key output region must be writable and must not alias
-/// `out_required_count`.
+/// `pose` must be a live reduced-pose handle and `flip_z` must be 0 or 1.
+/// `out_required_count` must be writable. A non-empty key output region must
+/// be writable and must not alias `out_required_count`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_keys(
     pose: *const MmdRuntimeReducedPose,
     frames_per_second: f32,
-    flip_z: bool,
+    flip_z: u8,
     curve_index: usize,
     out_keys: *mut MmdRuntimeFfiUnityCurveKey,
     out_key_capacity: usize,
     out_required_count: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        let Some(out_required_count) = (unsafe { out_required_count.as_mut() }) else {
+        if out_required_count.is_null() {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        unsafe { ptr::write(out_required_count, 0) };
+        let flip_z = match parse_unity_curve_flip_z(flip_z) {
+            Ok(flip_z) => flip_z,
+            Err(status) => return status,
         };
-        *out_required_count = 0;
         let Some(pose) = (unsafe { pose.as_ref() }) else {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
         };
@@ -6226,7 +6251,7 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_keys(
         let Some(descriptor) = unity_curve_descriptor(&pose.sequence, curve_index) else {
             return status_failure(MmdRuntimeStatus::InvalidInput, "curve index out of range");
         };
-        *out_required_count = descriptor.key_count;
+        unsafe { ptr::write(out_required_count, descriptor.key_count) };
         if out_key_capacity < descriptor.key_count || out_keys.is_null() {
             return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
         }
@@ -6240,14 +6265,15 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_keys(
         if curve.keys.len() != descriptor.key_count {
             return status_failure(MmdRuntimeStatus::Error, "Unity curve key count mismatch");
         }
-        let out_keys = unsafe { slice::from_raw_parts_mut(out_keys, descriptor.key_count) };
-        for (out, key) in out_keys.iter_mut().zip(&curve.keys) {
-            *out = MmdRuntimeFfiUnityCurveKey {
-                time_seconds: key.time_seconds,
-                value: key.value,
-                in_tangent: key.in_tangent,
-                out_tangent: key.out_tangent,
-            };
+        for (index, key) in curve.keys.iter().enumerate() {
+            unsafe {
+                out_keys.add(index).write(MmdRuntimeFfiUnityCurveKey {
+                    time_seconds: key.time_seconds,
+                    value: key.value,
+                    in_tangent: key.in_tangent,
+                    out_tangent: key.out_tangent,
+                });
+            }
         }
         MmdRuntimeStatus::Ok
     })

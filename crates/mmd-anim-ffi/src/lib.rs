@@ -392,7 +392,7 @@ pub struct MmdRuntimeModelDescriptor {
 #[repr(C)]
 pub struct MmdRuntimeFfiRigIkLink {
     pub bone_slot: u32,
-    pub has_angle_limit: bool,
+    pub has_angle_limit: u8,
     pub angle_limit_min_xyz: [f32; 3],
     pub angle_limit_max_xyz: [f32; 3],
 }
@@ -412,7 +412,7 @@ pub struct MmdRuntimeFfiRigBone {
 /// `mmd_runtime_ik_chain_create_v2`.
 #[repr(C)]
 pub struct MmdRuntimeFfiRigBoneLocalAxisV2 {
-    pub has_local_axis: bool,
+    pub has_local_axis: u8,
     pub local_axis_x_xyz: [f32; 3],
     pub local_axis_z_xyz: [f32; 3],
 }
@@ -428,8 +428,8 @@ pub struct MmdRuntimeFfiIkSolveStats {
 #[repr(C)]
 pub struct MmdRuntimeFfiAppendConfig {
     pub ratio: f32,
-    pub affect_rotation: bool,
-    pub affect_translation: bool,
+    pub affect_rotation: u8,
+    pub affect_translation: u8,
 }
 
 #[repr(C)]
@@ -1069,13 +1069,19 @@ pub unsafe extern "C" fn mmd_runtime_append_solver_create(
             return ptr::null_mut();
         }
         let config = unsafe { &*config };
+        let Some(affect_rotation) = parse_ffi_bool(config.affect_rotation) else {
+            return ptr::null_mut();
+        };
+        let Some(affect_translation) = parse_ffi_bool(config.affect_translation) else {
+            return ptr::null_mut();
+        };
         if !config.ratio.is_finite() {
             return ptr::null_mut();
         }
         Box::into_raw(Box::new(MmdRuntimeAppendSolver {
             ratio: config.ratio,
-            affect_rotation: config.affect_rotation,
-            affect_translation: config.affect_translation,
+            affect_rotation,
+            affect_translation,
         }))
     })
 }
@@ -7104,7 +7110,8 @@ unsafe fn build_ik_chain_definition(
             if link.bone_slot as usize >= bone_count {
                 return None;
             }
-            let angle_limit = if link.has_angle_limit {
+            let has_angle_limit = parse_ffi_bool(link.has_angle_limit)?;
+            let angle_limit = if has_angle_limit {
                 if !all_finite(&link.angle_limit_min_xyz) || !all_finite(&link.angle_limit_max_xyz)
                 {
                     return None;
@@ -7152,7 +7159,8 @@ unsafe fn build_ik_chain_local_axis_bases(
     let local_axes = unsafe { checked_slice(local_axes, bone_count) }?;
     let mut bases = Vec::with_capacity(bone_count);
     for axis in local_axes {
-        if !axis.has_local_axis {
+        let has_local_axis = parse_ffi_bool(axis.has_local_axis)?;
+        if !has_local_axis {
             bases.push(None);
             continue;
         }
@@ -7179,6 +7187,14 @@ unsafe fn build_ik_chain_local_axis_bases(
 fn checked_range<T>(slice: &[T], offset: usize, count: usize) -> Option<&[T]> {
     let end = offset.checked_add(count)?;
     slice.get(offset..end)
+}
+
+fn parse_ffi_bool(value: u8) -> Option<bool> {
+    match value {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
 }
 
 fn descriptor_failure<T>(message: impl AsRef<str>) -> Option<T> {

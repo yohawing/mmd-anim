@@ -925,7 +925,7 @@ fn simple_ik_chain() -> *mut MmdRuntimeIkChain {
     ];
     let links = [MmdRuntimeFfiRigIkLink {
         bone_slot: 0,
-        has_angle_limit: false,
+        has_angle_limit: 0,
         angle_limit_min_xyz: [0.0, 0.0, 0.0],
         angle_limit_max_xyz: [0.0, 0.0, 0.0],
     }];
@@ -943,11 +943,75 @@ fn simple_ik_chain() -> *mut MmdRuntimeIkChain {
 }
 
 #[test]
+fn primitive_creators_reject_noncanonical_boolean_bytes() {
+    let invalid_append = MmdRuntimeFfiAppendConfig {
+        ratio: 1.0,
+        affect_rotation: 2,
+        affect_translation: 1,
+    };
+    assert!(unsafe { mmd_runtime_append_solver_create(&invalid_append) }.is_null());
+
+    let bones = [MmdRuntimeFfiRigBone {
+        parent_slot: -1,
+        rest_position_xyz: [0.0, 0.0, 0.0],
+        flags: 0,
+        fixed_axis_xyz: [0.0, 0.0, 0.0],
+    }];
+    let invalid_link = [MmdRuntimeFfiRigIkLink {
+        bone_slot: 0,
+        has_angle_limit: 2,
+        angle_limit_min_xyz: [0.0; 3],
+        angle_limit_max_xyz: [0.0; 3],
+    }];
+    assert!(
+        unsafe {
+            mmd_runtime_ik_chain_create(
+                bones.as_ptr(),
+                bones.len(),
+                0,
+                invalid_link.as_ptr(),
+                invalid_link.len(),
+                1,
+                0.0,
+            )
+        }
+        .is_null()
+    );
+
+    let valid_link = [MmdRuntimeFfiRigIkLink {
+        bone_slot: 0,
+        has_angle_limit: 0,
+        angle_limit_min_xyz: [0.0; 3],
+        angle_limit_max_xyz: [0.0; 3],
+    }];
+    let invalid_local_axis = [MmdRuntimeFfiRigBoneLocalAxisV2 {
+        has_local_axis: 2,
+        local_axis_x_xyz: [0.0; 3],
+        local_axis_z_xyz: [0.0; 3],
+    }];
+    assert!(
+        unsafe {
+            mmd_runtime_ik_chain_create_v2(
+                bones.as_ptr(),
+                bones.len(),
+                invalid_local_axis.as_ptr(),
+                0,
+                valid_link.as_ptr(),
+                valid_link.len(),
+                1,
+                0.0,
+            )
+        }
+        .is_null()
+    );
+}
+
+#[test]
 fn append_solver_lifecycle_and_expected_output_use_xyzw_quaternion() {
     let config = MmdRuntimeFfiAppendConfig {
         ratio: 0.5,
-        affect_rotation: true,
-        affect_translation: true,
+        affect_rotation: 1,
+        affect_translation: 1,
     };
     let solver = unsafe { mmd_runtime_append_solver_create(&config) };
     assert!(!solver.is_null());
@@ -985,8 +1049,8 @@ fn append_solver_lifecycle_and_expected_output_use_xyzw_quaternion() {
 fn append_solver_rejects_null_inputs() {
     let config = MmdRuntimeFfiAppendConfig {
         ratio: 1.0,
-        affect_rotation: true,
-        affect_translation: true,
+        affect_rotation: 1,
+        affect_translation: 1,
     };
     assert!(unsafe { mmd_runtime_append_solver_create(ptr::null()) }.is_null());
     let solver = unsafe { mmd_runtime_append_solver_create(&config) };
@@ -1101,7 +1165,7 @@ fn ik_chain_create_v2_null_local_axes_matches_v1() {
     ];
     let links = [MmdRuntimeFfiRigIkLink {
         bone_slot: 0,
-        has_angle_limit: false,
+        has_angle_limit: 0,
         angle_limit_min_xyz: [0.0, 0.0, 0.0],
         angle_limit_max_xyz: [0.0, 0.0, 0.0],
     }];
@@ -1191,19 +1255,19 @@ fn ik_chain_create_v2_local_axis_changes_limited_solve() {
     let half_pi = std::f32::consts::FRAC_PI_2;
     let links = [MmdRuntimeFfiRigIkLink {
         bone_slot: 0,
-        has_angle_limit: true,
+        has_angle_limit: 1,
         angle_limit_min_xyz: [-half_pi, 0.0, 0.0],
         angle_limit_max_xyz: [half_pi, 0.0, 0.0],
     }];
     // localAxis x=(0,0,1), z=(0,1,0) rebuilds a non-identity LA frame.
     let local_axes = [
         MmdRuntimeFfiRigBoneLocalAxisV2 {
-            has_local_axis: true,
+            has_local_axis: 1,
             local_axis_x_xyz: [0.0, 0.0, 1.0],
             local_axis_z_xyz: [0.0, 1.0, 0.0],
         },
         MmdRuntimeFfiRigBoneLocalAxisV2 {
-            has_local_axis: false,
+            has_local_axis: 0,
             local_axis_x_xyz: [0.0, 0.0, 0.0],
             local_axis_z_xyz: [0.0, 0.0, 0.0],
         },

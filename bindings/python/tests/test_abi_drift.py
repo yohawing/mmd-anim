@@ -36,12 +36,12 @@ class AbiDriftCheckerTests(unittest.TestCase):
         mutated = self.header.replace(
             "typedef struct mmd_runtime_ffi_rig_ik_link {\n"
             "    uint32_t bone_slot;\n"
-            "    bool     has_angle_limit;\n"
+            "    uint8_t  has_angle_limit; /* must be 0 or 1 */\n"
             "    float    angle_limit_min_xyz[3];\n"
             "    float    angle_limit_max_xyz[3];",
             "typedef struct mmd_runtime_ffi_rig_ik_link {\n"
             "    uint32_t bone_slot;\n"
-            "    bool     has_angle_limit;\n"
+            "    uint8_t  has_angle_limit; /* must be 0 or 1 */\n"
             "    float    angle_limit_min_xyz[3];\n"
             "    float    angle_limit_max_xyz[4];",
             1,

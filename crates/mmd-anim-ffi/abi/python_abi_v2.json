@@ -19,7 +19,7 @@
       },
       {
         "name": "has_angle_limit",
-        "type": "bool"
+        "type": "uint8_t"
       },
       {
         "name": "angle_limit_min_xyz",

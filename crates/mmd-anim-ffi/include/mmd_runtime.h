@@ -353,7 +353,7 @@ typedef struct mmd_runtime_model_descriptor {
 
 typedef struct mmd_runtime_ffi_rig_ik_link {
     uint32_t bone_slot;
-    bool     has_angle_limit;
+    uint8_t  has_angle_limit; /* must be 0 or 1 */
     float    angle_limit_min_xyz[3];
     float    angle_limit_max_xyz[3];
 } mmd_runtime_ffi_rig_ik_link_t;
@@ -367,11 +367,11 @@ typedef struct mmd_runtime_ffi_rig_bone {
 
 /* Additive v2 per-bone local-axis descriptor for primitive IK-chain creation.
    Existing mmd_runtime_ffi_rig_bone_t layout is intentionally unchanged.
-   has_local_axis == false means unit XYZ angle-limit frames for that bone.
-   When has_local_axis is true, local_axis_x_xyz / local_axis_z_xyz are the PMX
+   has_local_axis == 0 means unit XYZ angle-limit frames for that bone.
+   When has_local_axis is 1, local_axis_x_xyz / local_axis_z_xyz are the PMX
    bone-local X/Z directions used only as the IK angle-limit evaluation frame. */
 typedef struct mmd_runtime_ffi_rig_bone_local_axis_v2 {
-    bool  has_local_axis;
+    uint8_t has_local_axis; /* must be 0 or 1 */
     float local_axis_x_xyz[3];
     float local_axis_z_xyz[3];
 } mmd_runtime_ffi_rig_bone_local_axis_v2_t;
@@ -385,8 +385,8 @@ typedef struct mmd_runtime_ffi_ik_solve_stats {
 
 typedef struct mmd_runtime_ffi_append_config {
     float ratio;
-    bool  affect_rotation;
-    bool  affect_translation;
+    uint8_t affect_rotation;    /* must be 0 or 1 */
+    uint8_t affect_translation; /* must be 0 or 1 */
 } mmd_runtime_ffi_append_config_t;
 
 typedef struct mmd_runtime_ffi_bone_morph_offset {

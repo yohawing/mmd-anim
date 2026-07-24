@@ -7042,6 +7042,14 @@ unsafe fn checked_slice<'a, T>(ptr: *const T, len: usize) -> Option<&'a [T]> {
     if ptr.is_null() {
         return None;
     }
+    let start = ptr as usize;
+    if !start.is_multiple_of(std::mem::align_of::<T>()) {
+        return None;
+    }
+    let byte_len = len.checked_mul(std::mem::size_of::<T>())?;
+    if byte_len > isize::MAX as usize || start.checked_add(byte_len).is_none() {
+        return None;
+    }
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
@@ -7530,20 +7538,21 @@ unsafe fn build_model_from_ffi(input: RawModelInput) -> Option<ModelArena> {
     let inverse_bind_matrices = if input.inverse_bind_matrices.is_null() {
         &[]
     } else {
-        unsafe { slice::from_raw_parts(input.inverse_bind_matrices, input.bone_count * 16) }
+        let len = input.bone_count.checked_mul(16)?;
+        unsafe { checked_slice(input.inverse_bind_matrices, len) }?
     };
     let transform_orders = if input.transform_orders.is_null() {
         &[]
     } else {
-        unsafe { slice::from_raw_parts(input.transform_orders, input.bone_count) }
+        unsafe { checked_slice(input.transform_orders, input.bone_count) }?
     };
     let ik_solvers = unsafe { checked_slice(input.ik_solvers, input.ik_solver_count) }?;
     let ik_links = unsafe { checked_slice(input.ik_links, input.ik_link_count) }?;
     let append_transforms =
         unsafe { checked_slice(input.append_transforms, input.append_transform_count) }?;
-    let parents = unsafe { slice::from_raw_parts(input.parent_indices, input.bone_count) };
-    let positions =
-        unsafe { slice::from_raw_parts(input.rest_positions_xyz, input.bone_count * 3) };
+    let parents = unsafe { checked_slice(input.parent_indices, input.bone_count) }?;
+    let position_len = input.bone_count.checked_mul(3)?;
+    let positions = unsafe { checked_slice(input.rest_positions_xyz, position_len) }?;
     let bones = build_bones_from_flat(FlatBoneInput {
         parent_indices: parents,
         rest_positions_xyz: positions,

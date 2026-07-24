@@ -943,6 +943,37 @@ fn simple_ik_chain() -> *mut MmdRuntimeIkChain {
 }
 
 #[test]
+fn flat_model_create_rejects_misaligned_and_oversized_slices_before_deref() {
+    let parent = [-1_i32];
+    let rest = [0.0_f32; 3];
+    let storage = [0_u8; 8];
+    let misaligned_offset = (0..std::mem::align_of::<i32>())
+        .find(|offset| {
+            !(storage.as_ptr() as usize + offset).is_multiple_of(std::mem::align_of::<i32>())
+        })
+        .expect("an i32 alignment always has misaligned byte offsets");
+    let misaligned_parent = unsafe { storage.as_ptr().add(misaligned_offset).cast::<i32>() };
+    assert!(unsafe { mmd_runtime_model_create(misaligned_parent, rest.as_ptr(), 1) }.is_null());
+    assert!(
+        unsafe { mmd_runtime_model_create(parent.as_ptr(), rest.as_ptr(), usize::MAX) }.is_null()
+    );
+
+    let inverse_bind = [0.0_f32; 16];
+    let overflowing_bone_count = usize::MAX / 16 + 1;
+    assert!(
+        unsafe {
+            mmd_runtime_model_create_with_inverse_bind(
+                parent.as_ptr(),
+                rest.as_ptr(),
+                inverse_bind.as_ptr(),
+                overflowing_bone_count,
+            )
+        }
+        .is_null()
+    );
+}
+
+#[test]
 fn primitive_creators_reject_noncanonical_boolean_bytes() {
     let invalid_append = MmdRuntimeFfiAppendConfig {
         ratio: 1.0,

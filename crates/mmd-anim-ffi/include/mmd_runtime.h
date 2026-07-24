@@ -47,11 +47,10 @@ extern "C" {
    ensuring that the bone indices used by the physics world match those of
    the instance it is paired with; index mismatches within bounds silently
    drive the wrong bones.
-   Free order: release instances before releasing the model they were
-   created from. Physics worlds may be freed in any order relative to
-   models. Freeing a model while instances still reference it is safe (Arc
-   keeps storage alive), but using any handle after it has been freed is
-   undefined behavior.
+   Models and instances may be released in either order: each instance keeps
+   its immutable model storage alive independently (Arc-backed). Physics
+   worlds may also be freed in any order relative to models and instances.
+   Using any individual handle after it has been freed is undefined behavior.
 
    Thread safety
    -------------

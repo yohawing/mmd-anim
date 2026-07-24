@@ -1591,6 +1591,27 @@ fn evaluates_rest_pose_through_c_abi() {
 }
 
 #[test]
+fn instance_remains_valid_when_model_handle_is_freed_first() {
+    let parents = [-1_i32];
+    let rest_positions = [1.0_f32, 2.0, 3.0];
+    let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
+    assert!(!model.is_null());
+    let instance = unsafe { mmd_runtime_instance_create(model, 0) };
+    assert!(!instance.is_null());
+
+    unsafe { mmd_runtime_model_free(model) };
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    assert_eq!(unsafe { mmd_runtime_instance_bone_count(instance) }, 1);
+    let mut world = [0.0_f32; 16];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, world.as_mut_ptr(), world.len())
+    });
+    assert_slice_near(&world[12..15], &rest_positions, 0.0);
+
+    unsafe { mmd_runtime_instance_free(instance) };
+}
+
+#[test]
 fn applies_inverse_bind_through_c_abi() {
     let parents = [-1];
     let rest_positions = [2.0, 0.0, 0.0];

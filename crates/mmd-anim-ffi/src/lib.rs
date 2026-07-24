@@ -6603,8 +6603,13 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_world_matrices(
         if out_f32_len < required_len {
             return false;
         }
+        if output_overlaps_instance_views(instance, out_f32, required_len) {
+            return false;
+        }
 
-        let out = unsafe { slice::from_raw_parts_mut(out_f32, required_len) };
+        let Some(out) = (unsafe { checked_mut_slice(out_f32, required_len) }) else {
+            return false;
+        };
         flatten_matrices_into_slice(out, matrices);
         true
     })
@@ -6654,8 +6659,13 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_skinning_matrices(
         if out_f32_len < required_len {
             return false;
         }
+        if output_overlaps_instance_views(instance, out_f32, required_len) {
+            return false;
+        }
 
-        let out = unsafe { slice::from_raw_parts_mut(out_f32, required_len) };
+        let Some(out) = (unsafe { checked_mut_slice(out_f32, required_len) }) else {
+            return false;
+        };
         flatten_matrices_into_slice(out, matrices);
         true
     })
@@ -6765,7 +6775,12 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_morph_weights(
         if out_f32_len < weights.len() {
             return false;
         }
-        let out = unsafe { slice::from_raw_parts_mut(out_f32, weights.len()) };
+        if output_overlaps_instance_views(instance, out_f32, weights.len()) {
+            return false;
+        }
+        let Some(out) = (unsafe { checked_mut_slice(out_f32, weights.len()) }) else {
+            return false;
+        };
         out.copy_from_slice(weights);
         true
     })
@@ -6813,7 +6828,12 @@ pub unsafe extern "C" fn mmd_runtime_instance_copy_ik_enabled(
         if out_u8_len < states.len() {
             return false;
         }
-        let out = unsafe { slice::from_raw_parts_mut(out_u8, states.len()) };
+        if output_overlaps_instance_views(instance, out_u8, states.len()) {
+            return false;
+        }
+        let Some(out) = (unsafe { checked_mut_slice(out_u8, states.len()) }) else {
+            return false;
+        };
         out.copy_from_slice(states);
         true
     })
@@ -7085,6 +7105,38 @@ fn checked_pointer_range<T>(ptr: *const T, len: usize) -> Option<(usize, usize)>
 
 fn pointer_ranges_overlap(left: (usize, usize), right: (usize, usize)) -> bool {
     left.0 < left.1 && right.0 < right.1 && left.0 < right.1 && right.0 < left.1
+}
+
+fn output_overlaps_instance_views<T>(
+    instance: &MmdRuntimeInstance,
+    output: *const T,
+    output_len: usize,
+) -> bool {
+    let Some(output_range) = checked_pointer_range(output, output_len) else {
+        return true;
+    };
+    let view_ranges = [
+        checked_pointer_range(
+            instance.cached_world_matrices.as_ptr(),
+            instance.cached_world_matrices.len(),
+        ),
+        checked_pointer_range(
+            instance.cached_skinning_matrices.as_ptr(),
+            instance.cached_skinning_matrices.len(),
+        ),
+        checked_pointer_range(
+            instance.runtime.morph_weights().as_ptr(),
+            instance.runtime.morph_weights().len(),
+        ),
+        checked_pointer_range(
+            instance.runtime.ik_enabled().as_ptr(),
+            instance.runtime.ik_enabled().len(),
+        ),
+    ];
+    view_ranges
+        .into_iter()
+        .flatten()
+        .any(|view_range| pointer_ranges_overlap(output_range, view_range))
 }
 
 fn all_finite(values: &[f32]) -> bool {

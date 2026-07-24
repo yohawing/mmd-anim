@@ -1596,12 +1596,24 @@ fn instance_remains_valid_when_model_handle_is_freed_first() {
     let rest_positions = [1.0_f32, 2.0, 3.0];
     let model = unsafe { mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), 1) };
     assert!(!model.is_null());
-    let instance = unsafe { mmd_runtime_instance_create(model, 0) };
+    let instance = unsafe { mmd_runtime_instance_create(model, 1) };
     assert!(!instance.is_null());
 
     unsafe { mmd_runtime_model_free(model) };
     assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
     assert_eq!(unsafe { mmd_runtime_instance_bone_count(instance) }, 1);
+    let world_view = unsafe { mmd_runtime_instance_world_matrices(instance) };
+    assert!(!unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, world_view.cast_mut(), 16)
+    });
+    let skinning_view = unsafe { mmd_runtime_instance_skinning_matrices(instance) };
+    assert!(!unsafe {
+        mmd_runtime_instance_copy_skinning_matrices(instance, skinning_view.cast_mut(), 16)
+    });
+    let morph_view = unsafe { mmd_runtime_instance_morph_weights(instance) };
+    assert!(!unsafe {
+        mmd_runtime_instance_copy_morph_weights(instance, morph_view.cast_mut(), 1)
+    });
     let mut world = [0.0_f32; 16];
     assert!(unsafe {
         mmd_runtime_instance_copy_world_matrices(instance, world.as_mut_ptr(), world.len())

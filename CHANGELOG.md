@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.3.2 - 2026-07-24
+
+Runtime-neutral reduced-pose curves, safer native host contracts, faster PMX
+WASM payloads, and PMX morph metadata preservation.
+
+### Added
+
+- Added caller-owned C ABI enumeration for runtime-neutral DCC cubic reduced
+  bone and morph tracks, including versioned descriptors, extensible key
+  strides, normalized quaternion authority, and feature discovery.
+- Added a typed WASM vertex-morph offset handle and a non-geometry JSON path
+  that omits the duplicated vertex-offset payload for lower parse-time memory
+  and serialization cost.
+
+### Changed
+
+- Enabled the existing runtime IK convergence break by changing the default
+  tolerance from zero to `1e-4`, while preserving authored iteration counts and
+  allowing callers to request exact zero tolerance explicitly.
+- Clarified native model/instance lifetime ordering and kept reduced-pose curve
+  data readable for the documented handle lifetime.
+
+### Fixed
+
+- Preserved all five PMX morph panel categories across binary parse/export,
+  JSON compatibility defaults, FBX material splitting, and parts workflows.
+- Rejected non-canonical boolean and curve-flag bytes, invalid or overlapping
+  pointer ranges, aliased instance output views, undersized structs, and
+  misaligned or overflowing caller-owned buffers in the experimental C ABI.
+- Made native output-buffer failures initialize outputs consistently and report
+  required counts without partial writes.
+
+### Known limitations
+
+- The C ABI, WASM wrapper, reduced-curve surface, and Python binding remain
+  experimental and may change before 1.0.
+- The WASM non-geometry JSON compatibility method still includes vertex morph
+  offsets; consumers must opt into the new split payload methods to avoid the
+  duplicate data.
+
 ## 0.3.1 - 2026-07-19
 
 Python host integration, payload-free runtime model construction, consistent

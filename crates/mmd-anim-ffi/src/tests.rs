@@ -303,7 +303,7 @@ fn reduced_pose_curve_fixture(target: u32) -> *mut MmdRuntimeReducedPose {
         world_rotation_radians: 1.0e-5,
         morph_weight: 1.0e-5,
     };
-    let mut reduced = ptr::null_mut();
+    let mut reduced = MaybeUninit::<*mut MmdRuntimeReducedPose>::uninit();
     assert_eq!(
         unsafe {
             mmd_runtime_reduced_pose_create_from_dense(
@@ -318,12 +318,13 @@ fn reduced_pose_curve_fixture(target: u32) -> *mut MmdRuntimeReducedPose {
                 1.0,
                 target,
                 tolerances,
-                &mut reduced,
+                reduced.as_mut_ptr(),
             )
         },
         MmdRuntimeStatus::Ok
     );
     unsafe { mmd_runtime_model_free(model) };
+    let reduced = unsafe { reduced.assume_init() };
     assert!(!reduced.is_null());
     reduced
 }
@@ -884,11 +885,12 @@ fn reduced_pose_handle_reports_and_enumerates_sparse_curves_after_model_free() {
     assert!(invalid.is_null());
     unsafe { mmd_runtime_model_free(model) };
 
-    let mut report = MmdRuntimeFfiPoseReductionReport::default();
+    let mut report = MaybeUninit::<MmdRuntimeFfiPoseReductionReport>::uninit();
     assert_eq!(
-        unsafe { mmd_runtime_reduced_pose_report(reduced, &mut report) },
+        unsafe { mmd_runtime_reduced_pose_report(reduced, report.as_mut_ptr()) },
         MmdRuntimeStatus::Ok
     );
+    let report = unsafe { report.assume_init() };
     assert_eq!(report.source_bone_key_count, 3);
     assert_eq!(report.reduced_bone_key_count, 2);
     assert_eq!(report.source_morph_key_count, 3);
@@ -3317,6 +3319,20 @@ fn evaluates_clip_frame_batch_through_c_abi_without_mutating_source_instance() {
             batch_world.len() - 1,
             batch_morphs.as_mut_ptr(),
             batch_morphs.len(),
+        )
+    });
+    assert!(!unsafe {
+        mmd_runtime_instance_evaluate_clip_frame_batch(
+            instance,
+            clip,
+            0.0,
+            30.0,
+            3,
+            2,
+            batch_world.as_mut_ptr(),
+            batch_world.len(),
+            batch_world.as_mut_ptr(),
+            3,
         )
     });
     assert!(!unsafe {

@@ -5739,16 +5739,21 @@ pub unsafe extern "C" fn mmd_runtime_instance_evaluate_clip_frame_batch(
         let ik_count = instance.runtime.ik_enabled().len();
         let workers = resolve_batch_worker_count(worker_count, frame_count);
 
-        let out_world = if required_world_len == 0 {
-            &mut []
-        } else {
-            unsafe { slice::from_raw_parts_mut(out_world_matrices_f32, required_world_len) }
+        let Some(world_range) = checked_pointer_range(out_world_matrices_f32, required_world_len)
+        else {
+            return false;
         };
-        let out_morph = if required_morph_len == 0 {
-            &mut []
-        } else {
-            unsafe { slice::from_raw_parts_mut(out_morph_weights_f32, required_morph_len) }
+        let Some(morph_range) = checked_pointer_range(out_morph_weights_f32, required_morph_len)
+        else {
+            return false;
         };
+        if pointer_ranges_overlap(world_range, morph_range) {
+            return false;
+        }
+        let out_world = unsafe { checked_mut_slice(out_world_matrices_f32, required_world_len) }
+            .expect("output range was validated");
+        let out_morph = unsafe { checked_mut_slice(out_morph_weights_f32, required_morph_len) }
+            .expect("output range was validated");
 
         if workers <= 1 {
             let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, ik_count);
@@ -5865,10 +5870,10 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_create_from_dense(
     out_reduced_pose: *mut *mut MmdRuntimeReducedPose,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        let Some(out_reduced_pose) = (unsafe { out_reduced_pose.as_mut() }) else {
+        if out_reduced_pose.is_null() {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        *out_reduced_pose = ptr::null_mut();
+        }
+        unsafe { ptr::write(out_reduced_pose, ptr::null_mut()) };
         let Some(model) = (unsafe { model.as_ref() }) else {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
         };
@@ -5949,10 +5954,15 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_create_from_dense(
                     return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
                 }
             };
-        *out_reduced_pose = Box::into_raw(Box::new(MmdRuntimeReducedPose {
-            sequence,
-            unity_curve_cache: RefCell::new(None),
-        }));
+        unsafe {
+            ptr::write(
+                out_reduced_pose,
+                Box::into_raw(Box::new(MmdRuntimeReducedPose {
+                    sequence,
+                    unity_curve_cache: RefCell::new(None),
+                })),
+            )
+        };
         MmdRuntimeStatus::Ok
     })
 }
@@ -6018,10 +6028,10 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_report(
         let Some(pose) = (unsafe { pose.as_ref() }) else {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
         };
-        let Some(out_report) = (unsafe { out_report.as_mut() }) else {
+        if out_report.is_null() {
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        *out_report = ffi_reduction_report(pose.sequence.report());
+        }
+        unsafe { ptr::write(out_report, ffi_reduction_report(pose.sequence.report())) };
         MmdRuntimeStatus::Ok
     })
 }
@@ -6471,16 +6481,20 @@ fn physics_world_bake_clip_frames_impl(
         return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
     }
 
-    let out_world = if required_world_len == 0 {
-        &mut []
-    } else {
-        unsafe { slice::from_raw_parts_mut(out_world_matrices_f32, required_world_len) }
+    let Some(world_range) = checked_pointer_range(out_world_matrices_f32, required_world_len)
+    else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
     };
-    let out_morph = if required_morph_len == 0 {
-        &mut []
-    } else {
-        unsafe { slice::from_raw_parts_mut(out_morph_weights_f32, required_morph_len) }
+    let Some(morph_range) = checked_pointer_range(out_morph_weights_f32, required_morph_len) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
     };
+    if pointer_ranges_overlap(world_range, morph_range) {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    }
+    let out_world = unsafe { checked_mut_slice(out_world_matrices_f32, required_world_len) }
+        .expect("output range was validated");
+    let out_morph = unsafe { checked_mut_slice(out_morph_weights_f32, required_morph_len) }
+        .expect("output range was validated");
 
     let mut last_report = MmdRuntimeFfiPhysicsWorldStepReport {
         tick: physics_step_stats_to_ffi(PhysicsStepStats::default()),
@@ -7036,8 +7050,24 @@ unsafe fn build_clip_from_ffi(input: RawClipInput) -> Option<AnimationClip> {
 }
 
 unsafe fn checked_slice<'a, T>(ptr: *const T, len: usize) -> Option<&'a [T]> {
+    checked_pointer_range(ptr, len)?;
     if len == 0 {
         return Some(&[]);
+    }
+    Some(unsafe { slice::from_raw_parts(ptr, len) })
+}
+
+unsafe fn checked_mut_slice<'a, T>(ptr: *mut T, len: usize) -> Option<&'a mut [T]> {
+    checked_pointer_range(ptr, len)?;
+    if len == 0 {
+        return Some(&mut []);
+    }
+    Some(unsafe { slice::from_raw_parts_mut(ptr, len) })
+}
+
+fn checked_pointer_range<T>(ptr: *const T, len: usize) -> Option<(usize, usize)> {
+    if len == 0 {
+        return Some((0, 0));
     }
     if ptr.is_null() {
         return None;
@@ -7047,10 +7077,14 @@ unsafe fn checked_slice<'a, T>(ptr: *const T, len: usize) -> Option<&'a [T]> {
         return None;
     }
     let byte_len = len.checked_mul(std::mem::size_of::<T>())?;
-    if byte_len > isize::MAX as usize || start.checked_add(byte_len).is_none() {
+    if byte_len > isize::MAX as usize {
         return None;
     }
-    Some(unsafe { slice::from_raw_parts(ptr, len) })
+    Some((start, start.checked_add(byte_len)?))
+}
+
+fn pointer_ranges_overlap(left: (usize, usize), right: (usize, usize)) -> bool {
+    left.0 < left.1 && right.0 < right.1 && left.0 < right.1 && right.0 < left.1
 }
 
 fn all_finite(values: &[f32]) -> bool {

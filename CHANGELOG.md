@@ -41,6 +41,9 @@ WASM payloads, and PMX morph metadata preservation.
 
 ### Fixed
 
+- Avoided unsupported `std::time::Instant` calls during reduced-pose reduction
+  on `wasm32-unknown-unknown`; WASM reductions now run normally while native
+  builds retain detailed reduction timings.
 - Preserved all five PMX morph panel categories across binary parse/export,
   JSON compatibility defaults, FBX material splitting, and parts workflows;
   parts export now rejects unknown panel labels instead of coercing them to

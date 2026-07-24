@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
 
 use glam::{EulerRot, Mat3, Mat4, Quat, Vec3, Vec3A};
 #[cfg(not(target_family = "wasm"))]
@@ -13,6 +15,24 @@ use crate::{BoneIndex, InterpolationScalar, ModelArena};
 const AFFINE_EPSILON: f32 = 1.0e-4;
 // Below this point the one-time prefit costs more than the global passes it removes.
 const DCC_LOCAL_PREFIT_MIN_FRAMES: usize = 90;
+
+#[cfg(not(target_family = "wasm"))]
+fn reduction_timer_start() -> Instant {
+    Instant::now()
+}
+
+#[cfg(target_family = "wasm")]
+fn reduction_timer_start() {}
+
+#[cfg(not(target_family = "wasm"))]
+fn reduction_timer_elapsed(started: Instant) -> Duration {
+    started.elapsed()
+}
+
+#[cfg(target_family = "wasm")]
+fn reduction_timer_elapsed(_: ()) -> Duration {
+    Duration::ZERO
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct DensePoseSequenceView<'a> {
@@ -702,7 +722,7 @@ fn reduce_dense_pose_sequence_internal(
     let mut morph_key_indices = vec![endpoint_indices(input.frame_count); input.morph_count];
 
     if target == ReductionTarget::DccCubic && input.frame_count >= DCC_LOCAL_PREFIT_MIN_FRAMES {
-        let dcc_prefit_started = Instant::now();
+        let dcc_prefit_started = reduction_timer_start();
         for (bone, keys) in bone_key_indices.iter_mut().enumerate() {
             let prefit = split_dcc_bone_track(
                 keys,
@@ -723,7 +743,7 @@ fn reduce_dense_pose_sequence_internal(
             work_stats.local_prefit_morph_key_additions += prefit.key_additions;
             work_stats.local_prefit_morph_samples += prefit.samples;
         }
-        timings.local_prefit += dcc_prefit_started.elapsed();
+        timings.local_prefit += reduction_timer_elapsed(dcc_prefit_started);
     } else if target == ReductionTarget::LinearSlerp {
         for (bone, keys) in bone_key_indices.iter_mut().enumerate() {
             split_bone_track(
@@ -752,7 +772,7 @@ fn reduce_dense_pose_sequence_internal(
         if candidate.is_some() && matches!(validation_mode, ValidationMode::FullScan) {
             dirty = DirtyRanges::full(input.frame_count, input.bone_count, input.morph_count);
         }
-        let candidate_started = Instant::now();
+        let candidate_started = reduction_timer_start();
         let local_pose = DenseLocalPose {
             translations: &local_translations,
             rotations: &local_rotations,
@@ -786,8 +806,8 @@ fn reduce_dense_pose_sequence_internal(
                 },
             ));
         }
-        timings.candidate_build += candidate_started.elapsed();
-        let error_measure_started = Instant::now();
+        timings.candidate_build += reduction_timer_elapsed(candidate_started);
+        let error_measure_started = reduction_timer_start();
         let (report, worst_by_track) = measure_error_cached(
             candidate.as_ref().expect("candidate initialized"),
             input,
@@ -804,7 +824,7 @@ fn reduce_dense_pose_sequence_internal(
             worker_pool.as_ref(),
             worker_count,
         )?;
-        timings.error_measure += error_measure_started.elapsed();
+        timings.error_measure += reduction_timer_elapsed(error_measure_started);
         let mut failing = worst_by_track
             .into_iter()
             .flatten()
@@ -1255,7 +1275,7 @@ fn build_sequence(
     }
     work_stats.candidate_bone_track_rebuilds += bone_key_indices.len();
     work_stats.candidate_morph_track_rebuilds += morph_key_indices.len();
-    let dcc_bone_started = (target == ReductionTarget::DccCubic).then(Instant::now);
+    let dcc_bone_started = (target == ReductionTarget::DccCubic).then(reduction_timer_start);
     let bone_tracks = bone_key_indices
         .iter()
         .enumerate()
@@ -1263,9 +1283,9 @@ fn build_sequence(
         .collect::<Vec<_>>()
         .into_boxed_slice();
     if let Some(started) = dcc_bone_started {
-        timings.dcc_fit += started.elapsed();
+        timings.dcc_fit += reduction_timer_elapsed(started);
     }
-    let dcc_morph_started = (target == ReductionTarget::DccCubic).then(Instant::now);
+    let dcc_morph_started = (target == ReductionTarget::DccCubic).then(reduction_timer_start);
     let morph_tracks = morph_key_indices
         .iter()
         .enumerate()
@@ -1273,7 +1293,7 @@ fn build_sequence(
         .collect::<Vec<_>>()
         .into_boxed_slice();
     if let Some(started) = dcc_morph_started {
-        timings.dcc_fit += started.elapsed();
+        timings.dcc_fit += reduction_timer_elapsed(started);
     }
     ReducedPoseSequence {
         snapshot: snapshot.clone(),
@@ -1385,7 +1405,7 @@ fn rebuild_dirty_tracks(
         work_stats,
         timings,
     } = instrumentation;
-    let dcc_started = (target == ReductionTarget::DccCubic).then(Instant::now);
+    let dcc_started = (target == ReductionTarget::DccCubic).then(reduction_timer_start);
     for (bone, range) in dirty.bone_local.iter().enumerate() {
         if range.is_empty() {
             continue;
@@ -1409,7 +1429,7 @@ fn rebuild_dirty_tracks(
         sequence.morph_tracks[morph] = build_morph_track(target, input, morph, indices);
     }
     if let Some(started) = dcc_started {
-        timings.dcc_fit += started.elapsed();
+        timings.dcc_fit += reduction_timer_elapsed(started);
     }
 }
 

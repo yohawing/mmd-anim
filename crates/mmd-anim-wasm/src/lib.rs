@@ -671,7 +671,6 @@ impl WasmPmxVertexMorphOffsets {
 #[wasm_bindgen]
 pub struct WasmPmxParsedModel {
     parsed: mmd_anim_format::pmx::PmxParsedModel,
-    profile: Option<mmd_anim_format::PmxParseProfile>,
 }
 
 impl WasmPmxParsedModel {
@@ -680,30 +679,7 @@ impl WasmPmxParsedModel {
             return Err("PMX data is empty".to_owned());
         }
         let parsed = mmd_anim_format::parse_pmx_model(data).map_err(|e| e.to_string())?;
-        Ok(Self {
-            parsed,
-            profile: None,
-        })
-    }
-
-    fn parse_profiled_inner(data: &[u8]) -> Result<Self, String> {
-        if data.is_empty() {
-            return Err("PMX data is empty".to_owned());
-        }
-        let (parsed, profile) =
-            mmd_anim_format::parse_pmx_model_profiled(data).map_err(|e| e.to_string())?;
-        Ok(Self {
-            parsed,
-            profile: Some(profile),
-        })
-    }
-
-    fn profile_json_inner(&self) -> Result<String, String> {
-        let profile = self
-            .profile
-            .as_ref()
-            .ok_or_else(|| "PMX parse profiling was not enabled".to_owned())?;
-        serde_json::to_string(profile).map_err(|error| error.to_string())
+        Ok(Self { parsed })
     }
 }
 
@@ -714,20 +690,6 @@ impl WasmPmxParsedModel {
     pub fn parse(data: &[u8]) -> Result<WasmPmxParsedModel, JsValue> {
         Self::parse_inner(data)
             .map_err(|error| js_parser_error("PMX", "parsePmxParsedModel", None, error))
-    }
-
-    /// Parse PMX bytes once while collecting per-section timings.
-    #[wasm_bindgen(js_name = parseProfiled)]
-    pub fn parse_profiled(data: &[u8]) -> Result<WasmPmxParsedModel, JsValue> {
-        Self::parse_profiled_inner(data)
-            .map_err(|error| js_parser_error("PMX", "parsePmxParsedModelProfiled", None, error))
-    }
-
-    /// Return the opt-in parse profile collected by `parseProfiled`.
-    #[wasm_bindgen(js_name = profileJson)]
-    pub fn profile_json(&self) -> Result<String, JsValue> {
-        self.profile_json_inner()
-            .map_err(|error| js_parser_error("PMX", "profileJson", None, error))
     }
 
     /// Return JSON with all model data except geometry.
@@ -3677,7 +3639,6 @@ TextureFilename { "tex/main.png"; }
     fn pmx_parsed_model_handle_rejects_empty_input() {
         assert!(WasmPmxParsedModel::parse_inner(&[]).is_err());
     }
-
     #[test]
     fn pmx_parsed_model_handle_splits_vertex_morph_offsets_from_json() {
         let parsed = WasmPmxParsedModel::parse_inner(&vertex_morph_pmx_bytes()).unwrap();
@@ -3691,26 +3652,5 @@ TextureFilename { "tex/main.png"; }
         assert_eq!(offsets.morph_spans(), vec![0, 2]);
         assert_eq!(offsets.vertex_indices(), vec![0, 2]);
         assert_eq!(offsets.positions(), vec![1.0, 2.0, 3.0, -1.0, 0.5, 4.0]);
-    }
-
-    #[test]
-    fn pmx_profiled_handle_exposes_parse_sections() {
-        let pmx_bytes = minimal_pmx_bytes();
-        let parsed = WasmPmxParsedModel::parse_profiled_inner(&pmx_bytes).unwrap();
-        let value: serde_json::Value =
-            serde_json::from_str(&parsed.profile_json_inner().unwrap()).unwrap();
-
-        assert_eq!(value["inputBytes"], pmx_bytes.len());
-        assert_eq!(value["sections"][0]["name"], "header");
-        assert_eq!(value["sections"][12]["name"], "finalize");
-    }
-
-    #[test]
-    fn pmx_regular_handle_has_no_parse_profile() {
-        let parsed = WasmPmxParsedModel::parse_inner(&minimal_pmx_bytes()).unwrap();
-        assert_eq!(
-            parsed.profile_json_inner().unwrap_err(),
-            "PMX parse profiling was not enabled"
-        );
     }
 }

@@ -33,14 +33,13 @@ pub use pmm::{
 pub use pmx::{
     PmxBoneImport, PmxMaterialSplit, PmxMaterialSplitManifest, PmxMaterialSplitManifestMesh,
     PmxMaterialSplitMesh, PmxMaterialSplitMorphIndexMap, PmxMaterialSplitResult, PmxMorphNames,
-    PmxParseProfile, PmxParseSectionProfile, PmxParsedModel, PmxPartsBoneDescriptor,
-    PmxPartsDescriptor, PmxPartsDisplayFrameDescriptor, PmxPartsDisplayFrameItem,
-    PmxPartsGroupMorphOffset, PmxPartsIndexSizes, PmxPartsInput, PmxPartsJointDescriptor,
-    PmxPartsMaterialDescriptor, PmxPartsMaterialFlags, PmxPartsMorphDescriptor,
-    PmxPartsRigidBodyDescriptor, PmxPartsVertexMorphOffset, PmxRigSpec, PmxRigSpecBone,
-    PmxRigSpecGrant, PmxRigSpecIkChain, PmxRigSpecIkLink, PmxRigSpecLocalAxis, PmxRuntimeImport,
-    build_pmx_model_from_parts, export_pmx_model, import_pmx_model, import_pmx_runtime,
-    parse_pmx_material_split, parse_pmx_model, parse_pmx_model_profiled, parse_pmx_rig_spec,
+    PmxParsedModel, PmxPartsBoneDescriptor, PmxPartsDescriptor, PmxPartsDisplayFrameDescriptor,
+    PmxPartsDisplayFrameItem, PmxPartsGroupMorphOffset, PmxPartsIndexSizes, PmxPartsInput,
+    PmxPartsJointDescriptor, PmxPartsMaterialDescriptor, PmxPartsMaterialFlags,
+    PmxPartsMorphDescriptor, PmxPartsRigidBodyDescriptor, PmxPartsVertexMorphOffset, PmxRigSpec,
+    PmxRigSpecBone, PmxRigSpecGrant, PmxRigSpecIkChain, PmxRigSpecIkLink, PmxRigSpecLocalAxis,
+    PmxRuntimeImport, build_pmx_model_from_parts, export_pmx_model, import_pmx_model,
+    import_pmx_runtime, parse_pmx_material_split, parse_pmx_model, parse_pmx_rig_spec,
     split_pmx_model_by_material, validate_pmx_export_model,
 };
 pub use vmd::{

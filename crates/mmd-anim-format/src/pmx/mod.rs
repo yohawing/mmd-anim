@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use glam::{Mat4, Quat};
 use serde::{Deserialize, Serialize};
-use web_time::Instant;
 
 use mmd_anim_runtime::{
     AppendTransformInit, BoneIndex, BoneInit, BoneMorphOffset, GroupMorphOffset, IkAngleLimit,
@@ -901,23 +900,6 @@ pub struct PmxParsedModel {
     pub joints: Vec<PmxParsedJoint>,
     pub soft_bodies: Vec<PmxParsedSoftBody>,
     pub diagnostics: Vec<PmxParserDiagnostic>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PmxParseProfile {
-    pub input_bytes: usize,
-    pub total_duration_ns: u64,
-    pub sections: Vec<PmxParseSectionProfile>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PmxParseSectionProfile {
-    pub name: &'static str,
-    pub offset: usize,
-    pub bytes: usize,
-    pub duration_ns: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2868,151 +2850,42 @@ fn default_pmx_parts_root_bone() -> PmxParsedBone {
     }
 }
 
-struct PmxParseProfiler {
-    input_bytes: usize,
-    total_started: Option<Instant>,
-    active_section: Option<(&'static str, usize, Instant)>,
-    sections: Vec<PmxParseSectionProfile>,
-}
-
-impl PmxParseProfiler {
-    fn disabled(input_bytes: usize) -> Self {
-        Self {
-            input_bytes,
-            total_started: None,
-            active_section: None,
-            sections: Vec::new(),
-        }
-    }
-
-    fn enabled(input_bytes: usize) -> Self {
-        Self {
-            input_bytes,
-            total_started: Some(Instant::now()),
-            active_section: None,
-            sections: Vec::new(),
-        }
-    }
-
-    fn begin(&mut self, name: &'static str, offset: usize) {
-        if self.total_started.is_some() {
-            debug_assert!(self.active_section.is_none());
-            self.active_section = Some((name, offset, Instant::now()));
-        }
-    }
-
-    fn end(&mut self, offset: usize) {
-        let Some((name, start_offset, started)) = self.active_section.take() else {
-            return;
-        };
-        self.sections.push(PmxParseSectionProfile {
-            name,
-            offset: start_offset,
-            bytes: offset.saturating_sub(start_offset),
-            duration_ns: duration_ns(started.elapsed()),
-        });
-    }
-
-    fn finish(self) -> PmxParseProfile {
-        debug_assert!(self.active_section.is_none());
-        PmxParseProfile {
-            input_bytes: self.input_bytes,
-            total_duration_ns: self
-                .total_started
-                .map(|started| duration_ns(started.elapsed()))
-                .unwrap_or(0),
-            sections: self.sections,
-        }
-    }
-}
-
-fn duration_ns(duration: std::time::Duration) -> u64 {
-    duration.as_nanos().min(u128::from(u64::MAX)) as u64
-}
-
 pub fn parse_pmx_model(data: &[u8]) -> Result<PmxParsedModel, ImportError> {
-    let mut profiler = PmxParseProfiler::disabled(data.len());
-    parse_pmx_model_inner(data, &mut profiler)
-}
-
-pub fn parse_pmx_model_profiled(
-    data: &[u8],
-) -> Result<(PmxParsedModel, PmxParseProfile), ImportError> {
-    let mut profiler = PmxParseProfiler::enabled(data.len());
-    let model = parse_pmx_model_inner(data, &mut profiler)?;
-    Ok((model, profiler.finish()))
-}
-
-fn parse_pmx_model_inner(
-    data: &[u8],
-    profiler: &mut PmxParseProfiler,
-) -> Result<PmxParsedModel, ImportError> {
-    profiler.begin("header", 0);
     let (header, pos) = read_header(data)?;
-    profiler.end(pos);
     let mut r = Reader { data, pos };
-
-    profiler.begin("metadata", r.pos);
     let name = r.read_string(header.encoding)?;
     let english_name = r.read_string(header.encoding)?;
     let comment = r.read_string(header.encoding)?;
     let english_comment = r.read_string(header.encoding)?;
-    profiler.end(r.pos);
 
-    profiler.begin("vertices", r.pos);
     let vertex_count = read_section_count_with_min_record(&mut r, 12 + 12 + 8 + 1 + 4)?;
-    let geometry = read_parsed_geometry(&mut r, &header, vertex_count, profiler)?;
+    let geometry = read_parsed_geometry(&mut r, &header, vertex_count)?;
     let index_count = geometry.indices.len();
-
-    profiler.begin("textures", r.pos);
     let textures = read_parsed_textures(&mut r, header.encoding)?;
-    profiler.end(r.pos);
-
-    profiler.begin("materials", r.pos);
     let materials = read_parsed_materials(&mut r, &header, &textures)?;
     let material_groups = build_material_groups(&materials);
-    profiler.end(r.pos);
-
-    profiler.begin("bones", r.pos);
     let bone_count = read_section_count_with_min_record(&mut r, 4 + 4 + 12)?;
     let skeleton = PmxParsedSkeleton {
         bones: read_parsed_bones(&mut r, &header, bone_count)?,
     };
-    profiler.end(r.pos);
-
-    profiler.begin("morphs", r.pos);
     let morphs = read_parsed_morphs(&mut r, &header)?;
-    profiler.end(r.pos);
-
-    profiler.begin("display_frames", r.pos);
     let display_frames = read_parsed_display_frames(&mut r, &header)?;
-    profiler.end(r.pos);
-
-    profiler.begin("rigid_bodies", r.pos);
     let rigid_bodies = if r.remaining() >= 4 {
         read_parsed_rigid_bodies(&mut r, &header)?
     } else {
         Vec::new()
     };
-    profiler.end(r.pos);
-
-    profiler.begin("joints", r.pos);
     let joints = if r.remaining() >= 4 {
         read_parsed_joints(&mut r, &header)?
     } else {
         Vec::new()
     };
-    profiler.end(r.pos);
-
-    profiler.begin("soft_bodies", r.pos);
     let soft_bodies = if header.version >= 2.05 && r.remaining() >= 4 {
         read_parsed_soft_bodies(&mut r, &header)?
     } else {
         Vec::new()
     };
-    profiler.end(r.pos);
 
-    profiler.begin("finalize", r.pos);
     let mut geometry = geometry;
     geometry.material_groups = material_groups;
     let mut diagnostics = Vec::new();
@@ -3034,7 +2907,7 @@ fn parse_pmx_model_inner(
         });
     }
 
-    let model = PmxParsedModel {
+    Ok(PmxParsedModel {
         metadata: PmxParsedMetadata {
             format: "pmx".to_owned(),
             version: header.version,
@@ -3076,9 +2949,7 @@ fn parse_pmx_model_inner(
         joints,
         soft_bodies,
         diagnostics,
-    };
-    profiler.end(r.pos);
-    Ok(model)
+    })
 }
 
 pub fn export_pmx_model(model: &PmxParsedModel) -> Vec<u8> {
@@ -3432,7 +3303,6 @@ fn read_parsed_geometry(
     r: &mut Reader<'_>,
     header: &PmxHeader,
     vertex_count: usize,
-    profiler: &mut PmxParseProfiler,
 ) -> Result<PmxParsedGeometry, ImportError> {
     r.require_record_bytes(vertex_count, 12 + 12 + 8 + 1 + 4)?;
     let position_capacity = vertex_count
@@ -3540,14 +3410,11 @@ fn read_parsed_geometry(
         edge_scale.push(r.read_f32_le()?);
     }
 
-    profiler.end(r.pos);
-    profiler.begin("indices", r.pos);
     let index_count = read_section_count_with_min_record(r, header.vertex_index_size as usize)?;
     let mut indices = Vec::with_capacity(index_count);
     for _ in 0..index_count {
         indices.push(r.read_vertex_index(header.vertex_index_size)?);
     }
-    profiler.end(r.pos);
 
     Ok(PmxParsedGeometry {
         positions,
@@ -6412,51 +6279,6 @@ mod tests {
         let reparsed = parse_pmx_model(&exported).unwrap();
 
         assert_pmx_roundtrip_eq(&parsed, &reparsed);
-    }
-
-    #[test]
-    fn profiled_parse_reports_ordered_sections_without_changing_the_model() {
-        let input = ik_multi_axis_limit_pmx_fixture();
-        let regular = parse_pmx_model(input).unwrap();
-        let (profiled, profile) = parse_pmx_model_profiled(input).unwrap();
-
-        assert_eq!(profile.input_bytes, input.len());
-        assert_eq!(
-            profiled.metadata.counts.vertices,
-            regular.metadata.counts.vertices
-        );
-        assert_eq!(
-            profiled.metadata.counts.morphs,
-            regular.metadata.counts.morphs
-        );
-        assert_eq!(profiled.geometry.positions, regular.geometry.positions);
-        assert_eq!(
-            profile
-                .sections
-                .iter()
-                .map(|section| section.name)
-                .collect::<Vec<_>>(),
-            [
-                "header",
-                "metadata",
-                "vertices",
-                "indices",
-                "textures",
-                "materials",
-                "bones",
-                "morphs",
-                "display_frames",
-                "rigid_bodies",
-                "joints",
-                "soft_bodies",
-                "finalize",
-            ]
-        );
-        for sections in profile.sections.windows(2) {
-            assert_eq!(sections[0].offset + sections[0].bytes, sections[1].offset);
-        }
-        let last = profile.sections.last().unwrap();
-        assert_eq!(last.offset + last.bytes, input.len());
     }
 
     #[test]

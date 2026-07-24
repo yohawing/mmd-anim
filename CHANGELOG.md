@@ -14,6 +14,23 @@ WASM payloads, and PMX morph metadata preservation.
   that omits the duplicated vertex-offset payload for lower parse-time memory
   and serialization cost.
 
+### Breaking changes
+
+- Raised the experimental C ABI version from 2 to 3 and removed the
+  Unity-specific `mmd_runtime_reduced_pose_unity_curve_count`,
+  `mmd_runtime_reduced_pose_unity_curve_descriptor`, and
+  `mmd_runtime_reduced_pose_unity_curve_keys` entry points, together with their
+  Unity curve enums and record types.
+- Unity consumers must migrate to
+  `mmd_runtime_reduced_pose_generic_curve_info`,
+  `mmd_runtime_reduced_pose_generic_curve_count`,
+  `mmd_runtime_reduced_pose_generic_curve_descriptor`, and
+  `mmd_runtime_reduced_pose_generic_curve_keys`. These return runtime-native
+  model units, radians, sample-frame time, per-frame tangents, and unscaled
+  morph weights; consumers perform handedness conversion, seconds and
+  per-second tangent conversion, Euler/channel mapping, and morph percent
+  scaling as required by the target runtime.
+
 ### Changed
 
 - Enabled the existing runtime IK convergence break by changing the default

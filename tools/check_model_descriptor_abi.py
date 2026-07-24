@@ -157,8 +157,8 @@ def check_descriptor_abi() -> list[str]:
     header_errors, _ = check_header(header)
     errors.extend(header_errors)
 
-    if manifest["abi_version"] != 2:
-        errors.append(f"manifest abi_version={manifest['abi_version']}, expected=2")
+    if manifest["abi_version"] != 3:
+        errors.append(f"manifest abi_version={manifest['abi_version']}, expected=3")
     feature = manifest["feature"]
     if feature["value"] != feature["bit"]:  # type: ignore[index]
         errors.append("manifest feature bit/value mismatch")

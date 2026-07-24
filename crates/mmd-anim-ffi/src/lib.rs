@@ -12,10 +12,6 @@ use std::{ptr, slice, str, sync::Arc};
 #[cfg(feature = "physics-bullet-native")]
 use serde::{Deserialize, Deserializer, Serialize};
 
-use mmd_anim_format::fbx::{
-    UnityAnimationClipDto, UnityMorphBinding, UnityReducedPoseBindings,
-    reduced_pose_to_unity_animation_clip_with_fps,
-};
 use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
     AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, DensePoseSequenceView,
@@ -33,7 +29,7 @@ use mmd_anim_runtime::{
     build_morph_init_from_flat_iter, compile_runtime_model_descriptor_v1, solve_append_transform,
 };
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 const FEATURE_SPLIT_PHYSICS_EVALUATION: u32 = 1 << 0;
 const FEATURE_PHYSICS_BULLET_NATIVE: u32 = 1 << 1;
 pub const MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR: u32 = 1 << 2;
@@ -97,13 +93,6 @@ pub struct MmdRuntimeClip {
 
 pub struct MmdRuntimeReducedPose {
     sequence: ReducedPoseSequence,
-    unity_curve_cache: RefCell<Option<MmdRuntimeUnityCurveCache>>,
-}
-
-struct MmdRuntimeUnityCurveCache {
-    frames_per_second_bits: u32,
-    flip_z: bool,
-    clip: UnityAnimationClipDto,
 }
 
 pub struct MmdRuntimeVmdCameraTrack {
@@ -584,33 +573,6 @@ pub struct MmdRuntimeFfiGenericCurveKey {
     pub segment_current_in_rotation_xyz: [f32; 3],
     pub segment_prev_out_scalar: f32,
     pub segment_current_in_scalar: f32,
-}
-
-pub const MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION: u32 = 0;
-pub const MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER: u32 = 1;
-pub const MMD_RUNTIME_UNITY_CURVE_MORPH_WEIGHT: u32 = 2;
-
-pub const MMD_RUNTIME_UNITY_CURVE_AXIS_X: u32 = 0;
-pub const MMD_RUNTIME_UNITY_CURVE_AXIS_Y: u32 = 1;
-pub const MMD_RUNTIME_UNITY_CURVE_AXIS_Z: u32 = 2;
-pub const MMD_RUNTIME_UNITY_CURVE_AXIS_NONE: u32 = 3;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MmdRuntimeFfiUnityCurveDescriptor {
-    pub semantic: u32,
-    pub target_index: u32,
-    pub axis: u32,
-    pub key_count: usize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct MmdRuntimeFfiUnityCurveKey {
-    pub time_seconds: f32,
-    pub value: f32,
-    pub in_tangent: f32,
-    pub out_tangent: f32,
 }
 
 #[repr(C)]
@@ -6067,10 +6029,7 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_create_from_dense(
         unsafe {
             ptr::write(
                 out_reduced_pose,
-                Box::into_raw(Box::new(MmdRuntimeReducedPose {
-                    sequence,
-                    unity_curve_cache: RefCell::new(None),
-                })),
+                Box::into_raw(Box::new(MmdRuntimeReducedPose { sequence })),
             )
         };
         MmdRuntimeStatus::Ok
@@ -6590,265 +6549,6 @@ pub unsafe extern "C" fn mmd_runtime_reduced_pose_generic_curve_keys(
                     .cast::<MmdRuntimeFfiGenericCurveKey>()
             };
             unsafe { ptr::write(destination, key) };
-        }
-        MmdRuntimeStatus::Ok
-    })
-}
-
-fn validate_unity_curve_request(
-    pose: &MmdRuntimeReducedPose,
-    frames_per_second: f32,
-) -> Result<(), MmdRuntimeStatus> {
-    if !frames_per_second.is_finite() || frames_per_second <= 0.0 {
-        return Err(status_failure(
-            MmdRuntimeStatus::InvalidInput,
-            "frames per second must be finite and greater than zero",
-        ));
-    }
-    if pose.sequence.target() != ReductionTarget::DccCubic {
-        return Err(status_failure(
-            MmdRuntimeStatus::Unsupported,
-            "Unity curve enumeration requires a DccCubic reduced pose",
-        ));
-    }
-    Ok(())
-}
-
-fn parse_unity_curve_flip_z(raw: u8) -> Result<bool, MmdRuntimeStatus> {
-    match raw {
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => Err(status_failure(
-            MmdRuntimeStatus::InvalidInput,
-            "flip_z must be 0 or 1",
-        )),
-    }
-}
-
-fn unity_curve_count(sequence: &ReducedPoseSequence) -> Option<usize> {
-    sequence
-        .bone_tracks()
-        .len()
-        .checked_mul(6)
-        .and_then(|bone_curves| bone_curves.checked_add(sequence.morph_tracks().len()))
-}
-
-fn unity_curve_descriptor(
-    sequence: &ReducedPoseSequence,
-    curve_index: usize,
-) -> Option<MmdRuntimeFfiUnityCurveDescriptor> {
-    let bone_curve_count = sequence.bone_tracks().len().checked_mul(6)?;
-    if curve_index < bone_curve_count {
-        let target = curve_index / 6;
-        let channel = curve_index % 6;
-        let target_index = u32::try_from(target).ok()?;
-        let key_count = sequence.bone_tracks()[target].keys().len();
-        let (semantic, axis) = if channel < 3 {
-            (MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION, channel)
-        } else {
-            (MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER, channel - 3)
-        };
-        return Some(MmdRuntimeFfiUnityCurveDescriptor {
-            semantic,
-            target_index,
-            axis: axis as u32,
-            key_count,
-        });
-    }
-    let target = curve_index.checked_sub(bone_curve_count)?;
-    let track = sequence.morph_tracks().get(target)?;
-    Some(MmdRuntimeFfiUnityCurveDescriptor {
-        semantic: MMD_RUNTIME_UNITY_CURVE_MORPH_WEIGHT,
-        target_index: u32::try_from(target).ok()?,
-        axis: MMD_RUNTIME_UNITY_CURVE_AXIS_NONE,
-        key_count: track.keys().len(),
-    })
-}
-
-fn unity_clip_for_reduced_pose(
-    sequence: &ReducedPoseSequence,
-    frames_per_second: f32,
-    flip_z: bool,
-) -> Result<UnityAnimationClipDto, MmdRuntimeStatus> {
-    let bindings = UnityReducedPoseBindings {
-        model_identity: sequence.snapshot().model_identity(),
-        bone_paths: vec![String::new(); sequence.snapshot().bone_count()],
-        morph_bindings: (0..sequence.snapshot().morph_count())
-            .map(|_| {
-                Some(UnityMorphBinding {
-                    path: String::new(),
-                    property: String::new(),
-                })
-            })
-            .collect(),
-    };
-    reduced_pose_to_unity_animation_clip_with_fps(sequence, &bindings, frames_per_second, flip_z)
-        .map_err(|error| status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string()))
-}
-
-fn ensure_unity_curve_cache(
-    pose: &MmdRuntimeReducedPose,
-    frames_per_second: f32,
-    flip_z: bool,
-) -> Result<(), MmdRuntimeStatus> {
-    validate_unity_curve_request(pose, frames_per_second)?;
-    let cache_matches = pose
-        .unity_curve_cache
-        .borrow()
-        .as_ref()
-        .is_some_and(|cache| {
-            cache.frames_per_second_bits == frames_per_second.to_bits() && cache.flip_z == flip_z
-        });
-    if cache_matches {
-        return Ok(());
-    }
-    let clip = unity_clip_for_reduced_pose(&pose.sequence, frames_per_second, flip_z)?;
-    *pose.unity_curve_cache.borrow_mut() = Some(MmdRuntimeUnityCurveCache {
-        frames_per_second_bits: frames_per_second.to_bits(),
-        flip_z,
-        clip,
-    });
-    Ok(())
-}
-
-/// Returns the number of target-native Unity scalar curves.
-///
-/// # Safety
-///
-/// `pose` must be a live reduced-pose handle, `flip_z` must be 0 or 1, and
-/// `out_curve_count` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_count(
-    pose: *const MmdRuntimeReducedPose,
-    frames_per_second: f32,
-    flip_z: u8,
-    out_curve_count: *mut usize,
-) -> MmdRuntimeStatus {
-    ffi_guard(MmdRuntimeStatus::Error, || {
-        if out_curve_count.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        unsafe { ptr::write(out_curve_count, 0) };
-        let flip_z = match parse_unity_curve_flip_z(flip_z) {
-            Ok(flip_z) => flip_z,
-            Err(status) => return status,
-        };
-        let Some(pose) = (unsafe { pose.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        if let Err(status) = ensure_unity_curve_cache(pose, frames_per_second, flip_z) {
-            return status;
-        }
-        let Some(count) = unity_curve_count(&pose.sequence) else {
-            return status_failure(MmdRuntimeStatus::Error, "Unity curve count overflow");
-        };
-        unsafe { ptr::write(out_curve_count, count) };
-        MmdRuntimeStatus::Ok
-    })
-}
-
-/// Copies one Unity scalar-curve descriptor.
-///
-/// Curves are ordered as translation XYZ then Euler XYZ for every bone,
-/// followed by one weight curve for every morph.
-///
-/// # Safety
-///
-/// `pose` must be a live reduced-pose handle, `flip_z` must be 0 or 1, and
-/// `out_descriptor` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_descriptor(
-    pose: *const MmdRuntimeReducedPose,
-    frames_per_second: f32,
-    flip_z: u8,
-    curve_index: usize,
-    out_descriptor: *mut MmdRuntimeFfiUnityCurveDescriptor,
-) -> MmdRuntimeStatus {
-    ffi_guard(MmdRuntimeStatus::Error, || {
-        if out_descriptor.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        unsafe { ptr::write(out_descriptor, MmdRuntimeFfiUnityCurveDescriptor::default()) };
-        let flip_z = match parse_unity_curve_flip_z(flip_z) {
-            Ok(flip_z) => flip_z,
-            Err(status) => return status,
-        };
-        let Some(pose) = (unsafe { pose.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        if let Err(status) = ensure_unity_curve_cache(pose, frames_per_second, flip_z) {
-            return status;
-        }
-        let Some(descriptor) = unity_curve_descriptor(&pose.sequence, curve_index) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, "curve index out of range");
-        };
-        unsafe { ptr::write(out_descriptor, descriptor) };
-        MmdRuntimeStatus::Ok
-    })
-}
-
-/// Copies one Unity scalar curve into a caller-owned key buffer.
-///
-/// `out_required_count` is always written after request validation. A null or
-/// short key buffer returns `BUFFER_TOO_SMALL` with the required count, which
-/// provides the first stage of the two-call retrieval pattern.
-///
-/// # Safety
-///
-/// `pose` must be a live reduced-pose handle and `flip_z` must be 0 or 1.
-/// `out_required_count` must be writable. A non-empty key output region must
-/// be writable and must not alias `out_required_count`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mmd_runtime_reduced_pose_unity_curve_keys(
-    pose: *const MmdRuntimeReducedPose,
-    frames_per_second: f32,
-    flip_z: u8,
-    curve_index: usize,
-    out_keys: *mut MmdRuntimeFfiUnityCurveKey,
-    out_key_capacity: usize,
-    out_required_count: *mut usize,
-) -> MmdRuntimeStatus {
-    ffi_guard(MmdRuntimeStatus::Error, || {
-        if out_required_count.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        unsafe { ptr::write(out_required_count, 0) };
-        let flip_z = match parse_unity_curve_flip_z(flip_z) {
-            Ok(flip_z) => flip_z,
-            Err(status) => return status,
-        };
-        let Some(pose) = (unsafe { pose.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        if let Err(status) = ensure_unity_curve_cache(pose, frames_per_second, flip_z) {
-            return status;
-        }
-        let Some(descriptor) = unity_curve_descriptor(&pose.sequence, curve_index) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, "curve index out of range");
-        };
-        unsafe { ptr::write(out_required_count, descriptor.key_count) };
-        if out_key_capacity < descriptor.key_count || out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-        let cache = pose.unity_curve_cache.borrow();
-        let Some(curve) = cache
-            .as_ref()
-            .and_then(|cache| cache.clip.curves.get(curve_index))
-        else {
-            return status_failure(MmdRuntimeStatus::Error, "Unity curve mapping mismatch");
-        };
-        if curve.keys.len() != descriptor.key_count {
-            return status_failure(MmdRuntimeStatus::Error, "Unity curve key count mismatch");
-        }
-        for (index, key) in curve.keys.iter().enumerate() {
-            unsafe {
-                out_keys.add(index).write(MmdRuntimeFfiUnityCurveKey {
-                    time_seconds: key.time_seconds,
-                    value: key.value,
-                    in_tangent: key.in_tangent,
-                    out_tangent: key.out_tangent,
-                });
-            }
         }
         MmdRuntimeStatus::Ok
     })

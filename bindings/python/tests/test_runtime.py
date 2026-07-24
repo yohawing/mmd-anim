@@ -298,9 +298,9 @@ class PureBindingTests(unittest.TestCase):
         self.assertEqual(runtime._last_error(), "integer pointer failure")
         self.assertEqual(native.free_calls, 0)
 
-    def test_abi_version_guard_accepts_only_v2(self) -> None:
+    def test_abi_version_guard_accepts_only_v3(self) -> None:
         _require_abi_version(EXPECTED_ABI_VERSION)
-        with self.assertRaisesRegex(AbiVersionError, "expected 2, got 1"):
+        with self.assertRaisesRegex(AbiVersionError, "expected 3, got 1"):
             _require_abi_version(1)
 
     def test_owned_buffer_is_copied_and_freed_once(self) -> None:

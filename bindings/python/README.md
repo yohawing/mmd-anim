@@ -1,7 +1,7 @@
 # Experimental Python binding
 
 This directory contains a dependency-free `ctypes` bridge to the experimental
-mmd-anim C ABI v2. It is an internal integration layer, not a stable public API
+mmd-anim C ABI v3. It is an internal integration layer, not a stable public API
 or a PyPI package.
 
 ## Quick start

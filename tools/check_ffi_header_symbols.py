@@ -15,73 +15,11 @@ RUST_NO_MANGLE_RE = re.compile(r"#\[\s*(?:unsafe\s*\(\s*)?no_mangle\s*\)?\s*\]")
 RUST_FN_RE = re.compile(r"fn\s+(mmd_runtime_\w+)\s*\(")
 HEADER_FN_RE = re.compile(r"\b(mmd_runtime_\w+)\s*\(")
 
-FORBIDDEN_DENSE_REDUCED_POSE_SYMBOLS = {
+FORBIDDEN_REMOVED_SYMBOLS = {
     "mmd_runtime_reduced_pose_sample",
-}
-
-UNITY_CONSTANTS = {
-    "MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_TRANSLATION": 0,
-    "MMD_RUNTIME_UNITY_CURVE_BONE_LOCAL_EULER": 1,
-    "MMD_RUNTIME_UNITY_CURVE_MORPH_WEIGHT": 2,
-    "MMD_RUNTIME_UNITY_CURVE_AXIS_X": 0,
-    "MMD_RUNTIME_UNITY_CURVE_AXIS_Y": 1,
-    "MMD_RUNTIME_UNITY_CURVE_AXIS_Z": 2,
-    "MMD_RUNTIME_UNITY_CURVE_AXIS_NONE": 3,
-}
-
-UNITY_STRUCTS = {
-    "MmdRuntimeFfiUnityCurveDescriptor": (
-        "mmd_runtime_ffi_unity_curve_descriptor_t",
-        [
-            ("semantic", "u32"),
-            ("target_index", "u32"),
-            ("axis", "u32"),
-            ("key_count", "usize"),
-        ],
-    ),
-    "MmdRuntimeFfiUnityCurveKey": (
-        "mmd_runtime_ffi_unity_curve_key_t",
-        [
-            ("time_seconds", "f32"),
-            ("value", "f32"),
-            ("in_tangent", "f32"),
-            ("out_tangent", "f32"),
-        ],
-    ),
-}
-
-UNITY_FUNCTIONS = {
-    "mmd_runtime_reduced_pose_unity_curve_count": (
-        "status",
-        [
-            ("pose", "const_reduced_pose_ptr"),
-            ("frames_per_second", "f32"),
-            ("flip_z", "u8"),
-            ("out_curve_count", "usize_ptr"),
-        ],
-    ),
-    "mmd_runtime_reduced_pose_unity_curve_descriptor": (
-        "status",
-        [
-            ("pose", "const_reduced_pose_ptr"),
-            ("frames_per_second", "f32"),
-            ("flip_z", "u8"),
-            ("curve_index", "usize"),
-            ("out_descriptor", "unity_descriptor_ptr"),
-        ],
-    ),
-    "mmd_runtime_reduced_pose_unity_curve_keys": (
-        "status",
-        [
-            ("pose", "const_reduced_pose_ptr"),
-            ("frames_per_second", "f32"),
-            ("flip_z", "u8"),
-            ("curve_index", "usize"),
-            ("out_keys", "unity_key_ptr"),
-            ("out_key_capacity", "usize"),
-            ("out_required_count", "usize_ptr"),
-        ],
-    ),
+    "mmd_runtime_reduced_pose_unity_curve_count",
+    "mmd_runtime_reduced_pose_unity_curve_descriptor",
+    "mmd_runtime_reduced_pose_unity_curve_keys",
 }
 
 GENERIC_CONSTANTS = {
@@ -258,8 +196,6 @@ def canonical_rust_type(type_name: str) -> str:
         "*mut MmdRuntimePhysicsWorld": "physics_world_ptr",
         "*const u8": "const_u8_ptr",
         "*mut usize": "usize_ptr",
-        "*mut MmdRuntimeFfiUnityCurveDescriptor": "unity_descriptor_ptr",
-        "*mut MmdRuntimeFfiUnityCurveKey": "unity_key_ptr",
         "*mut MmdRuntimeFfiGenericCurveInfo": "generic_info_ptr",
         "*mut MmdRuntimeFfiGenericCurveDescriptor": "generic_descriptor_ptr",
         "*mut MmdRuntimeFfiGenericCurveKey": "generic_key_ptr",
@@ -283,8 +219,6 @@ def canonical_c_type(type_name: str) -> str:
         "mmd_runtime_physics_world_t*": "physics_world_ptr",
         "const uint8_t*": "const_u8_ptr",
         "size_t*": "usize_ptr",
-        "mmd_runtime_ffi_unity_curve_descriptor_t*": "unity_descriptor_ptr",
-        "mmd_runtime_ffi_unity_curve_key_t*": "unity_key_ptr",
         "mmd_runtime_ffi_generic_curve_info_t*": "generic_info_ptr",
         "mmd_runtime_ffi_generic_curve_descriptor_t*": "generic_descriptor_ptr",
         "mmd_runtime_ffi_generic_curve_key_t*": "generic_key_ptr",
@@ -360,29 +294,6 @@ def c_function_shape(text: str, name: str) -> tuple[str, list[tuple[str, str]]]:
 
 def check_abi_shapes(rust_text: str, header_text: str) -> list[str]:
     errors: list[str] = []
-    for name, expected in UNITY_CONSTANTS.items():
-        rust_match = re.search(rf"pub const {name}: u32 = (\d+);", rust_text)
-        header_match = re.search(rf"\b{name}\s*=\s*(\d+)", header_text)
-        rust_value = int(rust_match.group(1)) if rust_match else None
-        header_value = int(header_match.group(1)) if header_match else None
-        if rust_value != expected or header_value != expected or rust_value != header_value:
-            errors.append(
-                f"constant {name}: Rust={rust_value}, header={header_value}, expected={expected}"
-            )
-    for rust_name, (c_alias, expected) in UNITY_STRUCTS.items():
-        rust_fields = rust_struct_fields(rust_text, rust_name)
-        c_fields = c_struct_fields(header_text, c_alias)
-        if rust_fields != expected or c_fields != expected or rust_fields != c_fields:
-            errors.append(
-                f"struct {rust_name}/{c_alias}: Rust={rust_fields}, header={c_fields}, expected={expected}"
-            )
-    for name, expected in UNITY_FUNCTIONS.items():
-        rust_shape = rust_function_shape(rust_text, name)
-        c_shape = c_function_shape(header_text, name)
-        if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
-            errors.append(
-                f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
-            )
     for name, expected in GENERIC_CONSTANTS.items():
         rust_match = re.search(rf"pub const {name}: u32 = (\d+);", rust_text)
         header_match = re.search(rf"\b{name}(?:\s+|\s*=\s*)(\d+)(?:u)?\b", header_text)
@@ -425,8 +336,8 @@ def main() -> int:
 
     missing_in_header = sorted(rust_symbols - header_symbols)
     missing_in_rust = sorted(header_symbols - rust_symbols)
-    forbidden_in_rust = sorted(FORBIDDEN_DENSE_REDUCED_POSE_SYMBOLS & rust_symbols)
-    forbidden_in_header = sorted(FORBIDDEN_DENSE_REDUCED_POSE_SYMBOLS & header_symbols)
+    forbidden_in_rust = sorted(FORBIDDEN_REMOVED_SYMBOLS & rust_symbols)
+    forbidden_in_header = sorted(FORBIDDEN_REMOVED_SYMBOLS & header_symbols)
     shape_errors = check_abi_shapes(rust_text, header_text)
 
     if missing_in_header or missing_in_rust or forbidden_in_rust or forbidden_in_header or shape_errors:

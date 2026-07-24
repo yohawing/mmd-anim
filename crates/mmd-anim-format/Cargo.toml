@@ -19,6 +19,7 @@ glam.workspace = true
 thiserror.workspace = true
 encoding_rs.workspace = true
 serde.workspace = true
+web-time.workspace = true
 fbxcel = { version = "0.9", optional = true }
 
 [dev-dependencies]

@@ -45,6 +45,61 @@ pub fn parse_pmx_model_json(data: &[u8]) -> Result<String, JsValue> {
 fn pmx_model_non_geometry_json_from_parsed(
     parsed: &mmd_anim_format::pmx::PmxParsedModel,
 ) -> Result<String, String> {
+    pmx_model_non_geometry_json_from_parsed_with_morphs(
+        parsed,
+        serde_json::to_value(&parsed.morphs).map_err(|error| error.to_string())?,
+    )
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PmxMorphWithoutVertexOffsets<'a> {
+    name: &'a str,
+    english_name: &'a str,
+    panel: &'a str,
+    #[serde(rename = "type")]
+    kind: &'a str,
+    vertex_offsets: [mmd_anim_format::pmx::PmxParsedVertexMorphOffset; 0],
+    group_offsets: &'a [mmd_anim_format::pmx::PmxParsedGroupMorphOffset],
+    bone_offsets: &'a [mmd_anim_format::pmx::PmxParsedBoneMorphOffset],
+    uv_offsets: &'a [mmd_anim_format::pmx::PmxParsedUvMorphOffset],
+    additional_uv_offsets: &'a [mmd_anim_format::pmx::PmxParsedAdditionalUvMorphOffset],
+    material_offsets: &'a [mmd_anim_format::pmx::PmxParsedMaterialMorphOffset],
+    flip_offsets: &'a [mmd_anim_format::pmx::PmxParsedGroupMorphOffset],
+    impulse_offsets: &'a [mmd_anim_format::pmx::PmxParsedImpulseMorphOffset],
+}
+
+fn pmx_model_non_geometry_json_without_vertex_offsets_from_parsed(
+    parsed: &mmd_anim_format::pmx::PmxParsedModel,
+) -> Result<String, String> {
+    let morphs = parsed
+        .morphs
+        .iter()
+        .map(|morph| PmxMorphWithoutVertexOffsets {
+            name: &morph.name,
+            english_name: &morph.english_name,
+            panel: &morph.panel,
+            kind: &morph.kind,
+            vertex_offsets: [],
+            group_offsets: &morph.group_offsets,
+            bone_offsets: &morph.bone_offsets,
+            uv_offsets: &morph.uv_offsets,
+            additional_uv_offsets: &morph.additional_uv_offsets,
+            material_offsets: &morph.material_offsets,
+            flip_offsets: &morph.flip_offsets,
+            impulse_offsets: &morph.impulse_offsets,
+        })
+        .collect::<Vec<_>>();
+    pmx_model_non_geometry_json_from_parsed_with_morphs(
+        parsed,
+        serde_json::to_value(morphs).map_err(|error| error.to_string())?,
+    )
+}
+
+fn pmx_model_non_geometry_json_from_parsed_with_morphs(
+    parsed: &mmd_anim_format::pmx::PmxParsedModel,
+    morphs: serde_json::Value,
+) -> Result<String, String> {
     // Serialize each non-geometry field individually into a JSON object.
     // `parsed.geometry` is intentionally omitted — no geometry JSON is constructed.
     let mut obj = serde_json::Map::with_capacity(9);
@@ -55,7 +110,7 @@ fn pmx_model_non_geometry_json_from_parsed(
     sv("metadata", serde_json::to_value(&parsed.metadata))?;
     sv("materials", serde_json::to_value(&parsed.materials))?;
     sv("skeleton", serde_json::to_value(&parsed.skeleton))?;
-    sv("morphs", serde_json::to_value(&parsed.morphs))?;
+    sv("morphs", Ok(morphs))?;
     sv(
         "displayFrames",
         serde_json::to_value(&parsed.display_frames),
@@ -539,6 +594,75 @@ impl WasmPmxGeometry {
     }
 }
 
+/// Typed-array DTO for all PMX vertex morph offsets.
+///
+/// `morphSpans` stores `[start, count]` per morph. `vertexIndices` stores one
+/// vertex index per offset and `positions` stores the matching XYZ triples.
+#[wasm_bindgen]
+pub struct WasmPmxVertexMorphOffsets {
+    morph_spans: Vec<u32>,
+    vertex_indices: Vec<u32>,
+    positions: Vec<f32>,
+}
+
+impl WasmPmxVertexMorphOffsets {
+    fn from_morphs(morphs: &[mmd_anim_format::pmx::PmxParsedMorph]) -> Result<Self, String> {
+        let offset_count = morphs
+            .iter()
+            .try_fold(0usize, |total, morph| {
+                total.checked_add(morph.vertex_offsets.len())
+            })
+            .ok_or_else(|| "PMX vertex morph offset count overflow".to_owned())?;
+        if offset_count > u32::MAX as usize {
+            return Err("PMX vertex morph offset count exceeds the Wasm DTO range".to_owned());
+        }
+        let span_capacity = morphs
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| "PMX vertex morph span count overflow".to_owned())?;
+        let position_capacity = offset_count
+            .checked_mul(3)
+            .ok_or_else(|| "PMX vertex morph position count overflow".to_owned())?;
+        let mut morph_spans = Vec::with_capacity(span_capacity);
+        let mut vertex_indices = Vec::with_capacity(offset_count);
+        let mut positions = Vec::with_capacity(position_capacity);
+        for morph in morphs {
+            morph_spans.push(vertex_indices.len() as u32);
+            morph_spans.push(morph.vertex_offsets.len() as u32);
+            for offset in &morph.vertex_offsets {
+                vertex_indices.push(offset.vertex_index);
+                positions.extend_from_slice(&offset.position);
+            }
+        }
+        Ok(Self {
+            morph_spans,
+            vertex_indices,
+            positions,
+        })
+    }
+}
+
+#[wasm_bindgen]
+impl WasmPmxVertexMorphOffsets {
+    /// Copy of `[start, count]` spans for every morph.
+    #[wasm_bindgen(js_name = morphSpans)]
+    pub fn morph_spans(&self) -> Vec<u32> {
+        self.morph_spans.clone()
+    }
+
+    /// Copy of one vertex index per flattened vertex morph offset.
+    #[wasm_bindgen(js_name = vertexIndices)]
+    pub fn vertex_indices(&self) -> Vec<u32> {
+        self.vertex_indices.clone()
+    }
+
+    /// Copy of flattened XYZ position offsets.
+    #[wasm_bindgen(js_name = positions)]
+    pub fn positions(&self) -> Vec<f32> {
+        self.positions.clone()
+    }
+}
+
 /// Parsed PMX handle for the split loader ABI.
 ///
 /// Use this when both non-geometry JSON and geometry typed arrays are needed
@@ -611,6 +735,21 @@ impl WasmPmxParsedModel {
     pub fn non_geometry_json(&self) -> Result<String, JsValue> {
         pmx_model_non_geometry_json_from_parsed(&self.parsed)
             .map_err(|error| js_parser_error("PMX", "nonGeometryJson", None, error))
+    }
+
+    /// Return non-geometry JSON with vertex morph offsets replaced by empty arrays.
+    #[wasm_bindgen(js_name = nonGeometryJsonWithoutVertexOffsets)]
+    pub fn non_geometry_json_without_vertex_offsets(&self) -> Result<String, JsValue> {
+        pmx_model_non_geometry_json_without_vertex_offsets_from_parsed(&self.parsed).map_err(
+            |error| js_parser_error("PMX", "nonGeometryJsonWithoutVertexOffsets", None, error),
+        )
+    }
+
+    /// Return all vertex morph offsets through compact typed arrays.
+    #[wasm_bindgen(js_name = vertexMorphOffsets)]
+    pub fn vertex_morph_offsets(&self) -> Result<WasmPmxVertexMorphOffsets, JsValue> {
+        WasmPmxVertexMorphOffsets::from_morphs(&self.parsed.morphs)
+            .map_err(|error| js_parser_error("PMX", "vertexMorphOffsets", None, error))
     }
 
     /// Return copied geometry typed arrays for this parsed PMX model.
@@ -3442,6 +3581,33 @@ TextureFilename { "tex/main.png"; }
         .unwrap()
     }
 
+    fn vertex_morph_pmx_bytes() -> Vec<u8> {
+        export_pmx_from_parts(
+            &serde_json::json!({
+                "name": "vertex morph test",
+                "encoding": "utf-8",
+                "indexSizes": { "vertex": 1, "texture": 1, "material": 1, "bone": 1, "morph": 1, "rigidBody": 1 },
+                "morphs": [{
+                    "name": "move",
+                    "kind": "vertex",
+                    "vertexOffsets": [
+                        { "vertexIndex": 0, "position": [1.0, 2.0, 3.0] },
+                        { "vertexIndex": 2, "position": [-1.0, 0.5, 4.0] }
+                    ]
+                }]
+            })
+            .to_string(),
+            &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            &[0, 1, 2],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn pmx_non_geometry_json_excludes_geometry_key() {
         let pmx_bytes = minimal_pmx_bytes();
@@ -3510,6 +3676,21 @@ TextureFilename { "tex/main.png"; }
     #[test]
     fn pmx_parsed_model_handle_rejects_empty_input() {
         assert!(WasmPmxParsedModel::parse_inner(&[]).is_err());
+    }
+
+    #[test]
+    fn pmx_parsed_model_handle_splits_vertex_morph_offsets_from_json() {
+        let parsed = WasmPmxParsedModel::parse_inner(&vertex_morph_pmx_bytes()).unwrap();
+        let compact_json =
+            pmx_model_non_geometry_json_without_vertex_offsets_from_parsed(&parsed.parsed).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&compact_json).unwrap();
+        let offsets = WasmPmxVertexMorphOffsets::from_morphs(&parsed.parsed.morphs).unwrap();
+
+        assert_eq!(value["morphs"][0]["name"], "move");
+        assert_eq!(value["morphs"][0]["vertexOffsets"], serde_json::json!([]));
+        assert_eq!(offsets.morph_spans(), vec![0, 2]);
+        assert_eq!(offsets.vertex_indices(), vec![0, 2]);
+        assert_eq!(offsets.positions(), vec![1.0, 2.0, 3.0, -1.0, 0.5, 4.0]);
     }
 
     #[test]

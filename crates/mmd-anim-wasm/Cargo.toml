@@ -20,4 +20,5 @@ mmd-anim-runtime.workspace = true
 mmd-anim-format = { path = "../mmd-anim-format", version = "0.3.1" }
 wasm-bindgen.workspace = true
 js-sys.workspace = true
+serde.workspace = true
 serde_json.workspace = true

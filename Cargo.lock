@@ -450,6 +450,7 @@ dependencies = [
  "js-sys",
  "mmd-anim-format",
  "mmd-anim-runtime",
+ "serde",
  "serde_json",
  "wasm-bindgen",
 ]

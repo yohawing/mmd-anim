@@ -47,10 +47,10 @@ pub use vmd::{
     VmdCameraState, VmdClipBuildOptions, VmdExportMorphKind, VmdExportName, VmdIkEntry,
     VmdImportResult, VmdLightState, VmdParsedAnimation, VmdPoseExport, VmdPoseExportBindings,
     VmdPoseExportError, VmdPoseExportReport, VmdPropertyIkFrame, VmdSelfShadowState,
-    build_clip_from_import, build_pair_clip, build_pair_clip_with_options,
-    build_property_binding_with_ik_resolver, export_reduced_pose_to_vmd, export_vmd_animation,
-    import_vmd_motion, parse_vmd_animation, sample_vmd_camera_frames, sample_vmd_light_frames,
-    sample_vmd_self_shadow_frames,
+    build_clip_from_import, build_model_pair_clip, build_model_pair_clip_with_options,
+    build_pair_clip, build_pair_clip_with_options, build_property_binding_with_ik_resolver,
+    export_reduced_pose_to_vmd, export_vmd_animation, import_vmd_motion, parse_vmd_animation,
+    sample_vmd_camera_frames, sample_vmd_light_frames, sample_vmd_self_shadow_frames,
 };
 pub use vpd::{VpdParsedPose, export_vpd_pose, parse_vpd_pose};
 pub use xfile::{AccessoryParsedManifest, export_accessory_manifest, parse_accessory_manifest};

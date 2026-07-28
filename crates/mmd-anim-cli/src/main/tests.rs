@@ -1423,6 +1423,83 @@ fn numeric_compare_reports_no_targets_when_focus_bones_do_not_match() {
 }
 
 #[test]
+fn numeric_compare_builds_motion_from_pmm_document_tracks() {
+    let temp = unique_test_dir("compare-numeric-pmm-document");
+    fs::create_dir_all(&temp).unwrap();
+    let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
+    let pmx = format_crate.join("fixtures/pmx/ik_multi_axis_limit.pmx");
+    let pmm = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+    let oracle = r#"{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"test"},"frame":15.0,"models":[{"index":0,"name":"m","filename":"m.pmx","visible":true,"bones":[{"index":0,"name":"link_root","worldMatrix":[0.2919265,0.8414710,0.45464867,0.0, -0.45464867,0.5403023,-0.7080735,0.0, -0.8414710,0.0,0.5403023,0.0, 0.05,0.0,0.0,1.0]}],"morphs":[]}]}"#;
+    fs::write(temp.join("oracle.actual.jsonl"), oracle).unwrap();
+    fs::write(
+        temp.join("manifest.json"),
+        format!(
+            r#"{{
+                "cases": [{{
+                    "name": "pmm-document",
+                    "kind": "motion-numeric",
+                    "assets": {{ "model": "{}", "pmm": "{}" }},
+                    "oracle": {{ "path": "oracle.actual.jsonl" }},
+                    "frames": [15],
+                    "metadata": {{ "focus": {{ "bones": ["link_root"] }} }},
+                    "compare": {{
+                        "targets": ["bones"],
+                        "motionSource": "pmm-document"
+                    }}
+                }}]
+            }}"#,
+            pmx.display().to_string().replace('\\', "\\\\"),
+            pmm.display().to_string().replace('\\', "\\\\")
+        ),
+    )
+    .unwrap();
+
+    let report = compare::build_numeric_compare_report(&temp.join("manifest.json"), false)
+        .unwrap()
+        .to_json();
+
+    assert_eq!(report["summary"]["motionImportErrors"], 0);
+    assert_eq!(report["perCase"][0]["status"], "ok");
+    assert_eq!(report["perCase"][0]["comparedBones"], 1);
+    assert_eq!(report["perCase"][0]["mismatchCount"], 0);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn numeric_compare_rejects_unknown_motion_source() {
+    let temp = unique_test_dir("compare-numeric-unknown-motion-source");
+    fs::create_dir_all(&temp).unwrap();
+    fs::write(
+        temp.join("manifest.json"),
+        r#"{
+            "cases": [{
+                "name": "unknown-source",
+                "kind": "motion-numeric",
+                "assets": { "model": "missing.pmx" },
+                "oracle": { "path": "missing.jsonl" },
+                "frames": [0],
+                "compare": { "motionSource": "something-else" }
+            }]
+        }"#,
+    )
+    .unwrap();
+
+    let report = compare::build_numeric_compare_report(&temp.join("manifest.json"), false)
+        .unwrap()
+        .to_json();
+
+    assert_eq!(report["summary"]["motionImportErrors"], 1);
+    assert_eq!(report["perCase"][0]["status"], "import-error");
+    assert!(
+        report["perCase"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported compare.motionSource")
+    );
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
 fn numeric_compare_accepts_unity_runtime_verification_oracle_format() {
     let temp = unique_test_dir("compare-numeric-unity-oracle");
     fs::create_dir_all(&temp).unwrap();

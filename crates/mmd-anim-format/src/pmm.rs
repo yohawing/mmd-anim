@@ -1,5 +1,12 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 
+use glam::{Quat, Vec3A};
+use mmd_anim_runtime::{
+    AnimationClip, BoneAnimationBinding, BoneIndex, InterpolationScalar, InterpolationVector3,
+    MorphAnimationBinding, MorphIndex, MorphKeyframe, MorphTrack, MovableBoneKeyframe,
+    MovableBoneTrack,
+};
 use serde::Serialize;
 
 use crate::binary::{
@@ -734,6 +741,271 @@ pub struct PmmDocumentModelSummary {
     pub morph_state_summaries: Vec<PmmDocumentMorphStateSummary>,
     pub constraint_state_summaries: Vec<PmmDocumentConstraintStateSummary>,
     pub outside_parent_state_summaries: Vec<PmmDocumentOutsideParentStateSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PmmDocumentClipBuildError {
+    message: String,
+}
+
+impl PmmDocumentClipBuildError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for PmmDocumentClipBuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PmmDocumentClipBuildError {}
+
+/// Builds a runtime-neutral clip from one PMMv2 document model.
+///
+/// PMM document tracks are indexed by the model's stored bone/morph order, so
+/// the resulting bindings preserve those indices. Callers must verify that the
+/// paired runtime model has the same structure before evaluating the clip.
+/// Model visibility, property IK, physics state, and outside-parent state are
+/// intentionally outside this diagnostic slice.
+pub fn build_pmm_document_model_clip(
+    model: &PmmDocumentModelSummary,
+) -> Result<AnimationClip, PmmDocumentClipBuildError> {
+    if model.initial_bone_keyframe_summaries.len() != model.bone_count {
+        return Err(PmmDocumentClipBuildError::new(format!(
+            "PMM model {} initial bone keyframe count {} does not match bone count {}",
+            model.name,
+            model.initial_bone_keyframe_summaries.len(),
+            model.bone_count
+        )));
+    }
+    if model.initial_morph_keyframe_summaries.len() != model.morph_count {
+        return Err(PmmDocumentClipBuildError::new(format!(
+            "PMM model {} initial morph keyframe count {} does not match morph count {}",
+            model.name,
+            model.initial_morph_keyframe_summaries.len(),
+            model.morph_count
+        )));
+    }
+
+    let additional_bones = indexed_bone_keyframes(model)?;
+    let mut bone_tracks = Vec::with_capacity(model.bone_count);
+    let mut consumed_bone_keyframes = HashSet::with_capacity(additional_bones.len());
+    for (bone_index, initial) in model.initial_bone_keyframe_summaries.iter().enumerate() {
+        let summaries = collect_bone_keyframe_chain(initial, &additional_bones, bone_index)?;
+        let mut keyframes = Vec::with_capacity(summaries.len());
+        let mut frames = HashSet::with_capacity(summaries.len());
+        for summary in summaries {
+            if let Some(index) = summary.index
+                && !consumed_bone_keyframes.insert(index)
+            {
+                return Err(PmmDocumentClipBuildError::new(format!(
+                    "PMM additional bone keyframe index {index} is shared by multiple tracks"
+                )));
+            }
+            let frame = pmm_frame_index(summary.frame_index, "bone", bone_index)?;
+            if !frames.insert(frame) {
+                return Err(PmmDocumentClipBuildError::new(format!(
+                    "PMM bone {bone_index} has duplicate frame {frame}"
+                )));
+            }
+            let (position_interpolation, rotation_interpolation) =
+                decode_pmm_bone_interpolation(summary.interpolation);
+            let position = Vec3A::from_array(summary.translation);
+            let rotation = Quat::from_array(summary.orientation);
+            if !position.is_finite() {
+                return Err(PmmDocumentClipBuildError::new(format!(
+                    "PMM bone {bone_index} frame {frame} has non-finite translation"
+                )));
+            }
+            if !rotation.is_finite() || rotation.length_squared() <= f32::EPSILON {
+                return Err(PmmDocumentClipBuildError::new(format!(
+                    "PMM bone {bone_index} frame {frame} has invalid orientation"
+                )));
+            }
+            keyframes.push(MovableBoneKeyframe {
+                frame,
+                position,
+                rotation,
+                position_interpolation,
+                rotation_interpolation,
+            });
+        }
+        bone_tracks.push(BoneAnimationBinding {
+            bone: BoneIndex(bone_index as u32),
+            track: MovableBoneTrack::from_keyframes(keyframes),
+        });
+    }
+    if consumed_bone_keyframes.len() != additional_bones.len() {
+        return Err(PmmDocumentClipBuildError::new(format!(
+            "PMM model {} has {} unlinked additional bone keyframe(s)",
+            model.name,
+            additional_bones.len() - consumed_bone_keyframes.len()
+        )));
+    }
+
+    let additional_morphs = indexed_morph_keyframes(model)?;
+    let mut morph_tracks = Vec::with_capacity(model.morph_count);
+    let mut consumed_morph_keyframes = HashSet::with_capacity(additional_morphs.len());
+    for (morph_index, initial) in model.initial_morph_keyframe_summaries.iter().enumerate() {
+        let summaries = collect_morph_keyframe_chain(initial, &additional_morphs, morph_index)?;
+        let mut keyframes = Vec::with_capacity(summaries.len());
+        let mut frames = HashSet::with_capacity(summaries.len());
+        for summary in summaries {
+            if let Some(index) = summary.index
+                && !consumed_morph_keyframes.insert(index)
+            {
+                return Err(PmmDocumentClipBuildError::new(format!(
+                    "PMM additional morph keyframe index {index} is shared by multiple tracks"
+                )));
+            }
+            let frame = pmm_frame_index(summary.frame_index, "morph", morph_index)?;
+            if !frames.insert(frame) {
+                return Err(PmmDocumentClipBuildError::new(format!(
+                    "PMM morph {morph_index} has duplicate frame {frame}"
+                )));
+            }
+            if !summary.weight.is_finite() {
+                return Err(PmmDocumentClipBuildError::new(format!(
+                    "PMM morph {morph_index} frame {frame} has non-finite weight"
+                )));
+            }
+            keyframes.push(MorphKeyframe::new(frame, summary.weight));
+        }
+        morph_tracks.push(MorphAnimationBinding {
+            morph: MorphIndex(morph_index as u32),
+            track: MorphTrack::from_keyframes(keyframes),
+        });
+    }
+    if consumed_morph_keyframes.len() != additional_morphs.len() {
+        return Err(PmmDocumentClipBuildError::new(format!(
+            "PMM model {} has {} unlinked additional morph keyframe(s)",
+            model.name,
+            additional_morphs.len() - consumed_morph_keyframes.len()
+        )));
+    }
+
+    Ok(AnimationClip::new_full(bone_tracks, morph_tracks, None))
+}
+
+fn indexed_bone_keyframes(
+    model: &PmmDocumentModelSummary,
+) -> Result<HashMap<i32, &PmmDocumentBoneKeyframeSummary>, PmmDocumentClipBuildError> {
+    let mut indexed = HashMap::with_capacity(model.bone_keyframe_summaries.len());
+    for summary in &model.bone_keyframe_summaries {
+        let index = summary.index.ok_or_else(|| {
+            PmmDocumentClipBuildError::new("PMM additional bone keyframe is missing its index")
+        })?;
+        if indexed.insert(index, summary).is_some() {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM duplicate additional bone keyframe index {index}"
+            )));
+        }
+    }
+    Ok(indexed)
+}
+
+fn indexed_morph_keyframes(
+    model: &PmmDocumentModelSummary,
+) -> Result<HashMap<i32, &PmmDocumentMorphKeyframeSummary>, PmmDocumentClipBuildError> {
+    let mut indexed = HashMap::with_capacity(model.morph_keyframe_summaries.len());
+    for summary in &model.morph_keyframe_summaries {
+        let index = summary.index.ok_or_else(|| {
+            PmmDocumentClipBuildError::new("PMM additional morph keyframe is missing its index")
+        })?;
+        if indexed.insert(index, summary).is_some() {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM duplicate additional morph keyframe index {index}"
+            )));
+        }
+    }
+    Ok(indexed)
+}
+
+fn collect_bone_keyframe_chain<'a>(
+    initial: &'a PmmDocumentBoneKeyframeSummary,
+    indexed: &HashMap<i32, &'a PmmDocumentBoneKeyframeSummary>,
+    bone_index: usize,
+) -> Result<Vec<&'a PmmDocumentBoneKeyframeSummary>, PmmDocumentClipBuildError> {
+    let mut result = vec![initial];
+    let mut visited = HashSet::new();
+    let mut next_index = initial.next_keyframe_index;
+    while next_index != 0 {
+        let summary = indexed.get(&next_index).copied().ok_or_else(|| {
+            PmmDocumentClipBuildError::new(format!(
+                "PMM bone {bone_index} keyframe chain references missing index {next_index}"
+            ))
+        })?;
+        if !visited.insert(next_index) {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM bone {bone_index} keyframe chain contains a cycle at index {next_index}"
+            )));
+        }
+        result.push(summary);
+        next_index = summary.next_keyframe_index;
+    }
+    Ok(result)
+}
+
+fn collect_morph_keyframe_chain<'a>(
+    initial: &'a PmmDocumentMorphKeyframeSummary,
+    indexed: &HashMap<i32, &'a PmmDocumentMorphKeyframeSummary>,
+    morph_index: usize,
+) -> Result<Vec<&'a PmmDocumentMorphKeyframeSummary>, PmmDocumentClipBuildError> {
+    let mut result = vec![initial];
+    let mut visited = HashSet::new();
+    let mut next_index = initial.next_keyframe_index;
+    while next_index != 0 {
+        let summary = indexed.get(&next_index).copied().ok_or_else(|| {
+            PmmDocumentClipBuildError::new(format!(
+                "PMM morph {morph_index} keyframe chain references missing index {next_index}"
+            ))
+        })?;
+        if !visited.insert(next_index) {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM morph {morph_index} keyframe chain contains a cycle at index {next_index}"
+            )));
+        }
+        result.push(summary);
+        next_index = summary.next_keyframe_index;
+    }
+    Ok(result)
+}
+
+fn pmm_frame_index(
+    frame_index: i32,
+    track_kind: &str,
+    track_index: usize,
+) -> Result<u32, PmmDocumentClipBuildError> {
+    u32::try_from(frame_index).map_err(|_| {
+        PmmDocumentClipBuildError::new(format!(
+            "PMM {track_kind} {track_index} has negative frame index {frame_index}"
+        ))
+    })
+}
+
+fn decode_pmm_bone_interpolation(
+    interpolation: [u8; 16],
+) -> (InterpolationVector3, InterpolationScalar) {
+    fn scalar(values: &[u8]) -> InterpolationScalar {
+        InterpolationScalar {
+            x1: values[0].min(127),
+            y1: values[1].min(127),
+            x2: values[2].min(127),
+            y2: values[3].min(127),
+        }
+    }
+    (
+        InterpolationVector3 {
+            x: scalar(&interpolation[0..4]),
+            y: scalar(&interpolation[4..8]),
+            z: scalar(&interpolation[8..12]),
+        },
+        scalar(&interpolation[12..16]),
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -8438,6 +8710,86 @@ mod tests {
                 "selected",
                 "translation"
             ]
+        );
+    }
+
+    #[test]
+    fn builds_runtime_clip_from_pmm_document_keyframe_chains() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.initial_bone_keyframe_summaries[0].next_keyframe_index = 1;
+        model.bone_keyframe_summaries[0].index = Some(1);
+        model.initial_morph_keyframe_summaries[0].next_keyframe_index = 1;
+        model.morph_keyframe_summaries[0].index = Some(1);
+
+        let clip = build_pmm_document_model_clip(&model).unwrap();
+
+        assert_eq!(clip.bone_tracks().len(), 1);
+        let bone_track = clip.find_bone_track(BoneIndex(0)).unwrap();
+        assert_eq!(bone_track.keyframe_count(), 2);
+        assert_eq!(bone_track.frame_range(), Some((0, 30)));
+        assert_eq!(bone_track.sample(0.0).unwrap().0, Vec3A::ZERO);
+        assert_eq!(bone_track.sample(30.0).unwrap().1, Quat::IDENTITY);
+
+        assert_eq!(clip.morph_tracks().len(), 1);
+        let morph_track = clip.find_morph_track(MorphIndex(0)).unwrap();
+        assert_eq!(morph_track.keyframe_count(), 2);
+        assert!((morph_track.sample(0.0).unwrap() - 0.5).abs() < 1.0e-6);
+        assert!((morph_track.sample(30.0).unwrap() - 0.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_rejects_missing_linked_keyframe() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.initial_bone_keyframe_summaries[0].next_keyframe_index = 999;
+
+        let error = build_pmm_document_model_clip(&model).unwrap_err();
+
+        assert!(error.to_string().contains("missing index 999"));
+    }
+
+    #[test]
+    fn decodes_pmm_bone_interpolation_as_contiguous_curves() {
+        let interpolation = [1, 2, 3, 4, 11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34];
+
+        let (position, rotation) = decode_pmm_bone_interpolation(interpolation);
+
+        assert_eq!(
+            position.x,
+            InterpolationScalar {
+                x1: 1,
+                y1: 2,
+                x2: 3,
+                y2: 4
+            }
+        );
+        assert_eq!(
+            position.y,
+            InterpolationScalar {
+                x1: 11,
+                y1: 12,
+                x2: 13,
+                y2: 14
+            }
+        );
+        assert_eq!(
+            position.z,
+            InterpolationScalar {
+                x1: 21,
+                y1: 22,
+                x2: 23,
+                y2: 24
+            }
+        );
+        assert_eq!(
+            rotation,
+            InterpolationScalar {
+                x1: 31,
+                y1: 32,
+                x2: 33,
+                y2: 34
+            }
         );
     }
 

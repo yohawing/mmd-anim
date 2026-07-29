@@ -10,7 +10,7 @@ use std::{
 };
 
 use mmd_anim::{
-    format::{build_pair_clip, import_pmx_runtime, import_vmd_motion},
+    format::{build_mmd_registered_pair_clip, import_pmx_runtime, import_vmd_motion},
     runtime::RuntimeInstance,
 };
 use serde_json::json;
@@ -64,13 +64,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let import_vmd = import_vmd_started.elapsed();
 
     let build_clip_started = Instant::now();
-    let clip = build_pair_clip(
+    let clip = build_mmd_registered_pair_clip(
+        &pmx.model,
         &vmd,
         &pmx.bone_name_to_index,
         &pmx.morph_name_to_index,
         &pmx.ik_solver_bone_name_to_index,
         pmx.model.ik_count(),
-    );
+    )?;
     let build_clip = build_clip_started.elapsed();
 
     let setup = SetupTimings {

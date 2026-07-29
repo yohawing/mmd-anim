@@ -1,4 +1,5 @@
 use super::*;
+use mmd_anim_runtime::InterpolationVector3;
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
 
@@ -278,6 +279,15 @@ fn assert_slice_near(actual: &[f32], expected: &[f32], tolerance: f32) {
             "index={index} actual={actual} expected={expected} tolerance={tolerance}"
         );
     }
+}
+
+fn misaligned_mut_ptr<T>(storage: &mut [u8]) -> *mut T {
+    let base = storage.as_mut_ptr();
+    let offset = (0..std::mem::align_of::<T>())
+        .find(|offset| !(base as usize + offset).is_multiple_of(std::mem::align_of::<T>()))
+        .expect("a type with alignment greater than one has a misaligned byte offset");
+    assert!(storage.len() >= offset + std::mem::size_of::<T>());
+    unsafe { base.add(offset).cast::<T>() }
 }
 
 fn reduced_pose_curve_fixture(target: u32) -> *mut MmdRuntimeReducedPose {
@@ -1728,6 +1738,401 @@ fn evaluates_clip_frame_through_c_abi() {
         mmd_runtime_instance_free(instance);
         mmd_runtime_model_free(model);
     }
+}
+
+#[test]
+fn clip_bone_track_introspection_is_authored_local_and_fail_closed() {
+    assert_eq!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION,
+        MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION
+    );
+    let clip = AnimationClip::new(vec![BoneAnimationBinding {
+        bone: BoneIndex(7),
+        track: MovableBoneTrack::from_keyframes(vec![
+            MovableBoneKeyframe {
+                frame: 10,
+                position: glam::Vec3A::new(1.0, 2.0, 3.0),
+                rotation: glam::Quat::from_xyzw(0.0, 0.0, 0.0, 2.0),
+                position_interpolation: InterpolationVector3 {
+                    x: InterpolationScalar {
+                        x1: 1,
+                        y1: 2,
+                        x2: 3,
+                        y2: 4,
+                    },
+                    y: InterpolationScalar::linear(),
+                    z: InterpolationScalar::linear(),
+                },
+                rotation_interpolation: InterpolationScalar::linear(),
+            },
+            MovableBoneKeyframe {
+                frame: 20,
+                position: glam::Vec3A::new(4.0, 5.0, 6.0),
+                rotation: glam::Quat::from_xyzw(0.0, 0.0, 1.0, 1.0),
+                position_interpolation: InterpolationVector3 {
+                    x: InterpolationScalar {
+                        x1: 32,
+                        y1: 64,
+                        x2: 96,
+                        y2: 127,
+                    },
+                    y: InterpolationScalar::linear(),
+                    z: InterpolationScalar::linear(),
+                },
+                rotation_interpolation: InterpolationScalar {
+                    x1: 16,
+                    y1: 32,
+                    x2: 80,
+                    y2: 112,
+                },
+            },
+        ]),
+    }]);
+    let handle = Box::into_raw(Box::new(MmdRuntimeClip { clip }));
+
+    assert_eq!(unsafe { mmd_runtime_clip_bone_track_count(handle) }, 1);
+    let key_count = unsafe { mmd_runtime_clip_bone_track_key_count(handle, 0) };
+    assert_eq!(key_count, 2);
+    assert_eq!(
+        unsafe { mmd_runtime_clip_bone_track_key_count(handle, 1) },
+        0
+    );
+
+    let mut descriptor = MmdRuntimeFfiBoneTrackDescriptor::default();
+    assert_eq!(
+        unsafe { mmd_runtime_clip_bone_track_descriptor(handle, 0, &mut descriptor) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(descriptor.bone_index, 7);
+    assert_eq!(descriptor.key_count, key_count);
+    assert_eq!(
+        unsafe { mmd_runtime_clip_bone_track_descriptor(handle, 1, &mut descriptor) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(descriptor, MmdRuntimeFfiBoneTrackDescriptor::default());
+
+    let mut keys = [MmdRuntimeFfiBoneTrackKey::default(); 2];
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                handle,
+                0,
+                keys.as_mut_ptr(),
+                keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    assert_eq!(keys[0].bone_index, 7);
+    assert_eq!(keys[0].frame, 10);
+    assert_eq!(keys[0].position_xyz, [1.0, 2.0, 3.0]);
+    assert_eq!(
+        keys[0].translation_x.kind,
+        MMD_RUNTIME_BONE_TRACK_CURVE_NONE
+    );
+    assert_eq!(keys[0].translation_x.x1, 0.0);
+    assert_eq!(keys[0].rotation.kind, MMD_RUNTIME_BONE_TRACK_CURVE_NONE);
+    assert_eq!(
+        keys[1].translation_x.kind,
+        MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER
+    );
+    assert_eq!(keys[1].bone_index, 7);
+    assert_eq!(keys[1].translation_x.x1, 32.0 / 127.0);
+    assert_eq!(keys[1].translation_x.y2, 1.0);
+    assert_eq!(
+        keys[1].rotation.kind,
+        MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER
+    );
+    let rotation_length = keys[1]
+        .rotation_xyzw
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
+    assert!((rotation_length - 1.0).abs() < 1e-6);
+
+    let sentinel = MmdRuntimeFfiBoneTrackKey {
+        frame: 1234,
+        ..MmdRuntimeFfiBoneTrackKey::default()
+    };
+    let mut short = [sentinel];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                handle,
+                0,
+                short.as_mut_ptr(),
+                short.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(written, 0);
+    let alias_sentinel = MmdRuntimeFfiBoneTrackKey {
+        frame: 4321,
+        ..MmdRuntimeFfiBoneTrackKey::default()
+    };
+    let mut aliased_outputs = [alias_sentinel; 2];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                handle,
+                0,
+                aliased_outputs.as_mut_ptr(),
+                aliased_outputs.len(),
+                aliased_outputs.as_mut_ptr().cast::<usize>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(aliased_outputs, [alias_sentinel; 2]);
+    assert_eq!(short[0], sentinel);
+
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(handle, 0, ptr::null_mut(), 0, &mut written)
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 0);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                ptr::null(),
+                0,
+                keys.as_mut_ptr(),
+                keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 0);
+
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_bone_track_descriptor(
+                handle,
+                0,
+                handle.cast::<MmdRuntimeFfiBoneTrackDescriptor>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                handle,
+                0,
+                handle.cast::<MmdRuntimeFfiBoneTrackKey>(),
+                keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 99);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                handle,
+                0,
+                keys.as_mut_ptr(),
+                keys.len(),
+                handle.cast::<usize>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(unsafe { mmd_runtime_clip_bone_track_count(handle) }, 1);
+
+    let mut misaligned_key_storage = [0u8; std::mem::size_of::<MmdRuntimeFfiBoneTrackKey>() + 8];
+    let misaligned_key =
+        misaligned_mut_ptr::<MmdRuntimeFfiBoneTrackKey>(&mut misaligned_key_storage);
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(handle, 0, misaligned_key, 1, &mut written)
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 99);
+    let mut misaligned_descriptor_storage =
+        [0u8; std::mem::size_of::<MmdRuntimeFfiBoneTrackDescriptor>() + 8];
+    let misaligned_descriptor =
+        misaligned_mut_ptr::<MmdRuntimeFfiBoneTrackDescriptor>(&mut misaligned_descriptor_storage);
+    assert_eq!(
+        unsafe { mmd_runtime_clip_bone_track_descriptor(handle, 0, misaligned_descriptor) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    let mut misaligned_count_storage = [0u8; std::mem::size_of::<usize>() + 8];
+    let misaligned_count = misaligned_mut_ptr::<usize>(&mut misaligned_count_storage);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                handle,
+                0,
+                keys.as_mut_ptr(),
+                keys.len(),
+                misaligned_count,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    written = 99;
+    let overflowing_capacity = usize::MAX / std::mem::size_of::<MmdRuntimeFfiBoneTrackKey>() + 1;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                handle,
+                0,
+                keys.as_mut_ptr(),
+                overflowing_capacity,
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 99);
+    assert_eq!(unsafe { mmd_runtime_clip_bone_track_count(handle) }, 1);
+
+    unsafe { mmd_runtime_clip_free(handle) };
+}
+
+#[test]
+fn clip_bone_track_introspection_rejects_out_of_range_controls_without_writes() {
+    let clip = AnimationClip::new(vec![BoneAnimationBinding {
+        bone: BoneIndex(0),
+        track: MovableBoneTrack::from_keyframes(vec![
+            MovableBoneKeyframe::new(0, glam::Vec3A::ZERO, glam::Quat::IDENTITY),
+            MovableBoneKeyframe {
+                frame: 1,
+                position: glam::Vec3A::ZERO,
+                rotation: glam::Quat::IDENTITY,
+                position_interpolation: InterpolationVector3 {
+                    x: InterpolationScalar {
+                        x1: 200,
+                        y1: 0,
+                        x2: 127,
+                        y2: 127,
+                    },
+                    ..InterpolationVector3::linear()
+                },
+                rotation_interpolation: InterpolationScalar::linear(),
+            },
+        ]),
+    }]);
+    let handle = Box::into_raw(Box::new(MmdRuntimeClip { clip }));
+    let sentinel = MmdRuntimeFfiBoneTrackKey {
+        frame: 777,
+        ..MmdRuntimeFfiBoneTrackKey::default()
+    };
+    let mut output = [sentinel; 2];
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                handle,
+                0,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 0);
+    assert_eq!(output, [sentinel; 2]);
+    unsafe { mmd_runtime_clip_free(handle) };
+}
+
+#[test]
+fn clip_bone_track_introspection_ignores_unused_first_key_controls() {
+    let clip = AnimationClip::new(vec![BoneAnimationBinding {
+        bone: BoneIndex(0),
+        track: MovableBoneTrack::from_keyframes(vec![
+            MovableBoneKeyframe {
+                frame: 0,
+                position: glam::Vec3A::ZERO,
+                rotation: glam::Quat::IDENTITY,
+                position_interpolation: InterpolationVector3 {
+                    x: InterpolationScalar {
+                        x1: 255,
+                        y1: 255,
+                        x2: 255,
+                        y2: 255,
+                    },
+                    ..InterpolationVector3::linear()
+                },
+                rotation_interpolation: InterpolationScalar {
+                    x1: 255,
+                    y1: 255,
+                    x2: 255,
+                    y2: 255,
+                },
+            },
+            MovableBoneKeyframe::new(1, glam::Vec3A::X, glam::Quat::IDENTITY),
+        ]),
+    }]);
+    let handle = Box::into_raw(Box::new(MmdRuntimeClip { clip }));
+    let mut output = [MmdRuntimeFfiBoneTrackKey::default(); 2];
+    let mut written = 0;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                handle,
+                0,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    assert_eq!(
+        output[0].translation_x.kind,
+        MMD_RUNTIME_BONE_TRACK_CURVE_NONE
+    );
+    assert_eq!(output[0].rotation.kind, MMD_RUNTIME_BONE_TRACK_CURVE_NONE);
+    unsafe { mmd_runtime_clip_free(handle) };
+}
+
+#[test]
+fn clip_bone_track_introspection_layout_is_c_compatible() {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert_eq!(size_of::<MmdRuntimeFfiBoneTrackCurve>(), 20);
+    assert_eq!(align_of::<MmdRuntimeFfiBoneTrackCurve>(), 4);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackCurve, kind), 0);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackCurve, x1), 4);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackCurve, y2), 16);
+
+    assert_eq!(size_of::<MmdRuntimeFfiBoneTrackDescriptor>(), 16);
+    assert_eq!(
+        align_of::<MmdRuntimeFfiBoneTrackDescriptor>(),
+        align_of::<usize>()
+    );
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackDescriptor, bone_index), 0);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackDescriptor, key_count), 8);
+
+    assert_eq!(size_of::<MmdRuntimeFfiBoneTrackKey>(), 116);
+    assert_eq!(align_of::<MmdRuntimeFfiBoneTrackKey>(), 4);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackKey, bone_index), 0);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackKey, frame), 4);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackKey, position_xyz), 8);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackKey, rotation_xyzw), 20);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackKey, translation_x), 36);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackKey, translation_y), 56);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackKey, translation_z), 76);
+    assert_eq!(offset_of!(MmdRuntimeFfiBoneTrackKey, rotation), 96);
 }
 
 #[test]
@@ -4766,6 +5171,334 @@ fn flat_array_model_returns_null_from_vmd_import() {
     unsafe {
         mmd_runtime_model_free(model);
     }
+}
+
+fn registered_vmd_probe_bytes() -> Vec<u8> {
+    let pmx: &[u8] =
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/model_descriptor_parity.pmx");
+    let parsed = mmd_anim_format::parse_pmx_model(pmx).expect("registered PMX fixture");
+    let fixed_name = parsed
+        .skeleton
+        .bones
+        .iter()
+        .find(|bone| bone.flags.fixed_axis)
+        .expect("fixture has fixed-axis bone")
+        .name
+        .clone();
+    let non_fixed_name = parsed
+        .skeleton
+        .bones
+        .iter()
+        .find(|bone| !bone.flags.fixed_axis)
+        .expect("fixture has non-fixed bone")
+        .name
+        .clone();
+    let interpolation = (0u8..64).collect::<Vec<_>>();
+    let mut bone_frames = Vec::new();
+    for (name, rotation, position) in [
+        (fixed_name.as_str(), [0.3, 0.4, 0.1, 0.8], [0.0, 0.0, 0.0]),
+        (
+            non_fixed_name.as_str(),
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+        ),
+    ] {
+        bone_frames.push(mmd_anim_format::vmd::VmdParsedBoneFrame {
+            bone_name: name.to_owned(),
+            bone_name_bytes: Vec::new(),
+            frame: 0,
+            translation: position,
+            rotation,
+            interpolation: vec![0; 64],
+        });
+    }
+    bone_frames.push(mmd_anim_format::vmd::VmdParsedBoneFrame {
+        bone_name: fixed_name,
+        bone_name_bytes: Vec::new(),
+        frame: 10,
+        translation: [0.0, 0.0, 0.0],
+        rotation: [0.3, 0.4, 0.1, 0.8],
+        interpolation: interpolation.clone(),
+    });
+    bone_frames.push(mmd_anim_format::vmd::VmdParsedBoneFrame {
+        bone_name: non_fixed_name,
+        bone_name_bytes: Vec::new(),
+        frame: 10,
+        translation: [0.4, 0.8, -0.6],
+        rotation: [0.2, -0.4, 0.3, 0.8],
+        interpolation,
+    });
+    mmd_anim_format::export_vmd_animation(&mmd_anim_format::vmd::VmdParsedAnimation {
+        kind: "vmd",
+        metadata: mmd_anim_format::vmd::VmdParsedMetadata {
+            format: "vmd",
+            model_name: "registered_probe".to_owned(),
+            model_name_bytes: Vec::new(),
+            counts: mmd_anim_format::vmd::VmdParsedCounts {
+                bones: bone_frames.len(),
+                morphs: 0,
+                cameras: 0,
+                lights: 0,
+                self_shadows: 0,
+                properties: 0,
+            },
+            max_frame: 10,
+        },
+        bone_frames,
+        morph_frames: Vec::new(),
+        camera_frames: Vec::new(),
+        light_frames: Vec::new(),
+        self_shadow_frames: Vec::new(),
+        property_frames: Vec::new(),
+    })
+}
+
+#[test]
+fn imported_model_vmd_clip_uses_mmd_registration_semantics() {
+    let pmx: &[u8] =
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/model_descriptor_parity.pmx");
+    let vmd = registered_vmd_probe_bytes();
+    let model = unsafe { mmd_runtime_model_create_from_pmx_bytes(pmx.as_ptr(), pmx.len()) };
+    assert!(!model.is_null());
+    let clip =
+        unsafe { mmd_runtime_clip_create_from_vmd_bytes_for_model(model, vmd.as_ptr(), vmd.len()) };
+    assert!(!clip.is_null());
+
+    let import = mmd_anim_format::import_pmx_runtime(pmx).expect("registered PMX import");
+    let motion = mmd_anim_format::import_vmd_motion(&vmd).expect("registered VMD import");
+    let raw = mmd_anim_format::build_pair_clip(
+        &motion,
+        &import.bone_name_to_index,
+        &import.morph_name_to_index,
+        &import.ik_solver_bone_name_to_index,
+        import.model.ik_count(),
+    );
+    let registered = mmd_anim_format::build_mmd_registered_pair_clip(
+        &import.model,
+        &motion,
+        &import.bone_name_to_index,
+        &import.morph_name_to_index,
+        &import.ik_solver_bone_name_to_index,
+        import.model.ik_count(),
+    )
+    .expect("registered builder");
+    let actual = unsafe { &(*clip).clip }.sample_at(5.0);
+    let expected = registered.sample_at(5.0);
+    let raw_sample = raw.sample_at(5.0);
+    assert_eq!(actual, expected);
+
+    let fixed_actual = actual
+        .bone_samples()
+        .iter()
+        .find(|sample| import.model.fixed_axis(sample.bone).is_some())
+        .expect("fixed-axis sample");
+    let fixed_raw = raw_sample
+        .bone_samples()
+        .iter()
+        .find(|sample| sample.bone == fixed_actual.bone)
+        .expect("raw fixed-axis sample");
+    assert!(
+        (fixed_actual.rotation.x - fixed_raw.rotation.x).abs()
+            + (fixed_actual.rotation.y - fixed_raw.rotation.y).abs()
+            + (fixed_actual.rotation.z - fixed_raw.rotation.z).abs()
+            > 1.0e-4,
+        "registered path must project fixed-axis rotation"
+    );
+
+    let non_fixed_actual = actual
+        .bone_samples()
+        .iter()
+        .find(|sample| import.model.fixed_axis(sample.bone).is_none())
+        .expect("non-fixed sample");
+    let non_fixed_raw = raw_sample
+        .bone_samples()
+        .iter()
+        .find(|sample| sample.bone == non_fixed_actual.bone)
+        .expect("raw non-fixed sample");
+    assert!(
+        (non_fixed_actual.position.y - non_fixed_raw.position.y).abs()
+            + (non_fixed_actual.position.z - non_fixed_raw.position.z).abs()
+            + (non_fixed_actual.rotation.x - non_fixed_raw.rotation.x).abs()
+            + (non_fixed_actual.rotation.y - non_fixed_raw.rotation.y).abs()
+            + (non_fixed_actual.rotation.z - non_fixed_raw.rotation.z).abs()
+            > 1.0e-4,
+        "registered path must decode the registered interpolation block"
+    );
+
+    unsafe { mmd_runtime_model_free(model) };
+    assert_eq!(
+        unsafe { mmd_runtime_clip_bone_track_count(clip) },
+        registered.bone_track_count()
+    );
+    let assert_curve = |actual: MmdRuntimeFfiBoneTrackCurve, expected: InterpolationScalar| {
+        assert_eq!(actual.kind, MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER);
+        assert_near(actual.x1, expected.x1 as f32 / 127.0, 1.0e-7);
+        assert_near(actual.y1, expected.y1 as f32 / 127.0, 1.0e-7);
+        assert_near(actual.x2, expected.x2 as f32 / 127.0, 1.0e-7);
+        assert_near(actual.y2, expected.y2 as f32 / 127.0, 1.0e-7);
+    };
+    for (track_index, expected_binding) in registered.bone_tracks().iter().enumerate() {
+        let mut descriptor = MmdRuntimeFfiBoneTrackDescriptor::default();
+        assert_eq!(
+            unsafe { mmd_runtime_clip_bone_track_descriptor(clip, track_index, &mut descriptor) },
+            MmdRuntimeStatus::Ok
+        );
+        assert_eq!(descriptor.bone_index, expected_binding.bone.0);
+        assert_eq!(
+            descriptor.key_count,
+            expected_binding.track.keyframe_count()
+        );
+        let mut keys = vec![MmdRuntimeFfiBoneTrackKey::default(); descriptor.key_count];
+        let mut written = 0;
+        assert_eq!(
+            unsafe {
+                mmd_runtime_clip_copy_bone_track_keys(
+                    clip,
+                    track_index,
+                    keys.as_mut_ptr(),
+                    keys.len(),
+                    &mut written,
+                )
+            },
+            MmdRuntimeStatus::Ok
+        );
+        assert_eq!(written, descriptor.key_count);
+        for (key_index, actual_key) in keys.iter().enumerate() {
+            let expected_key = expected_binding
+                .track
+                .keyframe(key_index)
+                .expect("registered key");
+            assert_eq!(actual_key.bone_index, expected_binding.bone.0);
+            assert_eq!(actual_key.frame, expected_key.frame);
+            assert_slice_near(
+                &actual_key.position_xyz,
+                &expected_key.position.to_array(),
+                1.0e-7,
+            );
+            assert_slice_near(
+                &actual_key.rotation_xyzw,
+                &expected_key.rotation.to_array(),
+                1.0e-6,
+            );
+            if key_index == 0 {
+                assert_eq!(
+                    actual_key.translation_x,
+                    MmdRuntimeFfiBoneTrackCurve::default()
+                );
+                assert_eq!(
+                    actual_key.translation_y,
+                    MmdRuntimeFfiBoneTrackCurve::default()
+                );
+                assert_eq!(
+                    actual_key.translation_z,
+                    MmdRuntimeFfiBoneTrackCurve::default()
+                );
+                assert_eq!(actual_key.rotation, MmdRuntimeFfiBoneTrackCurve::default());
+            } else {
+                assert_curve(
+                    actual_key.translation_x,
+                    expected_key.position_interpolation.x,
+                );
+                assert_curve(
+                    actual_key.translation_y,
+                    expected_key.position_interpolation.y,
+                );
+                assert_curve(
+                    actual_key.translation_z,
+                    expected_key.position_interpolation.z,
+                );
+                assert_curve(actual_key.rotation, expected_key.rotation_interpolation);
+            }
+        }
+    }
+    unsafe { mmd_runtime_clip_free(clip) };
+}
+
+#[test]
+fn pmm_document_clip_uses_the_same_bone_track_introspection_surface() {
+    let bytes = include_bytes!("../../mmd-anim-format/fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+    let parsed = mmd_anim_format::parse_pmm_manifest(bytes).expect("PMM fixture");
+    let mut model = parsed
+        .document_summary
+        .expect("PMM document summary")
+        .models
+        .remove(0);
+    let semantic_curves = [1, 2, 3, 4, 11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34];
+    for key in &mut model.bone_keyframe_summaries {
+        key.interpolation = semantic_curves;
+    }
+    let expected =
+        mmd_anim_format::build_pmm_document_model_clip(&model).expect("PMM document clip");
+    let track_index = expected
+        .bone_tracks()
+        .iter()
+        .position(|binding| binding.track.keyframe_count() > 1)
+        .expect("PMM fixture has a keyed bone track");
+    let expected_binding = &expected.bone_tracks()[track_index];
+    let handle = Box::into_raw(Box::new(MmdRuntimeClip {
+        clip: expected.clone(),
+    }));
+
+    let mut descriptor = MmdRuntimeFfiBoneTrackDescriptor::default();
+    assert_eq!(
+        unsafe { mmd_runtime_clip_bone_track_descriptor(handle, track_index, &mut descriptor) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(descriptor.bone_index, expected_binding.bone.0);
+    assert_eq!(
+        descriptor.key_count,
+        expected_binding.track.keyframe_count()
+    );
+    let mut keys = vec![MmdRuntimeFfiBoneTrackKey::default(); descriptor.key_count];
+    let mut written = 0;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_bone_track_keys(
+                handle,
+                track_index,
+                keys.as_mut_ptr(),
+                keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, descriptor.key_count);
+    assert_eq!(
+        keys[0].translation_x,
+        MmdRuntimeFfiBoneTrackCurve::default()
+    );
+    let expected_key = expected_binding
+        .track
+        .keyframe(1)
+        .expect("PMM authored second key");
+    assert_eq!(keys[1].frame, expected_key.frame);
+    assert_eq!(
+        keys[1].translation_x.kind,
+        MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER
+    );
+    assert_near(
+        keys[1].translation_x.x1,
+        expected_key.position_interpolation.x.x1 as f32 / 127.0,
+        1.0e-7,
+    );
+    assert_near(
+        keys[1].translation_y.x1,
+        expected_key.position_interpolation.y.x1 as f32 / 127.0,
+        1.0e-7,
+    );
+    assert_near(
+        keys[1].translation_z.x1,
+        expected_key.position_interpolation.z.x1 as f32 / 127.0,
+        1.0e-7,
+    );
+    assert_near(
+        keys[1].rotation.x1,
+        expected_key.rotation_interpolation.x1 as f32 / 127.0,
+        1.0e-7,
+    );
+
+    unsafe { mmd_runtime_clip_free(handle) };
 }
 
 // -----------------------------------------------------------------------

@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.3 - 2026-07-29
+
+Model-aware VMD registration parity, PMM document-track evaluation, and
+compiled animation-clip introspection for native hosts.
+
+### Added
+
+- Added PMMv2 document model-track conversion into runtime animation clips,
+  including numeric GoldenOracle comparison and diagnosis against an explicitly
+  selected PMM document motion source.
+- Added explicit model-aware VMD registration that applies MMD fixed-axis
+  projection and the registered 64-byte interpolation layout while preserving
+  the existing raw VMD construction APIs for inspection and round trips.
+- Added a versioned, read-only C ABI for enumerating compiled authored bone
+  tracks and copying local keyframes with normalized quaternions and semantic
+  translation/rotation Bezier curves into caller-owned buffers.
+
+### Changed
+
+- Routed model-paired CLI import, benchmarking, Golden comparison, FBX runtime
+  bake, C ABI, and WASM clip construction through MMD registration semantics.
+- Exposed authored bone-track accessors on `AnimationClip` and
+  `MovableBoneTrack` without exposing internal Rust slices or solved IK/append
+  world poses.
+
+### Fixed
+
+- Validated reachable PMM keyframe backlink chains and rejected malformed or
+  cyclic timelines while ignoring unlinked records retained after MMD edits.
+- Distinguished ordered PMM model slots from persistent model IDs and validated
+  model-name selection in document order.
+- Kept numeric diagnosis and comparison on the same selected motion source so
+  raw VMD, registered VMD, and PMM document results are not mixed implicitly.
+
+### Known limitations
+
+- The C ABI, WASM wrapper, PMM document conversion, and Python binding remain
+  experimental and may change before 1.0.
+- Compiled bone-track introspection exposes authored local keys, not evaluated
+  append/IK world poses or raw VMD bytes.
+
 ## 0.3.2 - 2026-07-24
 
 Runtime-neutral reduced-pose curves, safer native host contracts, faster PMX

@@ -178,13 +178,15 @@ pub(crate) fn convert_pmx_to_fbx(
                 error,
             )
         })?;
-        let clip = mmd_anim_format::build_pair_clip(
+        let clip = mmd_anim_format::build_mmd_registered_pair_clip(
+            &runtime_import.model,
             &runtime_motion,
             &runtime_import.bone_name_to_index,
             &runtime_import.morph_name_to_index,
             &runtime_import.ik_solver_bone_name_to_index,
             runtime_import.model.ik_count(),
-        );
+        )
+        .map_err(|error| format!("failed to build MMD-registered VMD clip: {error}"))?;
         warn_about_ignored_vmd_tracks(&motion);
         let natural_last_frame =
             fbx_bone_evaluation_last_frame(&motion, convert_options.bones_only);

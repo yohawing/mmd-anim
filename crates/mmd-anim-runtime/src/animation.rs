@@ -134,6 +134,22 @@ impl MovableBoneTrack {
         self.frame_numbers.len()
     }
 
+    /// Returns an owned view of one authored keyframe.
+    ///
+    /// The interpolation fields on the returned keyframe retain the clip's
+    /// incoming-segment convention: for key `i > 0` they describe the segment
+    /// from key `i - 1` to key `i`.  Callers that expose the first key should
+    /// treat its interpolation as having no incoming segment.
+    pub fn keyframe(&self, index: usize) -> Option<MovableBoneKeyframe> {
+        Some(MovableBoneKeyframe {
+            frame: *self.frame_numbers.get(index)?,
+            position: *self.positions.get(index)?,
+            rotation: *self.rotations.get(index)?,
+            position_interpolation: *self.position_interpolations.get(index)?,
+            rotation_interpolation: *self.rotation_interpolations.get(index)?,
+        })
+    }
+
     pub fn sample(&self, frame: f32) -> Option<(Vec3A, Quat)> {
         match self.frame_numbers.len() {
             0 => None,
@@ -543,6 +559,11 @@ impl AnimationClip {
 
     pub fn bone_track_count(&self) -> usize {
         self.bone_tracks.len()
+    }
+
+    /// Returns one authored local bone track by clip order.
+    pub fn bone_track(&self, index: usize) -> Option<&BoneAnimationBinding> {
+        self.bone_tracks.get(index)
     }
 
     pub fn morph_track_count(&self) -> usize {

@@ -3664,13 +3664,15 @@ mod tests {
         let runtime_motion =
             crate::import_vmd_motion(vmd_data).expect("VMD runtime fixture should import");
         let parsed_motion = crate::parse_vmd_animation(vmd_data).expect("VMD fixture should parse");
-        let clip = crate::build_pair_clip(
+        let clip = crate::build_mmd_registered_pair_clip(
+            &runtime_import.model,
             &runtime_motion,
             &runtime_import.bone_name_to_index,
             &runtime_import.morph_name_to_index,
             &runtime_import.ik_solver_bone_name_to_index,
             runtime_import.model.ik_count(),
-        );
+        )
+        .expect("MMD-registered VMD clip should build");
         let last_frame = parsed_motion
             .bone_frames
             .iter()
@@ -3937,13 +3939,15 @@ mod tests {
         let model = crate::parse_pmx_model(pmx_data).unwrap();
         let runtime_import = crate::import_pmx_runtime(pmx_data).unwrap();
         let runtime_motion = crate::import_vmd_motion(vmd_data).unwrap();
-        let clip = crate::build_pair_clip(
+        let clip = crate::build_mmd_registered_pair_clip(
+            &runtime_import.model,
             &runtime_motion,
             &runtime_import.bone_name_to_index,
             &runtime_import.morph_name_to_index,
             &runtime_import.ik_solver_bone_name_to_index,
             runtime_import.model.ik_count(),
-        );
+        )
+        .expect("MMD-registered VMD clip should build");
         let runtime_model = Arc::new(runtime_import.model);
         let expected = export_fbx_with_runtime_bake(
             &model,
@@ -4362,13 +4366,15 @@ mod tests {
         let runtime_motion =
             crate::import_vmd_motion(vmd_data).expect("VMD runtime fixture should import");
         let parsed_motion = crate::parse_vmd_animation(vmd_data).expect("VMD fixture should parse");
-        let clip = crate::build_pair_clip(
+        let clip = crate::build_mmd_registered_pair_clip(
+            &runtime_import.model,
             &runtime_motion,
             &runtime_import.bone_name_to_index,
             &runtime_import.morph_name_to_index,
             &runtime_import.ik_solver_bone_name_to_index,
             runtime_import.model.ik_count(),
-        );
+        )
+        .expect("MMD-registered VMD clip should build");
         let last_frame = parsed_motion
             .bone_frames
             .iter()
@@ -5185,13 +5191,15 @@ mod tests {
         let runtime_motion =
             crate::import_vmd_motion(vmd_data).expect("VMD runtime fixture should import");
         let parsed_motion = crate::parse_vmd_animation(vmd_data).expect("VMD fixture should parse");
-        let clip = crate::build_pair_clip(
+        let clip = crate::build_mmd_registered_pair_clip(
+            &runtime_import.model,
             &runtime_motion,
             &runtime_import.bone_name_to_index,
             &runtime_import.morph_name_to_index,
             &runtime_import.ik_solver_bone_name_to_index,
             runtime_import.model.ik_count(),
-        );
+        )
+        .expect("MMD-registered VMD clip should build");
         let last_frame = parsed_motion
             .bone_frames
             .iter()

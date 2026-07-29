@@ -85,6 +85,10 @@ $expectedExports = @(
     "mmd_runtime_instance_ik_enabled"
     "mmd_runtime_clip_create"
     "mmd_runtime_clip_create_from_vmd_bytes_for_model"
+    "mmd_runtime_clip_bone_track_count"
+    "mmd_runtime_clip_bone_track_descriptor"
+    "mmd_runtime_clip_bone_track_key_count"
+    "mmd_runtime_clip_copy_bone_track_keys"
     "mmd_runtime_clip_frame_range"
     "mmd_runtime_clip_free"
     "mmd_runtime_reduced_pose_create_from_dense"
@@ -92,9 +96,10 @@ $expectedExports = @(
     "mmd_runtime_reduced_pose_bone_count"
     "mmd_runtime_reduced_pose_morph_count"
     "mmd_runtime_reduced_pose_report"
-    "mmd_runtime_reduced_pose_unity_curve_count"
-    "mmd_runtime_reduced_pose_unity_curve_descriptor"
-    "mmd_runtime_reduced_pose_unity_curve_keys"
+    "mmd_runtime_reduced_pose_generic_curve_info"
+    "mmd_runtime_reduced_pose_generic_curve_count"
+    "mmd_runtime_reduced_pose_generic_curve_descriptor"
+    "mmd_runtime_reduced_pose_generic_curve_keys"
 )
 
 # Check each expected export name appears in the header

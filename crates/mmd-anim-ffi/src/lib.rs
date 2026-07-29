@@ -17,14 +17,14 @@ use mmd_anim_runtime::{
     AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, DensePoseSequenceView,
     FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
     FlatIkLinkInput, FlatIkSolverInput, HostPoseView, IkAngleLimit, IkChainDefinition,
-    IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkSolveOptions, LocalAxis,
-    MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack, MovableBoneKeyframe,
-    MovableBoneTrack, PhysicsMode, PhysicsStepStats, PhysicsTickConfig, PoseReductionReport,
-    PropertyAnimationBinding, PropertyKeyframe, ReducedPoseSequence, ReductionTarget,
-    ReductionTolerances, RuntimeAppendTransformDescriptorV1, RuntimeBoneDescriptorV1,
-    RuntimeBoneMorphOffsetDescriptorV1, RuntimeGroupMorphOffsetDescriptorV1,
-    RuntimeIkLinkDescriptorV1, RuntimeIkSolverDescriptorV1, RuntimeInstance,
-    RuntimeModelDescriptorV1, RuntimeMorphDescriptorV1, SkeletonSnapshot,
+    IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkSolveOptions, InterpolationScalar,
+    LocalAxis, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack,
+    MovableBoneKeyframe, MovableBoneTrack, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
+    PoseReductionReport, PropertyAnimationBinding, PropertyKeyframe, ReducedPoseSequence,
+    ReductionTarget, ReductionTolerances, RuntimeAppendTransformDescriptorV1,
+    RuntimeBoneDescriptorV1, RuntimeBoneMorphOffsetDescriptorV1,
+    RuntimeGroupMorphOffsetDescriptorV1, RuntimeIkLinkDescriptorV1, RuntimeIkSolverDescriptorV1,
+    RuntimeInstance, RuntimeModelDescriptorV1, RuntimeMorphDescriptorV1, SkeletonSnapshot,
     build_append_transforms_from_flat_iter, build_bones_from_flat, build_ik_solvers_from_flat_iter,
     build_morph_init_from_flat_iter, compile_runtime_model_descriptor_v1, solve_append_transform,
 };
@@ -35,7 +35,11 @@ const FEATURE_PHYSICS_BULLET_NATIVE: u32 = 1 << 1;
 pub const MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR: u32 = 1 << 2;
 pub const MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = 1 << 3;
 pub const MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES: u32 = 1 << 4;
+pub const MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION: u32 = 1 << 5;
 pub const MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_BONE_TRACK_CURVE_NONE: u32 = 0;
+pub const MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER: u32 = 1;
 pub const MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC: u32 = 2;
 pub const MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1: u32 =
     mmd_anim_runtime::RUNTIME_MODEL_DESCRIPTOR_VERSION_V1;
@@ -43,6 +47,8 @@ pub const MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE: u32 = 0;
 const FEATURE_MODEL_DESCRIPTOR: u32 = MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR;
 const FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS;
 const FEATURE_REDUCED_POSE_GENERIC_CURVES: u32 = MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES;
+const FEATURE_CLIP_BONE_TRACK_INTROSPECTION: u32 =
+    MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -250,6 +256,51 @@ pub struct MmdRuntimeFfiBoneKeyframe {
     pub frame: u32,
     pub position_xyz: [f32; 3],
     pub rotation_xyzw: [f32; 4],
+}
+
+/// Semantic interpolation metadata for one authored local bone channel.
+///
+/// `kind` is a raw integer so unknown future kinds remain ABI-safe to inspect.
+/// For the v1 kinds, the four controls are normalized to `[0, 1]` cubic
+/// Bezier coordinates. `MMD_RUNTIME_BONE_TRACK_CURVE_NONE` is represented by
+/// zero controls and denotes that the key has no incoming segment.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiBoneTrackCurve {
+    pub kind: u32,
+    pub x1: f32,
+    pub y1: f32,
+    pub x2: f32,
+    pub y2: f32,
+}
+
+/// Descriptor for one authored local bone track in clip order.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiBoneTrackDescriptor {
+    pub bone_index: u32,
+    pub key_count: usize,
+}
+
+/// One authored local bone key and its semantic incoming-segment curves.
+///
+/// This is compiled/authored local clip data and retains transformations made
+/// by the clip's construction path. Registered VMD clips therefore include
+/// name resolution, fixed-axis projection, and registered interpolation
+/// selection. It is not an Append/IK-evaluated world pose. For key `i > 0`,
+/// each curve stored on the key describes the segment from key `i - 1` to key
+/// `i`; the first key uses `NONE` curves.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiBoneTrackKey {
+    pub bone_index: u32,
+    pub frame: u32,
+    pub position_xyz: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+    pub translation_x: MmdRuntimeFfiBoneTrackCurve,
+    pub translation_y: MmdRuntimeFfiBoneTrackCurve,
+    pub translation_z: MmdRuntimeFfiBoneTrackCurve,
+    pub rotation: MmdRuntimeFfiBoneTrackCurve,
 }
 
 #[repr(C)]
@@ -852,6 +903,7 @@ fn runtime_feature_flags() -> u32 {
         | FEATURE_MODEL_DESCRIPTOR
         | FEATURE_HOST_POSE_NATIVE_MORPHS
         | FEATURE_REDUCED_POSE_GENERIC_CURVES
+        | FEATURE_CLIP_BONE_TRACK_INTROSPECTION
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE
         } else {
@@ -7223,6 +7275,269 @@ pub unsafe extern "C" fn mmd_runtime_clip_frame_range(
             *out_last_frame = last;
         }
         true
+    })
+}
+
+fn bone_track_curve(
+    interpolation: InterpolationScalar,
+    has_incoming_segment: bool,
+) -> MmdRuntimeFfiBoneTrackCurve {
+    if !has_incoming_segment {
+        return MmdRuntimeFfiBoneTrackCurve::default();
+    }
+    const SCALE: f32 = 1.0 / 127.0;
+    MmdRuntimeFfiBoneTrackCurve {
+        kind: MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER,
+        x1: interpolation.x1 as f32 * SCALE,
+        y1: interpolation.y1 as f32 * SCALE,
+        x2: interpolation.x2 as f32 * SCALE,
+        y2: interpolation.y2 as f32 * SCALE,
+    }
+}
+
+fn bone_track_key(
+    bone_index: BoneIndex,
+    track: &MovableBoneTrack,
+    key_index: usize,
+) -> Result<MmdRuntimeFfiBoneTrackKey, MmdRuntimeStatus> {
+    let key = track.keyframe(key_index).ok_or_else(|| {
+        status_failure(
+            MmdRuntimeStatus::Error,
+            "bone track key index does not match the track",
+        )
+    })?;
+    let scalar_is_normalized = |interpolation: InterpolationScalar| {
+        interpolation.x1 <= 127
+            && interpolation.y1 <= 127
+            && interpolation.x2 <= 127
+            && interpolation.y2 <= 127
+    };
+    if key_index > 0
+        && (!scalar_is_normalized(key.position_interpolation.x)
+            || !scalar_is_normalized(key.position_interpolation.y)
+            || !scalar_is_normalized(key.position_interpolation.z)
+            || !scalar_is_normalized(key.rotation_interpolation))
+    {
+        return Err(status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "bone track interpolation control is outside the normalized VMD range",
+        ));
+    }
+    let rotation = key.rotation.normalize();
+    let result = MmdRuntimeFfiBoneTrackKey {
+        bone_index: bone_index.0,
+        frame: key.frame,
+        position_xyz: key.position.to_array(),
+        rotation_xyzw: rotation.to_array(),
+        translation_x: bone_track_curve(key.position_interpolation.x, key_index > 0),
+        translation_y: bone_track_curve(key.position_interpolation.y, key_index > 0),
+        translation_z: bone_track_curve(key.position_interpolation.z, key_index > 0),
+        rotation: bone_track_curve(key.rotation_interpolation, key_index > 0),
+    };
+    if !result.position_xyz.iter().all(|value| value.is_finite())
+        || !result.rotation_xyzw.iter().all(|value| value.is_finite())
+        || result
+            .rotation_xyzw
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            < 0.999_9
+        || result
+            .rotation_xyzw
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            > 1.000_1
+    {
+        return Err(status_failure(
+            MmdRuntimeStatus::InvalidInput,
+            "bone track key contains a non-finite or non-normalized value",
+        ));
+    }
+    Ok(result)
+}
+
+/// Returns the number of authored local bone tracks, or zero for a null clip.
+///
+/// Tracks are enumerated in the clip's authored binding order. This metadata
+/// retains transformations made by the clip's construction path; registered
+/// VMD clips include name resolution, fixed-axis projection, and registered
+/// interpolation selection. It is not a solved world pose.
+///
+/// # Safety
+///
+/// `clip` must be null or a live handle returned by a clip creation function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_bone_track_count(clip: *const MmdRuntimeClip) -> usize {
+    ffi_guard(0, || {
+        unsafe { clip.as_ref() }
+            .map(|clip| clip.clip.bone_track_count())
+            .unwrap_or(0)
+    })
+}
+
+/// Copies one authored local bone-track descriptor.
+///
+/// # Safety
+///
+/// `clip` must be null or a live clip handle. `out_descriptor` must point to
+/// writable, naturally aligned storage for one descriptor and must not overlap
+/// the opaque clip handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_bone_track_descriptor(
+    clip: *const MmdRuntimeClip,
+    track_index: usize,
+    out_descriptor: *mut MmdRuntimeFfiBoneTrackDescriptor,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(descriptor_range) = checked_pointer_range(out_descriptor, 1) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if !clip.is_null() {
+            let Some(range) = checked_pointer_range(clip, 1) else {
+                return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+            };
+            if pointer_ranges_overlap(descriptor_range, range) {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "descriptor output must not alias the clip handle",
+                );
+            }
+        }
+        unsafe { ptr::write(out_descriptor, MmdRuntimeFfiBoneTrackDescriptor::default()) };
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(binding) = clip.clip.bone_track(track_index) else {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "bone track index out of range",
+            );
+        };
+        let descriptor = MmdRuntimeFfiBoneTrackDescriptor {
+            bone_index: binding.bone.0,
+            key_count: binding.track.keyframe_count(),
+        };
+        unsafe { ptr::write(out_descriptor, descriptor) };
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Returns one authored local bone track's key count, or zero for null or an
+/// out-of-range track index.
+///
+/// # Safety
+///
+/// `clip` must be null or a live handle returned by a clip creation function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_bone_track_key_count(
+    clip: *const MmdRuntimeClip,
+    track_index: usize,
+) -> usize {
+    ffi_guard(0, || {
+        unsafe { clip.as_ref() }
+            .and_then(|clip| clip.clip.bone_track(track_index))
+            .map(|binding| binding.track.keyframe_count())
+            .unwrap_or(0)
+    })
+}
+
+/// Copies all keys from one authored local bone track into caller-owned
+/// contiguous storage. The first key has `NONE` curves with zero controls.
+/// For every later key, each curve describes the segment from the previous key
+/// to that key. After all output storage has been validated, `out_written` is
+/// set to zero before semantic validation and remains zero for every later
+/// failure; short buffers are never partially written.
+///
+/// # Safety
+///
+/// `clip` must be null or a live clip handle. `out_written` must point to one
+/// writable, naturally aligned `size_t`. When the track is non-empty,
+/// `out_keys` must be writable and naturally aligned for at least
+/// `out_key_capacity` keys. Neither output may overlap the opaque clip handle,
+/// and the output buffer must not overlap `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_copy_bone_track_keys(
+    clip: *const MmdRuntimeClip,
+    track_index: usize,
+    out_keys: *mut MmdRuntimeFfiBoneTrackKey,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(count_range) = checked_pointer_range(out_written, 1) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let clip_range = if clip.is_null() {
+            None
+        } else {
+            let Some(range) = checked_pointer_range(clip, 1) else {
+                return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+            };
+            if pointer_ranges_overlap(count_range, range) {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "out_written must not alias the clip handle",
+                );
+            }
+            Some(range)
+        };
+        let Some(output_range) = checked_pointer_range(out_keys, out_key_capacity) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, "invalid key buffer");
+        };
+        if pointer_ranges_overlap(output_range, count_range) {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "key buffer must not alias out_written",
+            );
+        }
+        if clip_range.is_some_and(|range| pointer_ranges_overlap(output_range, range)) {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "key buffer must not alias the clip handle",
+            );
+        }
+        unsafe { ptr::write(out_written, 0) };
+
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(binding) = clip.clip.bone_track(track_index) else {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "bone track index out of range",
+            );
+        };
+        let required = binding.track.keyframe_count();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_key_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+
+        let mut keys = Vec::new();
+        if keys.try_reserve_exact(required).is_err() {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "failed to allocate the bone track key staging buffer",
+            );
+        }
+        for key_index in 0..required {
+            let key = match bone_track_key(binding.bone, &binding.track, key_index) {
+                Ok(key) => key,
+                Err(status) => return status,
+            };
+            keys.push(key);
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
     })
 }
 

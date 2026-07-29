@@ -1431,8 +1431,9 @@ fn numeric_compare_builds_motion_from_pmm_document_tracks() {
     let pmm = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
     let oracle = r#"{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"test"},"frame":15.0,"models":[{"index":0,"name":"m","filename":"m.pmx","visible":true,"bones":[{"index":0,"name":"link_root","worldMatrix":[0.2919265,0.8414710,0.45464867,0.0, -0.45464867,0.5403023,-0.7080735,0.0, -0.8414710,0.0,0.5403023,0.0, 0.05,0.0,0.0,1.0]}],"morphs":[]}]}"#;
     fs::write(temp.join("oracle.actual.jsonl"), oracle).unwrap();
+    let manifest_path = temp.join("manifest.json");
     fs::write(
-        temp.join("manifest.json"),
+        &manifest_path,
         format!(
             r#"{{
                 "cases": [{{
@@ -1454,7 +1455,7 @@ fn numeric_compare_builds_motion_from_pmm_document_tracks() {
     )
     .unwrap();
 
-    let report = compare::build_numeric_compare_report(&temp.join("manifest.json"), false)
+    let report = compare::build_numeric_compare_report(&manifest_path, false)
         .unwrap()
         .to_json();
 
@@ -1462,6 +1463,17 @@ fn numeric_compare_builds_motion_from_pmm_document_tracks() {
     assert_eq!(report["perCase"][0]["status"], "ok");
     assert_eq!(report["perCase"][0]["comparedBones"], 1);
     assert_eq!(report["perCase"][0]["mismatchCount"], 0);
+
+    let diagnosis = compare::diagnose_numeric_bones(
+        &manifest_path,
+        "pmm-document",
+        15.0,
+        15.0,
+        &["link_root".to_owned()],
+    )
+    .unwrap();
+    assert_eq!(diagnosis, ExitCode::SUCCESS);
+
     fs::remove_dir_all(temp).unwrap();
 }
 

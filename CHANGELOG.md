@@ -27,8 +27,8 @@ compiled animation-clip introspection for native hosts.
 
 ### Fixed
 
-- Validated PMM keyframe backlink chains and rejected malformed or cyclic
-  timelines instead of accepting ambiguous document motion.
+- Validated reachable PMM keyframe backlink chains and rejected malformed or
+  cyclic timelines while ignoring unlinked records retained after MMD edits.
 - Distinguished ordered PMM model slots from persistent model IDs and validated
   model-name selection in document order.
 - Kept numeric diagnosis and comparison on the same selected motion source so

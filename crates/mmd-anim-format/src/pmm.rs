@@ -854,11 +854,21 @@ pub fn build_pmm_document_model_clip(
             track: MovableBoneTrack::from_keyframes(keyframes),
         });
     }
-    if consumed_bone_keyframes.len() != additional_bones.len() {
+    // MMD can retain deleted/edited keys as records whose previous and next
+    // links are both zero. Only the chains reachable from each initial key are
+    // authoritative. Ignore only fully unlinked records; a remaining link on
+    // an unreachable record indicates a disconnected or malformed chain.
+    let disconnected_bone_keyframes = additional_bones
+        .iter()
+        .filter(|(index, summary)| {
+            !consumed_bone_keyframes.contains(index)
+                && (summary.previous_keyframe_index != 0 || summary.next_keyframe_index != 0)
+        })
+        .count();
+    if disconnected_bone_keyframes != 0 {
         return Err(PmmDocumentClipBuildError::new(format!(
-            "PMM model {} has {} unlinked additional bone keyframe(s)",
-            model.name,
-            additional_bones.len() - consumed_bone_keyframes.len()
+            "PMM model {} has {disconnected_bone_keyframes} disconnected additional bone keyframe(s)",
+            model.name
         )));
     }
 
@@ -895,14 +905,19 @@ pub fn build_pmm_document_model_clip(
             track: MorphTrack::from_keyframes(keyframes),
         });
     }
-    if consumed_morph_keyframes.len() != additional_morphs.len() {
+    let disconnected_morph_keyframes = additional_morphs
+        .iter()
+        .filter(|(index, summary)| {
+            !consumed_morph_keyframes.contains(index)
+                && (summary.previous_keyframe_index != 0 || summary.next_keyframe_index != 0)
+        })
+        .count();
+    if disconnected_morph_keyframes != 0 {
         return Err(PmmDocumentClipBuildError::new(format!(
-            "PMM model {} has {} unlinked additional morph keyframe(s)",
-            model.name,
-            additional_morphs.len() - consumed_morph_keyframes.len()
+            "PMM model {} has {disconnected_morph_keyframes} disconnected additional morph keyframe(s)",
+            model.name
         )));
     }
-
     Ok(AnimationClip::new_full(bone_tracks, morph_tracks, None))
 }
 
@@ -8806,6 +8821,67 @@ mod tests {
         assert_eq!(morph_track.keyframe_count(), 2);
         assert!((morph_track.sample(0.0).unwrap() - 0.5).abs() < 1.0e-6);
         assert!((morph_track.sample(30.0).unwrap() - 0.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_ignores_unlinked_deleted_keyframes() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.bone_keyframe_summaries[0].index = Some(1);
+        model.bone_keyframe_summaries[0].previous_keyframe_index = 0;
+        model.bone_keyframe_summaries[0].next_keyframe_index = 0;
+        model.morph_keyframe_summaries[0].index = Some(1);
+        model.morph_keyframe_summaries[0].previous_keyframe_index = 0;
+        model.morph_keyframe_summaries[0].next_keyframe_index = 0;
+
+        let clip = build_pmm_document_model_clip(&model).unwrap();
+
+        assert_eq!(
+            clip.find_bone_track(BoneIndex(0)).unwrap().keyframe_count(),
+            1
+        );
+        assert_eq!(
+            clip.find_morph_track(MorphIndex(0))
+                .unwrap()
+                .keyframe_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_rejects_disconnected_bone_chain() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.bone_keyframe_summaries[0].index = Some(1);
+        model.bone_keyframe_summaries[0].previous_keyframe_index = 7;
+        model.bone_keyframe_summaries[0].next_keyframe_index = 0;
+        model.morph_keyframe_summaries.clear();
+
+        let error = build_pmm_document_model_clip(&model).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("1 disconnected additional bone keyframe")
+        );
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_rejects_disconnected_morph_chain() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.bone_keyframe_summaries.clear();
+        model.morph_keyframe_summaries[0].index = Some(1);
+        model.morph_keyframe_summaries[0].previous_keyframe_index = 7;
+        model.morph_keyframe_summaries[0].next_keyframe_index = 0;
+
+        let error = build_pmm_document_model_clip(&model).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("1 disconnected additional morph keyframe")
+        );
     }
 
     #[test]

@@ -1175,7 +1175,7 @@ fn build_numeric_motion_clip(
             let bytes = fs::read(motion_path).map_err(|error| error.to_string())?;
             let vmd =
                 mmd_anim_format::import_vmd_motion(&bytes).map_err(|error| error.to_string())?;
-            Ok(mmd_anim_format::build_model_pair_clip_with_options(
+            mmd_anim_format::build_mmd_registered_pair_clip_with_options(
                 &model_import.model,
                 &vmd,
                 &model_import.bone_name_to_index,
@@ -1185,7 +1185,8 @@ fn build_numeric_motion_clip(
                 mmd_anim_format::VmdClipBuildOptions {
                     honor_property_ik: false,
                 },
-            ))
+            )
+            .map_err(|error| error.to_string())
         }
         NumericMotionSource::PmmDocument => {
             let bytes = fs::read(motion_path).map_err(|error| error.to_string())?;

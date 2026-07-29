@@ -13,6 +13,10 @@ use crate::binary::{
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
 use crate::sjis::{decode_sjis_fixed_trimmed, encode_sjis};
+use thiserror::Error;
+
+#[cfg(test)]
+use mmd_anim_runtime::BoneInit;
 
 mod reduced;
 pub use reduced::{
@@ -1079,6 +1083,20 @@ pub struct VmdClipBuildOptions {
     pub honor_property_ik: bool,
 }
 
+/// Errors returned while constructing an MMD-registered VMD clip.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum VmdClipBuildError {
+    /// A model-aware bone map contains a bone index that cannot be looked up
+    /// in the supplied [`ModelArena`].
+    #[error(
+        "VMD bone map contains bone index {bone_index:?} outside model bone count {bone_count}"
+    )]
+    BoneIndexOutOfRange {
+        bone_index: BoneIndex,
+        bone_count: usize,
+    },
+}
+
 impl Default for VmdClipBuildOptions {
     fn default() -> Self {
         Self {
@@ -1104,22 +1122,22 @@ pub fn build_pair_clip(
     )
 }
 
-/// Builds a VMD clip using the paired PMX model's fixed-axis metadata.
+/// Builds a VMD clip using the paired PMX model's MMD registration semantics.
 ///
 /// The default VMD builder intentionally preserves the raw imported rotations.
 /// This opt-in paired path applies MMD's fixed-axis registration rule to
 /// mapped bone keys and decodes their interpolation using MMD's registered
 /// block layout; positions, morphs, and property IK remain identical to
 /// [`build_pair_clip_with_options`].
-pub fn build_model_pair_clip(
+pub fn build_mmd_registered_pair_clip(
     model: &ModelArena,
     result: &VmdImportResult,
     bone_name_to_index: &std::collections::HashMap<Vec<u8>, BoneIndex>,
     morph_name_to_index: &std::collections::HashMap<Vec<u8>, MorphIndex>,
     ik_solver_bone_name_to_index: &std::collections::HashMap<Vec<u8>, usize>,
     solver_count: usize,
-) -> AnimationClip {
-    build_model_pair_clip_with_options(
+) -> Result<AnimationClip, VmdClipBuildError> {
+    build_mmd_registered_pair_clip_with_options(
         model,
         result,
         bone_name_to_index,
@@ -1138,20 +1156,20 @@ pub fn build_pair_clip_with_options(
     solver_count: usize,
     options: VmdClipBuildOptions,
 ) -> AnimationClip {
-    build_pair_clip_with_fixed_axis_resolver(
+    build_pair_clip_with_registration_policy(
         result,
         bone_name_to_index,
         morph_name_to_index,
         ik_solver_bone_name_to_index,
         solver_count,
         options,
-        None,
+        VmdRegistrationPolicy::Raw,
     )
 }
 
-/// Builds a VMD clip using the paired PMX model's fixed-axis metadata and
+/// Builds a VMD clip using the paired PMX model's MMD registration semantics and
 /// explicit clip construction options.
-pub fn build_model_pair_clip_with_options(
+pub fn build_mmd_registered_pair_clip_with_options(
     model: &ModelArena,
     result: &VmdImportResult,
     bone_name_to_index: &std::collections::HashMap<Vec<u8>, BoneIndex>,
@@ -1159,26 +1177,50 @@ pub fn build_model_pair_clip_with_options(
     ik_solver_bone_name_to_index: &std::collections::HashMap<Vec<u8>, usize>,
     solver_count: usize,
     options: VmdClipBuildOptions,
-) -> AnimationClip {
-    build_pair_clip_with_fixed_axis_resolver(
+) -> Result<AnimationClip, VmdClipBuildError> {
+    validate_bone_map(model, bone_name_to_index)?;
+    Ok(build_pair_clip_with_registration_policy(
         result,
         bone_name_to_index,
         morph_name_to_index,
         ik_solver_bone_name_to_index,
         solver_count,
         options,
-        Some(&|bone| model.fixed_axis(bone)),
-    )
+        VmdRegistrationPolicy::MmdRegistered(model),
+    ))
 }
 
-fn build_pair_clip_with_fixed_axis_resolver(
+#[derive(Clone, Copy)]
+enum VmdRegistrationPolicy<'a> {
+    Raw,
+    MmdRegistered(&'a ModelArena),
+}
+
+fn validate_bone_map(
+    model: &ModelArena,
+    bone_name_to_index: &std::collections::HashMap<Vec<u8>, BoneIndex>,
+) -> Result<(), VmdClipBuildError> {
+    let bone_count = model.bone_count();
+    if let Some(&bone_index) = bone_name_to_index
+        .values()
+        .find(|bone_index| bone_index.as_usize() >= bone_count)
+    {
+        return Err(VmdClipBuildError::BoneIndexOutOfRange {
+            bone_index,
+            bone_count,
+        });
+    }
+    Ok(())
+}
+
+fn build_pair_clip_with_registration_policy(
     result: &VmdImportResult,
     bone_name_to_index: &std::collections::HashMap<Vec<u8>, BoneIndex>,
     morph_name_to_index: &std::collections::HashMap<Vec<u8>, MorphIndex>,
     ik_solver_bone_name_to_index: &std::collections::HashMap<Vec<u8>, usize>,
     solver_count: usize,
     options: VmdClipBuildOptions,
-    fixed_axis_for_bone: Option<&dyn Fn(BoneIndex) -> Option<Vec3A>>,
+    registration_policy: VmdRegistrationPolicy<'_>,
 ) -> AnimationClip {
     let mut bone_tracks_map: std::collections::BTreeMap<u32, Vec<MovableBoneKeyframe>> =
         std::collections::BTreeMap::new();
@@ -1195,7 +1237,7 @@ fn build_pair_clip_with_fixed_axis_resolver(
             .push(build_mapped_bone_keyframe(
                 kf,
                 bone_index,
-                fixed_axis_for_bone,
+                registration_policy,
             ));
     }
 
@@ -1246,17 +1288,22 @@ fn build_pair_clip_with_fixed_axis_resolver(
 fn build_mapped_bone_keyframe(
     kf: &VmdBoneKeyframeRaw,
     bone_index: BoneIndex,
-    fixed_axis_for_bone: Option<&dyn Fn(BoneIndex) -> Option<Vec3A>>,
+    registration_policy: VmdRegistrationPolicy<'_>,
 ) -> MovableBoneKeyframe {
-    let (position_interpolation, rotation_interpolation) = match fixed_axis_for_bone {
-        Some(_) => decode_mmd_registered_bone_interpolation(&kf.interpolation),
-        None => decode_bone_interpolation(&kf.interpolation),
+    let (position_interpolation, rotation_interpolation) = match registration_policy {
+        VmdRegistrationPolicy::Raw => decode_bone_interpolation(&kf.interpolation),
+        VmdRegistrationPolicy::MmdRegistered(_) => {
+            decode_mmd_registered_bone_interpolation(&kf.interpolation)
+        }
     };
-    let rotation = fixed_axis_for_bone
-        .and_then(|resolve| resolve(bone_index))
-        .map_or(kf.rotation, |axis| {
-            project_rotation_to_fixed_axis(kf.rotation, axis)
-        });
+    let rotation = match registration_policy {
+        VmdRegistrationPolicy::Raw => kf.rotation,
+        VmdRegistrationPolicy::MmdRegistered(model) => {
+            model.fixed_axis(bone_index).map_or(kf.rotation, |axis| {
+                project_rotation_to_fixed_axis(kf.rotation, axis)
+            })
+        }
+    };
     MovableBoneKeyframe {
         frame: kf.frame,
         position: kf.position,
@@ -2396,11 +2443,23 @@ mod tests {
         }
     }
 
+    fn test_model(fixed_axis: Option<Vec3A>) -> ModelArena {
+        let mut bones: Vec<_> = (0..8).map(|_| BoneInit::new(None, Vec3A::ZERO)).collect();
+        if let Some(axis) = fixed_axis {
+            bones[7] = BoneInit::new(None, Vec3A::ZERO).with_fixed_axis(axis);
+        }
+        ModelArena::new(bones).unwrap()
+    }
+
     #[test]
     fn model_fixed_axis_projects_off_axis_positive_dot_and_preserves_keyframe_data() {
         let source = fixed_axis_test_keyframe(Quat::from_xyzw(0.3, 0.4, 0.0, 0.8));
-        let resolve = |bone: BoneIndex| (bone == BoneIndex(7)).then_some(Vec3A::new(0.0, 3.0, 0.0));
-        let mapped = build_mapped_bone_keyframe(&source, BoneIndex(7), Some(&resolve));
+        let model = test_model(Some(Vec3A::new(0.0, 3.0, 0.0)));
+        let mapped = build_mapped_bone_keyframe(
+            &source,
+            BoneIndex(7),
+            VmdRegistrationPolicy::MmdRegistered(&model),
+        );
 
         assert_quat_near(mapped.rotation, Quat::from_xyzw(0.0, 0.5, 0.0, 0.8));
         assert_eq!(mapped.frame, source.frame);
@@ -2414,8 +2473,12 @@ mod tests {
     #[test]
     fn model_fixed_axis_projects_off_axis_negative_dot_with_negative_sign() {
         let source = fixed_axis_test_keyframe(Quat::from_xyzw(0.3, -0.4, 0.0, 0.8));
-        let resolve = |_bone: BoneIndex| Some(Vec3A::new(0.0, 3.0, 0.0));
-        let mapped = build_mapped_bone_keyframe(&source, BoneIndex(7), Some(&resolve));
+        let model = test_model(Some(Vec3A::new(0.0, 3.0, 0.0)));
+        let mapped = build_mapped_bone_keyframe(
+            &source,
+            BoneIndex(7),
+            VmdRegistrationPolicy::MmdRegistered(&model),
+        );
 
         assert_quat_near(mapped.rotation, Quat::from_xyzw(0.0, -0.5, 0.0, 0.8));
     }
@@ -2423,8 +2486,12 @@ mod tests {
     #[test]
     fn model_fixed_axis_leaves_already_axis_aligned_rotation_unchanged() {
         let source = fixed_axis_test_keyframe(Quat::from_xyzw(0.0, -0.5, 0.0, 0.8));
-        let resolve = |_bone: BoneIndex| Some(Vec3A::new(0.0, 3.0, 0.0));
-        let mapped = build_mapped_bone_keyframe(&source, BoneIndex(7), Some(&resolve));
+        let model = test_model(Some(Vec3A::new(0.0, 3.0, 0.0)));
+        let mapped = build_mapped_bone_keyframe(
+            &source,
+            BoneIndex(7),
+            VmdRegistrationPolicy::MmdRegistered(&model),
+        );
 
         assert_quat_near(mapped.rotation, source.rotation);
     }
@@ -2432,8 +2499,12 @@ mod tests {
     #[test]
     fn model_fixed_axis_leaves_non_fixed_bone_rotation_unchanged() {
         let source = fixed_axis_test_keyframe(Quat::from_xyzw(0.3, 0.4, 0.1, 0.8));
-        let resolve = |_bone: BoneIndex| None;
-        let mapped = build_mapped_bone_keyframe(&source, BoneIndex(7), Some(&resolve));
+        let model = test_model(None);
+        let mapped = build_mapped_bone_keyframe(
+            &source,
+            BoneIndex(7),
+            VmdRegistrationPolicy::MmdRegistered(&model),
+        );
 
         assert_eq!(mapped.rotation, source.rotation);
     }
@@ -2444,10 +2515,13 @@ mod tests {
         for (index, value) in source.interpolation.iter_mut().enumerate() {
             *value = index as u8;
         }
-        let resolve = |_bone: BoneIndex| None;
-
-        let raw = build_mapped_bone_keyframe(&source, BoneIndex(7), None);
-        let model_aware = build_mapped_bone_keyframe(&source, BoneIndex(7), Some(&resolve));
+        let model = test_model(None);
+        let raw = build_mapped_bone_keyframe(&source, BoneIndex(7), VmdRegistrationPolicy::Raw);
+        let model_aware = build_mapped_bone_keyframe(
+            &source,
+            BoneIndex(7),
+            VmdRegistrationPolicy::MmdRegistered(&model),
+        );
         let (raw_position, raw_rotation) = decode_bone_interpolation(&source.interpolation);
         let (registered_position, registered_rotation) =
             decode_mmd_registered_bone_interpolation(&source.interpolation);
@@ -2463,6 +2537,112 @@ mod tests {
         assert_ne!(
             raw.rotation_interpolation,
             model_aware.rotation_interpolation
+        );
+    }
+
+    #[test]
+    fn public_mmd_registered_builder_projects_fixed_axis_rotation() {
+        let source = fixed_axis_test_keyframe(Quat::from_xyzw(0.3, 0.4, 0.0, 0.8));
+        let model = test_model(Some(Vec3A::Y));
+        let result = VmdImportResult {
+            bone_keyframes: vec![source],
+            morph_keyframes: Vec::new(),
+            property_keyframes: Vec::new(),
+            property_ik_frames: Vec::new(),
+        };
+        let mut bone_name_to_index = std::collections::HashMap::new();
+        bone_name_to_index.insert(b"FixedAxis".to_vec(), BoneIndex(7));
+        let morph_name_to_index = std::collections::HashMap::new();
+        let ik_solver_bone_name_to_index = std::collections::HashMap::new();
+
+        let clip = build_mmd_registered_pair_clip_with_options(
+            &model,
+            &result,
+            &bone_name_to_index,
+            &morph_name_to_index,
+            &ik_solver_bone_name_to_index,
+            0,
+            VmdClipBuildOptions::default(),
+        )
+        .unwrap();
+        let sample = clip.sample_at(12.0);
+        let rotation = sample.bone_samples()[0].rotation;
+        assert_quat_near(rotation, Quat::from_xyzw(0.0, 0.5, 0.0, 0.8).normalize());
+    }
+
+    #[test]
+    fn public_mmd_registered_builder_uses_registered_interpolation_layout() {
+        let mut first = fixed_axis_test_keyframe(Quat::IDENTITY);
+        first.frame = 0;
+        first.position = Vec3A::ZERO;
+        let mut second = fixed_axis_test_keyframe(Quat::IDENTITY);
+        second.frame = 10;
+        second.position = Vec3A::Y;
+        for (index, value) in second.interpolation.iter_mut().enumerate() {
+            *value = index as u8;
+        }
+        let result = VmdImportResult {
+            bone_keyframes: vec![first, second],
+            morph_keyframes: Vec::new(),
+            property_keyframes: Vec::new(),
+            property_ik_frames: Vec::new(),
+        };
+        let mut bone_name_to_index = std::collections::HashMap::new();
+        bone_name_to_index.insert(b"FixedAxis".to_vec(), BoneIndex(7));
+        let morph_name_to_index = std::collections::HashMap::new();
+        let ik_solver_bone_name_to_index = std::collections::HashMap::new();
+        let model = test_model(None);
+
+        let registered = build_mmd_registered_pair_clip(
+            &model,
+            &result,
+            &bone_name_to_index,
+            &morph_name_to_index,
+            &ik_solver_bone_name_to_index,
+            0,
+        )
+        .unwrap();
+        let raw = build_pair_clip(
+            &result,
+            &bone_name_to_index,
+            &morph_name_to_index,
+            &ik_solver_bone_name_to_index,
+            0,
+        );
+        let registered_position = registered.sample_at(5.0).bone_samples()[0].position;
+        let raw_position = raw.sample_at(5.0).bone_samples()[0].position;
+        assert_ne!(registered_position, raw_position);
+    }
+
+    #[test]
+    fn public_mmd_registered_builder_rejects_out_of_range_bone_map() {
+        let model = test_model(None);
+        let result = VmdImportResult {
+            bone_keyframes: Vec::new(),
+            morph_keyframes: Vec::new(),
+            property_keyframes: Vec::new(),
+            property_ik_frames: Vec::new(),
+        };
+        let mut bone_name_to_index = std::collections::HashMap::new();
+        bone_name_to_index.insert(b"Invalid".to_vec(), BoneIndex(8));
+        let morph_name_to_index = std::collections::HashMap::new();
+        let ik_solver_bone_name_to_index = std::collections::HashMap::new();
+
+        let error = build_mmd_registered_pair_clip(
+            &model,
+            &result,
+            &bone_name_to_index,
+            &morph_name_to_index,
+            &ik_solver_bone_name_to_index,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            VmdClipBuildError::BoneIndexOutOfRange {
+                bone_index: BoneIndex(8),
+                bone_count: 8,
+            }
         );
     }
 

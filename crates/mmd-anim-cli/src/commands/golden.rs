@@ -29,6 +29,7 @@ pub(crate) struct GoldenImportDiagnostic {
 pub(crate) struct RuntimeModelImport {
     pub(crate) model: ModelArena,
     pub(crate) bone_names: Vec<String>,
+    pub(crate) morph_names: Vec<String>,
     pub(crate) bone_name_to_index: HashMap<Vec<u8>, BoneIndex>,
     pub(crate) morph_name_to_index: HashMap<Vec<u8>, MorphIndex>,
     pub(crate) ik_solver_bone_name_to_index: HashMap<Vec<u8>, usize>,
@@ -818,9 +819,15 @@ pub(crate) fn import_golden_runtime_model(
     {
         Some("pmd") => {
             let import = mmd_anim_format::import_pmd_runtime(bytes)?;
+            let morph_names = mmd_anim_format::parse_pmd_model(bytes)?
+                .morphs
+                .into_iter()
+                .map(|morph| morph.name)
+                .collect();
             Ok(RuntimeModelImport {
                 model: import.model,
                 bone_names: import.bone_names,
+                morph_names,
                 bone_name_to_index: import.bone_name_to_index,
                 morph_name_to_index: import.morph_name_to_index,
                 ik_solver_bone_name_to_index: import.ik_solver_bone_name_to_index,
@@ -837,9 +844,15 @@ pub(crate) fn import_golden_runtime_model(
         }
         _ => {
             let import = mmd_anim_format::import_pmx_runtime(bytes)?;
+            let morph_names = mmd_anim_format::parse_pmx_model(bytes)?
+                .morphs
+                .into_iter()
+                .map(|morph| morph.name)
+                .collect();
             Ok(RuntimeModelImport {
                 model: import.model,
                 bone_names: import.bone_names,
+                morph_names,
                 bone_name_to_index: import.bone_name_to_index,
                 morph_name_to_index: import.morph_name_to_index,
                 ik_solver_bone_name_to_index: import.ik_solver_bone_name_to_index,

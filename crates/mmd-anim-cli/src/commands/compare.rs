@@ -1236,18 +1236,43 @@ fn validate_pmm_document_model_structure(
             pmm_model.morph_count
         ));
     }
-    for (index, name) in pmm_model.bone_names.iter().enumerate() {
-        if model_import.bone_name_to_index.get(name.as_bytes()) != Some(&BoneIndex(index as u32)) {
-            return Err(format!(
-                "PMM bone {index} ({name}) does not match the runtime model bone order"
-            ));
-        }
+    if pmm_model.bone_names.len() != pmm_model.bone_count {
+        return Err(format!(
+            "PMM bone name count {} does not match PMM bone count {}",
+            pmm_model.bone_names.len(),
+            pmm_model.bone_count
+        ));
     }
-    for (index, name) in pmm_model.morph_names.iter().enumerate() {
-        if model_import.morph_name_to_index.get(name.as_bytes()) != Some(&MorphIndex(index as u32))
-        {
+    if pmm_model.morph_names.len() != pmm_model.morph_count {
+        return Err(format!(
+            "PMM morph name count {} does not match PMM morph count {}",
+            pmm_model.morph_names.len(),
+            pmm_model.morph_count
+        ));
+    }
+    validate_ordered_runtime_names("bone", &pmm_model.bone_names, &model_import.bone_names)?;
+    validate_ordered_runtime_names("morph", &pmm_model.morph_names, &model_import.morph_names)
+}
+
+fn validate_ordered_runtime_names(
+    kind: &str,
+    pmm_names: &[String],
+    runtime_names: &[String],
+) -> Result<(), String> {
+    if pmm_names.len() != runtime_names.len() {
+        return Err(format!(
+            "PMM {kind} name count {} does not match runtime model {kind} name count {}",
+            pmm_names.len(),
+            runtime_names.len()
+        ));
+    }
+    for (index, name) in pmm_names.iter().enumerate() {
+        let runtime_name = runtime_names
+            .get(index)
+            .map(|runtime_name| mmd_anim_format::normalize_pmm_model_item_name(runtime_name));
+        if runtime_name.as_deref() != Some(name.as_str()) {
             return Err(format!(
-                "PMM morph {index} ({name}) does not match the runtime model morph order"
+                "PMM {kind} {index} ({name}) does not match the runtime model {kind} order"
             ));
         }
     }
@@ -3397,6 +3422,35 @@ mod tests {
         expected[11] = 30.0;
 
         assert_eq!(position_delta(&actual, &expected), [-4.0, 2.0, 9.0]);
+    }
+
+    #[test]
+    fn ordered_runtime_names_accept_duplicate_bone_and_morph_names() {
+        let duplicate_bones = vec!["arm".to_owned(), "arm".to_owned()];
+        let duplicate_morphs = vec!["smile".to_owned(), "smile".to_owned()];
+
+        assert!(validate_ordered_runtime_names("bone", &duplicate_bones, &duplicate_bones).is_ok());
+        assert!(
+            validate_ordered_runtime_names("morph", &duplicate_morphs, &duplicate_morphs).is_ok()
+        );
+    }
+
+    #[test]
+    fn ordered_runtime_names_reject_order_or_content_mismatch() {
+        let pmm = vec!["smile".to_owned(), "blink".to_owned()];
+        let runtime = vec!["blink".to_owned(), "smile".to_owned()];
+
+        let error = validate_ordered_runtime_names("morph", &pmm, &runtime).unwrap_err();
+        assert!(error.contains("PMM morph 0 (smile)"));
+        assert!(error.contains("runtime model morph order"));
+    }
+
+    #[test]
+    fn ordered_runtime_names_match_pmm_sjis_prefix_fit() {
+        let pmm = vec!["123456789あいうえお".to_owned()];
+        let runtime = vec!["123456789あいうえおか".to_owned()];
+
+        assert!(validate_ordered_runtime_names("morph", &pmm, &runtime).is_ok());
     }
 
     #[cfg(feature = "physics-bullet-native")]

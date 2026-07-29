@@ -2596,6 +2596,15 @@ fn pmm_bone_interpolation_from_vmd(interpolation: &[u8]) -> [u8; 16] {
 /// Max byte length MMD keeps for a bone/morph name (20-byte NUL-terminated buffer).
 const PMM_MODEL_NAME_MAX_BYTES: usize = 19;
 
+/// Normalizes a runtime bone or morph name to the content PMM stores.
+///
+/// PMM uses a 20-byte Shift-JIS buffer with one byte reserved for the NUL
+/// terminator. Prefix fitting is performed on encoded characters so a
+/// two-byte Shift-JIS character is never split.
+pub fn normalize_pmm_model_item_name(name: &str) -> String {
+    decode_sjis(&encode_sjis_prefix_fit(name, PMM_MODEL_NAME_MAX_BYTES))
+}
+
 struct PmmExportModelStructure {
     fixed_tracks: u8,
     constraint_bone_indices: Vec<i32>,
@@ -5249,6 +5258,14 @@ fn duplicate_asset_reference_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_pmm_model_item_name_fits_sjis_without_splitting_character() {
+        assert_eq!(
+            normalize_pmm_model_item_name("123456789あいうえおか"),
+            "123456789あいうえお"
+        );
+    }
 
     fn pmm_with_project_settings() -> Vec<u8> {
         let mut data = b"Polygon Movie maker 0002".to_vec();

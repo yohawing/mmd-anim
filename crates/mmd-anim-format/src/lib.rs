@@ -29,7 +29,7 @@ pub use pmd::{
 pub use pmm::{
     PmmDocumentClipBuildError, PmmParsedManifest, PmmSceneExportOptions, PmmSceneExportReport,
     build_pmm_document_model_clip, export_pmm_manifest, export_pmm_scene_from_pmx_vmd,
-    parse_pmm_manifest,
+    normalize_pmm_model_item_name, parse_pmm_manifest,
 };
 pub use pmx::{
     PmxBoneImport, PmxMaterialSplit, PmxMaterialSplitManifest, PmxMaterialSplitManifestMesh,

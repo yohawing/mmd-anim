@@ -791,6 +791,21 @@ pub fn build_pmm_document_model_clip(
         )));
     }
 
+    for (bone_index, initial) in model.initial_bone_keyframe_summaries.iter().enumerate() {
+        if let Some(index) = initial.index {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM bone {bone_index} initial keyframe must not have explicit index {index}"
+            )));
+        }
+    }
+    for (morph_index, initial) in model.initial_morph_keyframe_summaries.iter().enumerate() {
+        if let Some(index) = initial.index {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM morph {morph_index} initial keyframe must not have explicit index {index}"
+            )));
+        }
+    }
+
     let additional_bones = indexed_bone_keyframes(model)?;
     let mut bone_tracks = Vec::with_capacity(model.bone_count);
     let mut consumed_bone_keyframes = HashSet::with_capacity(additional_bones.len());
@@ -899,6 +914,17 @@ fn indexed_bone_keyframes(
         let index = summary.index.ok_or_else(|| {
             PmmDocumentClipBuildError::new("PMM additional bone keyframe is missing its index")
         })?;
+        if index < 0 {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM additional bone keyframe index {index} must be non-negative"
+            )));
+        }
+        if (index as usize) < model.bone_count {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM additional bone keyframe index {index} overlaps initial bone track index namespace; expected index >= {}",
+                model.bone_count
+            )));
+        }
         if indexed.insert(index, summary).is_some() {
             return Err(PmmDocumentClipBuildError::new(format!(
                 "PMM duplicate additional bone keyframe index {index}"
@@ -916,6 +942,17 @@ fn indexed_morph_keyframes(
         let index = summary.index.ok_or_else(|| {
             PmmDocumentClipBuildError::new("PMM additional morph keyframe is missing its index")
         })?;
+        if index < 0 {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM additional morph keyframe index {index} must be non-negative"
+            )));
+        }
+        if (index as usize) < model.morph_count {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM additional morph keyframe index {index} overlaps initial morph track index namespace; expected index >= {}",
+                model.morph_count
+            )));
+        }
         if indexed.insert(index, summary).is_some() {
             return Err(PmmDocumentClipBuildError::new(format!(
                 "PMM duplicate additional morph keyframe index {index}"
@@ -933,6 +970,7 @@ fn collect_bone_keyframe_chain<'a>(
     let mut result = vec![initial];
     let mut visited = HashSet::new();
     let mut next_index = initial.next_keyframe_index;
+    let mut expected_previous_index = bone_index as i32;
     while next_index != 0 {
         let summary = indexed.get(&next_index).copied().ok_or_else(|| {
             PmmDocumentClipBuildError::new(format!(
@@ -944,7 +982,14 @@ fn collect_bone_keyframe_chain<'a>(
                 "PMM bone {bone_index} keyframe chain contains a cycle at index {next_index}"
             )));
         }
+        if summary.previous_keyframe_index != expected_previous_index {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM bone {bone_index} keyframe index {next_index} has previous index {}; expected {expected_previous_index}",
+                summary.previous_keyframe_index
+            )));
+        }
         result.push(summary);
+        expected_previous_index = next_index;
         next_index = summary.next_keyframe_index;
     }
     Ok(result)
@@ -958,6 +1003,7 @@ fn collect_morph_keyframe_chain<'a>(
     let mut result = vec![initial];
     let mut visited = HashSet::new();
     let mut next_index = initial.next_keyframe_index;
+    let mut expected_previous_index = morph_index as i32;
     while next_index != 0 {
         let summary = indexed.get(&next_index).copied().ok_or_else(|| {
             PmmDocumentClipBuildError::new(format!(
@@ -969,7 +1015,14 @@ fn collect_morph_keyframe_chain<'a>(
                 "PMM morph {morph_index} keyframe chain contains a cycle at index {next_index}"
             )));
         }
+        if summary.previous_keyframe_index != expected_previous_index {
+            return Err(PmmDocumentClipBuildError::new(format!(
+                "PMM morph {morph_index} keyframe index {next_index} has previous index {}; expected {expected_previous_index}",
+                summary.previous_keyframe_index
+            )));
+        }
         result.push(summary);
+        expected_previous_index = next_index;
         next_index = summary.next_keyframe_index;
     }
     Ok(result)
@@ -8743,10 +8796,170 @@ mod tests {
         let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
         let mut model = parsed.document_summary.unwrap().models.remove(0);
         model.initial_bone_keyframe_summaries[0].next_keyframe_index = 999;
+        model.bone_keyframe_summaries[0].index = Some(1);
 
         let error = build_pmm_document_model_clip(&model).unwrap_err();
 
         assert!(error.to_string().contains("missing index 999"));
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_rejects_negative_bone_keyframe_index() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.bone_keyframe_summaries[0].index = Some(-1);
+
+        let error = build_pmm_document_model_clip(&model).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("additional bone keyframe index -1 must be non-negative")
+        );
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_rejects_negative_morph_keyframe_index() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.bone_keyframe_summaries.clear();
+        model.morph_keyframe_summaries[0].index = Some(-1);
+
+        let error = build_pmm_document_model_clip(&model).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("additional morph keyframe index -1 must be non-negative")
+        );
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_rejects_wrong_bone_keyframe_backlink() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.initial_bone_keyframe_summaries[0].next_keyframe_index = 1;
+        model.bone_keyframe_summaries[0].index = Some(1);
+        model.bone_keyframe_summaries[0].previous_keyframe_index = 99;
+
+        let error = build_pmm_document_model_clip(&model).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("PMM bone 0 keyframe index 1 has previous index 99; expected 0")
+        );
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_rejects_wrong_morph_keyframe_backlink() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.bone_keyframe_summaries.clear();
+        model.initial_morph_keyframe_summaries[0].next_keyframe_index = 1;
+        model.morph_keyframe_summaries[0].index = Some(1);
+        model.morph_keyframe_summaries[0].previous_keyframe_index = 99;
+
+        let error = build_pmm_document_model_clip(&model).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("PMM morph 0 keyframe index 1 has previous index 99; expected 0")
+        );
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_rejects_bone_index_in_initial_namespace() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let model = parsed.document_summary.unwrap().models.remove(0);
+
+        let error = build_pmm_document_model_clip(&model).unwrap_err();
+
+        assert!(error.to_string().contains(
+            "PMM additional bone keyframe index 0 overlaps initial bone track index namespace"
+        ));
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_rejects_morph_index_in_initial_namespace() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.bone_keyframe_summaries.clear();
+
+        let error = build_pmm_document_model_clip(&model).unwrap_err();
+
+        assert!(error.to_string().contains(
+            "PMM additional morph keyframe index 0 overlaps initial morph track index namespace"
+        ));
+    }
+
+    #[test]
+    fn builds_nonzero_track_two_hop_pmm_chains() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+
+        model.bone_count = 2;
+        model.initial_bone_keyframe_summaries[0].next_keyframe_index = 0;
+        let mut bone_track_one_initial = model.initial_bone_keyframe_summaries[0].clone();
+        bone_track_one_initial.next_keyframe_index = 2;
+        model
+            .initial_bone_keyframe_summaries
+            .push(bone_track_one_initial);
+        let mut bone_first = model.bone_keyframe_summaries[0].clone();
+        bone_first.index = Some(2);
+        bone_first.frame_index = 15;
+        bone_first.previous_keyframe_index = 1;
+        bone_first.next_keyframe_index = 3;
+        let mut bone_second = bone_first.clone();
+        bone_second.index = Some(3);
+        bone_second.frame_index = 30;
+        bone_second.previous_keyframe_index = 2;
+        bone_second.next_keyframe_index = 0;
+        model.bone_keyframe_summaries = vec![bone_first, bone_second];
+
+        model.morph_count = 2;
+        model.initial_morph_keyframe_summaries[0].next_keyframe_index = 0;
+        let mut morph_track_one_initial = model.initial_morph_keyframe_summaries[0].clone();
+        morph_track_one_initial.next_keyframe_index = 2;
+        model
+            .initial_morph_keyframe_summaries
+            .push(morph_track_one_initial);
+        let mut morph_first = model.morph_keyframe_summaries[0].clone();
+        morph_first.index = Some(2);
+        morph_first.frame_index = 15;
+        morph_first.previous_keyframe_index = 1;
+        morph_first.next_keyframe_index = 3;
+        let mut morph_second = morph_first.clone();
+        morph_second.index = Some(3);
+        morph_second.frame_index = 30;
+        morph_second.previous_keyframe_index = 2;
+        morph_second.next_keyframe_index = 0;
+        model.morph_keyframe_summaries = vec![morph_first, morph_second];
+
+        let clip = build_pmm_document_model_clip(&model).unwrap();
+
+        let bone_track = clip.find_bone_track(BoneIndex(1)).unwrap();
+        assert_eq!(bone_track.keyframe_count(), 3);
+        assert_eq!(bone_track.frame_range(), Some((0, 30)));
+        let morph_track = clip.find_morph_track(MorphIndex(1)).unwrap();
+        assert_eq!(morph_track.keyframe_count(), 3);
+        assert_eq!(morph_track.frame_range(), Some((0, 30)));
+    }
+
+    #[test]
+    fn pmm_document_clip_builder_rejects_indexed_initial_bone_keyframe() {
+        let parsed = parse_pmm_manifest(&pmm_with_document_summary()).unwrap();
+        let mut model = parsed.document_summary.unwrap().models.remove(0);
+        model.initial_bone_keyframe_summaries[0].index = Some(0);
+
+        let error = build_pmm_document_model_clip(&model).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("PMM bone 0 initial keyframe must not have explicit index 0")
+        );
     }
 
     #[test]

@@ -107,11 +107,13 @@ enum NumericMotionSource {
 
 impl NumericMotionSource {
     fn from_case(case: &serde_json::Value) -> Result<Self, String> {
-        match case
-            .pointer("/compare/motionSource")
-            .and_then(|value| value.as_str())
-            .unwrap_or("vmd")
-        {
+        let value = match case.pointer("/compare/motionSource") {
+            None => "vmd",
+            Some(value) => value
+                .as_str()
+                .ok_or_else(|| "compare.motionSource must be a string when present".to_owned())?,
+        };
+        match value {
             "vmd" => Ok(Self::Vmd),
             "pmm-document" => Ok(Self::PmmDocument),
             other => Err(format!("unsupported compare.motionSource: {other}")),
@@ -1195,26 +1197,49 @@ fn build_numeric_motion_clip(
             let document = parsed
                 .document_summary
                 .ok_or_else(|| "PMM does not contain a PMMv2 document summary".to_owned())?;
-            let model_index = case
-                .pointer("/compare/pmmDocumentModelIndex")
-                .and_then(|value| value.as_u64())
-                .map(|value| {
-                    u8::try_from(value).map_err(|_| {
-                        format!("compare.pmmDocumentModelIndex {value} exceeds the PMM u8 range")
-                    })
-                })
-                .transpose()?
-                .unwrap_or(document.selected_model_index);
-            let pmm_model = document
-                .models
-                .iter()
-                .find(|model| model.document_model_index == model_index)
-                .ok_or_else(|| format!("PMM document model index {model_index} does not exist"))?;
+            let pmm_model = select_pmm_document_model(case, &document)?;
 
             validate_pmm_document_model_structure(pmm_model, model_import, morph_count)?;
             mmd_anim_format::build_pmm_document_model_clip(pmm_model)
                 .map_err(|error| error.to_string())
         }
+    }
+}
+
+fn select_pmm_document_model<'a>(
+    case: &serde_json::Value,
+    document: &'a mmd_anim_format::pmm::PmmDocumentSummary,
+) -> Result<&'a mmd_anim_format::pmm::PmmDocumentModelSummary, String> {
+    let explicit_document_model_index = match case.pointer("/compare/pmmDocumentModelIndex") {
+        None => None,
+        Some(value) => {
+            let value = value.as_u64().ok_or_else(|| {
+                "compare.pmmDocumentModelIndex must be a nonnegative integer when present"
+                    .to_owned()
+            })?;
+            Some(u8::try_from(value).map_err(|_| {
+                format!("compare.pmmDocumentModelIndex {value} exceeds the PMM u8 range")
+            })?)
+        }
+    };
+
+    match explicit_document_model_index {
+        Some(document_model_index) => document
+            .models
+            .iter()
+            .find(|model| model.document_model_index == document_model_index)
+            .ok_or_else(|| {
+                format!("PMM document model index {document_model_index} does not exist")
+            }),
+        None => document
+            .models
+            .get(document.selected_model_index as usize)
+            .ok_or_else(|| {
+                format!(
+                    "PMM selected model slot {} does not exist",
+                    document.selected_model_index
+                )
+            }),
     }
 }
 
@@ -3451,6 +3476,83 @@ mod tests {
         let runtime = vec!["123456789あいうえおか".to_owned()];
 
         assert!(validate_ordered_runtime_names("morph", &pmm, &runtime).is_ok());
+    }
+
+    fn selection_test_document() -> mmd_anim_format::pmm::PmmDocumentSummary {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mmd-anim-format/fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+        let bytes = std::fs::read(path).expect("selection fixture must be readable");
+        let mut document = mmd_anim_format::parse_pmm_manifest(&bytes)
+            .expect("selection fixture must parse")
+            .document_summary
+            .expect("selection fixture must contain a document summary");
+
+        document.models[0].document_model_index = 7;
+        let mut second = document.models[0].clone();
+        second.slot_index = 1;
+        second.document_model_index = 23;
+        document.models.push(second);
+        document.model_count = document.models.len();
+        document
+    }
+
+    #[test]
+    fn pmm_selection_without_override_uses_selected_slot() {
+        let document = selection_test_document();
+        let case = serde_json::json!({ "compare": { "motionSource": "pmm-document" } });
+
+        let selected = select_pmm_document_model(&case, &document).unwrap();
+        assert_eq!(selected.slot_index, 0);
+        assert_eq!(selected.document_model_index, 7);
+    }
+
+    #[test]
+    fn pmm_selection_override_uses_persistent_document_model_index() {
+        let document = selection_test_document();
+        let case = serde_json::json!({
+            "compare": {
+                "motionSource": "pmm-document",
+                "pmmDocumentModelIndex": 23
+            }
+        });
+
+        let selected = select_pmm_document_model(&case, &document).unwrap();
+        assert_eq!(selected.slot_index, 1);
+        assert_eq!(selected.document_model_index, 23);
+    }
+
+    #[test]
+    fn pmm_selection_rejects_invalid_manifest_model_index_types() {
+        let document = selection_test_document();
+        for value in [serde_json::json!("23"), serde_json::json!(-1)] {
+            let case = serde_json::json!({
+                "compare": {
+                    "motionSource": "pmm-document",
+                    "pmmDocumentModelIndex": value
+                }
+            });
+            let error = select_pmm_document_model(&case, &document).unwrap_err();
+            assert!(
+                error.contains("must be a nonnegative integer"),
+                "unexpected error: {error}"
+            );
+        }
+
+        let case = serde_json::json!({
+            "compare": {
+                "motionSource": "pmm-document",
+                "pmmDocumentModelIndex": 256
+            }
+        });
+        let error = select_pmm_document_model(&case, &document).unwrap_err();
+        assert!(error.contains("exceeds the PMM u8 range"));
+    }
+
+    #[test]
+    fn motion_source_rejects_present_non_string_values() {
+        let case = serde_json::json!({ "compare": { "motionSource": 1 } });
+        let error = NumericMotionSource::from_case(&case).unwrap_err();
+        assert_eq!(error, "compare.motionSource must be a string when present");
     }
 
     #[cfg(feature = "physics-bullet-native")]

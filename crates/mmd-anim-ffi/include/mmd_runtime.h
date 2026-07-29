@@ -1062,6 +1062,9 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_export_pmx_from_parts(
     const float*   skin_weights,
     const float*   edge_scale);
 
+/* The PMX-paired constructor resolves names through the imported model and
+   applies MMD registration semantics, including fixed-axis projection and
+   the registered 64-byte VMD interpolation layout. */
 mmd_runtime_clip_t* mmd_runtime_clip_create_from_vmd_bytes_for_model(
     const mmd_runtime_model_t* model,
     const uint8_t*             data,

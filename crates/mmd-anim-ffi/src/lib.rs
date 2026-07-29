@@ -3516,7 +3516,9 @@ pub unsafe extern "C" fn mmd_runtime_model_create_from_pmx_bytes(
 }
 
 /// Creates an animation clip by importing a VMD motion binary and resolving
-/// bone/morph/property IK names through the imported model's name maps.
+/// bone/morph/property IK names through the imported model's name maps. The
+/// paired PMX model also supplies MMD registration semantics (fixed-axis
+/// projection and registered VMD interpolation decoding).
 ///
 /// The model must have been created via
 /// `mmd_runtime_model_create_from_pmx_bytes` (which populates the required
@@ -3550,13 +3552,17 @@ pub unsafe extern "C" fn mmd_runtime_clip_create_from_vmd_bytes_for_model(
             Err(_) => return null_mut_failure(FFI_ERR_VMD_IMPORT_FAILED),
         };
         let solver_count = model.model.ik_count();
-        let clip = mmd_anim_format::build_pair_clip(
+        let clip = match mmd_anim_format::build_mmd_registered_pair_clip(
+            &model.model,
             &motion,
             &model.bone_name_to_index,
             &model.morph_name_to_index,
             &model.ik_solver_bone_name_to_index,
             solver_count,
-        );
+        ) {
+            Ok(clip) => clip,
+            Err(_) => return null_mut_failure(FFI_ERR_CLIP_CREATE_FAILED),
+        };
         Box::into_raw(Box::new(MmdRuntimeClip { clip }))
     })
 }

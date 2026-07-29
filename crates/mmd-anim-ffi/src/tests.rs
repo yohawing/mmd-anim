@@ -4768,6 +4768,164 @@ fn flat_array_model_returns_null_from_vmd_import() {
     }
 }
 
+fn registered_vmd_probe_bytes() -> Vec<u8> {
+    let pmx: &[u8] =
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/model_descriptor_parity.pmx");
+    let parsed = mmd_anim_format::parse_pmx_model(pmx).expect("registered PMX fixture");
+    let fixed_name = parsed
+        .skeleton
+        .bones
+        .iter()
+        .find(|bone| bone.flags.fixed_axis)
+        .expect("fixture has fixed-axis bone")
+        .name
+        .clone();
+    let non_fixed_name = parsed
+        .skeleton
+        .bones
+        .iter()
+        .find(|bone| !bone.flags.fixed_axis)
+        .expect("fixture has non-fixed bone")
+        .name
+        .clone();
+    let interpolation = (0u8..64).collect::<Vec<_>>();
+    let mut bone_frames = Vec::new();
+    for (name, rotation, position) in [
+        (fixed_name.as_str(), [0.3, 0.4, 0.1, 0.8], [0.0, 0.0, 0.0]),
+        (
+            non_fixed_name.as_str(),
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+        ),
+    ] {
+        bone_frames.push(mmd_anim_format::vmd::VmdParsedBoneFrame {
+            bone_name: name.to_owned(),
+            bone_name_bytes: Vec::new(),
+            frame: 0,
+            translation: position,
+            rotation,
+            interpolation: vec![0; 64],
+        });
+    }
+    bone_frames.push(mmd_anim_format::vmd::VmdParsedBoneFrame {
+        bone_name: fixed_name,
+        bone_name_bytes: Vec::new(),
+        frame: 10,
+        translation: [0.0, 0.0, 0.0],
+        rotation: [0.3, 0.4, 0.1, 0.8],
+        interpolation: interpolation.clone(),
+    });
+    bone_frames.push(mmd_anim_format::vmd::VmdParsedBoneFrame {
+        bone_name: non_fixed_name,
+        bone_name_bytes: Vec::new(),
+        frame: 10,
+        translation: [0.4, 0.8, -0.6],
+        rotation: [0.2, -0.4, 0.3, 0.8],
+        interpolation,
+    });
+    mmd_anim_format::export_vmd_animation(&mmd_anim_format::vmd::VmdParsedAnimation {
+        kind: "vmd",
+        metadata: mmd_anim_format::vmd::VmdParsedMetadata {
+            format: "vmd",
+            model_name: "registered_probe".to_owned(),
+            model_name_bytes: Vec::new(),
+            counts: mmd_anim_format::vmd::VmdParsedCounts {
+                bones: bone_frames.len(),
+                morphs: 0,
+                cameras: 0,
+                lights: 0,
+                self_shadows: 0,
+                properties: 0,
+            },
+            max_frame: 10,
+        },
+        bone_frames,
+        morph_frames: Vec::new(),
+        camera_frames: Vec::new(),
+        light_frames: Vec::new(),
+        self_shadow_frames: Vec::new(),
+        property_frames: Vec::new(),
+    })
+}
+
+#[test]
+fn imported_model_vmd_clip_uses_mmd_registration_semantics() {
+    let pmx: &[u8] =
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/model_descriptor_parity.pmx");
+    let vmd = registered_vmd_probe_bytes();
+    let model = unsafe { mmd_runtime_model_create_from_pmx_bytes(pmx.as_ptr(), pmx.len()) };
+    assert!(!model.is_null());
+    let clip =
+        unsafe { mmd_runtime_clip_create_from_vmd_bytes_for_model(model, vmd.as_ptr(), vmd.len()) };
+    assert!(!clip.is_null());
+
+    let import = mmd_anim_format::import_pmx_runtime(pmx).expect("registered PMX import");
+    let motion = mmd_anim_format::import_vmd_motion(&vmd).expect("registered VMD import");
+    let raw = mmd_anim_format::build_pair_clip(
+        &motion,
+        &import.bone_name_to_index,
+        &import.morph_name_to_index,
+        &import.ik_solver_bone_name_to_index,
+        import.model.ik_count(),
+    );
+    let registered = mmd_anim_format::build_mmd_registered_pair_clip(
+        &import.model,
+        &motion,
+        &import.bone_name_to_index,
+        &import.morph_name_to_index,
+        &import.ik_solver_bone_name_to_index,
+        import.model.ik_count(),
+    )
+    .expect("registered builder");
+    let actual = unsafe { &(*clip).clip }.sample_at(5.0);
+    let expected = registered.sample_at(5.0);
+    let raw_sample = raw.sample_at(5.0);
+    assert_eq!(actual, expected);
+
+    let fixed_actual = actual
+        .bone_samples()
+        .iter()
+        .find(|sample| import.model.fixed_axis(sample.bone).is_some())
+        .expect("fixed-axis sample");
+    let fixed_raw = raw_sample
+        .bone_samples()
+        .iter()
+        .find(|sample| sample.bone == fixed_actual.bone)
+        .expect("raw fixed-axis sample");
+    assert!(
+        (fixed_actual.rotation.x - fixed_raw.rotation.x).abs()
+            + (fixed_actual.rotation.y - fixed_raw.rotation.y).abs()
+            + (fixed_actual.rotation.z - fixed_raw.rotation.z).abs()
+            > 1.0e-4,
+        "registered path must project fixed-axis rotation"
+    );
+
+    let non_fixed_actual = actual
+        .bone_samples()
+        .iter()
+        .find(|sample| import.model.fixed_axis(sample.bone).is_none())
+        .expect("non-fixed sample");
+    let non_fixed_raw = raw_sample
+        .bone_samples()
+        .iter()
+        .find(|sample| sample.bone == non_fixed_actual.bone)
+        .expect("raw non-fixed sample");
+    assert!(
+        (non_fixed_actual.position.y - non_fixed_raw.position.y).abs()
+            + (non_fixed_actual.position.z - non_fixed_raw.position.z).abs()
+            + (non_fixed_actual.rotation.x - non_fixed_raw.rotation.x).abs()
+            + (non_fixed_actual.rotation.y - non_fixed_raw.rotation.y).abs()
+            + (non_fixed_actual.rotation.z - non_fixed_raw.rotation.z).abs()
+            > 1.0e-4,
+        "registered path must decode the registered interpolation block"
+    );
+
+    unsafe {
+        mmd_runtime_clip_free(clip);
+        mmd_runtime_model_free(model);
+    }
+}
+
 // -----------------------------------------------------------------------
 //  JSON / geometry buffer API tests
 // -----------------------------------------------------------------------

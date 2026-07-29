@@ -32,10 +32,12 @@ extern "C" {
    performed natively. Hosts that pre-apply Morph bone deltas must stop doing
    so before using that contract; bit 4
    (MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES) is set when runtime-neutral
-   reduced-pose sparse tracks are available.
-   Check the relevant bit before calling any
-   physics_world_* or evaluate_host_frame function; when the bit is unset
-   those functions return MMD_RUNTIME_STATUS_UNSUPPORTED.
+   reduced-pose sparse tracks are available; bit 5
+   (MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION) is set when compiled
+   authored local bone-track introspection is available.
+   Check the relevant bit before calling each optional surface; when a
+   surface's bit is unset, its status-returning functions return
+   MMD_RUNTIME_STATUS_UNSUPPORTED (and optional count functions return zero).
 
    Handle ownership
    ----------------
@@ -122,7 +124,11 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR         (1u << 2)
 #define MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS  (1u << 3)
 #define MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES (1u << 4)
+#define MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION (1u << 5)
 #define MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_BONE_TRACK_CURVE_NONE 0u
+#define MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER 1u
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1      1u
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE     0u
 
@@ -284,6 +290,41 @@ typedef struct mmd_runtime_ffi_bone_keyframe {
     float    position_xyz[3];
     float    rotation_xyzw[4];
 } mmd_runtime_ffi_bone_keyframe_t;
+
+/* Compiled/authored local clip introspection (fixed v1 layouts selected by
+   MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1).  A future
+   incompatible layout must use a new ABI/schema version or symbol.
+   Curve controls are normalized
+   cubic Bezier coordinates.  NONE has zero controls and means that the key
+   has no incoming segment; a later key's curves describe the segment from
+   the previous key to that key. */
+typedef struct mmd_runtime_ffi_bone_track_curve {
+    uint32_t kind;
+    float    x1;
+    float    y1;
+    float    x2;
+    float    y2;
+} mmd_runtime_ffi_bone_track_curve_t;
+
+typedef struct mmd_runtime_ffi_bone_track_descriptor {
+    uint32_t bone_index;
+    size_t   key_count;
+} mmd_runtime_ffi_bone_track_descriptor_t;
+
+/* Values are compiled/authored local translation/quaternion data and retain
+   transformations made by the clip construction path.  Registered VMD clips
+   include name resolution, fixed-axis projection, and registered
+   interpolation selection.  Values are not Append/IK-evaluated world poses. */
+typedef struct mmd_runtime_ffi_bone_track_key {
+    uint32_t bone_index;
+    uint32_t frame;
+    float    position_xyz[3];
+    float    rotation_xyzw[4];
+    mmd_runtime_ffi_bone_track_curve_t translation_x;
+    mmd_runtime_ffi_bone_track_curve_t translation_y;
+    mmd_runtime_ffi_bone_track_curve_t translation_z;
+    mmd_runtime_ffi_bone_track_curve_t rotation;
+} mmd_runtime_ffi_bone_track_key_t;
 
 typedef struct mmd_runtime_ffi_morph_track {
     uint32_t morph_index;
@@ -1492,6 +1533,34 @@ mmd_runtime_clip_t* mmd_runtime_clip_create(
     size_t                                  property_keyframe_count,
     const uint8_t*                          property_ik_enabled,
     size_t                                  property_ik_enabled_count);
+
+/* Read-only introspection of compiled/authored local bone tracks.  This is
+   valid for VMD-, PMM-, and programmatically-built AnimationClip data and
+   retains transformations made by the applicable construction path.  It does
+   not expose raw VMD bytes or solved Append/IK world poses. */
+size_t mmd_runtime_clip_bone_track_count(
+    const mmd_runtime_clip_t* clip);
+
+/* out_descriptor must not overlap the opaque clip handle. */
+mmd_runtime_status_t mmd_runtime_clip_bone_track_descriptor(
+    const mmd_runtime_clip_t*                         clip,
+    size_t                                            track_index,
+    mmd_runtime_ffi_bone_track_descriptor_t*          out_descriptor);
+size_t mmd_runtime_clip_bone_track_key_count(
+    const mmd_runtime_clip_t* clip,
+    size_t                        track_index);
+
+/* Output storage must not overlap the opaque clip handle, and out_keys must
+   not overlap out_written.  Copies all keys when out_key_capacity is
+   sufficient.  out_written is zero on every failure after all output storage
+   has been validated, including BUFFER_TOO_SMALL; short buffers are never
+   partially written. */
+mmd_runtime_status_t mmd_runtime_clip_copy_bone_track_keys(
+    const mmd_runtime_clip_t*              clip,
+    size_t                                  track_index,
+    mmd_runtime_ffi_bone_track_key_t*      out_keys,
+    size_t                                  out_key_capacity,
+    size_t*                                out_written);
 
 bool mmd_runtime_clip_frame_range(
     const mmd_runtime_clip_t* clip,

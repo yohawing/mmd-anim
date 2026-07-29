@@ -968,7 +968,8 @@ pub(crate) fn golden_ik_compare(
         };
 
         let solver_count = model_import.model.ik_count();
-        let clip = mmd_anim_format::build_pair_clip_with_options(
+        let clip = mmd_anim_format::build_mmd_registered_pair_clip_with_options(
+            &model_import.model,
             &vmd,
             &model_import.bone_name_to_index,
             &model_import.morph_name_to_index,
@@ -977,7 +978,8 @@ pub(crate) fn golden_ik_compare(
             VmdClipBuildOptions {
                 honor_property_ik: false,
             },
-        );
+        )
+        .map_err(|error| format!("MMD-registered VMD clip build failed: {error}"))?;
 
         let model = Arc::new(model_import.model);
         let morph_count = model_import
@@ -1317,7 +1319,8 @@ pub(crate) fn golden_ik_diagnose(
         mmd_anim_format::import_vmd_motion(&vmd_bytes).map_err(|e| format!("import error: {e}"))?;
 
     let solver_count = model_import.model.ik_count();
-    let clip = mmd_anim_format::build_pair_clip_with_options(
+    let clip = mmd_anim_format::build_mmd_registered_pair_clip_with_options(
+        &model_import.model,
         &vmd,
         &model_import.bone_name_to_index,
         &model_import.morph_name_to_index,
@@ -1326,7 +1329,8 @@ pub(crate) fn golden_ik_diagnose(
         VmdClipBuildOptions {
             honor_property_ik: false,
         },
-    );
+    )
+    .map_err(|error| format!("MMD-registered VMD clip build failed: {error}"))?;
 
     let morph_count = model_import
         .morph_name_to_index

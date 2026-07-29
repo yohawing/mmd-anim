@@ -318,13 +318,15 @@ pub(crate) fn import_pair_clip_summary(
     })?;
 
     let solver_count = pmx.model.ik_count();
-    let clip = mmd_anim_format::build_pair_clip(
+    let clip = mmd_anim_format::build_mmd_registered_pair_clip(
+        &pmx.model,
         &vmd,
         &pmx.bone_name_to_index,
         &pmx.morph_name_to_index,
         &pmx.ik_solver_bone_name_to_index,
         solver_count,
-    );
+    )
+    .map_err(|error| format!("failed to build MMD-registered VMD clip: {error}"))?;
 
     let frame_range = clip
         .frame_range()
@@ -774,13 +776,15 @@ pub(crate) fn build_pair_runtime_context(
         .max()
         .unwrap_or(0);
 
-    let clip = mmd_anim_format::build_pair_clip(
+    let clip = mmd_anim_format::build_mmd_registered_pair_clip(
+        &pmx.model,
         &vmd,
         &pmx.bone_name_to_index,
         &pmx.morph_name_to_index,
         &pmx.ik_solver_bone_name_to_index,
         solver_count,
-    );
+    )
+    .map_err(|error| format!("failed to build MMD-registered VMD clip: {error}"))?;
     let summary = ImportRuntimeBatchSummary {
         bones: bone_count,
         ik: solver_count,

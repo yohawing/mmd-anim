@@ -12,7 +12,9 @@ use crate::schema::{
 use mmd_anim_format::vmd::VmdBoneKeyframeRaw;
 #[cfg(feature = "physics-bullet-native")]
 use mmd_anim_physics_bullet::{RuntimePhysicsBridgeExt, build_bullet_world_from_pmx};
-use mmd_anim_runtime::{BoneIndex, IkSolveOptions, ModelArena, MorphIndex, RuntimeInstance};
+use mmd_anim_runtime::{
+    AnimationClip, BoneIndex, IkSolveOptions, ModelArena, MorphIndex, RuntimeInstance,
+};
 #[cfg(feature = "physics-bullet-native")]
 use mmd_anim_runtime::{PhysicsMode, PhysicsTickConfig};
 use serde::Serialize;
@@ -95,6 +97,45 @@ struct MotionNumericCompareDefaults<'a> {
     epsilon: f64,
     focus_bones: Option<&'a [String]>,
     eval_frame_offset: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NumericMotionSource {
+    Vmd,
+    PmmDocument,
+}
+
+impl NumericMotionSource {
+    fn from_case(case: &serde_json::Value) -> Result<Self, String> {
+        let value = match case.pointer("/compare/motionSource") {
+            None => "vmd",
+            Some(value) => value
+                .as_str()
+                .ok_or_else(|| "compare.motionSource must be a string when present".to_owned())?,
+        };
+        match value {
+            "vmd" => Ok(Self::Vmd),
+            "pmm-document" => Ok(Self::PmmDocument),
+            other => Err(format!("unsupported compare.motionSource: {other}")),
+        }
+    }
+
+    const fn asset_pointer(self) -> &'static str {
+        match self {
+            Self::Vmd => "/assets/motion",
+            Self::PmmDocument => "/assets/pmm",
+        }
+    }
+}
+
+fn resolve_numeric_motion_source_path(
+    case: &serde_json::Value,
+    manifest_dir: &Path,
+    source: NumericMotionSource,
+) -> Option<PathBuf> {
+    case.pointer(source.asset_pointer())
+        .and_then(|value| value.as_str())
+        .map(|value| resolve_manifest_path(manifest_dir, value))
 }
 
 impl NumericCompareReport {
@@ -842,17 +883,37 @@ fn compare_motion_numeric_case(
             ));
         }
     };
-    let motion_path = match case
-        .pointer("/assets/motion")
-        .and_then(|value| value.as_str())
-        .map(|value| resolve_manifest_path(manifest_dir, value))
-    {
+    let motion_source = match NumericMotionSource::from_case(case) {
+        Ok(source) => source,
+        Err(error) => {
+            case_stats.import_errors += 1;
+            if emit_diagnostics {
+                eprintln!("import-error: {name}: {error}");
+            }
+            stats.merge(&case_stats);
+            return Ok(motion_case_report(
+                name,
+                case,
+                "import-error",
+                epsilon,
+                &case_stats,
+                missing_paths,
+                Some(error),
+            ));
+        }
+    };
+    let motion_asset_pointer = motion_source.asset_pointer();
+    let motion_path = match resolve_numeric_motion_source_path(case, manifest_dir, motion_source) {
         Some(path) => path,
         None => {
             case_stats.missing += 1;
-            missing_paths.push("assets.motion".to_owned());
+            missing_paths.push(
+                motion_asset_pointer
+                    .trim_start_matches('/')
+                    .replace('/', "."),
+            );
             if emit_diagnostics {
-                eprintln!("missing: {name} assets.motion");
+                eprintln!("missing: {name} {motion_asset_pointer}");
             }
             stats.merge(&case_stats);
             return Ok(motion_case_report(
@@ -966,9 +1027,22 @@ fn compare_motion_numeric_case(
             ));
         }
     };
-    let vmd_bytes = fs::read(&motion_path)?;
-    let vmd = match mmd_anim_format::import_vmd_motion(&vmd_bytes) {
-        Ok(vmd) => vmd,
+    let solver_count = model_import.model.ik_count();
+    let morph_count = model_import
+        .morph_name_to_index
+        .values()
+        .map(|index| index.as_usize() + 1)
+        .max()
+        .unwrap_or(0);
+    let clip = match build_numeric_motion_clip(
+        case,
+        motion_source,
+        &motion_path,
+        &model_import,
+        morph_count,
+        solver_count,
+    ) {
+        Ok(clip) => clip,
         Err(error) => {
             case_stats.import_errors += 1;
             let error = format!("{}: {}", motion_path.display(), error);
@@ -988,25 +1062,7 @@ fn compare_motion_numeric_case(
         }
     };
 
-    let solver_count = model_import.model.ik_count();
-    let clip = mmd_anim_format::build_pair_clip_with_options(
-        &vmd,
-        &model_import.bone_name_to_index,
-        &model_import.morph_name_to_index,
-        &model_import.ik_solver_bone_name_to_index,
-        solver_count,
-        mmd_anim_format::VmdClipBuildOptions {
-            honor_property_ik: false,
-        },
-    );
-
     let model = Arc::new(model_import.model);
-    let morph_count = model_import
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
     let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, solver_count);
     let mut physics_evaluator = build_physics_coarse_evaluator(PhysicsCoarseBuildInput {
         case,
@@ -1106,6 +1162,146 @@ fn compare_motion_numeric_case(
         missing_paths,
         error,
     ))
+}
+
+fn build_numeric_motion_clip(
+    case: &serde_json::Value,
+    motion_source: NumericMotionSource,
+    motion_path: &Path,
+    model_import: &golden::RuntimeModelImport,
+    morph_count: usize,
+    solver_count: usize,
+) -> Result<AnimationClip, String> {
+    match motion_source {
+        NumericMotionSource::Vmd => {
+            let bytes = fs::read(motion_path).map_err(|error| error.to_string())?;
+            let vmd =
+                mmd_anim_format::import_vmd_motion(&bytes).map_err(|error| error.to_string())?;
+            mmd_anim_format::build_mmd_registered_pair_clip_with_options(
+                &model_import.model,
+                &vmd,
+                &model_import.bone_name_to_index,
+                &model_import.morph_name_to_index,
+                &model_import.ik_solver_bone_name_to_index,
+                solver_count,
+                mmd_anim_format::VmdClipBuildOptions {
+                    honor_property_ik: false,
+                },
+            )
+            .map_err(|error| error.to_string())
+        }
+        NumericMotionSource::PmmDocument => {
+            let bytes = fs::read(motion_path).map_err(|error| error.to_string())?;
+            let parsed =
+                mmd_anim_format::parse_pmm_manifest(&bytes).map_err(|error| error.to_string())?;
+            let document = parsed
+                .document_summary
+                .ok_or_else(|| "PMM does not contain a PMMv2 document summary".to_owned())?;
+            let pmm_model = select_pmm_document_model(case, &document)?;
+
+            validate_pmm_document_model_structure(pmm_model, model_import, morph_count)?;
+            mmd_anim_format::build_pmm_document_model_clip(pmm_model)
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn select_pmm_document_model<'a>(
+    case: &serde_json::Value,
+    document: &'a mmd_anim_format::pmm::PmmDocumentSummary,
+) -> Result<&'a mmd_anim_format::pmm::PmmDocumentModelSummary, String> {
+    let explicit_document_model_index = match case.pointer("/compare/pmmDocumentModelIndex") {
+        None => None,
+        Some(value) => {
+            let value = value.as_u64().ok_or_else(|| {
+                "compare.pmmDocumentModelIndex must be a nonnegative integer when present"
+                    .to_owned()
+            })?;
+            Some(u8::try_from(value).map_err(|_| {
+                format!("compare.pmmDocumentModelIndex {value} exceeds the PMM u8 range")
+            })?)
+        }
+    };
+
+    match explicit_document_model_index {
+        Some(document_model_index) => document
+            .models
+            .iter()
+            .find(|model| model.document_model_index == document_model_index)
+            .ok_or_else(|| {
+                format!("PMM document model index {document_model_index} does not exist")
+            }),
+        None => document
+            .models
+            .get(document.selected_model_index as usize)
+            .ok_or_else(|| {
+                format!(
+                    "PMM selected model slot {} does not exist",
+                    document.selected_model_index
+                )
+            }),
+    }
+}
+
+fn validate_pmm_document_model_structure(
+    pmm_model: &mmd_anim_format::pmm::PmmDocumentModelSummary,
+    model_import: &golden::RuntimeModelImport,
+    morph_count: usize,
+) -> Result<(), String> {
+    if pmm_model.bone_count != model_import.model.bone_count() {
+        return Err(format!(
+            "PMM bone count {} does not match runtime model bone count {}",
+            pmm_model.bone_count,
+            model_import.model.bone_count()
+        ));
+    }
+    if pmm_model.morph_count != morph_count {
+        return Err(format!(
+            "PMM morph count {} does not match runtime model morph count {morph_count}",
+            pmm_model.morph_count
+        ));
+    }
+    if pmm_model.bone_names.len() != pmm_model.bone_count {
+        return Err(format!(
+            "PMM bone name count {} does not match PMM bone count {}",
+            pmm_model.bone_names.len(),
+            pmm_model.bone_count
+        ));
+    }
+    if pmm_model.morph_names.len() != pmm_model.morph_count {
+        return Err(format!(
+            "PMM morph name count {} does not match PMM morph count {}",
+            pmm_model.morph_names.len(),
+            pmm_model.morph_count
+        ));
+    }
+    validate_ordered_runtime_names("bone", &pmm_model.bone_names, &model_import.bone_names)?;
+    validate_ordered_runtime_names("morph", &pmm_model.morph_names, &model_import.morph_names)
+}
+
+fn validate_ordered_runtime_names(
+    kind: &str,
+    pmm_names: &[String],
+    runtime_names: &[String],
+) -> Result<(), String> {
+    if pmm_names.len() != runtime_names.len() {
+        return Err(format!(
+            "PMM {kind} name count {} does not match runtime model {kind} name count {}",
+            pmm_names.len(),
+            runtime_names.len()
+        ));
+    }
+    for (index, name) in pmm_names.iter().enumerate() {
+        let runtime_name = runtime_names
+            .get(index)
+            .map(|runtime_name| mmd_anim_format::normalize_pmm_model_item_name(runtime_name));
+        if runtime_name.as_deref() != Some(name.as_str()) {
+            return Err(format!(
+                "PMM {kind} {index} ({name}) does not match the runtime model {kind} order"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn load_motion_numeric_oracle_dump(
@@ -1465,11 +1661,17 @@ pub(crate) fn diagnose_numeric_bones(
         .and_then(|value| value.as_str())
         .map(|value| resolve_manifest_path(manifest_dir, value))
         .ok_or("case is missing assets.model")?;
-    let motion_path = case
-        .pointer("/assets/motion")
-        .and_then(|value| value.as_str())
-        .map(|value| resolve_manifest_path(manifest_dir, value))
-        .ok_or("case is missing assets.motion")?;
+    let motion_source = NumericMotionSource::from_case(case).map_err(|error| error.to_owned())?;
+    let motion_path = resolve_numeric_motion_source_path(case, manifest_dir, motion_source)
+        .ok_or_else(|| {
+            format!(
+                "case is missing {}",
+                motion_source
+                    .asset_pointer()
+                    .trim_start_matches('/')
+                    .replace('/', ".")
+            )
+        })?;
     let oracle_path = case
         .pointer("/oracle/path")
         .and_then(|value| value.as_str())
@@ -1488,18 +1690,7 @@ pub(crate) fn diagnose_numeric_bones(
 
     let model_bytes = fs::read(&model_path)?;
     let model_import = golden::import_golden_runtime_model(&model_path, &model_bytes)?;
-    let vmd = mmd_anim_format::import_vmd_motion(&fs::read(&motion_path)?)?;
     let solver_count = model_import.model.ik_count();
-    let clip = mmd_anim_format::build_pair_clip_with_options(
-        &vmd,
-        &model_import.bone_name_to_index,
-        &model_import.morph_name_to_index,
-        &model_import.ik_solver_bone_name_to_index,
-        solver_count,
-        mmd_anim_format::VmdClipBuildOptions {
-            honor_property_ik: false,
-        },
-    );
 
     let morph_count = model_import
         .morph_name_to_index
@@ -1507,6 +1698,21 @@ pub(crate) fn diagnose_numeric_bones(
         .map(|index| index.as_usize() + 1)
         .max()
         .unwrap_or(0);
+    let clip = build_numeric_motion_clip(
+        case,
+        motion_source,
+        &motion_path,
+        &model_import,
+        morph_count,
+        solver_count,
+    )
+    .map_err(|error| format!("{}: {}", motion_path.display(), error))?;
+    let vmd = match motion_source {
+        NumericMotionSource::Vmd => Some(mmd_anim_format::import_vmd_motion(&fs::read(
+            &motion_path,
+        )?)?),
+        NumericMotionSource::PmmDocument => None,
+    };
     let model = Arc::new(model_import.model);
     let mut pre_ik =
         RuntimeInstance::new_with_counts(Arc::clone(&model), morph_count, solver_count);
@@ -1591,15 +1797,19 @@ pub(crate) fn diagnose_numeric_bones(
             glam::Mat4::from_cols_array(&oracle_local).to_scale_rotation_translation();
         let oracle_local_axis = oracle_local_rot.to_axis_angle();
         let vmd_keyframes: Vec<_> = vmd
-            .bone_keyframes
-            .iter()
-            .filter(|kf| {
-                model_import
-                    .bone_name_to_index
-                    .get(&kf.bone_name_normalized)
-                    == Some(&index)
+            .as_ref()
+            .map(|vmd| {
+                vmd.bone_keyframes
+                    .iter()
+                    .filter(|kf| {
+                        model_import
+                            .bone_name_to_index
+                            .get(&kf.bone_name_normalized)
+                            == Some(&index)
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
         let vmd_lookup_frame = eval_frame;
         let exact_vmd_keyframes: Vec<_> = vmd_keyframes
             .iter()
@@ -1824,32 +2034,36 @@ pub(crate) fn diagnose_numeric_physics_penetration(
         .and_then(|value| value.as_str())
         .map(|value| resolve_manifest_path(manifest_dir, value))
         .ok_or("case is missing assets.model")?;
-    let motion_path = case
-        .pointer("/assets/motion")
-        .and_then(|value| value.as_str())
-        .map(|value| resolve_manifest_path(manifest_dir, value))
-        .ok_or("case is missing assets.motion")?;
+    let motion_source = NumericMotionSource::from_case(case).map_err(|error| error.to_owned())?;
+    let motion_path = resolve_numeric_motion_source_path(case, manifest_dir, motion_source)
+        .ok_or_else(|| {
+            format!(
+                "case is missing {}",
+                motion_source
+                    .asset_pointer()
+                    .trim_start_matches('/')
+                    .replace('/', ".")
+            )
+        })?;
     let model_bytes = fs::read(&model_path)?;
     let parsed_pmx = mmd_anim_format::parse_pmx_model(&model_bytes)?;
     let model_import = golden::import_golden_runtime_model(&model_path, &model_bytes)?;
-    let vmd = mmd_anim_format::import_vmd_motion(&fs::read(&motion_path)?)?;
     let solver_count = model_import.model.ik_count();
-    let clip = mmd_anim_format::build_pair_clip_with_options(
-        &vmd,
-        &model_import.bone_name_to_index,
-        &model_import.morph_name_to_index,
-        &model_import.ik_solver_bone_name_to_index,
-        solver_count,
-        mmd_anim_format::VmdClipBuildOptions {
-            honor_property_ik: false,
-        },
-    );
     let morph_count = model_import
         .morph_name_to_index
         .values()
         .map(|index| index.as_usize() + 1)
         .max()
         .unwrap_or(0);
+    let clip = build_numeric_motion_clip(
+        case,
+        motion_source,
+        &motion_path,
+        &model_import,
+        morph_count,
+        solver_count,
+    )
+    .map_err(|error| format!("{}: {}", motion_path.display(), error))?;
     let model = Arc::new(model_import.model);
     let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, solver_count);
     let mut physics_evaluator = build_physics_coarse_evaluator(PhysicsCoarseBuildInput {
@@ -3233,6 +3447,112 @@ mod tests {
         expected[11] = 30.0;
 
         assert_eq!(position_delta(&actual, &expected), [-4.0, 2.0, 9.0]);
+    }
+
+    #[test]
+    fn ordered_runtime_names_accept_duplicate_bone_and_morph_names() {
+        let duplicate_bones = vec!["arm".to_owned(), "arm".to_owned()];
+        let duplicate_morphs = vec!["smile".to_owned(), "smile".to_owned()];
+
+        assert!(validate_ordered_runtime_names("bone", &duplicate_bones, &duplicate_bones).is_ok());
+        assert!(
+            validate_ordered_runtime_names("morph", &duplicate_morphs, &duplicate_morphs).is_ok()
+        );
+    }
+
+    #[test]
+    fn ordered_runtime_names_reject_order_or_content_mismatch() {
+        let pmm = vec!["smile".to_owned(), "blink".to_owned()];
+        let runtime = vec!["blink".to_owned(), "smile".to_owned()];
+
+        let error = validate_ordered_runtime_names("morph", &pmm, &runtime).unwrap_err();
+        assert!(error.contains("PMM morph 0 (smile)"));
+        assert!(error.contains("runtime model morph order"));
+    }
+
+    #[test]
+    fn ordered_runtime_names_match_pmm_sjis_prefix_fit() {
+        let pmm = vec!["123456789あいうえお".to_owned()];
+        let runtime = vec!["123456789あいうえおか".to_owned()];
+
+        assert!(validate_ordered_runtime_names("morph", &pmm, &runtime).is_ok());
+    }
+
+    fn selection_test_document() -> mmd_anim_format::pmm::PmmDocumentSummary {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mmd-anim-format/fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
+        let bytes = std::fs::read(path).expect("selection fixture must be readable");
+        let mut document = mmd_anim_format::parse_pmm_manifest(&bytes)
+            .expect("selection fixture must parse")
+            .document_summary
+            .expect("selection fixture must contain a document summary");
+
+        document.models[0].document_model_index = 7;
+        let mut second = document.models[0].clone();
+        second.slot_index = 1;
+        second.document_model_index = 23;
+        document.models.push(second);
+        document.model_count = document.models.len();
+        document
+    }
+
+    #[test]
+    fn pmm_selection_without_override_uses_selected_slot() {
+        let document = selection_test_document();
+        let case = serde_json::json!({ "compare": { "motionSource": "pmm-document" } });
+
+        let selected = select_pmm_document_model(&case, &document).unwrap();
+        assert_eq!(selected.slot_index, 0);
+        assert_eq!(selected.document_model_index, 7);
+    }
+
+    #[test]
+    fn pmm_selection_override_uses_persistent_document_model_index() {
+        let document = selection_test_document();
+        let case = serde_json::json!({
+            "compare": {
+                "motionSource": "pmm-document",
+                "pmmDocumentModelIndex": 23
+            }
+        });
+
+        let selected = select_pmm_document_model(&case, &document).unwrap();
+        assert_eq!(selected.slot_index, 1);
+        assert_eq!(selected.document_model_index, 23);
+    }
+
+    #[test]
+    fn pmm_selection_rejects_invalid_manifest_model_index_types() {
+        let document = selection_test_document();
+        for value in [serde_json::json!("23"), serde_json::json!(-1)] {
+            let case = serde_json::json!({
+                "compare": {
+                    "motionSource": "pmm-document",
+                    "pmmDocumentModelIndex": value
+                }
+            });
+            let error = select_pmm_document_model(&case, &document).unwrap_err();
+            assert!(
+                error.contains("must be a nonnegative integer"),
+                "unexpected error: {error}"
+            );
+        }
+
+        let case = serde_json::json!({
+            "compare": {
+                "motionSource": "pmm-document",
+                "pmmDocumentModelIndex": 256
+            }
+        });
+        let error = select_pmm_document_model(&case, &document).unwrap_err();
+        assert!(error.contains("exceeds the PMM u8 range"));
+    }
+
+    #[test]
+    fn motion_source_rejects_present_non_string_values() {
+        let case = serde_json::json!({ "compare": { "motionSource": 1 } });
+        let error = NumericMotionSource::from_case(&case).unwrap_err();
+        assert_eq!(error, "compare.motionSource must be a string when present");
     }
 
     #[cfg(feature = "physics-bullet-native")]

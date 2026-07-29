@@ -10,7 +10,7 @@ use std::{
 };
 
 use mmd_anim::{
-    format::{build_pair_clip, import_pmx_runtime, import_vmd_motion},
+    format::{build_mmd_registered_pair_clip, import_pmx_runtime, import_vmd_motion},
     runtime::RuntimeInstance,
 };
 
@@ -91,13 +91,15 @@ fn assert_clip_evaluation_does_not_allocate_after_warmup(
 ) {
     let pmx = import_pmx_runtime(pmx_bytes).expect("pmx must import");
     let vmd = import_vmd_motion(vmd_bytes).expect("vmd must import");
-    let clip = build_pair_clip(
+    let clip = build_mmd_registered_pair_clip(
+        &pmx.model,
         &vmd,
         &pmx.bone_name_to_index,
         &pmx.morph_name_to_index,
         &pmx.ik_solver_bone_name_to_index,
         pmx.model.ik_count(),
-    );
+    )
+    .expect("MMD-registered VMD clip must build");
 
     let model = Arc::new(pmx.model);
     let morph_count = model.morph_count() as usize;

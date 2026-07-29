@@ -27,8 +27,9 @@ pub use pmd::{
     PmdParsedModel, PmdRuntimeImport, export_pmd_model, import_pmd_runtime, parse_pmd_model,
 };
 pub use pmm::{
-    PmmParsedManifest, PmmSceneExportOptions, PmmSceneExportReport, export_pmm_manifest,
-    export_pmm_scene_from_pmx_vmd, parse_pmm_manifest,
+    PmmDocumentClipBuildError, PmmParsedManifest, PmmSceneExportOptions, PmmSceneExportReport,
+    build_pmm_document_model_clip, export_pmm_manifest, export_pmm_scene_from_pmx_vmd,
+    normalize_pmm_model_item_name, parse_pmm_manifest,
 };
 pub use pmx::{
     PmxBoneImport, PmxMaterialSplit, PmxMaterialSplitManifest, PmxMaterialSplitManifestMesh,
@@ -43,10 +44,11 @@ pub use pmx::{
     split_pmx_model_by_material, validate_pmx_export_model,
 };
 pub use vmd::{
-    VmdCameraState, VmdClipBuildOptions, VmdExportMorphKind, VmdExportName, VmdIkEntry,
-    VmdImportResult, VmdLightState, VmdParsedAnimation, VmdPoseExport, VmdPoseExportBindings,
-    VmdPoseExportError, VmdPoseExportReport, VmdPropertyIkFrame, VmdSelfShadowState,
-    build_clip_from_import, build_pair_clip, build_pair_clip_with_options,
+    VmdCameraState, VmdClipBuildError, VmdClipBuildOptions, VmdExportMorphKind, VmdExportName,
+    VmdIkEntry, VmdImportResult, VmdLightState, VmdParsedAnimation, VmdPoseExport,
+    VmdPoseExportBindings, VmdPoseExportError, VmdPoseExportReport, VmdPropertyIkFrame,
+    VmdSelfShadowState, build_clip_from_import, build_mmd_registered_pair_clip,
+    build_mmd_registered_pair_clip_with_options, build_pair_clip, build_pair_clip_with_options,
     build_property_binding_with_ik_resolver, export_reduced_pose_to_vmd, export_vmd_animation,
     import_vmd_motion, parse_vmd_animation, sample_vmd_camera_frames, sample_vmd_light_frames,
     sample_vmd_self_shadow_frames,

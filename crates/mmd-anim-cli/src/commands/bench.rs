@@ -314,13 +314,15 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
         .unwrap_or(0);
 
     let clip_start = Instant::now();
-    let clip = mmd_anim_format::build_pair_clip(
+    let clip = mmd_anim_format::build_mmd_registered_pair_clip(
+        &pmx.model,
         &vmd,
         &pmx.bone_name_to_index,
         &pmx.morph_name_to_index,
         &pmx.ik_solver_bone_name_to_index,
         solver_count,
-    );
+    )
+    .map_err(|error| format!("failed to build MMD-registered VMD clip: {error}"))?;
     let clip_elapsed = clip_start.elapsed();
 
     let model = Arc::new(pmx.model);

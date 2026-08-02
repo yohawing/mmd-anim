@@ -39,11 +39,13 @@ pub const MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION: u32 = 1 << 5;
 pub const MMD_RUNTIME_FEATURE_CLIP_MORPH_TRACK_INTROSPECTION: u32 = 1 << 6;
 pub const MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION: u32 = 1 << 7;
 pub const MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 = 1 << 8;
+pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT: u32 = 1 << 9;
 pub const MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_NONE: u32 = 0;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER: u32 = 1;
 pub const MMD_RUNTIME_VMD_CURVE_NONE: u32 = 0;
@@ -63,6 +65,7 @@ const FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION: u32 =
     MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION;
 const FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 =
     MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION;
+const FEATURE_VMD_SHARED_CONTEXT: u32 = MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -125,6 +128,10 @@ pub struct MmdRuntimeVmdLightTrack {
 
 pub struct MmdRuntimeVmdSelfShadowTrack {
     frames: Vec<mmd_anim_format::vmd::VmdParsedSelfShadowFrame>,
+}
+
+pub struct MmdRuntimeVmdContext {
+    context: mmd_anim_format::vmd::VmdSharedContext,
 }
 
 pub struct MmdRuntimePmxMaterialSplit {
@@ -413,6 +420,29 @@ pub struct MmdRuntimeFfiVmdSelfShadowKeyframe {
     pub frame: u32,
     pub mode: u8,
     pub distance: f32,
+}
+
+/// One raw VMD property/IK keyframe. The packed IK entries are returned by
+/// `mmd_runtime_vmd_context_copy_property_ik_entries`; offsets/counts refer to
+/// that flat caller-owned array.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiVmdPropertyKeyframe {
+    pub frame: u32,
+    pub visible: u8,
+    pub reserved: [u8; 3],
+    pub ik_entry_offset: usize,
+    pub ik_entry_count: usize,
+}
+
+/// One raw fixed-layout VMD property IK entry. `name_bytes` contains the
+/// parsed name in a fixed-width 20-byte field with NUL padding.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiVmdPropertyIkEntry {
+    pub name_bytes: [u8; 20],
+    pub enabled: u8,
+    pub reserved: [u8; 3],
 }
 
 #[repr(C)]
@@ -1019,6 +1049,7 @@ fn runtime_feature_flags() -> u32 {
         | FEATURE_CLIP_MORPH_TRACK_INTROSPECTION
         | FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION
         | FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION
+        | FEATURE_VMD_SHARED_CONTEXT
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE
         } else {
@@ -1419,6 +1450,51 @@ pub unsafe extern "C" fn mmd_runtime_parse_vmd_json(
         match serde_json::to_vec(&parsed) {
             Ok(json) => byte_buffer_from_vec(json),
             Err(_) => empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
+        }
+    })
+}
+
+/// Parses VMD bytes once and returns an opaque shared context containing the
+/// model-clip, camera, light, self-shadow, and property/IK channels.
+///
+/// The context owns all parsed data and never borrows `data` after this call.
+/// A valid VMD with no optional channels is still a valid context.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_create_from_vmd_bytes(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimeVmdContext {
+    ffi_guard(ptr::null_mut(), || {
+        if data.is_null() || len == 0 {
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let context = match mmd_anim_format::vmd::parse_vmd_shared_context(bytes) {
+            Ok(context) => context,
+            Err(_) => return null_mut_failure(FFI_ERR_VMD_PARSE_FAILED),
+        };
+        Box::into_raw(Box::new(MmdRuntimeVmdContext { context }))
+    })
+}
+
+/// Frees a shared VMD context. Clips created from the context own their
+/// compiled tracks independently and remain valid after this call.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_free(context: *mut MmdRuntimeVmdContext) {
+    ffi_guard_void(|| {
+        if !context.is_null() {
+            unsafe {
+                drop(Box::from_raw(context));
+            }
         }
     })
 }
@@ -2064,6 +2140,441 @@ pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_free(
                 drop(Box::from_raw(track));
             }
         }
+    })
+}
+
+fn sorted_context_camera_frames(
+    context: &MmdRuntimeVmdContext,
+) -> Vec<&mmd_anim_format::vmd::VmdParsedCameraFrame> {
+    let mut frames: Vec<_> = context
+        .context
+        .parsed_animation()
+        .camera_frames
+        .iter()
+        .collect();
+    frames.sort_by_key(|keyframe| keyframe.frame);
+    frames
+}
+
+fn sorted_context_light_frames(
+    context: &MmdRuntimeVmdContext,
+) -> Vec<&mmd_anim_format::vmd::VmdParsedLightFrame> {
+    let mut frames: Vec<_> = context
+        .context
+        .parsed_animation()
+        .light_frames
+        .iter()
+        .collect();
+    frames.sort_by_key(|keyframe| keyframe.frame);
+    frames
+}
+
+fn sorted_context_self_shadow_frames(
+    context: &MmdRuntimeVmdContext,
+) -> Vec<&mmd_anim_format::vmd::VmdParsedSelfShadowFrame> {
+    let mut frames: Vec<_> = context
+        .context
+        .parsed_animation()
+        .self_shadow_frames
+        .iter()
+        .collect();
+    frames.sort_by_key(|keyframe| keyframe.frame);
+    frames
+}
+
+fn sorted_context_property_frames(
+    context: &MmdRuntimeVmdContext,
+) -> Vec<&mmd_anim_format::vmd::VmdParsedPropertyFrame> {
+    let mut frames: Vec<_> = context
+        .context
+        .parsed_animation()
+        .property_frames
+        .iter()
+        .collect();
+    frames.sort_by_key(|keyframe| keyframe.frame);
+    frames
+}
+
+fn context_property_entry_count(context: &MmdRuntimeVmdContext) -> Option<usize> {
+    sorted_context_property_frames(context)
+        .into_iter()
+        .try_fold(0usize, |total, frame| {
+            total.checked_add(frame.ik_states.len())
+        })
+}
+
+/// Returns the number of camera keys retained by a shared VMD context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_camera_frame_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.parsed_animation().camera_frames.len()
+    })
+}
+
+/// Copies raw camera keys from a shared VMD context in chronological order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_camera_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdCameraKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(context, out_keys, out_key_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let frames = sorted_context_camera_frames(context);
+        let required = frames.len();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_key_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+
+        let mut keys = Vec::new();
+        if keys.try_reserve_exact(required).is_err() {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "failed to allocate the shared VMD camera key staging buffer",
+            );
+        }
+        for (index, frame) in frames.into_iter().enumerate() {
+            let Ok(key) = vmd_camera_keyframe(frame, index != 0) else {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "VMD camera keyframe contains a non-finite value",
+                );
+            };
+            keys.push(key);
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Returns the number of light keys retained by a shared VMD context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_light_frame_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.parsed_animation().light_frames.len()
+    })
+}
+
+/// Copies raw light keys from a shared VMD context in chronological order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_light_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdLightKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(context, out_keys, out_key_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let frames = sorted_context_light_frames(context);
+        let required = frames.len();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_key_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+
+        let mut keys = Vec::new();
+        if keys.try_reserve_exact(required).is_err() {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "failed to allocate the shared VMD light key staging buffer",
+            );
+        }
+        for frame in frames {
+            if !all_finite(&frame.color) || !all_finite(&frame.direction) {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "VMD light keyframe contains a non-finite value",
+                );
+            }
+            keys.push(MmdRuntimeFfiVmdLightKeyframe {
+                frame: frame.frame,
+                color: frame.color,
+                direction: frame.direction,
+            });
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Returns the number of self-shadow keys retained by a shared VMD context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_self_shadow_frame_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.parsed_animation().self_shadow_frames.len()
+    })
+}
+
+/// Copies raw self-shadow keys from a shared VMD context in chronological
+/// order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_self_shadow_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdSelfShadowKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(context, out_keys, out_key_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let frames = sorted_context_self_shadow_frames(context);
+        let required = frames.len();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_key_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+
+        let mut keys = Vec::new();
+        if keys.try_reserve_exact(required).is_err() {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "failed to allocate the shared VMD self-shadow key staging buffer",
+            );
+        }
+        for frame in frames {
+            if !frame.distance.is_finite() {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "VMD self-shadow keyframe contains a non-finite value",
+                );
+            }
+            keys.push(MmdRuntimeFfiVmdSelfShadowKeyframe {
+                frame: frame.frame,
+                mode: frame.mode,
+                distance: frame.distance,
+            });
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Returns the number of property/IK keyframes retained by a shared VMD
+/// context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_property_frame_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.parsed_animation().property_frames.len()
+    })
+}
+
+/// Returns the total number of flattened property IK entries in a shared VMD
+/// context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_property_ik_entry_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context_property_entry_count(context).unwrap_or(0)
+    })
+}
+
+/// Copies property/IK keyframe descriptors from a shared VMD context. The
+/// returned offsets/counts address the flat entry array copied by
+/// `mmd_runtime_vmd_context_copy_property_ik_entries`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_property_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdPropertyKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(context, out_keys, out_key_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let frames = sorted_context_property_frames(context);
+        let required = frames.len();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_key_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+        let Some(total_entries) = context_property_entry_count(context) else {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "shared VMD property entry count overflow",
+            );
+        };
+
+        let mut keys = Vec::new();
+        if keys.try_reserve_exact(required).is_err() {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "failed to allocate the shared VMD property key staging buffer",
+            );
+        }
+        let mut offset = 0usize;
+        for frame in frames {
+            let count = frame.ik_states.len();
+            keys.push(MmdRuntimeFfiVmdPropertyKeyframe {
+                frame: frame.frame,
+                visible: u8::from(frame.visible),
+                reserved: [0; 3],
+                ik_entry_offset: offset,
+                ik_entry_count: count,
+            });
+            offset = match offset.checked_add(count) {
+                Some(next) => next,
+                None => {
+                    return status_failure(
+                        MmdRuntimeStatus::Error,
+                        "shared VMD property entry offset overflow",
+                    );
+                }
+            };
+        }
+        debug_assert_eq!(offset, total_entries);
+        unsafe {
+            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Copies the flattened fixed-layout property IK entries from a shared VMD
+/// context in the same chronological/key order as the property descriptors.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_property_ik_entries(
+    context: *const MmdRuntimeVmdContext,
+    out_entries: *mut MmdRuntimeFfiVmdPropertyIkEntry,
+    out_entry_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(context, out_entries, out_entry_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let frames = sorted_context_property_frames(context);
+        let Some(required) = context_property_entry_count(context) else {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "shared VMD property entry count overflow",
+            );
+        };
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_entries.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_entry_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+
+        let mut entries = Vec::new();
+        if entries.try_reserve_exact(required).is_err() {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "failed to allocate the shared VMD property entry staging buffer",
+            );
+        }
+        for frame in frames {
+            for state in &frame.ik_states {
+                let mut name_bytes = [0u8; 20];
+                let copy_len = state.bone_name_bytes.len().min(name_bytes.len());
+                name_bytes[..copy_len].copy_from_slice(&state.bone_name_bytes[..copy_len]);
+                entries.push(MmdRuntimeFfiVmdPropertyIkEntry {
+                    name_bytes,
+                    enabled: u8::from(state.enabled),
+                    reserved: [0; 3],
+                });
+            }
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_entries, required).copy_from_slice(&entries);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
     })
 }
 
@@ -3982,6 +4493,45 @@ pub unsafe extern "C" fn mmd_runtime_clip_create_from_vmd_bytes_for_model(
         let clip = match mmd_anim_format::build_mmd_registered_pair_clip(
             &model.model,
             &motion,
+            &model.bone_name_to_index,
+            &model.morph_name_to_index,
+            &model.ik_solver_bone_name_to_index,
+            solver_count,
+        ) {
+            Ok(clip) => clip,
+            Err(_) => return null_mut_failure(FFI_ERR_CLIP_CREATE_FAILED),
+        };
+        Box::into_raw(Box::new(MmdRuntimeClip { clip }))
+    })
+}
+
+/// Creates an independent model-aware animation clip from a shared VMD
+/// context. The returned clip owns all compiled tracks and remains valid
+/// after both `context` and `model` are freed.
+///
+/// # Safety
+///
+/// `model` and `context` must be null or live handles returned by this
+/// library. The model must have name maps populated by PMX import.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_create_from_vmd_context_for_model(
+    model: *const MmdRuntimeModel,
+    context: *const MmdRuntimeVmdContext,
+) -> *mut MmdRuntimeClip {
+    ffi_guard(ptr::null_mut(), || {
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
+        };
+        if model.bone_name_to_index.is_empty() && model.morph_name_to_index.is_empty() {
+            return null_mut_failure(FFI_ERR_CLIP_CREATE_FAILED);
+        }
+        let solver_count = model.model.ik_count();
+        let clip = match mmd_anim_format::build_mmd_registered_pair_clip(
+            &model.model,
+            context.context.import_result(),
             &model.bone_name_to_index,
             &model.morph_name_to_index,
             &model.ik_solver_bone_name_to_index,

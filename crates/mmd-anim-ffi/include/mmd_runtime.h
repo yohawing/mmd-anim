@@ -36,8 +36,8 @@ extern "C" {
    (MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION) is set when compiled
    authored local bone-track introspection is available.
    bit 9 (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT) is set when the opt-in
-   single-parse VMD context and its raw scene/property readback API are
-   available; bit 10 (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK)
+   single-parse VMD context, summary, and raw scene/property readback APIs
+   are available; bit 10 (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK)
    is set when raw model-resolved VMD bone readback is available.
    Check the relevant bit before calling each optional surface; when a
    surface's bit is unset, its status-returning functions return
@@ -141,6 +141,7 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_NONE 0u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER 1u
@@ -440,6 +441,34 @@ typedef struct mmd_runtime_ffi_vmd_property_ik_entry {
     uint8_t reserved[3];
 } mmd_runtime_ffi_vmd_property_ik_entry_t;
 
+/* Counts for one source VMD channel in the shared-context summary. Bone and
+   morph track_count values count distinct raw target names. Camera, light,
+   self-shadow, and property channels report one track when key_count is
+   non-zero. Both values are fixed-width uint32_t. */
+typedef struct mmd_runtime_ffi_vmd_track_summary {
+    uint32_t track_count;
+    uint32_t key_count;
+} mmd_runtime_ffi_vmd_track_summary_t;
+
+/* Fixed v1 summary returned by mmd_runtime_vmd_context_read_summary. The
+   target_model_name_bytes field is the original 20-byte VMD Shift-JIS/CP932
+   header field; callers use bytes before the first NUL to reproduce the
+   existing model-name value. struct_size and abi_version are populated by
+   the native function. */
+typedef struct mmd_runtime_ffi_vmd_context_summary {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint8_t  target_model_name_bytes[20];
+    uint32_t max_frame;
+    mmd_runtime_ffi_vmd_track_summary_t bones;
+    mmd_runtime_ffi_vmd_track_summary_t morphs;
+    mmd_runtime_ffi_vmd_track_summary_t cameras;
+    mmd_runtime_ffi_vmd_track_summary_t lights;
+    mmd_runtime_ffi_vmd_track_summary_t self_shadows;
+    mmd_runtime_ffi_vmd_track_summary_t properties;
+    uint32_t property_ik_entry_count;
+} mmd_runtime_ffi_vmd_context_summary_t;
+
 typedef struct mmd_runtime_ffi_morph_track {
     uint32_t morph_index;
     size_t   keyframe_offset;
@@ -709,6 +738,16 @@ mmd_runtime_vmd_context_t* mmd_runtime_vmd_context_create_from_vmd_bytes(
 
 void mmd_runtime_vmd_context_free(
     mmd_runtime_vmd_context_t* context);
+
+/* Reads the fixed v1 summary in one call. out_summary_size is the caller's
+   writable byte capacity and must be at least sizeof the output struct.
+   Invalid handles, unsupported capability, and short buffers fail without
+   writing the output. Counts are uint32_t and the output struct reports its
+   fixed size and ABI version. */
+mmd_runtime_status_t mmd_runtime_vmd_context_read_summary(
+    const mmd_runtime_vmd_context_t*            context,
+    mmd_runtime_ffi_vmd_context_summary_t*      out_summary,
+    size_t                                       out_summary_size);
 
 size_t mmd_runtime_vmd_context_camera_frame_count(
     const mmd_runtime_vmd_context_t* context);

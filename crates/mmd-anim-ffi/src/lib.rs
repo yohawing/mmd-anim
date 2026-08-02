@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::{ptr, slice, str, sync::Arc};
+use std::{mem::size_of, ptr, slice, str, sync::Arc};
 
 #[cfg(feature = "physics-bullet-native")]
 use serde::{Deserialize, Deserializer, Serialize};
@@ -47,6 +47,7 @@ pub const MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_NONE: u32 = 0;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER: u32 = 1;
@@ -477,6 +478,40 @@ pub struct MmdRuntimeFfiVmdPropertyIkEntry {
     pub name_bytes: [u8; 20],
     pub enabled: u8,
     pub reserved: [u8; 3],
+}
+
+/// Counts for one source VMD channel in the shared-context summary.
+///
+/// Bone and morph `track_count` values count distinct raw target names.
+/// Camera, light, self-shadow, and property channels report one track when
+/// their `key_count` is non-zero. Both values are fixed-width ABI `uint32_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiVmdTrackSummary {
+    pub track_count: u32,
+    pub key_count: u32,
+}
+
+/// One fixed-layout summary readback for an opaque shared VMD context.
+///
+/// `target_model_name_bytes` is the original 20-byte VMD Shift-JIS/CP932
+/// header field; callers use bytes before the first NUL to reproduce the
+/// existing model-name value. `struct_size` and `abi_version` are populated by
+/// the native function and let callers validate the returned layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiVmdContextSummary {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub target_model_name_bytes: [u8; 20],
+    pub max_frame: u32,
+    pub bones: MmdRuntimeFfiVmdTrackSummary,
+    pub morphs: MmdRuntimeFfiVmdTrackSummary,
+    pub cameras: MmdRuntimeFfiVmdTrackSummary,
+    pub lights: MmdRuntimeFfiVmdTrackSummary,
+    pub self_shadows: MmdRuntimeFfiVmdTrackSummary,
+    pub properties: MmdRuntimeFfiVmdTrackSummary,
+    pub property_ik_entry_count: u32,
 }
 
 #[repr(C)]
@@ -1534,6 +1569,56 @@ pub unsafe extern "C" fn mmd_runtime_vmd_context_free(context: *mut MmdRuntimeVm
     })
 }
 
+/// Reads the fixed v1 summary for a shared VMD context in one call.
+///
+/// `out_summary_size` is the caller's writable byte capacity and must be at
+/// least `sizeof(MmdRuntimeFfiVmdContextSummary)`. The output is not written
+/// on invalid handles, unsupported capability, short capacity, or summary
+/// count conversion failure. The caller must provide a naturally aligned,
+/// writable output region that does not overlap `context`.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`. On a non-null output,
+/// `out_summary_size` bytes must be writable and the pointer must be aligned
+/// for `MmdRuntimeFfiVmdContextSummary`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_read_summary(
+    context: *const MmdRuntimeVmdContext,
+    out_summary: *mut MmdRuntimeFfiVmdContextSummary,
+    out_summary_size: usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if context.is_null() || out_summary.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_summary_size < size_of::<MmdRuntimeFfiVmdContextSummary>() {
+            return status_failure(
+                MmdRuntimeStatus::BufferTooSmall,
+                "shared VMD summary output buffer too small",
+            );
+        }
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT == 0 {
+            return status_failure(
+                MmdRuntimeStatus::Unsupported,
+                "shared VMD context summary is unsupported",
+            );
+        }
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let summary = match vmd_context_summary(context) {
+            Ok(summary) => summary,
+            Err(message) => return status_failure(MmdRuntimeStatus::Error, message),
+        };
+        unsafe {
+            ptr::write(out_summary, summary);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
 /// Parses VMD bytes and returns an owned camera-track handle.
 ///
 /// # Safety
@@ -2241,6 +2326,47 @@ fn context_property_entry_count(context: &MmdRuntimeVmdContext) -> Option<usize>
         .try_fold(0usize, |total, frame| {
             total.checked_add(frame.ik_states.len())
         })
+}
+
+fn checked_vmd_summary_count(value: usize) -> Result<u32, &'static str> {
+    u32::try_from(value).map_err(|_| "shared VMD summary count exceeds uint32_t")
+}
+
+fn vmd_context_summary(
+    context: &MmdRuntimeVmdContext,
+) -> Result<MmdRuntimeFfiVmdContextSummary, &'static str> {
+    let summary = context.context.summary();
+    Ok(MmdRuntimeFfiVmdContextSummary {
+        struct_size: size_of::<MmdRuntimeFfiVmdContextSummary>() as u32,
+        abi_version: MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1,
+        target_model_name_bytes: summary.target_model_name_bytes,
+        max_frame: summary.max_frame,
+        bones: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.bones.track_count)?,
+            key_count: checked_vmd_summary_count(summary.bones.key_count)?,
+        },
+        morphs: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.morphs.track_count)?,
+            key_count: checked_vmd_summary_count(summary.morphs.key_count)?,
+        },
+        cameras: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.cameras.track_count)?,
+            key_count: checked_vmd_summary_count(summary.cameras.key_count)?,
+        },
+        lights: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.lights.track_count)?,
+            key_count: checked_vmd_summary_count(summary.lights.key_count)?,
+        },
+        self_shadows: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.self_shadows.track_count)?,
+            key_count: checked_vmd_summary_count(summary.self_shadows.key_count)?,
+        },
+        properties: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.properties.track_count)?,
+            key_count: checked_vmd_summary_count(summary.properties.key_count)?,
+        },
+        property_ik_entry_count: checked_vmd_summary_count(summary.property_ik_entry_count)?,
+    })
 }
 
 /// Returns the number of resolved raw VMD bone keys for a PMX model and

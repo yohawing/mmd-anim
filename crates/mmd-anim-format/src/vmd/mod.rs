@@ -1,5 +1,6 @@
 use glam::{Quat, Vec3A};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use mmd_anim_runtime::{
     AnimationClip, BoneAnimationBinding, BoneIndex, InterpolationScalar, InterpolationVector3,
@@ -127,6 +128,87 @@ pub struct VmdImportResult {
 pub struct VmdSharedContext {
     raw: VmdImportResult,
     parsed: VmdParsedAnimation,
+    summary: VmdSharedContextSummary,
+}
+
+/// Counts for one VMD source channel in a shared-context summary.
+///
+/// Bone and morph track counts are the number of distinct raw target names.
+/// Camera, light, self-shadow, and property channels have one track when they
+/// contain at least one key. `key_count` always counts source keyframe records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmdSharedContextTrackSummary {
+    pub track_count: usize,
+    pub key_count: usize,
+}
+
+/// Fixed-width summary retained by a parsed shared VMD context.
+///
+/// `target_model_name_bytes` is the original 20-byte VMD header field. It is
+/// Shift-JIS/CP932 data with the same first-NUL trimming convention as the
+/// existing parsed model-name value. Counts remain `usize` inside the format
+/// layer; the native ABI exposes them as checked `uint32_t` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmdSharedContextSummary {
+    pub target_model_name_bytes: [u8; 20],
+    pub max_frame: u32,
+    pub bones: VmdSharedContextTrackSummary,
+    pub morphs: VmdSharedContextTrackSummary,
+    pub cameras: VmdSharedContextTrackSummary,
+    pub lights: VmdSharedContextTrackSummary,
+    pub self_shadows: VmdSharedContextTrackSummary,
+    pub properties: VmdSharedContextTrackSummary,
+    pub property_ik_entry_count: usize,
+}
+
+impl VmdSharedContextSummary {
+    fn from_parsed(target_model_name_bytes: [u8; 20], parsed: &VmdParsedAnimation) -> Self {
+        Self {
+            target_model_name_bytes,
+            max_frame: parsed.metadata.max_frame,
+            bones: VmdSharedContextTrackSummary {
+                track_count: distinct_name_count(
+                    parsed
+                        .bone_frames
+                        .iter()
+                        .map(|frame| frame.bone_name_bytes.as_slice()),
+                ),
+                key_count: parsed.bone_frames.len(),
+            },
+            morphs: VmdSharedContextTrackSummary {
+                track_count: distinct_name_count(
+                    parsed
+                        .morph_frames
+                        .iter()
+                        .map(|frame| frame.morph_name_bytes.as_slice()),
+                ),
+                key_count: parsed.morph_frames.len(),
+            },
+            cameras: singleton_track_summary(parsed.camera_frames.len()),
+            lights: singleton_track_summary(parsed.light_frames.len()),
+            self_shadows: singleton_track_summary(parsed.self_shadow_frames.len()),
+            properties: singleton_track_summary(parsed.property_frames.len()),
+            property_ik_entry_count: parsed
+                .property_frames
+                .iter()
+                .map(|frame| frame.ik_states.len())
+                .sum(),
+        }
+    }
+}
+
+fn distinct_name_count<'a>(names: impl Iterator<Item = &'a [u8]>) -> usize {
+    names
+        .map(|name| name.to_vec())
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn singleton_track_summary(key_count: usize) -> VmdSharedContextTrackSummary {
+    VmdSharedContextTrackSummary {
+        track_count: usize::from(key_count != 0),
+        key_count,
+    }
 }
 
 impl VmdSharedContext {
@@ -137,17 +219,27 @@ impl VmdSharedContext {
     pub fn parsed_animation(&self) -> &VmdParsedAnimation {
         &self.parsed
     }
+
+    pub fn summary(&self) -> &VmdSharedContextSummary {
+        &self.summary
+    }
 }
 
 /// Parses VMD bytes once and retains every supported channel for shared
 /// model-clip and scene-track consumers.
 pub fn parse_vmd_shared_context(data: &[u8]) -> Result<VmdSharedContext, ImportError> {
     let scan = parse_vmd_scan(data, VmdScanOptions::BOTH)?;
+    let VmdScanResult {
+        raw,
+        parsed,
+        target_model_name_bytes,
+    } = scan;
+    let raw = raw.expect("combined VMD scan must produce raw output");
+    let parsed = parsed.expect("combined VMD scan must produce parsed output");
     Ok(VmdSharedContext {
-        raw: scan.raw.expect("combined VMD scan must produce raw output"),
-        parsed: scan
-            .parsed
-            .expect("combined VMD scan must produce parsed output"),
+        summary: VmdSharedContextSummary::from_parsed(target_model_name_bytes, &parsed),
+        raw,
+        parsed,
     })
 }
 
@@ -325,17 +417,18 @@ impl VmdScanOptions {
 struct VmdScanResult {
     raw: Option<VmdImportResult>,
     parsed: Option<VmdParsedAnimation>,
+    target_model_name_bytes: [u8; 20],
 }
 
 fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult, ImportError> {
-    let (_header, pos) = read_header(data)?;
+    let (header, pos) = read_header(data)?;
     let mut r = Reader { data, pos };
     let model_name = options
         .build_parsed
-        .then(|| decode_sjis_fixed(&_header.model_name_bytes));
+        .then(|| decode_sjis_fixed(&header.model_name_bytes));
     let model_name_bytes = options
         .build_parsed
-        .then(|| trim_fixed_bytes(&_header.model_name_bytes).to_vec());
+        .then(|| trim_fixed_bytes(&header.model_name_bytes).to_vec());
     let mut max_frame = 0u32;
 
     let bone_count = r.read_record_count(111)?;
@@ -397,6 +490,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         return Ok(vmd_scan_result(
             model_name,
             model_name_bytes,
+            header.model_name_bytes,
             max_frame,
             raw,
             bone_frames.map(|bone_frames| VmdParsedSections {
@@ -491,6 +585,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
     Ok(vmd_scan_result(
         model_name,
         model_name_bytes,
+        header.model_name_bytes,
         max_frame,
         raw,
         parsed,
@@ -632,12 +727,14 @@ fn vmd_parsed_animation(
 fn vmd_scan_result(
     model_name: Option<String>,
     model_name_bytes: Option<Vec<u8>>,
+    target_model_name_bytes: [u8; 20],
     max_frame: u32,
     raw: Option<VmdImportResult>,
     sections: Option<VmdParsedSections>,
 ) -> VmdScanResult {
     VmdScanResult {
         raw,
+        target_model_name_bytes,
         parsed: sections.map(|sections| {
             vmd_parsed_animation(
                 model_name.expect("parsed VMD scan must decode model name"),
@@ -2152,6 +2249,135 @@ mod tests {
         assert!(parsed.property_frames[0].visible);
         assert_eq!(parsed.property_frames[0].ik_states[0].bone_name, "IK");
         assert!(parsed.property_frames[0].ik_states[0].enabled);
+    }
+
+    #[test]
+    fn shared_context_summary_reports_target_and_channel_counts() {
+        let animation = VmdParsedAnimation {
+            kind: "vmd",
+            metadata: VmdParsedMetadata {
+                format: "vmd",
+                model_name: "target".to_owned(),
+                model_name_bytes: Vec::new(),
+                counts: VmdParsedCounts {
+                    bones: 3,
+                    morphs: 2,
+                    cameras: 1,
+                    lights: 1,
+                    self_shadows: 1,
+                    properties: 1,
+                },
+                max_frame: 0,
+            },
+            bone_frames: vec![
+                VmdParsedBoneFrame {
+                    bone_name: "bone".to_owned(),
+                    bone_name_bytes: Vec::new(),
+                    frame: 5,
+                    translation: [0.0; 3],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    interpolation: vec![0; 64],
+                },
+                VmdParsedBoneFrame {
+                    bone_name: "bone".to_owned(),
+                    bone_name_bytes: Vec::new(),
+                    frame: 10,
+                    translation: [0.0; 3],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    interpolation: vec![0; 64],
+                },
+                VmdParsedBoneFrame {
+                    bone_name: "other".to_owned(),
+                    bone_name_bytes: Vec::new(),
+                    frame: 15,
+                    translation: [0.0; 3],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    interpolation: vec![0; 64],
+                },
+            ],
+            morph_frames: vec![
+                VmdParsedMorphFrame {
+                    morph_name: "smile".to_owned(),
+                    morph_name_bytes: Vec::new(),
+                    frame: 20,
+                    weight: 0.5,
+                },
+                VmdParsedMorphFrame {
+                    morph_name: "smile".to_owned(),
+                    morph_name_bytes: Vec::new(),
+                    frame: 25,
+                    weight: 1.0,
+                },
+            ],
+            camera_frames: vec![VmdParsedCameraFrame {
+                frame: 30,
+                distance: -40.0,
+                position: [0.0; 3],
+                rotation: [0.0; 3],
+                interpolation: [0; 24],
+                fov: 45,
+                perspective: true,
+            }],
+            light_frames: vec![VmdParsedLightFrame {
+                frame: 35,
+                color: [1.0; 3],
+                direction: [0.0; 3],
+            }],
+            self_shadow_frames: vec![VmdParsedSelfShadowFrame {
+                frame: 40,
+                mode: 1,
+                distance: 10.0,
+            }],
+            property_frames: vec![VmdParsedPropertyFrame {
+                frame: 42,
+                visible: true,
+                ik_states: vec![
+                    VmdParsedIkState {
+                        bone_name: "ik_a".to_owned(),
+                        bone_name_bytes: Vec::new(),
+                        enabled: true,
+                    },
+                    VmdParsedIkState {
+                        bone_name: "ik_b".to_owned(),
+                        bone_name_bytes: Vec::new(),
+                        enabled: false,
+                    },
+                ],
+            }],
+        };
+
+        let shared = parse_vmd_shared_context(&export_vmd_animation(&animation)).unwrap();
+        let summary = shared.summary();
+        let mut expected_name = [0u8; 20];
+        expected_name[..6].copy_from_slice(b"target");
+
+        assert_eq!(summary.target_model_name_bytes, expected_name);
+        assert_eq!(summary.max_frame, 42);
+        assert_eq!(
+            summary.bones,
+            VmdSharedContextTrackSummary {
+                track_count: 2,
+                key_count: 3,
+            }
+        );
+        assert_eq!(
+            summary.morphs,
+            VmdSharedContextTrackSummary {
+                track_count: 1,
+                key_count: 2,
+            }
+        );
+        assert_eq!(
+            summary.cameras,
+            VmdSharedContextTrackSummary {
+                track_count: 1,
+                key_count: 1,
+            }
+        );
+        assert_eq!(summary.lights.key_count, 1);
+        assert_eq!(summary.self_shadows.key_count, 1);
+        assert_eq!(summary.properties.key_count, 1);
+        assert_eq!(summary.property_ik_entry_count, 2);
     }
 
     #[test]

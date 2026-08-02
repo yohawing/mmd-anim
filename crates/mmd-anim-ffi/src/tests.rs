@@ -6096,6 +6096,32 @@ fn shared_vmd_context_reads_all_channels_and_keeps_clip_alive_after_free() {
         MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1, 1,
         "raw shared-context bone readback capability version is explicitly versioned"
     );
+    assert_eq!(
+        MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1, 1,
+        "shared-context summary capability version is explicitly versioned"
+    );
+    assert_eq!(std::mem::size_of::<MmdRuntimeFfiVmdTrackSummary>(), 8);
+    assert_eq!(std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>(), 84);
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdContextSummary, struct_size),
+        0
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdContextSummary, abi_version),
+        4
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdContextSummary, target_model_name_bytes),
+        8
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdContextSummary, max_frame),
+        28
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdContextSummary, property_ik_entry_count),
+        80
+    );
     assert_eq!(size_of::<MmdRuntimeFfiVmdPropertyKeyframe>(), 24);
     assert_eq!(size_of::<MmdRuntimeFfiVmdPropertyIkEntry>(), 24);
     assert_eq!(size_of::<MmdRuntimeFfiVmdBoneKeyframe>(), 100);
@@ -6123,6 +6149,87 @@ fn shared_vmd_context_reads_all_channels_and_keeps_clip_alive_after_free() {
     let vmd = shared_vmd_context_probe_bytes();
     let context = unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(vmd.as_ptr(), vmd.len()) };
     assert!(!context.is_null());
+
+    let mut summary = MmdRuntimeFfiVmdContextSummary::default();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_read_summary(
+                context,
+                &mut summary,
+                std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        summary.struct_size as usize,
+        std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>()
+    );
+    assert_eq!(
+        summary.abi_version,
+        MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1
+    );
+    assert_eq!(&summary.target_model_name_bytes[..16], b"registered_probe");
+    assert_eq!(summary.target_model_name_bytes[16..], [0; 4]);
+    assert_eq!(summary.max_frame, 30);
+    assert_eq!(summary.bones.track_count, 2);
+    assert_eq!(summary.bones.key_count, 4);
+    assert_eq!(summary.morphs, MmdRuntimeFfiVmdTrackSummary::default());
+    assert_eq!(summary.cameras.track_count, 1);
+    assert_eq!(summary.cameras.key_count, 2);
+    assert_eq!(summary.lights.track_count, 1);
+    assert_eq!(summary.lights.key_count, 2);
+    assert_eq!(summary.self_shadows.track_count, 1);
+    assert_eq!(summary.self_shadows.key_count, 2);
+    assert_eq!(summary.properties.track_count, 1);
+    assert_eq!(summary.properties.key_count, 1);
+    assert_eq!(summary.property_ik_entry_count, 2);
+
+    let summary_sentinel = MmdRuntimeFfiVmdContextSummary {
+        struct_size: 0xfeed_beef,
+        abi_version: 0xdead_beef,
+        target_model_name_bytes: [0xa5; 20],
+        max_frame: 1234,
+        bones: MmdRuntimeFfiVmdTrackSummary {
+            track_count: 11,
+            key_count: 12,
+        },
+        ..MmdRuntimeFfiVmdContextSummary::default()
+    };
+    let mut short_summary = summary_sentinel;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_read_summary(
+                context,
+                &mut short_summary,
+                std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>() - 1,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(short_summary, summary_sentinel);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_read_summary(
+                ptr::null(),
+                &mut short_summary,
+                std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(short_summary, summary_sentinel);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_read_summary(
+                context,
+                ptr::null_mut(),
+                std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+
     assert_eq!(
         unsafe { mmd_runtime_vmd_context_camera_frame_count(context) },
         2
@@ -6468,6 +6575,27 @@ fn shared_vmd_context_rejects_empty_malformed_and_null_inputs() {
             mmd_runtime_vmd_context_create_from_vmd_bytes(malformed.as_ptr(), malformed.len())
         }
         .is_null()
+    );
+    assert_eq!(
+        last_error_cstr()
+            .expect("malformed VMD should set last error")
+            .to_bytes(),
+        FFI_ERR_VMD_PARSE_FAILED.as_bytes()
+    );
+
+    let valid = shared_vmd_context_probe_bytes();
+    let truncated = &valid[..valid.len() - 1];
+    assert!(
+        unsafe {
+            mmd_runtime_vmd_context_create_from_vmd_bytes(truncated.as_ptr(), truncated.len())
+        }
+        .is_null()
+    );
+    assert_eq!(
+        last_error_cstr()
+            .expect("truncated VMD should set last error")
+            .to_bytes(),
+        FFI_ERR_VMD_PARSE_FAILED.as_bytes()
     );
 
     let mut written = 99;

@@ -340,6 +340,58 @@ pub struct ReducedBoneKey {
     pub dcc_segment: DccCubicSegment,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReductionKeyProvenance {
+    bits: u8,
+}
+
+impl ReductionKeyProvenance {
+    const ENDPOINT: u8 = 1 << 0;
+    const LOCAL_PREFIT: u8 = 1 << 1;
+    const VALIDATION_FAILURE: u8 = 1 << 2;
+    const ANCESTOR_PROPAGATION: u8 = 1 << 3;
+
+    fn endpoint() -> Self {
+        Self {
+            bits: Self::ENDPOINT,
+        }
+    }
+
+    fn local_prefit() -> Self {
+        Self {
+            bits: Self::LOCAL_PREFIT,
+        }
+    }
+
+    fn validation_failure() -> Self {
+        Self {
+            bits: Self::VALIDATION_FAILURE,
+        }
+    }
+
+    fn ancestor_propagation() -> Self {
+        Self {
+            bits: Self::ANCESTOR_PROPAGATION,
+        }
+    }
+
+    fn is_endpoint(self) -> bool {
+        self.bits & Self::ENDPOINT != 0
+    }
+
+    fn is_local_prefit(self) -> bool {
+        self.bits & Self::LOCAL_PREFIT != 0
+    }
+
+    fn is_validation_failure(self) -> bool {
+        self.bits & Self::VALIDATION_FAILURE != 0
+    }
+
+    fn is_ancestor_propagation(self) -> bool {
+        self.bits & Self::ANCESTOR_PROPAGATION != 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReducedBoneTrack {
     keys: Box<[ReducedBoneKey]>,
@@ -404,6 +456,10 @@ pub struct ReductionWorkStats {
     pub world_rotation_decompositions: usize,
     pub normal_key_additions: usize,
     pub ancestor_key_additions: usize,
+    /// Number of ancestor-propagated key candidates tested by reverse pruning.
+    pub ancestor_prune_attempts: usize,
+    /// Number of ancestor-propagated keys removed after subtree validation.
+    pub ancestor_pruned_keys: usize,
     pub added_keys_per_pass: Vec<usize>,
 }
 
@@ -470,6 +526,8 @@ pub struct ReductionTimings {
     pub candidate_build: Duration,
     pub error_measure: Duration,
     pub dcc_fit: Duration,
+    /// Time spent testing and applying ancestor reverse-prune candidates.
+    pub ancestor_prune: Duration,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -761,8 +819,19 @@ fn reduce_dense_pose_sequence_internal(
             split_morph_track(keys, input, morph, tolerances.morph_weight);
         }
     }
+    let mut bone_key_provenance = bone_key_indices
+        .iter()
+        .map(|indices| initial_key_provenance(indices, input.frame_count))
+        .collect::<Vec<_>>();
+    let mut morph_key_provenance = morph_key_indices
+        .iter()
+        .map(|indices| initial_key_provenance(indices, input.frame_count))
+        .collect::<Vec<_>>();
 
     let mut candidate: Option<ReducedPoseSequence> = None;
+    // Keep the exact insertion order so reverse-prune remains deterministic even
+    // when several tracks receive a key for the same failing frame.
+    let mut ancestor_insertions = Vec::<(usize, usize)>::new();
     let mut dirty = DirtyRanges::full(input.frame_count, input.bone_count, input.morph_count);
     let mut validation_cache =
         ValidationCache::new(input.frame_count, input.bone_count, input.morph_count);
@@ -834,6 +903,50 @@ fn reduce_dense_pose_sequence_internal(
         if failing.is_empty() {
             work_stats.added_keys_per_pass.push(0);
             let mut result = candidate.expect("candidate initialized");
+            let mut final_report = report;
+            if !ancestor_insertions.is_empty() {
+                let prune_started = reduction_timer_start();
+                let pruned = prune_ancestor_keys(
+                    &mut result,
+                    input,
+                    local_pose,
+                    DenseValidationPose {
+                        translations: &local_translations,
+                        rotations: &local_rotations,
+                        world_positions: &world_positions,
+                        world_rotations: &world_rotations,
+                    },
+                    tolerances,
+                    &mut bone_key_indices,
+                    &mut bone_key_provenance,
+                    &ancestor_insertions,
+                    &mut validation_cache,
+                    &mut work_stats,
+                )?;
+                timings.ancestor_prune += reduction_timer_elapsed(prune_started);
+                if pruned > 0 {
+                    // Recompute aggregate maxima once after all accepted removals.
+                    // Candidate checks are subtree/range scoped; this final pass is
+                    // intentionally the only full report scan for the prune phase.
+                    let (pruned_report, _) = measure_error_cached(
+                        &result,
+                        input,
+                        DenseValidationPose {
+                            translations: &local_translations,
+                            rotations: &local_rotations,
+                            world_positions: &world_positions,
+                            world_rotations: &world_rotations,
+                        },
+                        tolerances,
+                        &mut work_stats,
+                        &DirtyRanges::full(input.frame_count, input.bone_count, input.morph_count),
+                        &mut validation_cache,
+                        worker_pool.as_ref(),
+                        worker_count,
+                    )?;
+                    final_report = pruned_report;
+                }
+            }
             result.report = PoseReductionReport {
                 source_bone_key_count: input.frame_count * input.bone_count,
                 reduced_bone_key_count: result
@@ -847,7 +960,7 @@ fn reduce_dense_pose_sequence_internal(
                     .iter()
                     .map(|track| track.keys.len())
                     .sum(),
-                ..report
+                ..final_report
             };
             result.work_stats = work_stats;
             result.timings = timings;
@@ -863,7 +976,7 @@ fn reduce_dense_pose_sequence_internal(
                     let mut cursor = Some(bone);
                     let mut is_origin = true;
                     while let Some(index) = cursor {
-                        if let Some(range) = insert_key_with_affected_range(
+                        if let Some((range, position)) = insert_key_with_affected_range(
                             &mut bone_key_indices[index],
                             worst.frame,
                         ) {
@@ -872,8 +985,15 @@ fn reduce_dense_pose_sequence_internal(
                             next_dirty.mark_bone(index, range);
                             if is_origin {
                                 work_stats.normal_key_additions += 1;
+                                bone_key_provenance[index]
+                                    .insert(position, ReductionKeyProvenance::validation_failure());
                             } else {
                                 work_stats.ancestor_key_additions += 1;
+                                ancestor_insertions.push((index, worst.frame));
+                                bone_key_provenance[index].insert(
+                                    position,
+                                    ReductionKeyProvenance::ancestor_propagation(),
+                                );
                             }
                         }
                         let parent = snapshot.parent_indices[index];
@@ -882,13 +1002,15 @@ fn reduce_dense_pose_sequence_internal(
                     }
                 }
                 ErrorTrack::Morph(morph) => {
-                    if let Some(range) =
+                    if let Some((range, position)) =
                         insert_key_with_affected_range(&mut morph_key_indices[morph], worst.frame)
                     {
                         inserted = true;
                         added_this_pass += 1;
                         next_dirty.mark_morph(morph, range);
                         work_stats.normal_key_additions += 1;
+                        morph_key_provenance[morph]
+                            .insert(position, ReductionKeyProvenance::validation_failure());
                     }
                 }
             }
@@ -909,6 +1031,19 @@ fn endpoint_indices(frame_count: usize) -> Vec<usize> {
     } else {
         vec![0, frame_count - 1]
     }
+}
+
+fn initial_key_provenance(indices: &[usize], frame_count: usize) -> Vec<ReductionKeyProvenance> {
+    indices
+        .iter()
+        .map(|&frame| {
+            if frame == 0 || frame + 1 == frame_count {
+                ReductionKeyProvenance::endpoint()
+            } else {
+                ReductionKeyProvenance::local_prefit()
+            }
+        })
+        .collect()
 }
 
 fn decompose_dense_pose(
@@ -1230,12 +1365,12 @@ fn insert_key(keys: &mut Vec<usize>, frame: usize) -> bool {
 fn insert_key_with_affected_range(
     keys: &mut Vec<usize>,
     frame: usize,
-) -> Option<std::ops::RangeInclusive<usize>> {
+) -> Option<(std::ops::RangeInclusive<usize>, usize)> {
     let position = keys.binary_search(&frame).err()?;
     let start = keys[position.saturating_sub(1)];
     let end = keys[position.min(keys.len() - 1)];
     keys.insert(position, frame);
-    Some(start..=end)
+    Some((start..=end, position))
 }
 
 #[derive(Clone, Copy)]
@@ -1250,6 +1385,7 @@ struct ReductionInstrumentation<'a> {
     timings: &'a mut ReductionTimings,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_sequence(
     snapshot: &SkeletonSnapshot,
     target: ReductionTarget,
@@ -1431,6 +1567,288 @@ fn rebuild_dirty_tracks(
     if let Some(started) = dcc_started {
         timings.dcc_fit += reduction_timer_elapsed(started);
     }
+}
+
+/// Remove ancestor-propagated keys after the global refinement pass has
+/// converged. Each candidate is tested against only the local interval it
+/// spans and the candidate bone's descendant subtree; the cache is updated
+/// only when the removal is accepted.
+#[allow(clippy::too_many_arguments)]
+fn prune_ancestor_keys(
+    sequence: &mut ReducedPoseSequence,
+    input: DensePoseSequenceView<'_>,
+    local_pose: DenseLocalPose<'_>,
+    dense: DenseValidationPose<'_>,
+    tolerances: ReductionTolerances,
+    bone_key_indices: &mut [Vec<usize>],
+    bone_key_provenance: &mut [Vec<ReductionKeyProvenance>],
+    ancestor_insertions: &[(usize, usize)],
+    cache: &mut ValidationCache,
+    work_stats: &mut ReductionWorkStats,
+) -> Result<usize, PoseReductionError> {
+    let subtrees = build_subtree_lists(&sequence.snapshot);
+    let mut pruned = 0;
+    let mut subtree_worlds = vec![Mat4::IDENTITY; sequence.snapshot.bone_count()];
+
+    for &(bone, frame) in ancestor_insertions.iter().rev() {
+        let Some(position) = bone_key_indices[bone].binary_search(&frame).ok() else {
+            continue;
+        };
+        let provenance = bone_key_provenance[bone][position];
+        // A future provenance combination must not make this pass remove an
+        // endpoint or a local-prefit/validation key by accident.
+        if !provenance.is_ancestor_propagation()
+            || provenance.is_endpoint()
+            || provenance.is_local_prefit()
+            || provenance.is_validation_failure()
+            || position == 0
+            || position + 1 >= bone_key_indices[bone].len()
+        {
+            continue;
+        }
+
+        work_stats.ancestor_prune_attempts += 1;
+        let start = bone_key_indices[bone][position - 1];
+        let end = bone_key_indices[bone][position + 1];
+        let mut replacement_indices = bone_key_indices[bone].clone();
+        replacement_indices.remove(position);
+        let mut replacement_provenance = bone_key_provenance[bone].clone();
+        replacement_provenance.remove(position);
+        let replacement = build_bone_track_without_key(sequence, input, local_pose, bone, position);
+        work_stats.candidate_bone_track_rebuilds += 1;
+        if sequence.target == ReductionTarget::DccCubic {
+            work_stats.dcc_bone_segment_fits += 1;
+        }
+
+        let interval = start..=end;
+        if !validate_ancestor_prune_candidate(
+            sequence,
+            input,
+            dense,
+            tolerances,
+            bone,
+            &subtrees[bone],
+            interval.clone(),
+            &replacement,
+            cache,
+            &mut subtree_worlds,
+            work_stats,
+        )? {
+            continue;
+        }
+
+        bone_key_indices[bone] = replacement_indices;
+        bone_key_provenance[bone] = replacement_provenance;
+        sequence.bone_tracks[bone] = replacement;
+        apply_ancestor_prune_candidate(
+            sequence,
+            input,
+            dense,
+            bone,
+            &subtrees[bone],
+            interval,
+            cache,
+            &mut subtree_worlds,
+            work_stats,
+        )?;
+        work_stats.ancestor_pruned_keys += 1;
+        pruned += 1;
+    }
+    Ok(pruned)
+}
+
+fn build_bone_track_without_key(
+    sequence: &ReducedPoseSequence,
+    input: DensePoseSequenceView<'_>,
+    local_pose: DenseLocalPose<'_>,
+    bone: usize,
+    position: usize,
+) -> ReducedBoneTrack {
+    let mut keys = sequence.bone_tracks[bone].keys.to_vec();
+    keys.remove(position);
+    if position < keys.len() {
+        let start = keys[position - 1].sample_index;
+        let end = keys[position].sample_index;
+        keys[position].vmd_interpolation = if sequence.target == ReductionTarget::VmdBezier {
+            fit_vmd_bone_interpolation(
+                input,
+                bone,
+                start,
+                end,
+                local_pose.translations,
+                local_pose.rotations,
+            )
+        } else {
+            VmdBoneInterpolation::LINEAR
+        };
+        keys[position].dcc_segment = if sequence.target == ReductionTarget::DccCubic {
+            fit_dcc_bone_segment(
+                input,
+                bone,
+                start,
+                end,
+                local_pose.translations,
+                local_pose.euler_xyz,
+            )
+        } else {
+            DccCubicSegment::default()
+        };
+    }
+    ReducedBoneTrack {
+        keys: keys.into_boxed_slice(),
+    }
+}
+
+fn build_subtree_lists(snapshot: &SkeletonSnapshot) -> Vec<Vec<usize>> {
+    (0..snapshot.bone_count())
+        .map(|root| {
+            snapshot
+                .evaluation_order
+                .iter()
+                .copied()
+                .filter(|&bone| is_descendant_or_self(snapshot, bone, root))
+                .collect()
+        })
+        .collect()
+}
+
+fn is_descendant_or_self(snapshot: &SkeletonSnapshot, mut bone: usize, root: usize) -> bool {
+    loop {
+        if bone == root {
+            return true;
+        }
+        let parent = snapshot.parent_indices[bone];
+        if parent < 0 {
+            return false;
+        }
+        bone = parent as usize;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_ancestor_prune_candidate(
+    sequence: &ReducedPoseSequence,
+    input: DensePoseSequenceView<'_>,
+    dense: DenseValidationPose<'_>,
+    tolerances: ReductionTolerances,
+    bone: usize,
+    subtree: &[usize],
+    interval: std::ops::RangeInclusive<usize>,
+    replacement: &ReducedBoneTrack,
+    cache: &ValidationCache,
+    subtree_worlds: &mut [Mat4],
+    work_stats: &mut ReductionWorkStats,
+) -> Result<bool, PoseReductionError> {
+    for frame in interval {
+        let (translation, rotation) = sample_bone_track(
+            replacement,
+            &sequence.sample_frames,
+            input.sample_frame(frame),
+            sequence.target,
+        );
+        work_stats.bone_samples += 1;
+        let index = frame * input.bone_count + bone;
+        if dense.translations[index].distance(translation) > tolerances.local_position
+            || quat_angle(dense.rotations[index], rotation) > tolerances.local_rotation_radians
+        {
+            return Ok(false);
+        }
+
+        for &current in subtree {
+            let current_index = frame * input.bone_count + current;
+            let (local_translation, local_rotation) = if current == bone {
+                (translation, rotation)
+            } else {
+                (
+                    cache.local_translations[current_index],
+                    cache.local_rotations[current_index],
+                )
+            };
+            let local = Mat4::from_rotation_translation(local_rotation, local_translation.into());
+            let parent = sequence.snapshot.parent_indices[current];
+            let world = if parent < 0 {
+                local
+            } else if is_descendant_or_self(&sequence.snapshot, parent as usize, bone) {
+                subtree_worlds[parent as usize] * local
+            } else {
+                cache.world_matrices[frame * input.bone_count + parent as usize] * local
+            };
+            subtree_worlds[current] = world;
+            let world_rotation = decompose_rigid(world, frame, current)?.1;
+            work_stats.world_bone_recomputes += 1;
+            work_stats.world_rotation_decompositions += 1;
+            if dense.world_positions[current_index].distance(Vec3A::from(world.w_axis.truncate()))
+                > tolerances.world_position
+                || quat_angle(dense.world_rotations[current_index], world_rotation)
+                    > tolerances.world_rotation_radians
+            {
+                return Ok(false);
+            }
+        }
+        work_stats.world_rebuilds += 1;
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_ancestor_prune_candidate(
+    sequence: &ReducedPoseSequence,
+    input: DensePoseSequenceView<'_>,
+    dense: DenseValidationPose<'_>,
+    bone: usize,
+    subtree: &[usize],
+    interval: std::ops::RangeInclusive<usize>,
+    cache: &mut ValidationCache,
+    subtree_worlds: &mut [Mat4],
+    work_stats: &mut ReductionWorkStats,
+) -> Result<(), PoseReductionError> {
+    for frame in interval {
+        let index = frame * input.bone_count + bone;
+        let (translation, rotation) = sample_bone_track(
+            &sequence.bone_tracks[bone],
+            &sequence.sample_frames,
+            input.sample_frame(frame),
+            sequence.target,
+        );
+        work_stats.bone_samples += 1;
+        cache.local_translations[index] = translation;
+        cache.local_rotations[index] = rotation;
+        cache.bone_errors[index].local_position = dense.translations[index].distance(translation);
+        cache.bone_errors[index].local_rotation = quat_angle(dense.rotations[index], rotation);
+
+        for &current in subtree {
+            let current_index = frame * input.bone_count + current;
+            let (local_translation, local_rotation) = if current == bone {
+                (translation, rotation)
+            } else {
+                (
+                    cache.local_translations[current_index],
+                    cache.local_rotations[current_index],
+                )
+            };
+            let local = Mat4::from_rotation_translation(local_rotation, local_translation.into());
+            let parent = sequence.snapshot.parent_indices[current];
+            let world = if parent < 0 {
+                local
+            } else if is_descendant_or_self(&sequence.snapshot, parent as usize, bone) {
+                subtree_worlds[parent as usize] * local
+            } else {
+                cache.world_matrices[frame * input.bone_count + parent as usize] * local
+            };
+            subtree_worlds[current] = world;
+            let world_rotation = decompose_rigid(world, frame, current)?.1;
+            work_stats.world_bone_recomputes += 1;
+            work_stats.world_rotation_decompositions += 1;
+            cache.world_matrices[current_index] = world;
+            cache.world_rotations[current_index] = world_rotation;
+            cache.bone_errors[current_index].world_position =
+                dense.world_positions[current_index].distance(Vec3A::from(world.w_axis.truncate()));
+            cache.bone_errors[current_index].world_rotation =
+                quat_angle(dense.world_rotations[current_index], world_rotation);
+        }
+        work_stats.world_rebuilds += 1;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

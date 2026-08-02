@@ -63,15 +63,6 @@ impl<'a> ByteReader<'a> {
         }
         Ok(Some(count))
     }
-
-    fn read_quat(&mut self) -> Result<Quat, ImportError> {
-        Ok(Quat::from_xyzw(
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-        ))
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +152,19 @@ pub struct VmdSharedContextSummary {
     pub property_ik_entry_count: usize,
 }
 
+/// Errors returned by the non-materializing VMD summary scanner.
+///
+/// The summary-only validation surface is intentionally separate from
+/// `ImportError` so adding summary diagnostics does not make the existing
+/// public import error enum's exhaustive matches non-exhaustive.
+#[derive(Debug, Error, PartialEq)]
+pub enum VmdSummaryError {
+    #[error("VMD summary parse failed: {0}")]
+    Parse(ImportError),
+    #[error("invalid VMD summary data: {0}")]
+    Invalid(&'static str),
+}
+
 impl VmdSharedContextSummary {
     fn from_parsed(target_model_name_bytes: [u8; 20], parsed: &VmdParsedAnimation) -> Self {
         Self {
@@ -232,6 +236,7 @@ pub fn parse_vmd_shared_context(data: &[u8]) -> Result<VmdSharedContext, ImportE
     let VmdScanResult {
         raw,
         parsed,
+        summary: _,
         target_model_name_bytes,
     } = scan;
     let raw = raw.expect("combined VMD scan must produce raw output");
@@ -241,6 +246,28 @@ pub fn parse_vmd_shared_context(data: &[u8]) -> Result<VmdSharedContext, ImportE
         raw,
         parsed,
     })
+}
+
+/// Reads only the fixed-width VMD summary without materializing raw or parsed
+/// keyframe tracks.
+///
+/// Bone and morph distinct-track counts borrow their fixed-width names from
+/// `data` for the duration of the scan. All other channels retain only their
+/// key and IK-entry counts. Optional camera/light/self-shadow tails preserve
+/// the compatibility parser's absent-tail behavior when a complete count is
+/// present but its records are unavailable; a partial four-byte count remains
+/// a structural parse error.
+pub fn parse_vmd_summary(data: &[u8]) -> Result<VmdSharedContextSummary, VmdSummaryError> {
+    let scan = parse_vmd_scan(data, VmdScanOptions::SUMMARY).map_err(|error| match error {
+        ImportError::UnsupportedFormat {
+            format: "VMD",
+            detail,
+        } => VmdSummaryError::Invalid(detail),
+        error => VmdSummaryError::Parse(error),
+    })?;
+    Ok(scan
+        .summary
+        .expect("summary-only VMD scan must produce summary output"))
 }
 
 pub fn read_header(data: &[u8]) -> Result<(VmdHeader, usize), ImportError> {
@@ -397,27 +424,197 @@ pub struct VmdParsedIkState {
 struct VmdScanOptions {
     build_raw: bool,
     build_parsed: bool,
+    build_summary: bool,
 }
 
 impl VmdScanOptions {
     const RAW: Self = Self {
         build_raw: true,
         build_parsed: false,
+        build_summary: false,
     };
     const PARSED: Self = Self {
         build_raw: false,
         build_parsed: true,
+        build_summary: false,
     };
     const BOTH: Self = Self {
         build_raw: true,
         build_parsed: true,
+        build_summary: false,
+    };
+    const SUMMARY: Self = Self {
+        build_raw: false,
+        build_parsed: false,
+        build_summary: true,
     };
 }
 
 struct VmdScanResult {
     raw: Option<VmdImportResult>,
     parsed: Option<VmdParsedAnimation>,
+    summary: Option<VmdSharedContextSummary>,
     target_model_name_bytes: [u8; 20],
+}
+
+struct VmdSummaryAccumulator {
+    bone_names: HashSet<Vec<u8>>,
+    morph_names: HashSet<Vec<u8>>,
+    bone_key_count: usize,
+    morph_key_count: usize,
+    camera_key_count: usize,
+    light_key_count: usize,
+    self_shadow_key_count: usize,
+    property_key_count: usize,
+    property_ik_entry_count: usize,
+}
+
+impl VmdSummaryAccumulator {
+    fn new() -> Self {
+        Self {
+            bone_names: HashSet::new(),
+            morph_names: HashSet::new(),
+            bone_key_count: 0,
+            morph_key_count: 0,
+            camera_key_count: 0,
+            light_key_count: 0,
+            self_shadow_key_count: 0,
+            property_key_count: 0,
+            property_ik_entry_count: 0,
+        }
+    }
+
+    fn record_bone(&mut self, name: &[u8]) -> Result<(), ImportError> {
+        validate_summary_name(name, "empty bone name")?;
+        self.bone_names.insert(name.to_vec());
+        self.bone_key_count = self
+            .bone_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn record_morph(&mut self, name: &[u8]) -> Result<(), ImportError> {
+        validate_summary_name(name, "empty morph name")?;
+        self.morph_names.insert(name.to_vec());
+        self.morph_key_count = self
+            .morph_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn record_camera(&mut self) -> Result<(), ImportError> {
+        self.camera_key_count = self
+            .camera_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn record_light(&mut self) -> Result<(), ImportError> {
+        self.light_key_count = self
+            .light_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn record_self_shadow(&mut self) -> Result<(), ImportError> {
+        self.self_shadow_key_count = self
+            .self_shadow_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn record_property(&mut self, ik_count: usize) -> Result<(), ImportError> {
+        self.property_key_count = self
+            .property_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        self.property_ik_entry_count = self
+            .property_ik_entry_count
+            .checked_add(ik_count)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn finish(self, target_model_name_bytes: [u8; 20], max_frame: u32) -> VmdSharedContextSummary {
+        VmdSharedContextSummary {
+            target_model_name_bytes,
+            max_frame,
+            bones: VmdSharedContextTrackSummary {
+                track_count: self.bone_names.len(),
+                key_count: self.bone_key_count,
+            },
+            morphs: VmdSharedContextTrackSummary {
+                track_count: self.morph_names.len(),
+                key_count: self.morph_key_count,
+            },
+            cameras: singleton_track_summary(self.camera_key_count),
+            lights: singleton_track_summary(self.light_key_count),
+            self_shadows: singleton_track_summary(self.self_shadow_key_count),
+            properties: singleton_track_summary(self.property_key_count),
+            property_ik_entry_count: self.property_ik_entry_count,
+        }
+    }
+}
+
+fn summary_invalid_error(detail: &'static str) -> ImportError {
+    ImportError::UnsupportedFormat {
+        format: "VMD",
+        detail,
+    }
+}
+
+fn validate_summary_name(name: &[u8], detail: &'static str) -> Result<(), ImportError> {
+    if vmd_fixed_name_is_blank(name) {
+        Err(summary_invalid_error(detail))
+    } else {
+        Ok(())
+    }
+}
+
+fn read_vmd_f32(
+    r: &mut Reader<'_>,
+    validate: bool,
+    field: &'static str,
+) -> Result<f32, ImportError> {
+    let value = r.read_f32_le()?;
+    if validate && !value.is_finite() {
+        return Err(summary_invalid_error(field));
+    }
+    Ok(value)
+}
+
+fn read_vmd_vec3(
+    r: &mut Reader<'_>,
+    validate: bool,
+    field: &'static str,
+) -> Result<Vec3A, ImportError> {
+    Ok(Vec3A::new(
+        read_vmd_f32(r, validate, field)?,
+        read_vmd_f32(r, validate, field)?,
+        read_vmd_f32(r, validate, field)?,
+    ))
+}
+
+fn read_vmd_quat(
+    r: &mut Reader<'_>,
+    validate: bool,
+    field: &'static str,
+) -> Result<Quat, ImportError> {
+    Ok(Quat::from_xyzw(
+        read_vmd_f32(r, validate, field)?,
+        read_vmd_f32(r, validate, field)?,
+        read_vmd_f32(r, validate, field)?,
+        read_vmd_f32(r, validate, field)?,
+    ))
+}
+
+fn vmd_fixed_name_is_blank(bytes: &[u8]) -> bool {
+    decode_sjis_fixed(bytes).trim().is_empty()
 }
 
 fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult, ImportError> {
@@ -430,6 +627,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         .build_parsed
         .then(|| trim_fixed_bytes(&header.model_name_bytes).to_vec());
     let mut max_frame = 0u32;
+    let mut summary = options.build_summary.then(VmdSummaryAccumulator::new);
 
     let bone_count = r.read_record_count(111)?;
     let mut raw = options.build_raw.then(|| VmdImportResult {
@@ -441,6 +639,9 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
     let mut bone_frames = options.build_parsed.then(|| Vec::with_capacity(bone_count));
     for _ in 0..bone_count {
         let bone_name_field = r.read_slice(15)?;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_bone(trim_fixed_bytes(bone_name_field))?;
+        }
         let raw_bone_name = options
             .build_raw
             .then(|| trim_fixed_bytes(bone_name_field).to_vec());
@@ -454,11 +655,11 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
             .build_parsed
             .then(|| trim_fixed_bytes(bone_name_field).to_vec());
         let frame = r.read_u32_le()?;
-        if options.build_parsed {
+        if options.build_parsed || options.build_summary {
             max_frame = max_frame.max(frame);
         }
-        let position = r.read_vec3()?;
-        let rotation = r.read_quat()?;
+        let position = read_vmd_vec3(&mut r, options.build_summary, "bone translation")?;
+        let rotation = read_vmd_quat(&mut r, options.build_summary, "bone rotation")?;
         let interpolation: [u8; 64] = r.read_slice(64)?.try_into().unwrap();
         if let Some(raw) = raw.as_mut() {
             raw.bone_keyframes.push(VmdBoneKeyframeRaw {
@@ -501,6 +702,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
                 self_shadow_frames: Vec::new(),
                 property_frames: Vec::new(),
             }),
+            summary.map(|summary| summary.finish(header.model_name_bytes, max_frame)),
         ));
     };
     let morph_count = morph_count as usize;
@@ -513,6 +715,9 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         .then(|| Vec::with_capacity(morph_count));
     for _ in 0..morph_count {
         let morph_name_field = r.read_slice(15)?;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_morph(trim_fixed_bytes(morph_name_field))?;
+        }
         let raw_morph_name = options
             .build_raw
             .then(|| trim_fixed_bytes(morph_name_field).to_vec());
@@ -523,10 +728,10 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
             .build_parsed
             .then(|| trim_fixed_bytes(morph_name_field).to_vec());
         let frame = r.read_u32_le()?;
-        if options.build_parsed {
+        if options.build_parsed || options.build_summary {
             max_frame = max_frame.max(frame);
         }
-        let weight = r.read_f32_le()?;
+        let weight = read_vmd_f32(&mut r, options.build_summary, "morph weight")?;
         if let Some(raw) = raw.as_mut() {
             raw.morph_keyframes.push((
                 raw_morph_name.expect("raw VMD scan must build morph names"),
@@ -545,26 +750,26 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         }
     }
 
-    let camera_frames = if options.build_parsed {
-        Some(read_parsed_camera_frames(&mut r, &mut max_frame)?)
+    let camera_frames = if options.build_parsed || options.build_summary {
+        read_camera_frames(&mut r, &mut max_frame, options.build_parsed, &mut summary)?
     } else {
         skip_optional_records(&mut r, 61)?;
         None
     };
-    let light_frames = if options.build_parsed {
-        Some(read_parsed_light_frames(&mut r, &mut max_frame)?)
+    let light_frames = if options.build_parsed || options.build_summary {
+        read_light_frames(&mut r, &mut max_frame, options.build_parsed, &mut summary)?
     } else {
         skip_optional_records(&mut r, 28)?;
         None
     };
-    let self_shadow_frames = if options.build_parsed {
-        Some(read_parsed_self_shadow_frames(&mut r, &mut max_frame)?)
+    let self_shadow_frames = if options.build_parsed || options.build_summary {
+        read_self_shadow_frames(&mut r, &mut max_frame, options.build_parsed, &mut summary)?
     } else {
         skip_optional_records(&mut r, 9)?;
         None
     };
     let (property_frames, raw_property_keyframes, raw_property_ik_frames) =
-        read_property_frames(&mut r, &mut max_frame, options)?;
+        read_property_frames(&mut r, &mut max_frame, options, &mut summary)?;
 
     if let Some(raw) = raw.as_mut() {
         raw.property_keyframes =
@@ -589,6 +794,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         max_frame,
         raw,
         parsed,
+        summary.map(|summary| summary.finish(header.model_name_bytes, max_frame)),
     ))
 }
 
@@ -731,10 +937,12 @@ fn vmd_scan_result(
     max_frame: u32,
     raw: Option<VmdImportResult>,
     sections: Option<VmdParsedSections>,
+    summary: Option<VmdSharedContextSummary>,
 ) -> VmdScanResult {
     VmdScanResult {
         raw,
         target_model_name_bytes,
+        summary,
         parsed: sections.map(|sections| {
             vmd_parsed_animation(
                 model_name.expect("parsed VMD scan must decode model name"),
@@ -753,74 +961,97 @@ fn skip_optional_records(r: &mut Reader<'_>, record_size: usize) -> Result<(), I
     Ok(())
 }
 
-fn read_parsed_camera_frames(
+fn read_camera_frames(
     r: &mut Reader<'_>,
     max_frame: &mut u32,
-) -> Result<Vec<VmdParsedCameraFrame>, ImportError> {
+    build_parsed: bool,
+    summary: &mut Option<VmdSummaryAccumulator>,
+) -> Result<Option<Vec<VmdParsedCameraFrame>>, ImportError> {
     let Some(count) = r.read_optional_record_count(61)? else {
-        return Ok(Vec::new());
+        return Ok(build_parsed.then(Vec::new));
     };
-    let mut frames = Vec::with_capacity(count);
+    let mut frames = build_parsed.then(|| Vec::with_capacity(count));
     for _ in 0..count {
         let frame = r.read_u32_le()?;
         *max_frame = (*max_frame).max(frame);
-        frames.push(VmdParsedCameraFrame {
-            frame,
-            distance: r.read_f32_le()?,
-            position: {
-                let p = r.read_vec3()?;
-                [p.x, p.y, p.z]
-            },
-            rotation: {
-                let p = r.read_vec3()?;
-                [p.x, p.y, p.z]
-            },
-            interpolation: r.read_slice(24)?.try_into().unwrap(),
-            fov: r.read_u32_le()?,
-            perspective: r.read_u8()? == 0,
-        });
+        let distance = read_vmd_f32(r, summary.is_some(), "camera distance")?;
+        let position = read_vmd_vec3(r, summary.is_some(), "camera position")?;
+        let rotation = read_vmd_vec3(r, summary.is_some(), "camera rotation")?;
+        let interpolation: [u8; 24] = r.read_slice(24)?.try_into().unwrap();
+        let fov = r.read_u32_le()?;
+        let perspective = r.read_u8()? == 0;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_camera()?;
+        }
+        if let Some(frames) = frames.as_mut() {
+            frames.push(VmdParsedCameraFrame {
+                frame,
+                distance,
+                position: [position.x, position.y, position.z],
+                rotation: [rotation.x, rotation.y, rotation.z],
+                interpolation,
+                fov,
+                perspective,
+            });
+        }
     }
     Ok(frames)
 }
 
-fn read_parsed_light_frames(
+fn read_light_frames(
     r: &mut Reader<'_>,
     max_frame: &mut u32,
-) -> Result<Vec<VmdParsedLightFrame>, ImportError> {
+    build_parsed: bool,
+    summary: &mut Option<VmdSummaryAccumulator>,
+) -> Result<Option<Vec<VmdParsedLightFrame>>, ImportError> {
     let Some(count) = r.read_optional_record_count(28)? else {
-        return Ok(Vec::new());
+        return Ok(build_parsed.then(Vec::new));
     };
-    let mut frames = Vec::with_capacity(count);
+    let mut frames = build_parsed.then(|| Vec::with_capacity(count));
     for _ in 0..count {
         let frame = r.read_u32_le()?;
         *max_frame = (*max_frame).max(frame);
-        let color = r.read_vec3()?;
-        let direction = r.read_vec3()?;
-        frames.push(VmdParsedLightFrame {
-            frame,
-            color: [color.x, color.y, color.z],
-            direction: [direction.x, direction.y, direction.z],
-        });
+        let color = read_vmd_vec3(r, summary.is_some(), "light color")?;
+        let direction = read_vmd_vec3(r, summary.is_some(), "light direction")?;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_light()?;
+        }
+        if let Some(frames) = frames.as_mut() {
+            frames.push(VmdParsedLightFrame {
+                frame,
+                color: [color.x, color.y, color.z],
+                direction: [direction.x, direction.y, direction.z],
+            });
+        }
     }
     Ok(frames)
 }
 
-fn read_parsed_self_shadow_frames(
+fn read_self_shadow_frames(
     r: &mut Reader<'_>,
     max_frame: &mut u32,
-) -> Result<Vec<VmdParsedSelfShadowFrame>, ImportError> {
+    build_parsed: bool,
+    summary: &mut Option<VmdSummaryAccumulator>,
+) -> Result<Option<Vec<VmdParsedSelfShadowFrame>>, ImportError> {
     let Some(count) = r.read_optional_record_count(9)? else {
-        return Ok(Vec::new());
+        return Ok(build_parsed.then(Vec::new));
     };
-    let mut frames = Vec::with_capacity(count);
+    let mut frames = build_parsed.then(|| Vec::with_capacity(count));
     for _ in 0..count {
         let frame = r.read_u32_le()?;
         *max_frame = (*max_frame).max(frame);
-        frames.push(VmdParsedSelfShadowFrame {
-            frame,
-            mode: r.read_u8()?,
-            distance: r.read_f32_le()?,
-        });
+        let mode = r.read_u8()?;
+        let distance = read_vmd_f32(r, summary.is_some(), "self-shadow distance")?;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_self_shadow()?;
+        }
+        if let Some(frames) = frames.as_mut() {
+            frames.push(VmdParsedSelfShadowFrame {
+                frame,
+                mode,
+                distance,
+            });
+        }
     }
     Ok(frames)
 }
@@ -829,6 +1060,7 @@ fn read_property_frames(
     r: &mut Reader<'_>,
     max_frame: &mut u32,
     options: VmdScanOptions,
+    summary: &mut Option<VmdSummaryAccumulator>,
 ) -> Result<
     (
         Option<Vec<VmdParsedPropertyFrame>>,
@@ -851,17 +1083,23 @@ fn read_property_frames(
     let mut raw_ik_frames = options.build_raw.then(|| Vec::with_capacity(count));
     for _ in 0..count {
         let frame = r.read_u32_le()?;
-        if options.build_parsed {
+        if options.build_parsed || options.build_summary {
             *max_frame = (*max_frame).max(frame);
         }
         let show = r.read_u8()?;
         let ik_count = r.read_u32_le()? as usize;
         r.require_record_bytes(ik_count, 21)?;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_property(ik_count)?;
+        }
         let mut raw_ik_enabled = options.build_raw.then(|| Vec::with_capacity(ik_count));
         let mut raw_ik_entries = options.build_raw.then(|| Vec::with_capacity(ik_count));
         let mut ik_states = options.build_parsed.then(|| Vec::with_capacity(ik_count));
         for _ in 0..ik_count {
             let name_field = r.read_slice(20)?;
+            if options.build_summary {
+                validate_summary_name(trim_fixed_bytes(name_field), "empty property IK name")?;
+            }
             let raw_name_bytes = options.build_raw.then(|| name_field.to_vec());
             let raw_name_normalized = raw_name_bytes
                 .as_ref()
@@ -2346,7 +2584,10 @@ mod tests {
             }],
         };
 
-        let shared = parse_vmd_shared_context(&export_vmd_animation(&animation)).unwrap();
+        let bytes = export_vmd_animation(&animation);
+        let shared = parse_vmd_shared_context(&bytes).unwrap();
+        let summary_only = parse_vmd_summary(&bytes).unwrap();
+        assert_eq!(summary_only, *shared.summary());
         let summary = shared.summary();
         let mut expected_name = [0u8; 20];
         expected_name[..6].copy_from_slice(b"target");
@@ -2378,6 +2619,139 @@ mod tests {
         assert_eq!(summary.self_shadows.key_count, 1);
         assert_eq!(summary.properties.key_count, 1);
         assert_eq!(summary.property_ik_entry_count, 2);
+    }
+
+    fn summary_validation_vmd_bytes() -> Vec<u8> {
+        let mut buf = build_vmd_header_bytes();
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one bone
+        let mut bone_name = [0u8; 15];
+        bone_name[..4].copy_from_slice(b"bone");
+        buf.extend_from_slice(&bone_name);
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 12]); // translation
+        buf.extend_from_slice(&[0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // rotation
+        buf.extend_from_slice(&[0u8; 64]); // interpolation
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one morph
+        let mut morph_name = [0u8; 15];
+        morph_name[..5].copy_from_slice(b"morph");
+        buf.extend_from_slice(&morph_name);
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one camera
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // distance
+        buf.extend_from_slice(&[0u8; 12]); // position
+        buf.extend_from_slice(&[0u8; 12]); // rotation
+        buf.extend_from_slice(&[0u8; 24]); // interpolation
+        buf.extend_from_slice(&45u32.to_le_bytes());
+        buf.push(0);
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one light
+        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 12]); // color
+        buf.extend_from_slice(&[0u8; 12]); // direction
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one self-shadow
+        buf.extend_from_slice(&5u32.to_le_bytes());
+        buf.push(1);
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one property
+        buf.extend_from_slice(&6u32.to_le_bytes());
+        buf.push(1);
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one IK entry
+        let mut ik_name = [0u8; 20];
+        ik_name[..2].copy_from_slice(b"ik");
+        buf.extend_from_slice(&ik_name);
+        buf.push(1);
+        buf
+    }
+
+    #[test]
+    fn summary_scanner_rejects_empty_names_and_non_finite_values() {
+        let mut empty_bone = summary_validation_vmd_bytes();
+        empty_bone[54..69].fill(0);
+        assert_eq!(
+            parse_vmd_summary(&empty_bone),
+            Err(VmdSummaryError::Invalid("empty bone name"))
+        );
+
+        let mut empty_morph = summary_validation_vmd_bytes();
+        empty_morph[169..184].fill(0);
+        assert_eq!(
+            parse_vmd_summary(&empty_morph),
+            Err(VmdSummaryError::Invalid("empty morph name"))
+        );
+
+        let non_finite_offsets = [
+            (73, "bone translation"),
+            (85, "bone rotation"),
+            (188, "morph weight"),
+            (200, "camera distance"),
+            (204, "camera position"),
+            (216, "camera rotation"),
+            (265, "light color"),
+            (277, "light direction"),
+            (298, "self-shadow distance"),
+        ];
+        for (offset, field) in non_finite_offsets {
+            let mut malformed = summary_validation_vmd_bytes();
+            malformed[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+            assert_eq!(
+                parse_vmd_summary(&malformed),
+                Err(VmdSummaryError::Invalid(field)),
+                "summary scanner must reject non-finite {field}"
+            );
+        }
+
+        let mut empty_property_ik = summary_validation_vmd_bytes();
+        empty_property_ik[315..335].fill(0);
+        assert_eq!(
+            parse_vmd_summary(&empty_property_ik),
+            Err(VmdSummaryError::Invalid("empty property IK name"))
+        );
+
+        let mut whitespace_property_ik = summary_validation_vmd_bytes();
+        whitespace_property_ik[315..335].fill(0x20);
+        assert_eq!(
+            parse_vmd_summary(&whitespace_property_ik),
+            Err(VmdSummaryError::Invalid("empty property IK name"))
+        );
+    }
+
+    #[test]
+    fn summary_scanner_preserves_optional_tail_absence_semantics() {
+        let bytes = summary_validation_vmd_bytes();
+        let context = parse_vmd_shared_context(&bytes).unwrap();
+
+        // The camera count starts after the 50-byte header, bone record, and
+        // morph record. A complete count with insufficient records is the
+        // same absent-tail condition used by the existing parser.
+        let mut truncated_camera_tail = bytes.clone();
+        truncated_camera_tail[192..196].copy_from_slice(&10u32.to_le_bytes());
+        let summary = parse_vmd_summary(&truncated_camera_tail).unwrap();
+        let parsed_context = parse_vmd_shared_context(&truncated_camera_tail).unwrap();
+        assert_eq!(summary, *parsed_context.summary());
+        assert_eq!(summary.bones, context.summary().bones);
+        assert_eq!(summary.morphs, context.summary().morphs);
+        let empty_track_summary = VmdSharedContextTrackSummary {
+            track_count: 0,
+            key_count: 0,
+        };
+        assert_eq!(summary.cameras, empty_track_summary);
+        assert_eq!(summary.lights, empty_track_summary);
+        assert_eq!(summary.properties, empty_track_summary);
+
+        let mut partial_camera_count = build_vmd_header_bytes();
+        partial_camera_count.extend_from_slice(&0u32.to_le_bytes()); // bones
+        partial_camera_count.extend_from_slice(&0u32.to_le_bytes()); // morphs
+        partial_camera_count.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(
+            parse_vmd_summary(&partial_camera_count),
+            Err(VmdSummaryError::Parse(ImportError::UnexpectedEof(1)))
+        );
     }
 
     #[test]

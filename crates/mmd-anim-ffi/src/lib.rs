@@ -1571,51 +1571,30 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_copy_keyframes(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(track, out_keys, out_key_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-
-        let Some(track) = (unsafe { track.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let required = track.frames.len();
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_key_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-
-        let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedCameraFrame> =
-            track.frames.iter().collect();
-        sorted.sort_by_key(|keyframe| keyframe.frame);
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the VMD camera key staging buffer",
-            );
-        }
-        for (index, keyframe) in sorted.into_iter().enumerate() {
-            let Ok(key) = vmd_camera_keyframe(keyframe, index != 0) else {
-                return status_failure(
-                    MmdRuntimeStatus::InvalidInput,
-                    "VMD camera keyframe contains a non-finite value",
-                );
-            };
-            keys.push(key);
-        }
-        unsafe {
-            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+        copy_vmd_keyframes(
+            track,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            |track| Ok(track.frames.len()),
+            |_| Ok(()),
+            "failed to allocate the VMD camera key staging buffer",
+            |track, keys| {
+                let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedCameraFrame> =
+                    track.frames.iter().collect();
+                sorted.sort_by_key(|keyframe| keyframe.frame);
+                for (index, keyframe) in sorted.into_iter().enumerate() {
+                    let key = vmd_camera_keyframe(keyframe, index != 0).map_err(|_| {
+                        (
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD camera keyframe contains a non-finite value",
+                        )
+                    })?;
+                    keys.push(key);
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -1784,55 +1763,34 @@ pub unsafe extern "C" fn mmd_runtime_vmd_light_track_copy_keyframes(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(track, out_keys, out_key_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-
-        let Some(track) = (unsafe { track.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let required = track.frames.len();
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_key_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-
-        let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedLightFrame> =
-            track.frames.iter().collect();
-        sorted.sort_by_key(|keyframe| keyframe.frame);
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the VMD light key staging buffer",
-            );
-        }
-        for keyframe in sorted {
-            if !all_finite(&keyframe.color) || !all_finite(&keyframe.direction) {
-                return status_failure(
-                    MmdRuntimeStatus::InvalidInput,
-                    "VMD light keyframe contains a non-finite value",
-                );
-            }
-            keys.push(MmdRuntimeFfiVmdLightKeyframe {
-                frame: keyframe.frame,
-                color: keyframe.color,
-                direction: keyframe.direction,
-            });
-        }
-        unsafe {
-            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+        copy_vmd_keyframes(
+            track,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            |track| Ok(track.frames.len()),
+            |_| Ok(()),
+            "failed to allocate the VMD light key staging buffer",
+            |track, keys| {
+                let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedLightFrame> =
+                    track.frames.iter().collect();
+                sorted.sort_by_key(|keyframe| keyframe.frame);
+                for keyframe in sorted {
+                    if !all_finite(&keyframe.color) || !all_finite(&keyframe.direction) {
+                        return Err((
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD light keyframe contains a non-finite value",
+                        ));
+                    }
+                    keys.push(MmdRuntimeFfiVmdLightKeyframe {
+                        frame: keyframe.frame,
+                        color: keyframe.color,
+                        direction: keyframe.direction,
+                    });
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -1997,55 +1955,34 @@ pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_copy_keyframes(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(track, out_keys, out_key_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-
-        let Some(track) = (unsafe { track.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let required = track.frames.len();
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_key_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-
-        let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedSelfShadowFrame> =
-            track.frames.iter().collect();
-        sorted.sort_by_key(|keyframe| keyframe.frame);
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the VMD self-shadow key staging buffer",
-            );
-        }
-        for keyframe in sorted {
-            if !keyframe.distance.is_finite() {
-                return status_failure(
-                    MmdRuntimeStatus::InvalidInput,
-                    "VMD self-shadow keyframe contains a non-finite value",
-                );
-            }
-            keys.push(MmdRuntimeFfiVmdSelfShadowKeyframe {
-                frame: keyframe.frame,
-                mode: keyframe.mode,
-                distance: keyframe.distance,
-            });
-        }
-        unsafe {
-            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+        copy_vmd_keyframes(
+            track,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            |track| Ok(track.frames.len()),
+            |_| Ok(()),
+            "failed to allocate the VMD self-shadow key staging buffer",
+            |track, keys| {
+                let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedSelfShadowFrame> =
+                    track.frames.iter().collect();
+                sorted.sort_by_key(|keyframe| keyframe.frame);
+                for keyframe in sorted {
+                    if !keyframe.distance.is_finite() {
+                        return Err((
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD self-shadow keyframe contains a non-finite value",
+                        ));
+                    }
+                    keys.push(MmdRuntimeFfiVmdSelfShadowKeyframe {
+                        frame: keyframe.frame,
+                        mode: keyframe.mode,
+                        distance: keyframe.distance,
+                    });
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -2225,48 +2162,30 @@ pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_camera_keyframes(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(context, out_keys, out_key_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-        let Some(context) = (unsafe { context.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let frames = sorted_context_camera_frames(context);
-        let required = frames.len();
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_key_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the shared VMD camera key staging buffer",
-            );
-        }
-        for (index, frame) in frames.into_iter().enumerate() {
-            let Ok(key) = vmd_camera_keyframe(frame, index != 0) else {
-                return status_failure(
-                    MmdRuntimeStatus::InvalidInput,
-                    "VMD camera keyframe contains a non-finite value",
-                );
-            };
-            keys.push(key);
-        }
-        unsafe {
-            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+        copy_vmd_keyframes(
+            context,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            |context| Ok(context.context.parsed_animation().camera_frames.len()),
+            |_| Ok(()),
+            "failed to allocate the shared VMD camera key staging buffer",
+            |context, keys| {
+                for (index, frame) in sorted_context_camera_frames(context)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let key = vmd_camera_keyframe(frame, index != 0).map_err(|_| {
+                        (
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD camera keyframe contains a non-finite value",
+                        )
+                    })?;
+                    keys.push(key);
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -2292,52 +2211,31 @@ pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_light_keyframes(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(context, out_keys, out_key_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-        let Some(context) = (unsafe { context.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let frames = sorted_context_light_frames(context);
-        let required = frames.len();
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_key_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the shared VMD light key staging buffer",
-            );
-        }
-        for frame in frames {
-            if !all_finite(&frame.color) || !all_finite(&frame.direction) {
-                return status_failure(
-                    MmdRuntimeStatus::InvalidInput,
-                    "VMD light keyframe contains a non-finite value",
-                );
-            }
-            keys.push(MmdRuntimeFfiVmdLightKeyframe {
-                frame: frame.frame,
-                color: frame.color,
-                direction: frame.direction,
-            });
-        }
-        unsafe {
-            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+        copy_vmd_keyframes(
+            context,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            |context| Ok(context.context.parsed_animation().light_frames.len()),
+            |_| Ok(()),
+            "failed to allocate the shared VMD light key staging buffer",
+            |context, keys| {
+                for frame in sorted_context_light_frames(context) {
+                    if !all_finite(&frame.color) || !all_finite(&frame.direction) {
+                        return Err((
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD light keyframe contains a non-finite value",
+                        ));
+                    }
+                    keys.push(MmdRuntimeFfiVmdLightKeyframe {
+                        frame: frame.frame,
+                        color: frame.color,
+                        direction: frame.direction,
+                    });
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -2364,52 +2262,31 @@ pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_self_shadow_keyframes(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(context, out_keys, out_key_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-        let Some(context) = (unsafe { context.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let frames = sorted_context_self_shadow_frames(context);
-        let required = frames.len();
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_key_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the shared VMD self-shadow key staging buffer",
-            );
-        }
-        for frame in frames {
-            if !frame.distance.is_finite() {
-                return status_failure(
-                    MmdRuntimeStatus::InvalidInput,
-                    "VMD self-shadow keyframe contains a non-finite value",
-                );
-            }
-            keys.push(MmdRuntimeFfiVmdSelfShadowKeyframe {
-                frame: frame.frame,
-                mode: frame.mode,
-                distance: frame.distance,
-            });
-        }
-        unsafe {
-            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+        copy_vmd_keyframes(
+            context,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            |context| Ok(context.context.parsed_animation().self_shadow_frames.len()),
+            |_| Ok(()),
+            "failed to allocate the shared VMD self-shadow key staging buffer",
+            |context, keys| {
+                for frame in sorted_context_self_shadow_frames(context) {
+                    if !frame.distance.is_finite() {
+                        return Err((
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD self-shadow keyframe contains a non-finite value",
+                        ));
+                    }
+                    keys.push(MmdRuntimeFfiVmdSelfShadowKeyframe {
+                        frame: frame.frame,
+                        mode: frame.mode,
+                        distance: frame.distance,
+                    });
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -2452,66 +2329,39 @@ pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_property_keyframes(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(context, out_keys, out_key_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-        let Some(context) = (unsafe { context.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let frames = sorted_context_property_frames(context);
-        let required = frames.len();
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_key_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-        let Some(total_entries) = context_property_entry_count(context) else {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "shared VMD property entry count overflow",
-            );
-        };
-
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the shared VMD property key staging buffer",
-            );
-        }
-        let mut offset = 0usize;
-        for frame in frames {
-            let count = frame.ik_states.len();
-            keys.push(MmdRuntimeFfiVmdPropertyKeyframe {
-                frame: frame.frame,
-                visible: u8::from(frame.visible),
-                reserved: [0; 3],
-                ik_entry_offset: offset,
-                ik_entry_count: count,
-            });
-            offset = match offset.checked_add(count) {
-                Some(next) => next,
-                None => {
-                    return status_failure(
+        copy_vmd_keyframes(
+            context,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            |context| Ok(context.context.parsed_animation().property_frames.len()),
+            |context| {
+                context_property_entry_count(context).map(|_| ()).ok_or((
+                    MmdRuntimeStatus::Error,
+                    "shared VMD property entry count overflow",
+                ))
+            },
+            "failed to allocate the shared VMD property key staging buffer",
+            |context, keys| {
+                let mut offset = 0usize;
+                for frame in sorted_context_property_frames(context) {
+                    let count = frame.ik_states.len();
+                    let next_offset = offset.checked_add(count).ok_or((
                         MmdRuntimeStatus::Error,
                         "shared VMD property entry offset overflow",
-                    );
+                    ))?;
+                    keys.push(MmdRuntimeFfiVmdPropertyKeyframe {
+                        frame: frame.frame,
+                        visible: u8::from(frame.visible),
+                        reserved: [0; 3],
+                        ik_entry_offset: offset,
+                        ik_entry_count: count,
+                    });
+                    offset = next_offset;
                 }
-            };
-        }
-        debug_assert_eq!(offset, total_entries);
-        unsafe {
-            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+                Ok(())
+            },
+        )
     })
 }
 
@@ -2525,56 +2375,35 @@ pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_property_ik_entries(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(context, out_entries, out_entry_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-        let Some(context) = (unsafe { context.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let frames = sorted_context_property_frames(context);
-        let Some(required) = context_property_entry_count(context) else {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "shared VMD property entry count overflow",
-            );
-        };
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_entries.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_entry_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-
-        let mut entries = Vec::new();
-        if entries.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the shared VMD property entry staging buffer",
-            );
-        }
-        for frame in frames {
-            for state in &frame.ik_states {
-                let mut name_bytes = [0u8; 20];
-                let copy_len = state.bone_name_bytes.len().min(name_bytes.len());
-                name_bytes[..copy_len].copy_from_slice(&state.bone_name_bytes[..copy_len]);
-                entries.push(MmdRuntimeFfiVmdPropertyIkEntry {
-                    name_bytes,
-                    enabled: u8::from(state.enabled),
-                    reserved: [0; 3],
-                });
-            }
-        }
-        unsafe {
-            slice::from_raw_parts_mut(out_entries, required).copy_from_slice(&entries);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+        copy_vmd_keyframes(
+            context,
+            out_entries,
+            out_entry_capacity,
+            out_written,
+            |context| {
+                context_property_entry_count(context).ok_or((
+                    MmdRuntimeStatus::Error,
+                    "shared VMD property entry count overflow",
+                ))
+            },
+            |_| Ok(()),
+            "failed to allocate the shared VMD property entry staging buffer",
+            |context, entries| {
+                for frame in sorted_context_property_frames(context) {
+                    for state in &frame.ik_states {
+                        let mut name_bytes = [0u8; 20];
+                        let copy_len = state.bone_name_bytes.len().min(name_bytes.len());
+                        name_bytes[..copy_len].copy_from_slice(&state.bone_name_bytes[..copy_len]);
+                        entries.push(MmdRuntimeFfiVmdPropertyIkEntry {
+                            name_bytes,
+                            enabled: u8::from(state.enabled),
+                            reserved: [0; 3],
+                        });
+                    }
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -8982,6 +8811,65 @@ fn checked_pointer_range<T>(ptr: *const T, len: usize) -> Option<(usize, usize)>
         return None;
     }
     Some((start, start.checked_add(byte_len)?))
+}
+
+fn copy_vmd_keyframes<Owner, Key, Required, Preflight, Stage>(
+    owner: *const Owner,
+    out_keys: *mut Key,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+    required: Required,
+    preflight: Preflight,
+    staging_error: &'static str,
+    stage: Stage,
+) -> MmdRuntimeStatus
+where
+    Key: Copy,
+    Required: FnOnce(&Owner) -> Result<usize, (MmdRuntimeStatus, &'static str)>,
+    Preflight: FnOnce(&Owner) -> Result<(), (MmdRuntimeStatus, &'static str)>,
+    Stage: FnOnce(&Owner, &mut Vec<Key>) -> Result<(), (MmdRuntimeStatus, &'static str)>,
+{
+    if let Err(message) = validate_key_copy_storage(owner, out_keys, out_key_capacity, out_written)
+    {
+        return status_failure(MmdRuntimeStatus::InvalidInput, message);
+    }
+    unsafe { ptr::write(out_written, 0) };
+
+    let Some(owner) = (unsafe { owner.as_ref() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let required = match required(owner) {
+        Ok(required) => required,
+        Err((status, message)) => return status_failure(status, message),
+    };
+    if required == 0 {
+        return MmdRuntimeStatus::Ok;
+    }
+    if out_keys.is_null() {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    }
+    if out_key_capacity < required {
+        return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+    }
+    if let Err((status, message)) = preflight(owner) {
+        return status_failure(status, message);
+    }
+
+    let mut keys = Vec::new();
+    if keys.try_reserve_exact(required).is_err() {
+        return status_failure(MmdRuntimeStatus::Error, staging_error);
+    }
+    if let Err((status, message)) = stage(owner, &mut keys) {
+        return status_failure(status, message);
+    }
+    if keys.len() != required {
+        return status_failure(MmdRuntimeStatus::Error, "staged key count mismatch");
+    }
+    unsafe {
+        slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+        ptr::write(out_written, required);
+    }
+    MmdRuntimeStatus::Ok
 }
 
 fn validate_key_copy_storage<Owner, Key>(

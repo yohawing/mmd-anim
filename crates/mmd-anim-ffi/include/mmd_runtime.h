@@ -38,7 +38,9 @@ extern "C" {
    bit 9 (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT) is set when the opt-in
    single-parse VMD context, summary, and raw scene/property readback APIs
    are available; bit 10 (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK)
-   is set when raw model-resolved VMD bone readback is available.
+   is set when raw model-resolved VMD bone readback is available; bit 11
+   (MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES) is set when the non-materializing
+   byte-summary endpoint is available.
    Check the relevant bit before calling each optional surface; when a
    surface's bit is unset, its status-returning functions return
    MMD_RUNTIME_STATUS_UNSUPPORTED (and optional count functions return zero).
@@ -135,6 +137,7 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION (1u << 8)
 #define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT (1u << 9)
 #define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK (1u << 10)
+#define MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES (1u << 11)
 #define MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
@@ -143,6 +146,7 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_SUMMARY_BYTES_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_NONE 0u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER 1u
 #define MMD_RUNTIME_VMD_CURVE_NONE 0u
@@ -748,6 +752,16 @@ mmd_runtime_status_t mmd_runtime_vmd_context_read_summary(
     const mmd_runtime_vmd_context_t*            context,
     mmd_runtime_ffi_vmd_context_summary_t*      out_summary,
     size_t                                       out_summary_size);
+
+/* Reads the fixed v1 VMD summary directly from bytes. This summary-only
+   endpoint does not create a shared context or materialize keyframe tracks.
+   Invalid input, invalid VMD bytes, and short output buffers fail without
+   writing out_summary. */
+mmd_runtime_status_t mmd_runtime_vmd_summary_read_from_vmd_bytes(
+    const uint8_t*                              data,
+    size_t                                      data_len,
+    mmd_runtime_ffi_vmd_context_summary_t*      out_summary,
+    size_t                                      out_summary_size);
 
 size_t mmd_runtime_vmd_context_camera_frame_count(
     const mmd_runtime_vmd_context_t* context);

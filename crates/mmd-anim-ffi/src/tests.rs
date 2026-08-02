@@ -6100,6 +6100,15 @@ fn shared_vmd_context_reads_all_channels_and_keeps_clip_alive_after_free() {
         MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1, 1,
         "shared-context summary capability version is explicitly versioned"
     );
+    assert_eq!(
+        MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES,
+        1 << 11,
+        "VMD byte summary capability has a dedicated feature bit"
+    );
+    assert_eq!(
+        MMD_RUNTIME_VMD_SUMMARY_BYTES_ABI_VERSION_V1, 1,
+        "VMD byte summary capability version is explicitly versioned"
+    );
     assert_eq!(std::mem::size_of::<MmdRuntimeFfiVmdTrackSummary>(), 8);
     assert_eq!(std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>(), 84);
     assert_eq!(
@@ -6378,6 +6387,199 @@ fn shared_vmd_context_reads_all_channels_and_keeps_clip_alive_after_free() {
     unsafe { mmd_runtime_model_free(model) };
     assert!(unsafe { &(*clip).clip }.sample_at(5.0).bone_samples().len() > 0);
     unsafe { mmd_runtime_clip_free(clip) };
+}
+
+#[test]
+fn vmd_summary_bytes_endpoint_matches_context_summary_and_fails_closed() {
+    assert_eq!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES,
+        MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES
+    );
+
+    let vmd = shared_vmd_context_probe_bytes();
+    let sentinel = MmdRuntimeFfiVmdContextSummary {
+        struct_size: 0xfeed_beef,
+        abi_version: 0xdead_beef,
+        target_model_name_bytes: [0xa5; 20],
+        max_frame: 1234,
+        bones: MmdRuntimeFfiVmdTrackSummary {
+            track_count: 11,
+            key_count: 12,
+        },
+        ..MmdRuntimeFfiVmdContextSummary::default()
+    };
+    let mut direct = sentinel;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                vmd.as_ptr(),
+                vmd.len(),
+                &mut direct,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        direct.struct_size as usize,
+        size_of::<MmdRuntimeFfiVmdContextSummary>()
+    );
+    assert_eq!(
+        direct.abi_version,
+        MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1
+    );
+    assert_eq!(&direct.target_model_name_bytes[..16], b"registered_probe");
+    assert_eq!(direct.max_frame, 30);
+    assert_eq!(direct.bones.track_count, 2);
+    assert_eq!(direct.bones.key_count, 4);
+    assert_eq!(direct.morphs, MmdRuntimeFfiVmdTrackSummary::default());
+    assert_eq!(direct.cameras.key_count, 2);
+    assert_eq!(direct.lights.key_count, 2);
+    assert_eq!(direct.self_shadows.key_count, 2);
+    assert_eq!(direct.properties.key_count, 1);
+    assert_eq!(direct.property_ik_entry_count, 2);
+
+    let context = unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(vmd.as_ptr(), vmd.len()) };
+    assert!(!context.is_null());
+    let mut from_context = MmdRuntimeFfiVmdContextSummary::default();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_read_summary(
+                context,
+                &mut from_context,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(direct, from_context);
+    unsafe { mmd_runtime_vmd_context_free(context) };
+
+    let mut short = sentinel;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                vmd.as_ptr(),
+                vmd.len(),
+                &mut short,
+                size_of::<MmdRuntimeFfiVmdContextSummary>() - 1,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(short, sentinel);
+
+    let mut invalid = sentinel;
+    let garbage = [0u8; 16];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                garbage.as_ptr(),
+                garbage.len(),
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VMD_PARSE_FAILED.as_bytes()
+    );
+
+    let truncated = &vmd[..vmd.len() - 1];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                truncated.as_ptr(),
+                truncated.len(),
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                ptr::null(),
+                0,
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                vmd.as_ptr(),
+                vmd.len(),
+                ptr::null_mut(),
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    let mut malformed = mmd_anim_format::parse_vmd_animation(&registered_vmd_probe_bytes())
+        .expect("registered VMD probe");
+    malformed.bone_frames[0].bone_name.clear();
+    malformed.bone_frames[0].bone_name_bytes.clear();
+    let malformed = mmd_anim_format::export_vmd_animation(&malformed);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                malformed.as_ptr(),
+                malformed.len(),
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+
+    let mut malformed = mmd_anim_format::parse_vmd_animation(&shared_vmd_context_probe_bytes())
+        .expect("shared VMD probe");
+    malformed.property_frames[0].ik_states[0].bone_name.clear();
+    malformed.property_frames[0].ik_states[0]
+        .bone_name_bytes
+        .clear();
+    let malformed = mmd_anim_format::export_vmd_animation(&malformed);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                malformed.as_ptr(),
+                malformed.len(),
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+
+    let mut malformed = mmd_anim_format::parse_vmd_animation(&registered_vmd_probe_bytes())
+        .expect("registered VMD probe");
+    malformed.bone_frames[0].translation[0] = f32::NAN;
+    let malformed = mmd_anim_format::export_vmd_animation(&malformed);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                malformed.as_ptr(),
+                malformed.len(),
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
 }
 
 #[test]

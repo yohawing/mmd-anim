@@ -41,6 +41,7 @@ pub const MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION: u32 = 1 << 7;
 pub const MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 = 1 << 8;
 pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT: u32 = 1 << 9;
 pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK: u32 = 1 << 10;
+pub const MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES: u32 = 1 << 11;
 pub const MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
@@ -49,6 +50,7 @@ pub const MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_SUMMARY_BYTES_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_NONE: u32 = 0;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER: u32 = 1;
 pub const MMD_RUNTIME_VMD_CURVE_NONE: u32 = 0;
@@ -71,6 +73,7 @@ const FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 =
 const FEATURE_VMD_SHARED_CONTEXT: u32 = MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT;
 const FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK: u32 =
     MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK;
+const FEATURE_VMD_SUMMARY_BYTES: u32 = MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -1120,6 +1123,7 @@ fn runtime_feature_flags() -> u32 {
         | FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION
         | FEATURE_VMD_SHARED_CONTEXT
         | FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK
+        | FEATURE_VMD_SUMMARY_BYTES
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE
         } else {
@@ -1609,6 +1613,61 @@ pub unsafe extern "C" fn mmd_runtime_vmd_context_read_summary(
             return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
         };
         let summary = match vmd_context_summary(context) {
+            Ok(summary) => summary,
+            Err(message) => return status_failure(MmdRuntimeStatus::Error, message),
+        };
+        unsafe {
+            ptr::write(out_summary, summary);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Reads the fixed v1 VMD summary directly from bytes without creating a
+/// shared context or materializing raw/parsed keyframe tracks.
+///
+/// `out_summary_size` is the caller's writable byte capacity and must be at
+/// least `sizeof(MmdRuntimeFfiVmdContextSummary)`. Invalid input, invalid VMD
+/// bytes, and short output capacity leave the output untouched.
+///
+/// # Safety
+///
+/// When `data_len` is non-zero, `data` must point to `data_len` readable
+/// bytes. When `out_summary` is non-null, it must be naturally aligned and
+/// point to a writable region of at least `out_summary_size` bytes that does
+/// not overlap `data`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_read_from_vmd_bytes(
+    data: *const u8,
+    data_len: usize,
+    out_summary: *mut MmdRuntimeFfiVmdContextSummary,
+    out_summary_size: usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if data.is_null() || data_len == 0 || out_summary.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_summary_size < size_of::<MmdRuntimeFfiVmdContextSummary>() {
+            return status_failure(
+                MmdRuntimeStatus::BufferTooSmall,
+                "shared VMD summary output buffer too small",
+            );
+        }
+        if runtime_feature_flags() & FEATURE_VMD_SUMMARY_BYTES == 0 {
+            return status_failure(
+                MmdRuntimeStatus::Unsupported,
+                "VMD byte summary is unsupported",
+            );
+        }
+
+        let bytes = unsafe { slice::from_raw_parts(data, data_len) };
+        let summary = match mmd_anim_format::vmd::parse_vmd_summary(bytes) {
+            Ok(summary) => summary,
+            Err(_) => {
+                return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_VMD_PARSE_FAILED);
+            }
+        };
+        let summary = match vmd_summary_from_format(&summary) {
             Ok(summary) => summary,
             Err(message) => return status_failure(MmdRuntimeStatus::Error, message),
         };
@@ -2335,7 +2394,12 @@ fn checked_vmd_summary_count(value: usize) -> Result<u32, &'static str> {
 fn vmd_context_summary(
     context: &MmdRuntimeVmdContext,
 ) -> Result<MmdRuntimeFfiVmdContextSummary, &'static str> {
-    let summary = context.context.summary();
+    vmd_summary_from_format(context.context.summary())
+}
+
+fn vmd_summary_from_format(
+    summary: &mmd_anim_format::vmd::VmdSharedContextSummary,
+) -> Result<MmdRuntimeFfiVmdContextSummary, &'static str> {
     Ok(MmdRuntimeFfiVmdContextSummary {
         struct_size: size_of::<MmdRuntimeFfiVmdContextSummary>() as u32,
         abi_version: MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1,

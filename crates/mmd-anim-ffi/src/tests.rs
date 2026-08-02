@@ -2136,6 +2136,255 @@ fn clip_bone_track_introspection_layout_is_c_compatible() {
 }
 
 #[test]
+fn clip_morph_and_property_track_introspection_copies_all_authored_keys() {
+    let clip = AnimationClip::new_full(
+        Vec::new(),
+        vec![MorphAnimationBinding {
+            morph: MorphIndex(3),
+            track: MorphTrack::from_keyframes(vec![
+                MorphKeyframe::new(30, 1.0),
+                MorphKeyframe::new(10, 0.25),
+            ]),
+        }],
+        Some(PropertyAnimationBinding::from_keyframes(vec![
+            PropertyKeyframe::new(20, vec![false, true]),
+            PropertyKeyframe::new(0, vec![true, false]),
+        ])),
+    );
+    let handle = Box::into_raw(Box::new(MmdRuntimeClip { clip }));
+
+    let flags = mmd_runtime_feature_flags();
+    assert_eq!(
+        flags & MMD_RUNTIME_FEATURE_CLIP_MORPH_TRACK_INTROSPECTION,
+        MMD_RUNTIME_FEATURE_CLIP_MORPH_TRACK_INTROSPECTION
+    );
+    assert_eq!(
+        flags & MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION,
+        MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION
+    );
+
+    assert_eq!(unsafe { mmd_runtime_clip_morph_track_count(handle) }, 1);
+    assert_eq!(
+        unsafe { mmd_runtime_clip_morph_track_count(ptr::null()) },
+        0
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_clip_morph_track_key_count(handle, 0) },
+        2
+    );
+    let mut morph_descriptor = MmdRuntimeFfiMorphTrackDescriptor::default();
+    assert_eq!(
+        unsafe { mmd_runtime_clip_morph_track_descriptor(handle, 0, &mut morph_descriptor) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        morph_descriptor,
+        MmdRuntimeFfiMorphTrackDescriptor {
+            morph_index: 3,
+            key_count: 2,
+        }
+    );
+    let mut morph_keys = [MmdRuntimeFfiMorphTrackKey::default(); 2];
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_morph_track_keys(
+                handle,
+                0,
+                morph_keys.as_mut_ptr(),
+                morph_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    assert_eq!(morph_keys[0].morph_index, 3);
+    assert_eq!(morph_keys[0].frame, 10);
+    assert_eq!(morph_keys[0].weight, 0.25);
+    assert_eq!(morph_keys[1].frame, 30);
+    assert_eq!(morph_keys[1].weight, 1.0);
+
+    assert_eq!(unsafe { mmd_runtime_clip_property_track_count(handle) }, 1);
+    assert_eq!(
+        unsafe { mmd_runtime_clip_property_track_count(ptr::null()) },
+        0
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_clip_property_track_key_count(handle) },
+        2
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_clip_property_track_ik_enabled_count(handle) },
+        4
+    );
+    let mut property_descriptor = MmdRuntimeFfiPropertyTrackDescriptor::default();
+    assert_eq!(
+        unsafe { mmd_runtime_clip_property_track_descriptor(handle, &mut property_descriptor) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        property_descriptor,
+        MmdRuntimeFfiPropertyTrackDescriptor {
+            key_count: 2,
+            ik_enabled_count: 4,
+        }
+    );
+    let mut property_keys = [MmdRuntimeFfiPropertyTrackKey::default(); 2];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_property_track_keys(
+                handle,
+                property_keys.as_mut_ptr(),
+                property_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    assert_eq!(property_keys[0].frame, 0);
+    assert_eq!(property_keys[0].ik_enabled_offset, 0);
+    assert_eq!(property_keys[0].ik_enabled_count, 2);
+    assert_eq!(property_keys[1].frame, 20);
+    assert_eq!(property_keys[1].ik_enabled_offset, 2);
+    assert_eq!(property_keys[1].ik_enabled_count, 2);
+
+    let mut states = [0u8; 4];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_property_track_ik_enabled(
+                handle,
+                states.as_mut_ptr(),
+                states.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 4);
+    assert_eq!(states, [1, 0, 0, 1]);
+
+    let mut short_states = [9u8; 3];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_property_track_ik_enabled(
+                handle,
+                short_states.as_mut_ptr(),
+                short_states.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(written, 0);
+    assert_eq!(short_states, [9, 9, 9]);
+
+    let sentinel = MmdRuntimeFfiMorphTrackKey {
+        frame: 777,
+        ..MmdRuntimeFfiMorphTrackKey::default()
+    };
+    let mut short = [sentinel];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_morph_track_keys(
+                handle,
+                0,
+                short.as_mut_ptr(),
+                short.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(written, 0);
+    assert_eq!(short, [sentinel]);
+
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_clip_copy_morph_track_keys(
+                ptr::null(),
+                0,
+                morph_keys.as_mut_ptr(),
+                morph_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 0);
+
+    unsafe { mmd_runtime_clip_free(handle) };
+}
+
+#[test]
+fn extended_track_introspection_layout_is_c_compatible() {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert_eq!(size_of::<MmdRuntimeFfiMorphTrackDescriptor>(), 16);
+    assert_eq!(
+        align_of::<MmdRuntimeFfiMorphTrackDescriptor>(),
+        align_of::<usize>()
+    );
+    assert_eq!(
+        offset_of!(MmdRuntimeFfiMorphTrackDescriptor, morph_index),
+        0
+    );
+    assert_eq!(offset_of!(MmdRuntimeFfiMorphTrackDescriptor, key_count), 8);
+
+    assert_eq!(size_of::<MmdRuntimeFfiMorphTrackKey>(), 12);
+    assert_eq!(align_of::<MmdRuntimeFfiMorphTrackKey>(), 4);
+    assert_eq!(offset_of!(MmdRuntimeFfiMorphTrackKey, morph_index), 0);
+    assert_eq!(offset_of!(MmdRuntimeFfiMorphTrackKey, frame), 4);
+    assert_eq!(offset_of!(MmdRuntimeFfiMorphTrackKey, weight), 8);
+
+    assert_eq!(size_of::<MmdRuntimeFfiPropertyTrackDescriptor>(), 16);
+    assert_eq!(
+        offset_of!(MmdRuntimeFfiPropertyTrackDescriptor, key_count),
+        0
+    );
+    assert_eq!(
+        offset_of!(MmdRuntimeFfiPropertyTrackDescriptor, ik_enabled_count),
+        8
+    );
+
+    assert_eq!(size_of::<MmdRuntimeFfiPropertyTrackKey>(), 24);
+    assert_eq!(offset_of!(MmdRuntimeFfiPropertyTrackKey, frame), 0);
+    assert_eq!(
+        offset_of!(MmdRuntimeFfiPropertyTrackKey, ik_enabled_offset),
+        8
+    );
+    assert_eq!(
+        offset_of!(MmdRuntimeFfiPropertyTrackKey, ik_enabled_count),
+        16
+    );
+
+    assert_eq!(size_of::<MmdRuntimeFfiVmdCurve>(), 20);
+    assert_eq!(align_of::<MmdRuntimeFfiVmdCurve>(), 4);
+    assert_eq!(size_of::<MmdRuntimeFfiVmdCameraKeyframe>(), 184);
+    assert_eq!(offset_of!(MmdRuntimeFfiVmdCameraKeyframe, frame), 0);
+    assert_eq!(offset_of!(MmdRuntimeFfiVmdCameraKeyframe, distance), 4);
+    assert_eq!(offset_of!(MmdRuntimeFfiVmdCameraKeyframe, position_xyz), 8);
+    assert_eq!(offset_of!(MmdRuntimeFfiVmdCameraKeyframe, rotation_xyz), 20);
+    assert_eq!(
+        offset_of!(MmdRuntimeFfiVmdCameraKeyframe, interpolation),
+        32
+    );
+    assert_eq!(offset_of!(MmdRuntimeFfiVmdCameraKeyframe, fov), 56);
+    assert_eq!(offset_of!(MmdRuntimeFfiVmdCameraKeyframe, perspective), 60);
+    assert_eq!(offset_of!(MmdRuntimeFfiVmdCameraKeyframe, position_x), 64);
+    assert_eq!(offset_of!(MmdRuntimeFfiVmdCameraKeyframe, fov_curve), 164);
+    assert_eq!(size_of::<MmdRuntimeFfiVmdLightKeyframe>(), 28);
+    assert_eq!(size_of::<MmdRuntimeFfiVmdSelfShadowKeyframe>(), 12);
+    assert_eq!(offset_of!(MmdRuntimeFfiVmdSelfShadowKeyframe, distance), 8);
+}
+
+#[test]
 fn split_physics_feature_flags_and_mode_config_work_through_c_abi() {
     assert_eq!(
         mmd_runtime_feature_flags() & FEATURE_SPLIT_PHYSICS_EVALUATION,
@@ -5544,6 +5793,10 @@ fn vmd_json_serializes_camera_fixture() {
 #[test]
 fn vmd_camera_track_samples_camera_fixture() {
     let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
+    assert_eq!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION,
+        MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION
+    );
     let track =
         unsafe { mmd_runtime_vmd_camera_track_create_from_vmd_bytes(bytes.as_ptr(), bytes.len()) };
     assert!(!track.is_null());
@@ -5551,6 +5804,77 @@ fn vmd_camera_track_samples_camera_fixture() {
         unsafe { mmd_runtime_vmd_camera_track_frame_count(track) },
         2
     );
+
+    let parsed = mmd_anim_format::parse_vmd_animation(bytes).unwrap();
+    let mut expected: Vec<_> = parsed.camera_frames.iter().collect();
+    expected.sort_by_key(|keyframe| keyframe.frame);
+    let mut keyframes = [MmdRuntimeFfiVmdCameraKeyframe::default(); 2];
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_camera_track_copy_keyframes(
+                track,
+                keyframes.as_mut_ptr(),
+                keyframes.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    for (actual, expected) in keyframes.iter().zip(expected) {
+        assert_eq!(actual.frame, expected.frame);
+        assert_eq!(actual.distance, expected.distance);
+        assert_eq!(actual.position_xyz, expected.position);
+        assert_eq!(actual.rotation_xyz, expected.rotation);
+        assert_eq!(actual.interpolation, expected.interpolation);
+        assert_eq!(actual.fov, expected.fov);
+        assert_eq!(actual.perspective, u8::from(expected.perspective));
+    }
+    assert_eq!(keyframes[0].position_x, MmdRuntimeFfiVmdCurve::default());
+    assert_eq!(
+        keyframes[1].position_x.kind,
+        MMD_RUNTIME_VMD_CURVE_CUBIC_BEZIER
+    );
+    let second_position_x = &keyframes[1].interpolation[0..4];
+    assert_eq!(
+        keyframes[1].position_x.x1,
+        second_position_x[0].min(127) as f32 / 127.0
+    );
+
+    let sentinel = MmdRuntimeFfiVmdCameraKeyframe {
+        frame: 1234,
+        ..MmdRuntimeFfiVmdCameraKeyframe::default()
+    };
+    let mut short = [sentinel];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_camera_track_copy_keyframes(
+                track,
+                short.as_mut_ptr(),
+                short.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(written, 0);
+    assert_eq!(short, [sentinel]);
+
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_camera_track_copy_keyframes(
+                ptr::null(),
+                keyframes.as_mut_ptr(),
+                keyframes.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 0);
 
     let mut values = [0.0f32; 9];
     assert!(unsafe {
@@ -5593,6 +5917,47 @@ fn vmd_light_track_and_one_shot_sample_buffers() {
     assert!(!track.is_null());
     assert_eq!(unsafe { mmd_runtime_vmd_light_track_frame_count(track) }, 2);
 
+    let mut keyframes = [MmdRuntimeFfiVmdLightKeyframe::default(); 2];
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_light_track_copy_keyframes(
+                track,
+                keyframes.as_mut_ptr(),
+                keyframes.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    assert_eq!(keyframes[0].frame, 10);
+    assert_eq!(keyframes[0].color, [0.0, 0.0, 1.0]);
+    assert_eq!(keyframes[0].direction, [1.0, 0.0, 0.0]);
+    assert_eq!(keyframes[1].frame, 30);
+    assert_eq!(keyframes[1].color, [1.0, 0.5, 0.0]);
+    assert_eq!(keyframes[1].direction, [0.0, -1.0, 0.0]);
+
+    let sentinel = MmdRuntimeFfiVmdLightKeyframe {
+        frame: 1234,
+        ..MmdRuntimeFfiVmdLightKeyframe::default()
+    };
+    let mut short = [sentinel];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_light_track_copy_keyframes(
+                track,
+                short.as_mut_ptr(),
+                short.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(written, 0);
+    assert_eq!(short, [sentinel]);
+
     let mut track_values = [0.0f32; 6];
     assert!(unsafe {
         mmd_runtime_vmd_light_track_sample(
@@ -5630,6 +5995,47 @@ fn vmd_self_shadow_track_and_one_shot_sample_buffers() {
         unsafe { mmd_runtime_vmd_self_shadow_track_frame_count(track) },
         2
     );
+
+    let mut keyframes = [MmdRuntimeFfiVmdSelfShadowKeyframe::default(); 2];
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_self_shadow_track_copy_keyframes(
+                track,
+                keyframes.as_mut_ptr(),
+                keyframes.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    assert_eq!(keyframes[0].frame, 10);
+    assert_eq!(keyframes[0].mode, 1);
+    assert_eq!(keyframes[0].distance, 20.0);
+    assert_eq!(keyframes[1].frame, 30);
+    assert_eq!(keyframes[1].mode, 2);
+    assert_eq!(keyframes[1].distance, 60.0);
+
+    let sentinel = MmdRuntimeFfiVmdSelfShadowKeyframe {
+        frame: 1234,
+        ..MmdRuntimeFfiVmdSelfShadowKeyframe::default()
+    };
+    let mut short = [sentinel];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_self_shadow_track_copy_keyframes(
+                track,
+                short.as_mut_ptr(),
+                short.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(written, 0);
+    assert_eq!(short, [sentinel]);
 
     let mut track_values = [0.0f32; 2];
     assert!(unsafe {

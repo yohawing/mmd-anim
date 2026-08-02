@@ -36,10 +36,18 @@ pub const MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR: u32 = 1 << 2;
 pub const MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = 1 << 3;
 pub const MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES: u32 = 1 << 4;
 pub const MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION: u32 = 1 << 5;
+pub const MMD_RUNTIME_FEATURE_CLIP_MORPH_TRACK_INTROSPECTION: u32 = 1 << 6;
+pub const MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION: u32 = 1 << 7;
+pub const MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 = 1 << 8;
 pub const MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_NONE: u32 = 0;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER: u32 = 1;
+pub const MMD_RUNTIME_VMD_CURVE_NONE: u32 = 0;
+pub const MMD_RUNTIME_VMD_CURVE_CUBIC_BEZIER: u32 = 1;
 pub const MMD_RUNTIME_REDUCTION_TARGET_DCC_CUBIC: u32 = 2;
 pub const MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1: u32 =
     mmd_anim_runtime::RUNTIME_MODEL_DESCRIPTOR_VERSION_V1;
@@ -49,6 +57,12 @@ const FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = MMD_RUNTIME_FEATURE_HOST_POSE_NATIV
 const FEATURE_REDUCED_POSE_GENERIC_CURVES: u32 = MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES;
 const FEATURE_CLIP_BONE_TRACK_INTROSPECTION: u32 =
     MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION;
+const FEATURE_CLIP_MORPH_TRACK_INTROSPECTION: u32 =
+    MMD_RUNTIME_FEATURE_CLIP_MORPH_TRACK_INTROSPECTION;
+const FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION: u32 =
+    MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION;
+const FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 =
+    MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -301,6 +315,104 @@ pub struct MmdRuntimeFfiBoneTrackKey {
     pub translation_y: MmdRuntimeFfiBoneTrackCurve,
     pub translation_z: MmdRuntimeFfiBoneTrackCurve,
     pub rotation: MmdRuntimeFfiBoneTrackCurve,
+}
+
+/// Descriptor for one authored morph track in compiled clip order.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiMorphTrackDescriptor {
+    pub morph_index: u32,
+    pub key_count: usize,
+}
+
+/// One authored morph keyframe. Morph interpolation is implicit linear
+/// interpolation in the compiled runtime track; VMD has no per-key morph
+/// curve payload.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiMorphTrackKey {
+    pub morph_index: u32,
+    pub frame: u32,
+    pub weight: f32,
+}
+
+/// Descriptor for the single compiled property/IK track.
+///
+/// `ik_enabled_count` is the total number of packed state bytes returned by
+/// `mmd_runtime_clip_copy_property_track_ik_enabled`. Each key's offset and
+/// count refer to that packed array.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiPropertyTrackDescriptor {
+    pub key_count: usize,
+    pub ik_enabled_count: usize,
+}
+
+/// One authored compiled property/IK keyframe. State values are 0 or 1 and
+/// are stored in the separate packed array described above.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiPropertyTrackKey {
+    pub frame: u32,
+    pub ik_enabled_offset: usize,
+    pub ik_enabled_count: usize,
+}
+
+/// A normalized cubic Bezier curve used by raw VMD camera keyframes.
+/// `NONE` has zero controls and means that the first key has no incoming
+/// segment. Later keys describe the segment from the previous key to that key.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiVmdCurve {
+    pub kind: u32,
+    pub x1: f32,
+    pub y1: f32,
+    pub x2: f32,
+    pub y2: f32,
+}
+
+/// One raw VMD camera keyframe in chronological order.
+///
+/// `interpolation` retains the original 24-byte VMD payload. The six curve
+/// fields decode its position x/y/z, rotation, distance, and FOV channels.
+/// `perspective` is an ABI-safe 0/1 flag, not a C/Rust `bool`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiVmdCameraKeyframe {
+    pub frame: u32,
+    pub distance: f32,
+    pub position_xyz: [f32; 3],
+    pub rotation_xyz: [f32; 3],
+    pub interpolation: [u8; 24],
+    pub fov: u32,
+    pub perspective: u8,
+    pub position_x: MmdRuntimeFfiVmdCurve,
+    pub position_y: MmdRuntimeFfiVmdCurve,
+    pub position_z: MmdRuntimeFfiVmdCurve,
+    pub rotation: MmdRuntimeFfiVmdCurve,
+    pub distance_curve: MmdRuntimeFfiVmdCurve,
+    pub fov_curve: MmdRuntimeFfiVmdCurve,
+}
+
+/// One raw VMD light keyframe in chronological order. Light values have no
+/// authored VMD interpolation payload and are sampled linearly by the format
+/// layer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiVmdLightKeyframe {
+    pub frame: u32,
+    pub color: [f32; 3],
+    pub direction: [f32; 3],
+}
+
+/// One raw VMD self-shadow keyframe in chronological order. `mode` is the
+/// authored discrete mode byte; distance is the authored value.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiVmdSelfShadowKeyframe {
+    pub frame: u32,
+    pub mode: u8,
+    pub distance: f32,
 }
 
 #[repr(C)]
@@ -904,6 +1016,9 @@ fn runtime_feature_flags() -> u32 {
         | FEATURE_HOST_POSE_NATIVE_MORPHS
         | FEATURE_REDUCED_POSE_GENERIC_CURVES
         | FEATURE_CLIP_BONE_TRACK_INTROSPECTION
+        | FEATURE_CLIP_MORPH_TRACK_INTROSPECTION
+        | FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION
+        | FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE
         } else {
@@ -1358,6 +1473,76 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_frame_count(
     })
 }
 
+/// Copies every raw VMD camera keyframe in chronological order.
+///
+/// The original 24-byte interpolation payload is retained. The six decoded
+/// curves use the same incoming-segment convention as the bone introspection
+/// API: the first key has `MMD_RUNTIME_VMD_CURVE_NONE`, and each later key's
+/// curves describe the segment from the previous key to that key.
+///
+/// # Safety
+///
+/// `track` must be null or a live handle returned by the camera-track create
+/// function. `out_written` must point to one writable, naturally aligned
+/// `size_t`. When the track is non-empty, `out_keys` must be writable and
+/// naturally aligned for at least `out_key_capacity` keys. Output storage must
+/// not overlap the track handle or `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_copy_keyframes(
+    track: *const MmdRuntimeVmdCameraTrack,
+    out_keys: *mut MmdRuntimeFfiVmdCameraKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(track, out_keys, out_key_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+
+        let Some(track) = (unsafe { track.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let required = track.frames.len();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_key_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+
+        let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedCameraFrame> =
+            track.frames.iter().collect();
+        sorted.sort_by_key(|keyframe| keyframe.frame);
+        let mut keys = Vec::new();
+        if keys.try_reserve_exact(required).is_err() {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "failed to allocate the VMD camera key staging buffer",
+            );
+        }
+        for (index, keyframe) in sorted.into_iter().enumerate() {
+            let Ok(key) = vmd_camera_keyframe(keyframe, index != 0) else {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "VMD camera keyframe contains a non-finite value",
+                );
+            };
+            keys.push(key);
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
 /// Samples an owned VMD camera track into a flat array.
 ///
 /// Writes `[distance, position.x, position.y, position.z, rotation.x,
@@ -1503,6 +1688,78 @@ pub unsafe extern "C" fn mmd_runtime_vmd_light_track_frame_count(
     })
 }
 
+/// Copies every raw VMD light keyframe in chronological order.
+///
+/// Light records have no authored interpolation payload; the format layer
+/// samples their color and direction linearly.
+///
+/// # Safety
+///
+/// `track` must be null or a live handle returned by the light-track create
+/// function. `out_written` must point to one writable, naturally aligned
+/// `size_t`. When the track is non-empty, `out_keys` must be writable and
+/// naturally aligned for at least `out_key_capacity` keys. Output storage must
+/// not overlap the track handle or `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_light_track_copy_keyframes(
+    track: *const MmdRuntimeVmdLightTrack,
+    out_keys: *mut MmdRuntimeFfiVmdLightKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(track, out_keys, out_key_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+
+        let Some(track) = (unsafe { track.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let required = track.frames.len();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_key_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+
+        let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedLightFrame> =
+            track.frames.iter().collect();
+        sorted.sort_by_key(|keyframe| keyframe.frame);
+        let mut keys = Vec::new();
+        if keys.try_reserve_exact(required).is_err() {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "failed to allocate the VMD light key staging buffer",
+            );
+        }
+        for keyframe in sorted {
+            if !all_finite(&keyframe.color) || !all_finite(&keyframe.direction) {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "VMD light keyframe contains a non-finite value",
+                );
+            }
+            keys.push(MmdRuntimeFfiVmdLightKeyframe {
+                frame: keyframe.frame,
+                color: keyframe.color,
+                direction: keyframe.direction,
+            });
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
 /// Samples an owned VMD light track into a flat array.
 ///
 /// Writes `[color.r, color.g, color.b, direction.x, direction.y,
@@ -1643,6 +1900,79 @@ pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_frame_count(
     })
 }
 
+/// Copies every raw VMD self-shadow keyframe in chronological order.
+///
+/// `mode` is copied as the authored discrete byte and `distance` as the
+/// authored float. The format layer treats mode as stepped and distance as a
+/// linear value when sampling.
+///
+/// # Safety
+///
+/// `track` must be null or a live handle returned by the self-shadow-track
+/// create function. `out_written` must point to one writable, naturally
+/// aligned `size_t`. When the track is non-empty, `out_keys` must be writable
+/// and naturally aligned for at least `out_key_capacity` keys. Output storage
+/// must not overlap the track handle or `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_copy_keyframes(
+    track: *const MmdRuntimeVmdSelfShadowTrack,
+    out_keys: *mut MmdRuntimeFfiVmdSelfShadowKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(track, out_keys, out_key_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+
+        let Some(track) = (unsafe { track.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let required = track.frames.len();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_key_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+
+        let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedSelfShadowFrame> =
+            track.frames.iter().collect();
+        sorted.sort_by_key(|keyframe| keyframe.frame);
+        let mut keys = Vec::new();
+        if keys.try_reserve_exact(required).is_err() {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "failed to allocate the VMD self-shadow key staging buffer",
+            );
+        }
+        for keyframe in sorted {
+            if !keyframe.distance.is_finite() {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "VMD self-shadow keyframe contains a non-finite value",
+                );
+            }
+            keys.push(MmdRuntimeFfiVmdSelfShadowKeyframe {
+                frame: keyframe.frame,
+                mode: keyframe.mode,
+                distance: keyframe.distance,
+            });
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
 /// Samples an owned VMD self-shadow track into a flat array.
 ///
 /// Writes `[mode, distance]` to `out_values`. `mode` is encoded as a float.
@@ -1735,6 +2065,51 @@ pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_free(
             }
         }
     })
+}
+
+fn vmd_camera_keyframe(
+    keyframe: &mmd_anim_format::vmd::VmdParsedCameraFrame,
+    has_incoming_segment: bool,
+) -> Result<MmdRuntimeFfiVmdCameraKeyframe, ()> {
+    if !keyframe.distance.is_finite()
+        || !all_finite(&keyframe.position)
+        || !all_finite(&keyframe.rotation)
+    {
+        return Err(());
+    }
+    Ok(MmdRuntimeFfiVmdCameraKeyframe {
+        frame: keyframe.frame,
+        distance: keyframe.distance,
+        position_xyz: keyframe.position,
+        rotation_xyz: keyframe.rotation,
+        interpolation: keyframe.interpolation,
+        fov: keyframe.fov,
+        perspective: u8::from(keyframe.perspective),
+        position_x: vmd_curve(&keyframe.interpolation, 0, has_incoming_segment),
+        position_y: vmd_curve(&keyframe.interpolation, 1, has_incoming_segment),
+        position_z: vmd_curve(&keyframe.interpolation, 2, has_incoming_segment),
+        rotation: vmd_curve(&keyframe.interpolation, 3, has_incoming_segment),
+        distance_curve: vmd_curve(&keyframe.interpolation, 4, has_incoming_segment),
+        fov_curve: vmd_curve(&keyframe.interpolation, 5, has_incoming_segment),
+    })
+}
+
+fn vmd_curve(
+    interpolation: &[u8; 24],
+    channel: usize,
+    has_incoming_segment: bool,
+) -> MmdRuntimeFfiVmdCurve {
+    if !has_incoming_segment {
+        return MmdRuntimeFfiVmdCurve::default();
+    }
+    let offset = channel * 4;
+    MmdRuntimeFfiVmdCurve {
+        kind: MMD_RUNTIME_VMD_CURVE_CUBIC_BEZIER,
+        x1: interpolation[offset].min(127) as f32 / 127.0,
+        y1: interpolation[offset + 1].min(127) as f32 / 127.0,
+        x2: interpolation[offset + 2].min(127) as f32 / 127.0,
+        y2: interpolation[offset + 3].min(127) as f32 / 127.0,
+    }
 }
 
 fn camera_state_array(camera: mmd_anim_format::VmdCameraState) -> [f32; 9] {
@@ -7541,6 +7916,382 @@ pub unsafe extern "C" fn mmd_runtime_clip_copy_bone_track_keys(
     })
 }
 
+/// Returns the number of authored morph tracks, or zero for a null clip.
+///
+/// # Safety
+///
+/// `clip` must be null or a live handle returned by a clip creation function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_morph_track_count(clip: *const MmdRuntimeClip) -> usize {
+    ffi_guard(0, || {
+        unsafe { clip.as_ref() }
+            .map(|clip| clip.clip.morph_track_count())
+            .unwrap_or(0)
+    })
+}
+
+/// Copies one authored morph-track descriptor.
+///
+/// # Safety
+///
+/// `clip` must be null or a live clip handle. `out_descriptor` must point to
+/// writable, naturally aligned storage for one descriptor and must not overlap
+/// the opaque clip handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_morph_track_descriptor(
+    clip: *const MmdRuntimeClip,
+    track_index: usize,
+    out_descriptor: *mut MmdRuntimeFfiMorphTrackDescriptor,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(descriptor_range) = checked_pointer_range(out_descriptor, 1) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if !clip.is_null() {
+            let Some(clip_range) = checked_pointer_range(clip, 1) else {
+                return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+            };
+            if pointer_ranges_overlap(descriptor_range, clip_range) {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "descriptor output must not alias the clip handle",
+                );
+            }
+        }
+        unsafe { ptr::write(out_descriptor, MmdRuntimeFfiMorphTrackDescriptor::default()) };
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(binding) = clip.clip.morph_track(track_index) else {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "morph track index out of range",
+            );
+        };
+        unsafe {
+            ptr::write(
+                out_descriptor,
+                MmdRuntimeFfiMorphTrackDescriptor {
+                    morph_index: binding.morph.0,
+                    key_count: binding.track.keyframe_count(),
+                },
+            );
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Returns one authored morph track's key count, or zero for null or an
+/// out-of-range track index.
+///
+/// # Safety
+///
+/// `clip` must be null or a live handle returned by a clip creation function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_morph_track_key_count(
+    clip: *const MmdRuntimeClip,
+    track_index: usize,
+) -> usize {
+    ffi_guard(0, || {
+        unsafe { clip.as_ref() }
+            .and_then(|clip| clip.clip.morph_track(track_index))
+            .map(|binding| binding.track.keyframe_count())
+            .unwrap_or(0)
+    })
+}
+
+/// Copies all authored keys from one compiled morph track. The output order is
+/// chronological and the interpolation rule for these keys is implicit
+/// linear interpolation.
+///
+/// # Safety
+///
+/// `clip` must be null or a live clip handle. `out_written` must point to one
+/// writable, naturally aligned `size_t`. When the track is non-empty,
+/// `out_keys` must be writable and naturally aligned for at least
+/// `out_key_capacity` keys. Neither output may overlap the clip handle, and
+/// `out_keys` must not overlap `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_copy_morph_track_keys(
+    clip: *const MmdRuntimeClip,
+    track_index: usize,
+    out_keys: *mut MmdRuntimeFfiMorphTrackKey,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(clip, out_keys, out_key_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(binding) = clip.clip.morph_track(track_index) else {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "morph track index out of range",
+            );
+        };
+        let required = binding.track.keyframe_count();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_key_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+
+        let mut keys = Vec::new();
+        if keys.try_reserve_exact(required).is_err() {
+            return status_failure(
+                MmdRuntimeStatus::Error,
+                "failed to allocate the morph track key staging buffer",
+            );
+        }
+        for key_index in 0..required {
+            let Some(keyframe) = binding.track.keyframe(key_index) else {
+                return status_failure(
+                    MmdRuntimeStatus::Error,
+                    "morph track key disappeared during introspection",
+                );
+            };
+            if !keyframe.weight.is_finite() {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "morph track key contains a non-finite weight",
+                );
+            }
+            keys.push(MmdRuntimeFfiMorphTrackKey {
+                morph_index: binding.morph.0,
+                frame: keyframe.frame,
+                weight: keyframe.weight,
+            });
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Returns 1 when a compiled property/IK track exists, otherwise 0.
+///
+/// # Safety
+///
+/// `clip` must be null or a live handle returned by a clip creation function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_property_track_count(
+    clip: *const MmdRuntimeClip,
+) -> usize {
+    ffi_guard(0, || {
+        usize::from(unsafe { clip.as_ref() }.is_some_and(|clip| clip.clip.has_property_track()))
+    })
+}
+
+/// Copies the descriptor for the single compiled property/IK track.
+///
+/// The compiled track retains resolved IK enabled bytes only. Raw VMD
+/// visibility and IK bone names remain available through
+/// `mmd_runtime_parse_vmd_json` because they are not stored in `AnimationClip`.
+///
+/// # Safety
+///
+/// `clip` must be null or a live clip handle. `out_descriptor` must point to
+/// writable, naturally aligned storage for one descriptor and must not overlap
+/// the opaque clip handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_property_track_descriptor(
+    clip: *const MmdRuntimeClip,
+    out_descriptor: *mut MmdRuntimeFfiPropertyTrackDescriptor,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(descriptor_range) = checked_pointer_range(out_descriptor, 1) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        if !clip.is_null() {
+            let Some(clip_range) = checked_pointer_range(clip, 1) else {
+                return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+            };
+            if pointer_ranges_overlap(descriptor_range, clip_range) {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "descriptor output must not alias the clip handle",
+                );
+            }
+        }
+        unsafe {
+            ptr::write(
+                out_descriptor,
+                MmdRuntimeFfiPropertyTrackDescriptor::default(),
+            )
+        };
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(track) = clip.clip.property_track() else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, "property track is absent");
+        };
+        unsafe {
+            ptr::write(
+                out_descriptor,
+                MmdRuntimeFfiPropertyTrackDescriptor {
+                    key_count: track.keyframe_count(),
+                    ik_enabled_count: track.ik_enabled_count(),
+                },
+            );
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Returns the authored property/IK key count, or zero when absent.
+///
+/// # Safety
+///
+/// `clip` must be null or a live handle returned by a clip creation function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_property_track_key_count(
+    clip: *const MmdRuntimeClip,
+) -> usize {
+    ffi_guard(0, || {
+        unsafe { clip.as_ref() }
+            .and_then(|clip| clip.clip.property_track())
+            .map(|track| track.keyframe_count())
+            .unwrap_or(0)
+    })
+}
+
+/// Returns the total packed IK state byte count for the property track, or
+/// zero when absent.
+///
+/// # Safety
+///
+/// `clip` must be null or a live handle returned by a clip creation function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_property_track_ik_enabled_count(
+    clip: *const MmdRuntimeClip,
+) -> usize {
+    ffi_guard(0, || {
+        unsafe { clip.as_ref() }
+            .and_then(|clip| clip.clip.property_track())
+            .map(|track| track.ik_enabled_count())
+            .unwrap_or(0)
+    })
+}
+
+/// Copies all compiled property/IK keys. The offsets refer to the packed
+/// state array returned by `mmd_runtime_clip_copy_property_track_ik_enabled`.
+///
+/// # Safety
+///
+/// `clip` must be null or a live clip handle. `out_written` must point to one
+/// writable, naturally aligned `size_t`. When the track is non-empty,
+/// `out_keys` must be writable and naturally aligned for at least
+/// `out_key_capacity` keys. Neither output may overlap the clip handle, and
+/// `out_keys` must not overlap `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_copy_property_track_keys(
+    clip: *const MmdRuntimeClip,
+    out_keys: *mut MmdRuntimeFfiPropertyTrackKey,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(clip, out_keys, out_key_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(track) = clip.clip.property_track() else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, "property track is absent");
+        };
+        let (keys, _) = match property_track_key_data(track) {
+            Ok(data) => data,
+            Err(message) => return status_failure(MmdRuntimeStatus::InvalidInput, message),
+        };
+        let required = keys.len();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_keys.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_key_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Copies all compiled property/IK state bytes in the order referenced by the
+/// property key offsets. Each byte is guaranteed to be 0 or 1.
+///
+/// # Safety
+///
+/// `clip` must be null or a live clip handle. `out_written` must point to one
+/// writable, naturally aligned `size_t`. When the track is non-empty,
+/// `out_states` must be writable and naturally aligned for at least
+/// `out_state_capacity` bytes. Neither output may overlap the clip handle, and
+/// `out_states` must not overlap `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_copy_property_track_ik_enabled(
+    clip: *const MmdRuntimeClip,
+    out_states: *mut u8,
+    out_state_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) =
+            validate_key_copy_storage(clip, out_states, out_state_capacity, out_written)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe { ptr::write(out_written, 0) };
+
+        let Some(clip) = (unsafe { clip.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(track) = clip.clip.property_track() else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, "property track is absent");
+        };
+        let (_, states) = match property_track_key_data(track) {
+            Ok(data) => data,
+            Err(message) => return status_failure(MmdRuntimeStatus::InvalidInput, message),
+        };
+        let required = states.len();
+        if required == 0 {
+            return MmdRuntimeStatus::Ok;
+        }
+        if out_states.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_state_capacity < required {
+            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+        }
+        unsafe {
+            slice::from_raw_parts_mut(out_states, required).copy_from_slice(&states);
+            ptr::write(out_written, required);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
 /// Frees a clip created by `mmd_runtime_clip_create`.
 ///
 /// # Safety
@@ -7681,6 +8432,64 @@ fn checked_pointer_range<T>(ptr: *const T, len: usize) -> Option<(usize, usize)>
         return None;
     }
     Some((start, start.checked_add(byte_len)?))
+}
+
+fn validate_key_copy_storage<Owner, Key>(
+    owner: *const Owner,
+    out_keys: *mut Key,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> Result<(), &'static str> {
+    let count_range = checked_pointer_range(out_written, 1).ok_or("invalid out_written storage")?;
+    let owner_range = if owner.is_null() {
+        None
+    } else {
+        Some(checked_pointer_range(owner, 1).ok_or("invalid track handle")?)
+    };
+    if owner_range.is_some_and(|range| pointer_ranges_overlap(count_range, range)) {
+        return Err("out_written must not alias the track handle");
+    }
+
+    let output_range =
+        checked_pointer_range(out_keys, out_key_capacity).ok_or("invalid key buffer")?;
+    if pointer_ranges_overlap(output_range, count_range) {
+        return Err("key buffer must not alias out_written");
+    }
+    if owner_range.is_some_and(|range| pointer_ranges_overlap(output_range, range)) {
+        return Err("key buffer must not alias the track handle");
+    }
+    Ok(())
+}
+
+fn property_track_key_data(
+    track: &PropertyAnimationBinding,
+) -> Result<(Vec<MmdRuntimeFfiPropertyTrackKey>, Vec<u8>), &'static str> {
+    let key_count = track.keyframe_count();
+    let state_count = track.ik_enabled_count();
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(key_count)
+        .map_err(|_| "failed to allocate the property key staging buffer")?;
+    let mut states = Vec::new();
+    states
+        .try_reserve_exact(state_count)
+        .map_err(|_| "failed to allocate the property state staging buffer")?;
+
+    for key_index in 0..key_count {
+        let Some(keyframe) = track.keyframe(key_index) else {
+            return Err("property track key disappeared during introspection");
+        };
+        if keyframe.ik_enabled.iter().any(|state| *state > 1) {
+            return Err("property IK state contains a value other than 0 or 1");
+        }
+        let offset = states.len();
+        states.extend_from_slice(&keyframe.ik_enabled);
+        keys.push(MmdRuntimeFfiPropertyTrackKey {
+            frame: keyframe.frame,
+            ik_enabled_offset: offset,
+            ik_enabled_count: keyframe.ik_enabled.len(),
+        });
+    }
+    Ok((keys, states))
 }
 
 fn pointer_ranges_overlap(left: (usize, usize), right: (usize, usize)) -> bool {

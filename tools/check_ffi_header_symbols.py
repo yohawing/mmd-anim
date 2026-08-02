@@ -38,12 +38,20 @@ GENERIC_CONSTANTS = {
 
 CLIP_TRACK_CONSTANTS = {
     "MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1": 1,
+    "MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1": 1,
+    "MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1": 1,
+    "MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1": 1,
     "MMD_RUNTIME_BONE_TRACK_CURVE_NONE": 0,
     "MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER": 1,
+    "MMD_RUNTIME_VMD_CURVE_NONE": 0,
+    "MMD_RUNTIME_VMD_CURVE_CUBIC_BEZIER": 1,
 }
 
 CLIP_TRACK_FEATURE_BITS = {
     "MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION": 5,
+    "MMD_RUNTIME_FEATURE_CLIP_MORPH_TRACK_INTROSPECTION": 6,
+    "MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION": 7,
+    "MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION": 8,
 }
 
 GENERIC_STRUCTS = {
@@ -128,6 +136,56 @@ CLIP_TRACK_STRUCTS = {
             ("rotation", "bone_track_curve"),
         ],
     ),
+    "MmdRuntimeFfiMorphTrackDescriptor": (
+        "mmd_runtime_ffi_morph_track_descriptor_t",
+        [("morph_index", "u32"), ("key_count", "usize")],
+    ),
+    "MmdRuntimeFfiMorphTrackKey": (
+        "mmd_runtime_ffi_morph_track_key_t",
+        [("morph_index", "u32"), ("frame", "u32"), ("weight", "f32")],
+    ),
+    "MmdRuntimeFfiPropertyTrackDescriptor": (
+        "mmd_runtime_ffi_property_track_descriptor_t",
+        [("key_count", "usize"), ("ik_enabled_count", "usize")],
+    ),
+    "MmdRuntimeFfiPropertyTrackKey": (
+        "mmd_runtime_ffi_property_track_key_t",
+        [
+            ("frame", "u32"),
+            ("ik_enabled_offset", "usize"),
+            ("ik_enabled_count", "usize"),
+        ],
+    ),
+    "MmdRuntimeFfiVmdCurve": (
+        "mmd_runtime_ffi_vmd_curve_t",
+        [("kind", "u32"), ("x1", "f32"), ("y1", "f32"), ("x2", "f32"), ("y2", "f32")],
+    ),
+    "MmdRuntimeFfiVmdCameraKeyframe": (
+        "mmd_runtime_ffi_vmd_camera_keyframe_t",
+        [
+            ("frame", "u32"),
+            ("distance", "f32"),
+            ("position_xyz", "f32[3]"),
+            ("rotation_xyz", "f32[3]"),
+            ("interpolation", "u8[24]"),
+            ("fov", "u32"),
+            ("perspective", "u8"),
+            ("position_x", "vmd_curve"),
+            ("position_y", "vmd_curve"),
+            ("position_z", "vmd_curve"),
+            ("rotation", "vmd_curve"),
+            ("distance_curve", "vmd_curve"),
+            ("fov_curve", "vmd_curve"),
+        ],
+    ),
+    "MmdRuntimeFfiVmdLightKeyframe": (
+        "mmd_runtime_ffi_vmd_light_keyframe_t",
+        [("frame", "u32"), ("color", "f32[3]"), ("direction", "f32[3]")],
+    ),
+    "MmdRuntimeFfiVmdSelfShadowKeyframe": (
+        "mmd_runtime_ffi_vmd_self_shadow_keyframe_t",
+        [("frame", "u32"), ("mode", "u8"), ("distance", "f32")],
+    ),
 }
 
 GENERIC_FUNCTIONS = {
@@ -183,6 +241,93 @@ CLIP_TRACK_FUNCTIONS = {
             ("clip", "const_clip_ptr"),
             ("track_index", "usize"),
             ("out_keys", "bone_track_key_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_clip_morph_track_count": (
+        "usize",
+        [("clip", "const_clip_ptr")],
+    ),
+    "mmd_runtime_clip_morph_track_descriptor": (
+        "status",
+        [
+            ("clip", "const_clip_ptr"),
+            ("track_index", "usize"),
+            ("out_descriptor", "morph_track_descriptor_ptr"),
+        ],
+    ),
+    "mmd_runtime_clip_morph_track_key_count": (
+        "usize",
+        [("clip", "const_clip_ptr"), ("track_index", "usize")],
+    ),
+    "mmd_runtime_clip_copy_morph_track_keys": (
+        "status",
+        [
+            ("clip", "const_clip_ptr"),
+            ("track_index", "usize"),
+            ("out_keys", "morph_track_key_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_clip_property_track_count": (
+        "usize",
+        [("clip", "const_clip_ptr")],
+    ),
+    "mmd_runtime_clip_property_track_descriptor": (
+        "status",
+        [("clip", "const_clip_ptr"), ("out_descriptor", "property_track_descriptor_ptr")],
+    ),
+    "mmd_runtime_clip_property_track_key_count": (
+        "usize",
+        [("clip", "const_clip_ptr")],
+    ),
+    "mmd_runtime_clip_property_track_ik_enabled_count": (
+        "usize",
+        [("clip", "const_clip_ptr")],
+    ),
+    "mmd_runtime_clip_copy_property_track_keys": (
+        "status",
+        [
+            ("clip", "const_clip_ptr"),
+            ("out_keys", "property_track_key_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_clip_copy_property_track_ik_enabled": (
+        "status",
+        [
+            ("clip", "const_clip_ptr"),
+            ("out_states", "mut_u8_ptr"),
+            ("out_state_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_vmd_camera_track_copy_keyframes": (
+        "status",
+        [
+            ("track", "const_vmd_camera_ptr"),
+            ("out_keys", "vmd_camera_keyframe_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_vmd_light_track_copy_keyframes": (
+        "status",
+        [
+            ("track", "const_vmd_light_ptr"),
+            ("out_keys", "vmd_light_keyframe_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_vmd_self_shadow_track_copy_keyframes": (
+        "status",
+        [
+            ("track", "const_vmd_self_shadow_ptr"),
+            ("out_keys", "vmd_self_shadow_keyframe_ptr"),
             ("out_key_capacity", "usize"),
             ("out_written", "usize_ptr"),
         ],
@@ -247,9 +392,9 @@ def strip_c_comments(text: str) -> str:
 
 def canonical_rust_type(type_name: str) -> str:
     compact = " ".join(type_name.split())
-    array_match = re.fullmatch(r"\[f32;\s*(\d+)\]", compact)
+    array_match = re.fullmatch(r"\[(u8|u32|u64|i32|usize|f32);\s*(\d+)\]", compact)
     if array_match:
-        return f"f32[{array_match.group(1)}]"
+        return f"{array_match.group(1)}[{array_match.group(2)}]"
     return {
         "u8": "u8",
         "u32": "u32",
@@ -262,9 +407,13 @@ def canonical_rust_type(type_name: str) -> str:
         "MmdRuntimeFfiByteBuffer": "ffi_byte_buffer",
         "*const MmdRuntimeReducedPose": "const_reduced_pose_ptr",
         "*const MmdRuntimeClip": "const_clip_ptr",
+        "*const MmdRuntimeVmdCameraTrack": "const_vmd_camera_ptr",
+        "*const MmdRuntimeVmdLightTrack": "const_vmd_light_ptr",
+        "*const MmdRuntimeVmdSelfShadowTrack": "const_vmd_self_shadow_ptr",
         "*const MmdRuntimePhysicsWorld": "const_physics_world_ptr",
         "*mut MmdRuntimePhysicsWorld": "physics_world_ptr",
         "*const u8": "const_u8_ptr",
+        "*mut u8": "mut_u8_ptr",
         "*mut usize": "usize_ptr",
         "*mut MmdRuntimeFfiGenericCurveInfo": "generic_info_ptr",
         "*mut MmdRuntimeFfiGenericCurveDescriptor": "generic_descriptor_ptr",
@@ -272,6 +421,14 @@ def canonical_rust_type(type_name: str) -> str:
         "MmdRuntimeFfiBoneTrackCurve": "bone_track_curve",
         "*mut MmdRuntimeFfiBoneTrackDescriptor": "bone_track_descriptor_ptr",
         "*mut MmdRuntimeFfiBoneTrackKey": "bone_track_key_ptr",
+        "MmdRuntimeFfiVmdCurve": "vmd_curve",
+        "*mut MmdRuntimeFfiMorphTrackDescriptor": "morph_track_descriptor_ptr",
+        "*mut MmdRuntimeFfiMorphTrackKey": "morph_track_key_ptr",
+        "*mut MmdRuntimeFfiPropertyTrackDescriptor": "property_track_descriptor_ptr",
+        "*mut MmdRuntimeFfiPropertyTrackKey": "property_track_key_ptr",
+        "*mut MmdRuntimeFfiVmdCameraKeyframe": "vmd_camera_keyframe_ptr",
+        "*mut MmdRuntimeFfiVmdLightKeyframe": "vmd_light_keyframe_ptr",
+        "*mut MmdRuntimeFfiVmdSelfShadowKeyframe": "vmd_self_shadow_keyframe_ptr",
     }.get(compact, compact)
 
 
@@ -289,9 +446,13 @@ def canonical_c_type(type_name: str) -> str:
         "mmd_runtime_ffi_byte_buffer_t": "ffi_byte_buffer",
         "const mmd_runtime_reduced_pose_t*": "const_reduced_pose_ptr",
         "const mmd_runtime_clip_t*": "const_clip_ptr",
+        "const mmd_runtime_vmd_camera_track_t*": "const_vmd_camera_ptr",
+        "const mmd_runtime_vmd_light_track_t*": "const_vmd_light_ptr",
+        "const mmd_runtime_vmd_self_shadow_track_t*": "const_vmd_self_shadow_ptr",
         "const mmd_runtime_physics_world_t*": "const_physics_world_ptr",
         "mmd_runtime_physics_world_t*": "physics_world_ptr",
         "const uint8_t*": "const_u8_ptr",
+        "uint8_t*": "mut_u8_ptr",
         "size_t*": "usize_ptr",
         "mmd_runtime_ffi_generic_curve_info_t*": "generic_info_ptr",
         "mmd_runtime_ffi_generic_curve_descriptor_t*": "generic_descriptor_ptr",
@@ -299,6 +460,14 @@ def canonical_c_type(type_name: str) -> str:
         "mmd_runtime_ffi_bone_track_descriptor_t*": "bone_track_descriptor_ptr",
         "mmd_runtime_ffi_bone_track_key_t*": "bone_track_key_ptr",
         "mmd_runtime_ffi_bone_track_curve_t": "bone_track_curve",
+        "mmd_runtime_ffi_vmd_curve_t": "vmd_curve",
+        "mmd_runtime_ffi_morph_track_descriptor_t*": "morph_track_descriptor_ptr",
+        "mmd_runtime_ffi_morph_track_key_t*": "morph_track_key_ptr",
+        "mmd_runtime_ffi_property_track_descriptor_t*": "property_track_descriptor_ptr",
+        "mmd_runtime_ffi_property_track_key_t*": "property_track_key_ptr",
+        "mmd_runtime_ffi_vmd_camera_keyframe_t*": "vmd_camera_keyframe_ptr",
+        "mmd_runtime_ffi_vmd_light_keyframe_t*": "vmd_light_keyframe_ptr",
+        "mmd_runtime_ffi_vmd_self_shadow_keyframe_t*": "vmd_self_shadow_keyframe_ptr",
     }.get(compact, compact)
 
 

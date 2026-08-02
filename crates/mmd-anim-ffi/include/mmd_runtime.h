@@ -125,10 +125,18 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS  (1u << 3)
 #define MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES (1u << 4)
 #define MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION (1u << 5)
+#define MMD_RUNTIME_FEATURE_CLIP_MORPH_TRACK_INTROSPECTION (1u << 6)
+#define MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION (1u << 7)
+#define MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION (1u << 8)
 #define MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_NONE 0u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER 1u
+#define MMD_RUNTIME_VMD_CURVE_NONE 0u
+#define MMD_RUNTIME_VMD_CURVE_CUBIC_BEZIER 1u
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1      1u
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE     0u
 
@@ -325,6 +333,72 @@ typedef struct mmd_runtime_ffi_bone_track_key {
     mmd_runtime_ffi_bone_track_curve_t translation_z;
     mmd_runtime_ffi_bone_track_curve_t rotation;
 } mmd_runtime_ffi_bone_track_key_t;
+
+/* Compiled/authored morph-track introspection. Morph interpolation is
+   implicit linear interpolation; VMD has no per-key morph curve payload. */
+typedef struct mmd_runtime_ffi_morph_track_descriptor {
+    uint32_t morph_index;
+    size_t   key_count;
+} mmd_runtime_ffi_morph_track_descriptor_t;
+
+typedef struct mmd_runtime_ffi_morph_track_key {
+    uint32_t morph_index;
+    uint32_t frame;
+    float    weight;
+} mmd_runtime_ffi_morph_track_key_t;
+
+/* Compiled property/IK introspection. The state offsets refer to the packed
+   array returned by mmd_runtime_clip_copy_property_track_ik_enabled. */
+typedef struct mmd_runtime_ffi_property_track_descriptor {
+    size_t key_count;
+    size_t ik_enabled_count;
+} mmd_runtime_ffi_property_track_descriptor_t;
+
+typedef struct mmd_runtime_ffi_property_track_key {
+    uint32_t frame;
+    size_t   ik_enabled_offset;
+    size_t   ik_enabled_count;
+} mmd_runtime_ffi_property_track_key_t;
+
+/* Raw VMD camera interpolation curve. The first chronological key has NONE;
+   later keys describe the incoming segment from the previous key. */
+typedef struct mmd_runtime_ffi_vmd_curve {
+    uint32_t kind;
+    float    x1;
+    float    y1;
+    float    x2;
+    float    y2;
+} mmd_runtime_ffi_vmd_curve_t;
+
+/* Raw VMD camera keyframe. interpolation retains the original 24-byte
+   payload; the six curves decode position x/y/z, rotation, distance, FOV. */
+typedef struct mmd_runtime_ffi_vmd_camera_keyframe {
+    uint32_t frame;
+    float    distance;
+    float    position_xyz[3];
+    float    rotation_xyz[3];
+    uint8_t  interpolation[24];
+    uint32_t fov;
+    uint8_t  perspective;
+    mmd_runtime_ffi_vmd_curve_t position_x;
+    mmd_runtime_ffi_vmd_curve_t position_y;
+    mmd_runtime_ffi_vmd_curve_t position_z;
+    mmd_runtime_ffi_vmd_curve_t rotation;
+    mmd_runtime_ffi_vmd_curve_t distance_curve;
+    mmd_runtime_ffi_vmd_curve_t fov_curve;
+} mmd_runtime_ffi_vmd_camera_keyframe_t;
+
+typedef struct mmd_runtime_ffi_vmd_light_keyframe {
+    uint32_t frame;
+    float    color[3];
+    float    direction[3];
+} mmd_runtime_ffi_vmd_light_keyframe_t;
+
+typedef struct mmd_runtime_ffi_vmd_self_shadow_keyframe {
+    uint32_t frame;
+    uint8_t  mode;
+    float    distance;
+} mmd_runtime_ffi_vmd_self_shadow_keyframe_t;
 
 typedef struct mmd_runtime_ffi_morph_track {
     uint32_t morph_index;
@@ -593,6 +667,15 @@ mmd_runtime_vmd_camera_track_t* mmd_runtime_vmd_camera_track_create_from_vmd_byt
 size_t mmd_runtime_vmd_camera_track_frame_count(
     const mmd_runtime_vmd_camera_track_t* track);
 
+/* Copies all raw camera keyframes in chronological order. The first key has
+   MMD_RUNTIME_VMD_CURVE_NONE; later curve fields describe the incoming
+   segment. out_written is zero on failure after output storage validation. */
+mmd_runtime_status_t mmd_runtime_vmd_camera_track_copy_keyframes(
+    const mmd_runtime_vmd_camera_track_t*       track,
+    mmd_runtime_ffi_vmd_camera_keyframe_t*      out_keys,
+    size_t                                      out_key_capacity,
+    size_t*                                     out_written);
+
 bool mmd_runtime_vmd_camera_track_sample(
     const mmd_runtime_vmd_camera_track_t* track,
     float                                 frame,
@@ -616,6 +699,12 @@ mmd_runtime_vmd_light_track_t* mmd_runtime_vmd_light_track_create_from_vmd_bytes
 size_t mmd_runtime_vmd_light_track_frame_count(
     const mmd_runtime_vmd_light_track_t* track);
 
+mmd_runtime_status_t mmd_runtime_vmd_light_track_copy_keyframes(
+    const mmd_runtime_vmd_light_track_t*       track,
+    mmd_runtime_ffi_vmd_light_keyframe_t*      out_keys,
+    size_t                                     out_key_capacity,
+    size_t*                                    out_written);
+
 bool mmd_runtime_vmd_light_track_sample(
     const mmd_runtime_vmd_light_track_t* track,
     float                                frame,
@@ -638,6 +727,12 @@ mmd_runtime_vmd_self_shadow_track_t* mmd_runtime_vmd_self_shadow_track_create_fr
 
 size_t mmd_runtime_vmd_self_shadow_track_frame_count(
     const mmd_runtime_vmd_self_shadow_track_t* track);
+
+mmd_runtime_status_t mmd_runtime_vmd_self_shadow_track_copy_keyframes(
+    const mmd_runtime_vmd_self_shadow_track_t*       track,
+    mmd_runtime_ffi_vmd_self_shadow_keyframe_t*      out_keys,
+    size_t                                           out_key_capacity,
+    size_t*                                          out_written);
 
 bool mmd_runtime_vmd_self_shadow_track_sample(
     const mmd_runtime_vmd_self_shadow_track_t* track,
@@ -1561,6 +1656,55 @@ mmd_runtime_status_t mmd_runtime_clip_copy_bone_track_keys(
     mmd_runtime_ffi_bone_track_key_t*      out_keys,
     size_t                                  out_key_capacity,
     size_t*                                out_written);
+
+/* Read-only introspection of compiled/authored local morph tracks. Morph
+   values are chronological and use implicit linear interpolation. */
+size_t mmd_runtime_clip_morph_track_count(
+    const mmd_runtime_clip_t* clip);
+
+mmd_runtime_status_t mmd_runtime_clip_morph_track_descriptor(
+    const mmd_runtime_clip_t*                  clip,
+    size_t                                     track_index,
+    mmd_runtime_ffi_morph_track_descriptor_t*  out_descriptor);
+
+size_t mmd_runtime_clip_morph_track_key_count(
+    const mmd_runtime_clip_t* clip,
+    size_t                  track_index);
+
+mmd_runtime_status_t mmd_runtime_clip_copy_morph_track_keys(
+    const mmd_runtime_clip_t*             clip,
+    size_t                                track_index,
+    mmd_runtime_ffi_morph_track_key_t*    out_keys,
+    size_t                                out_key_capacity,
+    size_t*                               out_written);
+
+/* Read-only introspection of the single compiled/authored property/IK track.
+   This track retains resolved IK enabled bytes. Raw VMD visibility and IK
+   names remain available from mmd_runtime_parse_vmd_json. */
+size_t mmd_runtime_clip_property_track_count(
+    const mmd_runtime_clip_t* clip);
+
+mmd_runtime_status_t mmd_runtime_clip_property_track_descriptor(
+    const mmd_runtime_clip_t*                    clip,
+    mmd_runtime_ffi_property_track_descriptor_t* out_descriptor);
+
+size_t mmd_runtime_clip_property_track_key_count(
+    const mmd_runtime_clip_t* clip);
+
+size_t mmd_runtime_clip_property_track_ik_enabled_count(
+    const mmd_runtime_clip_t* clip);
+
+mmd_runtime_status_t mmd_runtime_clip_copy_property_track_keys(
+    const mmd_runtime_clip_t*                clip,
+    mmd_runtime_ffi_property_track_key_t*    out_keys,
+    size_t                                   out_key_capacity,
+    size_t*                                  out_written);
+
+mmd_runtime_status_t mmd_runtime_clip_copy_property_track_ik_enabled(
+    const mmd_runtime_clip_t* clip,
+    uint8_t*                  out_states,
+    size_t                    out_state_capacity,
+    size_t*                   out_written);
 
 bool mmd_runtime_clip_frame_range(
     const mmd_runtime_clip_t* clip,

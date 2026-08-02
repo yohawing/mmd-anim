@@ -232,6 +232,89 @@ fn reduction_work_stats_are_deterministic_and_separate_from_quality_report() {
 }
 
 #[test]
+fn reverse_prunes_constant_ancestor_but_keeps_long_lever_root_key() {
+    // The root's small nonlinear rotation is below the local rotation
+    // tolerance, but the ten-unit lever arm makes the child's world position
+    // fail. Global refinement therefore propagates a key through the
+    // constant middle bone; reverse pruning must remove only that middle key.
+    let root_mid = Mat4::from_rotation_z(0.0015);
+    let child_offset = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
+    let world = [
+        Mat4::IDENTITY,
+        Mat4::IDENTITY,
+        Mat4::IDENTITY,
+        root_mid,
+        root_mid,
+        root_mid * child_offset,
+        Mat4::IDENTITY,
+        Mat4::IDENTITY,
+        child_offset,
+    ];
+    let input = DensePoseSequenceView::new(&world, &[], 3, 3, 0, 0.0, 1.0).unwrap();
+    let snapshot = SkeletonSnapshot::new(
+        vec![-1, 0, 1],
+        vec![Vec3A::ZERO, Vec3A::ZERO, Vec3A::new(10.0, 0.0, 0.0)],
+        vec![Quat::IDENTITY; 3],
+        0,
+        88,
+    )
+    .unwrap();
+    let tolerances = ReductionTolerances {
+        local_rotation_radians: 0.01,
+        world_position: 0.01,
+        world_rotation_radians: 0.01,
+        ..Default::default()
+    };
+    let reduced = reduce_dense_pose_sequence(
+        input,
+        snapshot.clone(),
+        tolerances,
+        ReductionTarget::LinearSlerp,
+    )
+    .unwrap();
+
+    let stats = reduced.work_stats();
+    assert!(stats.ancestor_key_additions >= 2, "{stats:?}");
+    assert!(stats.ancestor_prune_attempts >= 2, "{stats:?}");
+    assert_eq!(stats.ancestor_pruned_keys, 1, "{stats:?}");
+    assert_eq!(reduced.bone_tracks()[1].keys().len(), 2);
+    assert_eq!(reduced.bone_tracks()[0].keys().len(), 3);
+    assert!(reduced.report().max_world_position_error <= 0.01);
+    let dcc =
+        reduce_dense_pose_sequence(input, snapshot, tolerances, ReductionTarget::DccCubic).unwrap();
+    assert!(dcc.work_stats().ancestor_prune_attempts > 0);
+    assert!(dcc.work_stats().ancestor_pruned_keys > 0);
+    assert!(dcc.report().max_world_position_error <= tolerances.world_position);
+    assert!(dcc.report().max_world_rotation_error_radians <= tolerances.world_rotation_radians);
+}
+
+#[test]
+fn reverse_prune_preserves_endpoint_keys() {
+    let frame_count = 7;
+    let world = dense_world(frame_count);
+    let morphs = vec![0.0; frame_count];
+    let input = DensePoseSequenceView::new(&world, &morphs, frame_count, 2, 1, 0.0, 1.0).unwrap();
+    let reduced = reduce_dense_pose_sequence(
+        input,
+        snapshot(),
+        ReductionTolerances {
+            local_position: 0.01,
+            local_rotation_radians: 0.01,
+            world_position: 0.01,
+            world_rotation_radians: 0.01,
+            ..Default::default()
+        },
+        ReductionTarget::LinearSlerp,
+    )
+    .unwrap();
+    for track in reduced.bone_tracks() {
+        let keys = track.keys();
+        assert_eq!(keys.first().unwrap().sample_index, 0);
+        assert_eq!(keys.last().unwrap().sample_index, frame_count - 1);
+    }
+}
+
+#[test]
 fn incremental_validation_matches_full_scan_on_branching_sequence() {
     let frame_count = 97;
     let parents = vec![-1, 0, 0, 1, 1];

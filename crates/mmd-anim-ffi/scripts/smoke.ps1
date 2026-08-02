@@ -86,6 +86,8 @@ $expectedExports = @(
     "mmd_runtime_vmd_camera_track_copy_keyframes"
     "mmd_runtime_vmd_light_track_copy_keyframes"
     "mmd_runtime_vmd_self_shadow_track_copy_keyframes"
+    "mmd_runtime_vmd_context_bone_keyframe_count_for_model"
+    "mmd_runtime_vmd_context_copy_bone_keyframes_for_model"
     "mmd_runtime_clip_create"
     "mmd_runtime_clip_create_from_vmd_bytes_for_model"
     "mmd_runtime_clip_bone_track_count"

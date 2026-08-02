@@ -37,7 +37,8 @@ extern "C" {
    authored local bone-track introspection is available.
    bit 9 (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT) is set when the opt-in
    single-parse VMD context and its raw scene/property readback API are
-   available.
+   available; bit 10 (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK)
+   is set when raw model-resolved VMD bone readback is available.
    Check the relevant bit before calling each optional surface; when a
    surface's bit is unset, its status-returning functions return
    MMD_RUNTIME_STATUS_UNSUPPORTED (and optional count functions return zero).
@@ -133,12 +134,14 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION (1u << 7)
 #define MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION (1u << 8)
 #define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT (1u << 9)
+#define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK (1u << 10)
 #define MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_NONE 0u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER 1u
 #define MMD_RUNTIME_VMD_CURVE_NONE 0u
@@ -393,6 +396,19 @@ typedef struct mmd_runtime_ffi_vmd_camera_keyframe {
     mmd_runtime_ffi_vmd_curve_t distance_curve;
     mmd_runtime_ffi_vmd_curve_t fov_curve;
 } mmd_runtime_ffi_vmd_camera_keyframe_t;
+
+/* Raw VMD bone keyframe resolved through the PMX model name map. The
+   position, rotation, and interpolation payload are copied without
+   clip-construction transforms. Output order is (bone_index, frame), with
+   stable VMD input order for duplicate-frame keys. Unresolved names are
+   skipped like model-aware clip construction and counted by out_skipped. */
+typedef struct mmd_runtime_ffi_vmd_bone_keyframe {
+    uint32_t bone_index;
+    uint32_t frame;
+    float    position_xyz[3];
+    float    rotation_xyzw[4];
+    uint8_t  interpolation[64];
+} mmd_runtime_ffi_vmd_bone_keyframe_t;
 
 typedef struct mmd_runtime_ffi_vmd_light_keyframe {
     uint32_t frame;
@@ -738,6 +754,22 @@ mmd_runtime_status_t mmd_runtime_vmd_context_copy_property_ik_entries(
     mmd_runtime_ffi_vmd_property_ik_entry_t*      out_entries,
     size_t                                        out_entry_capacity,
     size_t*                                       out_written);
+
+/* Raw model-resolved bone keyframes from the single-parse context. The count
+   excludes unresolved names. out_skipped reports the unresolved key count;
+   out_written and out_skipped are zero on failure after storage validation,
+   and short buffers are never partially written. */
+size_t mmd_runtime_vmd_context_bone_keyframe_count_for_model(
+    const mmd_runtime_model_t*       model,
+    const mmd_runtime_vmd_context_t* context);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_bone_keyframes_for_model(
+    const mmd_runtime_model_t*             model,
+    const mmd_runtime_vmd_context_t*       context,
+    mmd_runtime_ffi_vmd_bone_keyframe_t*   out_keys,
+    size_t                                 out_key_capacity,
+    size_t*                                out_written,
+    size_t*                                out_skipped);
 
 mmd_runtime_vmd_camera_track_t* mmd_runtime_vmd_camera_track_create_from_vmd_bytes(
     const uint8_t* data,

@@ -40,12 +40,14 @@ pub const MMD_RUNTIME_FEATURE_CLIP_MORPH_TRACK_INTROSPECTION: u32 = 1 << 6;
 pub const MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION: u32 = 1 << 7;
 pub const MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 = 1 << 8;
 pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT: u32 = 1 << 9;
+pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK: u32 = 1 << 10;
 pub const MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_NONE: u32 = 0;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER: u32 = 1;
 pub const MMD_RUNTIME_VMD_CURVE_NONE: u32 = 0;
@@ -66,6 +68,8 @@ const FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION: u32 =
 const FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 =
     MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION;
 const FEATURE_VMD_SHARED_CONTEXT: u32 = MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT;
+const FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK: u32 =
+    MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -399,6 +403,36 @@ pub struct MmdRuntimeFfiVmdCameraKeyframe {
     pub rotation: MmdRuntimeFfiVmdCurve,
     pub distance_curve: MmdRuntimeFfiVmdCurve,
     pub fov_curve: MmdRuntimeFfiVmdCurve,
+}
+
+/// One raw VMD bone keyframe resolved through a PMX model's bone name map.
+///
+/// The position, rotation, and 64-byte interpolation block are copied from
+/// the shared context without clip-construction transformations. Keys are
+/// returned in stable `(bone_index, frame)` order; equal-frame keys retain VMD
+/// input order. Unresolved VMD bone names use the same skip semantics as model
+/// aware clip construction and are reported through `out_skipped` on the copy
+/// endpoint.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MmdRuntimeFfiVmdBoneKeyframe {
+    pub bone_index: u32,
+    pub frame: u32,
+    pub position_xyz: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+    pub interpolation: [u8; 64],
+}
+
+impl Default for MmdRuntimeFfiVmdBoneKeyframe {
+    fn default() -> Self {
+        Self {
+            bone_index: 0,
+            frame: 0,
+            position_xyz: [0.0; 3],
+            rotation_xyzw: [0.0; 4],
+            interpolation: [0; 64],
+        }
+    }
 }
 
 /// One raw VMD light keyframe in chronological order. Light values have no
@@ -1050,6 +1084,7 @@ fn runtime_feature_flags() -> u32 {
         | FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION
         | FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION
         | FEATURE_VMD_SHARED_CONTEXT
+        | FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE
         } else {
@@ -2093,6 +2128,74 @@ fn sorted_context_camera_frames(
     frames
 }
 
+fn context_bone_keyframe_counts(
+    model: &MmdRuntimeModel,
+    context: &MmdRuntimeVmdContext,
+) -> Result<(usize, usize), &'static str> {
+    let mut resolved = 0usize;
+    let mut skipped = 0usize;
+    for keyframe in &context.context.import_result().bone_keyframes {
+        let count = if model
+            .bone_name_to_index
+            .contains_key(&keyframe.bone_name_normalized)
+        {
+            &mut resolved
+        } else {
+            &mut skipped
+        };
+        *count = count
+            .checked_add(1)
+            .ok_or("shared VMD bone keyframe count overflow")?;
+    }
+    Ok((resolved, skipped))
+}
+
+fn stage_context_bone_keyframes(
+    model: &MmdRuntimeModel,
+    context: &MmdRuntimeVmdContext,
+    keys: &mut Vec<MmdRuntimeFfiVmdBoneKeyframe>,
+) -> Result<(), (MmdRuntimeStatus, &'static str)> {
+    let raw_keyframes = &context.context.import_result().bone_keyframes;
+    let mut resolved = Vec::new();
+    resolved.try_reserve_exact(keys.capacity()).map_err(|_| {
+        (
+            MmdRuntimeStatus::Error,
+            "failed to allocate the shared VMD bone key staging index buffer",
+        )
+    })?;
+    for (source_index, keyframe) in raw_keyframes.iter().enumerate() {
+        let Some(&bone_index) = model.bone_name_to_index.get(&keyframe.bone_name_normalized) else {
+            continue;
+        };
+        resolved.push((bone_index.0, source_index));
+    }
+    // Match model-aware clip construction: tracks are grouped by ascending
+    // model bone index, and each track is chronologically ordered. Stable
+    // sorting retains VMD input order for duplicate-frame keys.
+    resolved.sort_by_key(|(bone_index, source_index)| {
+        (*bone_index, raw_keyframes[*source_index].frame)
+    });
+    for (bone_index, source_index) in resolved {
+        let keyframe = &raw_keyframes[source_index];
+        let position_xyz = keyframe.position.to_array();
+        let rotation_xyzw = keyframe.rotation.to_array();
+        if !all_finite(&position_xyz) || !all_finite(&rotation_xyzw) {
+            return Err((
+                MmdRuntimeStatus::InvalidInput,
+                "VMD bone keyframe contains a non-finite value",
+            ));
+        }
+        keys.push(MmdRuntimeFfiVmdBoneKeyframe {
+            bone_index,
+            frame: keyframe.frame,
+            position_xyz,
+            rotation_xyzw,
+            interpolation: keyframe.interpolation,
+        });
+    }
+    Ok(())
+}
+
 fn sorted_context_light_frames(
     context: &MmdRuntimeVmdContext,
 ) -> Vec<&mmd_anim_format::vmd::VmdParsedLightFrame> {
@@ -2138,6 +2241,119 @@ fn context_property_entry_count(context: &MmdRuntimeVmdContext) -> Option<usize>
         .try_fold(0usize, |total, frame| {
             total.checked_add(frame.ik_states.len())
         })
+}
+
+/// Returns the number of resolved raw VMD bone keys for a PMX model and
+/// shared VMD context. Unresolved VMD bone names are excluded from this count;
+/// the copy endpoint reports their count explicitly through `out_skipped`.
+/// Keys are ordered by model bone index and then frame, with stable VMD input
+/// order for duplicate-frame keys.
+///
+/// # Safety
+///
+/// `model` and `context` must be null or live handles returned by this
+/// library. The model must have name maps populated by PMX import.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_bone_keyframe_count_for_model(
+    model: *const MmdRuntimeModel,
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK == 0 {
+            return 0;
+        }
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return 0;
+        };
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        match context_bone_keyframe_counts(model, context) {
+            Ok((resolved, _)) => resolved,
+            Err(message) => {
+                set_last_error(message);
+                0
+            }
+        }
+    })
+}
+
+/// Copies raw VMD bone keys from a shared context after resolving names
+/// through the imported PMX model map. The position, rotation, and original
+/// 64-byte interpolation payload are copied without clip-construction
+/// transforms. The output is ordered by `(bone_index, frame)`; equal-frame
+/// keys retain VMD input order. Unresolved names follow model-aware clip
+/// construction's skip semantics and are reported in `out_skipped`.
+///
+/// `out_written` and `out_skipped` are zero on every failure after output
+/// storage validation. Short buffers never receive partial key writes.
+///
+/// # Safety
+///
+/// `model` and `context` must be null or live handles returned by this
+/// library. `out_written` and `out_skipped` must each point to one writable,
+/// naturally aligned `size_t`. When resolved keys exist, `out_keys` must be
+/// writable and naturally aligned for `out_key_capacity` keys. Outputs must
+/// not overlap either handle or one another.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_bone_keyframes_for_model(
+    model: *const MmdRuntimeModel,
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdBoneKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+    out_skipped: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) = validate_model_context_bone_key_copy_storage(
+            model,
+            context,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            out_skipped,
+        ) {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe {
+            ptr::write(out_written, 0);
+            ptr::write(out_skipped, 0);
+        }
+
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK == 0 {
+            return status_failure(
+                MmdRuntimeStatus::Unsupported,
+                "shared VMD bone readback is unsupported",
+            );
+        }
+        let Some(model_ref) = (unsafe { model.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(context_ref) = (unsafe { context.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let (required, skipped) = match context_bone_keyframe_counts(model_ref, context_ref) {
+            Ok(counts) => counts,
+            Err(message) => return status_failure(MmdRuntimeStatus::Error, message),
+        };
+
+        let status = copy_vmd_keyframes(
+            model,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            |_| Ok(required),
+            |_| Ok(()),
+            "failed to allocate the shared VMD bone key staging buffer",
+            |_, keys| stage_context_bone_keyframes(model_ref, context_ref, keys),
+        );
+        if status == MmdRuntimeStatus::Ok {
+            unsafe {
+                ptr::write(out_skipped, skipped);
+            }
+        }
+        status
+    })
 }
 
 /// Returns the number of camera keys retained by a shared VMD context.
@@ -8895,6 +9111,56 @@ fn validate_key_copy_storage<Owner, Key>(
     }
     if owner_range.is_some_and(|range| pointer_ranges_overlap(output_range, range)) {
         return Err("key buffer must not alias the track handle");
+    }
+    Ok(())
+}
+
+fn validate_model_context_bone_key_copy_storage(
+    model: *const MmdRuntimeModel,
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdBoneKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+    out_skipped: *mut usize,
+) -> Result<(), &'static str> {
+    validate_key_copy_storage(model, out_keys, out_key_capacity, out_written)?;
+
+    let model_range = if model.is_null() {
+        None
+    } else {
+        Some(checked_pointer_range(model, 1).ok_or("invalid model handle")?)
+    };
+    let context_range = if context.is_null() {
+        None
+    } else {
+        Some(checked_pointer_range(context, 1).ok_or("invalid VMD context handle")?)
+    };
+    let skipped_range =
+        checked_pointer_range(out_skipped, 1).ok_or("invalid out_skipped storage")?;
+    let written_range =
+        checked_pointer_range(out_written, 1).ok_or("invalid out_written storage")?;
+    let output_range =
+        checked_pointer_range(out_keys, out_key_capacity).ok_or("invalid key buffer")?;
+
+    if pointer_ranges_overlap(skipped_range, written_range) {
+        return Err("out_skipped must not alias out_written");
+    }
+    if pointer_ranges_overlap(output_range, skipped_range) {
+        return Err("key buffer must not alias out_skipped");
+    }
+    if model_range.is_some_and(|range| {
+        pointer_ranges_overlap(range, skipped_range)
+            || pointer_ranges_overlap(range, written_range)
+            || pointer_ranges_overlap(range, output_range)
+    }) {
+        return Err("outputs must not alias the model handle");
+    }
+    if context_range.is_some_and(|range| {
+        pointer_ranges_overlap(range, skipped_range)
+            || pointer_ranges_overlap(range, written_range)
+            || pointer_ranges_overlap(range, output_range)
+    }) {
+        return Err("outputs must not alias the VMD context handle");
     }
     Ok(())
 }

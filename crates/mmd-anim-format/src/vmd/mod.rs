@@ -2490,6 +2490,93 @@ mod tests {
     }
 
     #[test]
+    fn shared_context_preserves_raw_bone_and_morph_bytes_order_and_interpolation() {
+        let mut buf = build_vmd_header_bytes();
+        buf.extend_from_slice(&2u32.to_le_bytes()); // bones
+
+        let mut first_bone_name = [0u8; 15];
+        first_bone_name[..3].copy_from_slice(&[0x82, 0xa0, b'1']);
+        first_bone_name[4] = 0xa5; // bytes after NUL stay outside the raw name
+        buf.extend_from_slice(&first_bone_name);
+        buf.extend_from_slice(&11u32.to_le_bytes());
+        buf.extend_from_slice(&1.0f32.to_le_bytes());
+        buf.extend_from_slice(&2.0f32.to_le_bytes());
+        buf.extend_from_slice(&3.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.1f32.to_le_bytes());
+        buf.extend_from_slice(&0.2f32.to_le_bytes());
+        buf.extend_from_slice(&1.0f32.to_le_bytes());
+        let first_interpolation = (0u8..64).collect::<Vec<_>>();
+        buf.extend_from_slice(&first_interpolation);
+
+        let mut second_bone_name = [0u8; 15];
+        second_bone_name[..4].copy_from_slice(b"bone");
+        buf.extend_from_slice(&second_bone_name);
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&4.0f32.to_le_bytes());
+        buf.extend_from_slice(&5.0f32.to_le_bytes());
+        buf.extend_from_slice(&6.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.3f32.to_le_bytes());
+        buf.extend_from_slice(&0.4f32.to_le_bytes());
+        buf.extend_from_slice(&0.5f32.to_le_bytes());
+        buf.extend_from_slice(&0.6f32.to_le_bytes());
+        let second_interpolation = (64u8..=127).collect::<Vec<_>>();
+        buf.extend_from_slice(&second_interpolation);
+
+        buf.extend_from_slice(&2u32.to_le_bytes()); // morphs
+        let mut first_morph_name = [0u8; 15];
+        first_morph_name[..2].copy_from_slice(&[0x83, 0x65]);
+        buf.extend_from_slice(&first_morph_name);
+        buf.extend_from_slice(&20u32.to_le_bytes());
+        buf.extend_from_slice(&0.25f32.to_le_bytes());
+
+        let mut second_morph_name = [0u8; 15];
+        second_morph_name[..5].copy_from_slice(b"morph");
+        buf.extend_from_slice(&second_morph_name);
+        buf.extend_from_slice(&7u32.to_le_bytes());
+        buf.extend_from_slice(&0.75f32.to_le_bytes());
+
+        // Empty camera, light, self-shadow, and property sections.
+        buf.extend_from_slice(&[0u8; 16]);
+
+        let context = parse_vmd_shared_context(&buf).unwrap();
+        let raw = context.import_result();
+        assert_eq!(raw.bone_keyframes.len(), 2);
+        assert_eq!(raw.morph_keyframes.len(), 2);
+        match &raw.bone_keyframes[0].bone_mode {
+            VmdBoneImportMode::ByName(name) => {
+                assert_eq!(name, &vec![0x82, 0xa0, b'1']);
+            }
+            VmdBoneImportMode::ByIndex(_) => panic!("raw VMD key must retain its name"),
+        }
+        assert_eq!(raw.bone_keyframes[0].frame, 11);
+        assert_eq!(
+            raw.bone_keyframes[0].interpolation,
+            [
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43,
+                44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+            ]
+        );
+        match &raw.bone_keyframes[1].bone_mode {
+            VmdBoneImportMode::ByName(name) => assert_eq!(name, &b"bone".to_vec()),
+            VmdBoneImportMode::ByIndex(_) => panic!("raw VMD key must retain its name"),
+        }
+        assert_eq!(raw.bone_keyframes[1].frame, 3);
+        assert_eq!(
+            raw.bone_keyframes[1].interpolation,
+            [
+                64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
+                85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+                104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+                120, 121, 122, 123, 124, 125, 126, 127,
+            ]
+        );
+        assert_eq!(raw.morph_keyframes[0], (vec![0x83, 0x65], 20, 0.25f32));
+        assert_eq!(raw.morph_keyframes[1], (b"morph".to_vec(), 7, 0.75f32));
+    }
+
+    #[test]
     fn shared_context_summary_reports_target_and_channel_counts() {
         let animation = VmdParsedAnimation {
             kind: "vmd",

@@ -40,7 +40,9 @@ extern "C" {
    are available; bit 10 (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK)
    is set when raw model-resolved VMD bone readback is available; bit 11
    (MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES) is set when the non-materializing
-   byte-summary endpoint is available.
+   byte-summary endpoint is available; bit 12
+   (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK) is set when the
+   model-less raw bone/morph key readback endpoints are available.
    Check the relevant bit before calling each optional surface; when a
    surface's bit is unset, its status-returning functions return
    MMD_RUNTIME_STATUS_UNSUPPORTED (and optional count functions return zero).
@@ -138,6 +140,7 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT (1u << 9)
 #define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK (1u << 10)
 #define MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES (1u << 11)
+#define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK (1u << 12)
 #define MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
@@ -146,6 +149,7 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_SHARED_CONTEXT_RAW_READBACK_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_VMD_SUMMARY_BYTES_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_NONE 0u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER 1u
@@ -414,6 +418,26 @@ typedef struct mmd_runtime_ffi_vmd_bone_keyframe {
     float    rotation_xyzw[4];
     uint8_t  interpolation[64];
 } mmd_runtime_ffi_vmd_bone_keyframe_t;
+
+/* Raw model-less VMD bone keyframe in source order. bone_name_bytes is the
+   trimmed CP932 source name copied into a 15-byte NUL-padded field. Position,
+   rotation, and interpolation are copied without model resolution or clip
+   construction transforms. */
+typedef struct mmd_runtime_ffi_vmd_raw_bone_keyframe {
+    uint8_t  bone_name_bytes[15];
+    uint32_t frame;
+    float    position_xyz[3];
+    float    rotation_xyzw[4];
+    uint8_t  interpolation[64];
+} mmd_runtime_ffi_vmd_raw_bone_keyframe_t;
+
+/* Raw model-less VMD morph keyframe in source order. morph_name_bytes is the
+   trimmed CP932 source name copied into a 15-byte NUL-padded field. */
+typedef struct mmd_runtime_ffi_vmd_raw_morph_keyframe {
+    uint8_t  morph_name_bytes[15];
+    uint32_t frame;
+    float    weight;
+} mmd_runtime_ffi_vmd_raw_morph_keyframe_t;
 
 typedef struct mmd_runtime_ffi_vmd_light_keyframe {
     uint32_t frame;
@@ -823,6 +847,27 @@ mmd_runtime_status_t mmd_runtime_vmd_context_copy_bone_keyframes_for_model(
     size_t                                 out_key_capacity,
     size_t*                                out_written,
     size_t*                                out_skipped);
+
+/* Raw model-less bone and morph keyframes from the single-parse context.
+   Names are fixed-width CP932 bytes, keys remain in source order, and
+   out_written is zero on failure. Short buffers never receive partial writes. */
+size_t mmd_runtime_vmd_context_bone_keyframe_count(
+    const mmd_runtime_vmd_context_t* context);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_bone_keyframes(
+    const mmd_runtime_vmd_context_t*             context,
+    mmd_runtime_ffi_vmd_raw_bone_keyframe_t*    out_keys,
+    size_t                                      out_key_capacity,
+    size_t*                                     out_written);
+
+size_t mmd_runtime_vmd_context_morph_keyframe_count(
+    const mmd_runtime_vmd_context_t* context);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_morph_keyframes(
+    const mmd_runtime_vmd_context_t*             context,
+    mmd_runtime_ffi_vmd_raw_morph_keyframe_t*   out_keys,
+    size_t                                      out_key_capacity,
+    size_t*                                     out_written);
 
 mmd_runtime_vmd_camera_track_t* mmd_runtime_vmd_camera_track_create_from_vmd_bytes(
     const uint8_t* data,

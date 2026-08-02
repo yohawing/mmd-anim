@@ -42,6 +42,7 @@ pub const MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 = 1 << 8;
 pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT: u32 = 1 << 9;
 pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK: u32 = 1 << 10;
 pub const MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES: u32 = 1 << 11;
+pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK: u32 = 1 << 12;
 pub const MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
@@ -50,6 +51,7 @@ pub const MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_RAW_READBACK_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_SUMMARY_BYTES_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_NONE: u32 = 0;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER: u32 = 1;
@@ -74,6 +76,8 @@ const FEATURE_VMD_SHARED_CONTEXT: u32 = MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT;
 const FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK: u32 =
     MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK;
 const FEATURE_VMD_SUMMARY_BYTES: u32 = MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES;
+const FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK: u32 =
+    MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -481,6 +485,46 @@ pub struct MmdRuntimeFfiVmdPropertyIkEntry {
     pub name_bytes: [u8; 20],
     pub enabled: u8,
     pub reserved: [u8; 3],
+}
+
+/// One raw model-less VMD bone keyframe in source order.
+///
+/// `bone_name_bytes` is the trimmed CP932 payload from the fixed-width VMD
+/// name field, copied into a 15-byte NUL-padded ABI field. Position,
+/// rotation, and interpolation are copied without model resolution or clip
+/// construction transforms.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MmdRuntimeFfiVmdRawBoneKeyframe {
+    pub bone_name_bytes: [u8; 15],
+    pub frame: u32,
+    pub position_xyz: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+    pub interpolation: [u8; 64],
+}
+
+impl Default for MmdRuntimeFfiVmdRawBoneKeyframe {
+    fn default() -> Self {
+        Self {
+            bone_name_bytes: [0; 15],
+            frame: 0,
+            position_xyz: [0.0; 3],
+            rotation_xyzw: [0.0; 4],
+            interpolation: [0; 64],
+        }
+    }
+}
+
+/// One raw model-less VMD morph keyframe in source order.
+///
+/// `morph_name_bytes` is the trimmed CP932 payload from the fixed-width VMD
+/// name field, copied into a 15-byte NUL-padded ABI field.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiVmdRawMorphKeyframe {
+    pub morph_name_bytes: [u8; 15],
+    pub frame: u32,
+    pub weight: f32,
 }
 
 /// Counts for one source VMD channel in the shared-context summary.
@@ -1124,6 +1168,7 @@ fn runtime_feature_flags() -> u32 {
         | FEATURE_VMD_SHARED_CONTEXT
         | FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK
         | FEATURE_VMD_SUMMARY_BYTES
+        | FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE
         } else {
@@ -2338,6 +2383,166 @@ fn stage_context_bone_keyframes(
         });
     }
     Ok(())
+}
+
+fn stage_context_raw_bone_keyframes(
+    context: &MmdRuntimeVmdContext,
+    keys: &mut Vec<MmdRuntimeFfiVmdRawBoneKeyframe>,
+) -> Result<(), (MmdRuntimeStatus, &'static str)> {
+    for keyframe in &context.context.import_result().bone_keyframes {
+        let mmd_anim_format::vmd::VmdBoneImportMode::ByName(name_bytes) = &keyframe.bone_mode
+        else {
+            return Err((
+                MmdRuntimeStatus::Error,
+                "shared VMD raw bone keyframe has no source name",
+            ));
+        };
+        if name_bytes.len() > 15 {
+            return Err((
+                MmdRuntimeStatus::Error,
+                "shared VMD raw bone name exceeds the ABI field width",
+            ));
+        }
+        let position_xyz = keyframe.position.to_array();
+        let rotation_xyzw = keyframe.rotation.to_array();
+        if !all_finite(&position_xyz) || !all_finite(&rotation_xyzw) {
+            return Err((
+                MmdRuntimeStatus::InvalidInput,
+                "VMD raw bone keyframe contains a non-finite value",
+            ));
+        }
+        let mut name = [0u8; 15];
+        name[..name_bytes.len()].copy_from_slice(name_bytes);
+        keys.push(MmdRuntimeFfiVmdRawBoneKeyframe {
+            bone_name_bytes: name,
+            frame: keyframe.frame,
+            position_xyz,
+            rotation_xyzw,
+            interpolation: keyframe.interpolation,
+        });
+    }
+    Ok(())
+}
+
+fn stage_context_raw_morph_keyframes(
+    context: &MmdRuntimeVmdContext,
+    keys: &mut Vec<MmdRuntimeFfiVmdRawMorphKeyframe>,
+) -> Result<(), (MmdRuntimeStatus, &'static str)> {
+    for (name_bytes, frame, weight) in &context.context.import_result().morph_keyframes {
+        if name_bytes.len() > 15 {
+            return Err((
+                MmdRuntimeStatus::Error,
+                "shared VMD raw morph name exceeds the ABI field width",
+            ));
+        }
+        if !weight.is_finite() {
+            return Err((
+                MmdRuntimeStatus::InvalidInput,
+                "VMD raw morph keyframe contains a non-finite value",
+            ));
+        }
+        let mut name = [0u8; 15];
+        name[..name_bytes.len()].copy_from_slice(name_bytes);
+        keys.push(MmdRuntimeFfiVmdRawMorphKeyframe {
+            morph_name_bytes: name,
+            frame: *frame,
+            weight: *weight,
+        });
+    }
+    Ok(())
+}
+
+/// Returns the number of raw model-less VMD bone keys retained by a shared
+/// context. Keys remain in source order and retain their CP932 source names.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_bone_keyframe_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK == 0 {
+            return 0;
+        }
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.import_result().bone_keyframes.len()
+    })
+}
+
+/// Copies raw model-less VMD bone keys from a shared context in source order.
+/// The source name bytes and 64-byte interpolation payload are copied without
+/// decoding, model resolution, or clip-construction transforms.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_bone_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdRawBoneKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK == 0 {
+            return status_failure(
+                MmdRuntimeStatus::Unsupported,
+                "shared VMD raw track readback is unsupported",
+            );
+        }
+        copy_vmd_keyframes(
+            context,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            |context| Ok(context.context.import_result().bone_keyframes.len()),
+            |_| Ok(()),
+            "failed to allocate the shared VMD raw bone key staging buffer",
+            stage_context_raw_bone_keyframes,
+        )
+    })
+}
+
+/// Returns the number of raw model-less VMD morph keys retained by a shared
+/// context. Keys remain in source order and retain their CP932 source names.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_morph_keyframe_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK == 0 {
+            return 0;
+        }
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.import_result().morph_keyframes.len()
+    })
+}
+
+/// Copies raw model-less VMD morph keys from a shared context in source order.
+/// The source name bytes are copied without decoding or name resolution.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_morph_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdRawMorphKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK == 0 {
+            return status_failure(
+                MmdRuntimeStatus::Unsupported,
+                "shared VMD raw track readback is unsupported",
+            );
+        }
+        copy_vmd_keyframes(
+            context,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            |context| Ok(context.context.import_result().morph_keyframes.len()),
+            |_| Ok(()),
+            "failed to allocate the shared VMD raw morph key staging buffer",
+            stage_context_raw_morph_keyframes,
+        )
+    })
 }
 
 fn sorted_context_light_frames(

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.0 - 2026-08-03
+
+Expanded raw VMD diagnostics and versioned native-host ABI contracts.
+
+### Added
+
+- Added raw model-less VMD bone and morph keyframe readback, model-resolved
+  bone keyframe readback, and source-order preservation for diagnostic hosts.
+- Added an opt-in shared VMD context that parses input once and exposes a
+  fixed summary, raw camera/light/self-shadow/property/IK channels, raw VMD
+  byte fields, and model-aware clip construction.
+- Added versioned feature flags, ABI shape checks, header symbol coverage, and
+  native smoke coverage for the expanded VMD context contract.
+- Added fail-closed CLI diagnostics tests for malformed VMD input while
+  retaining compatibility-tolerated optional tails.
+
+### Changed
+
+- Extended native FFI introspection across authored animation channels while
+  keeping caller-owned buffers, stable source ordering, and explicit optional
+  capability checks.
+- Reused the shared VMD parser and summary scanner so summary-only and
+  keyframe readback paths validate the same input contract.
+
+### Known limitations
+
+- The C ABI, WASM wrapper, PMM document conversion, and Python binding remain
+  experimental and may change before 1.0.
+- Raw VMD readback is diagnostic/source data; it does not replace model-aware
+  runtime evaluation or expose solved append/IK world poses.
+
 ## 0.3.3 - 2026-07-29
 
 Model-aware VMD registration parity, PMM document-track evaluation, and

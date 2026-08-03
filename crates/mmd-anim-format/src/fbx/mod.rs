@@ -1,7 +1,7 @@
 #![cfg(feature = "fbx")]
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     io::{Cursor, Seek, Write},
     sync::Arc,
 };
@@ -13,9 +13,9 @@ use fbxcel::{
 use glam::Mat4;
 use mmd_anim_runtime::{
     AnimationClip, BoneIndex, DensePoseSequenceView, ModelArena, MorphIndex, PoseReductionError,
-    PoseReductionReport, ReducedBoneKey, ReducedMorphKey, ReducedPoseSequence, ReductionTarget,
-    ReductionTimings, ReductionTolerances, ReductionWorkStats, RuntimeInstance, SkeletonSnapshot,
-    reduce_dense_pose_sequence,
+    PoseReductionReport, ReducedBoneKey, ReducedBoneTrack, ReducedMorphKey, ReducedPoseSequence,
+    ReductionTarget, ReductionTimings, ReductionTolerances, ReductionWorkStats, RuntimeInstance,
+    SkeletonSnapshot, reduce_dense_pose_sequence,
 };
 
 use crate::{
@@ -54,6 +54,12 @@ const ANIM_CURVE_MORPH_BASE: i64 = 110_000;
 const FBX_TIME_ONE_SECOND: i64 = 46_186_158_000;
 const FBX_FRAME_DURATION: i64 = FBX_TIME_ONE_SECOND / 30;
 const STATIC_BONE_EPSILON: f32 = 1.0e-5;
+const DCC_TRANSLATION_EPSILON: f32 = 1.0e-5;
+const DCC_ROTATION_EPSILON_DEGREES: f32 = 1.0e-5;
+const DCC_LOCAL_POSITION_ADAPTER_EPSILON: f32 = 2.0e-5;
+const DCC_LOCAL_ROTATION_ADAPTER_EPSILON_RADIANS: f32 = 5.0e-6;
+const DCC_WORLD_POSITION_EPSILON: f32 = 1.0e-4;
+const DCC_WORLD_ROTATION_EPSILON_RADIANS: f32 = 5.0e-6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FbxBoneNamePolicy {
@@ -136,6 +142,8 @@ pub enum FbxExportError {
     ReducedPoseBinding,
     #[error("reduced pose frame {frame} cannot be represented as FBX time")]
     ReducedPoseTime { frame: f32 },
+    #[error("DCC channel plan cannot reproduce the reduced pose within adapter tolerances")]
+    DccChannelPlanValidation,
     #[error("frames per second must be finite and greater than zero")]
     InvalidFramesPerSecond,
     #[error("Unity curve {curve_index} key {key_index} has non-finite {field}")]
@@ -433,59 +441,29 @@ pub fn reduced_pose_to_unity_animation_clip_with_fps(
         bindings.bone_paths.len(),
         bindings.morph_bindings.len(),
     )?;
+    let channel_plans = build_dcc_channel_plans(
+        reduced,
+        &FbxExportOptions {
+            flip_z,
+            ..FbxExportOptions::default()
+        },
+    )?;
     let mut curves = Vec::new();
-    let position_sign = [1.0, 1.0, if flip_z { -1.0 } else { 1.0 }];
-    let rotation_sign = [
-        if flip_z { -1.0 } else { 1.0 },
-        if flip_z { -1.0 } else { 1.0 },
-        1.0,
-    ];
-    for (bone, track) in reduced.bone_tracks().iter().enumerate() {
-        for (axis, sign) in position_sign.iter().copied().enumerate() {
-            let values = track
-                .keys()
-                .iter()
-                .map(|key| key.translation.to_array()[axis] * sign)
-                .collect::<Vec<_>>();
-            let tangents =
-                bone_segment_tangents(track.keys(), axis, false, sign, frames_per_second);
+    for (bone, plan) in channel_plans.iter().enumerate() {
+        for (axis, channel) in plan.translation_channels.iter().enumerate() {
+            let Some(channel) = channel else { continue };
             curves.push(UnityAnimationCurveDto {
                 path: bindings.bone_paths[bone].clone(),
                 property: format!("localPosition.{}", axis_name(axis)),
-                keys: unity_keys(reduced, track.keys(), &values, &tangents, frames_per_second)?,
+                keys: unity_channel_keys(reduced, channel, frames_per_second)?,
             });
         }
-        let mut previous = None;
-        let euler_values = track
-            .keys()
-            .iter()
-            .map(|key| {
-                let q = key.rotation;
-                let converted = convert_quat_to_fbx(
-                    [q.x as f64, q.y as f64, q.z as f64, q.w as f64],
-                    &FbxExportOptions {
-                        flip_z,
-                        ..FbxExportOptions::default()
-                    },
-                );
-                let euler = quat_to_euler_xyz(converted);
-                let filtered = previous
-                    .map(|value| euler_filter(euler, value))
-                    .unwrap_or(euler);
-                previous = Some(filtered);
-                filtered
-            })
-            .collect::<Vec<_>>();
-        for (axis, sign) in rotation_sign.iter().copied().enumerate() {
-            let values = euler_values
-                .iter()
-                .map(|value| value[axis] as f32)
-                .collect::<Vec<_>>();
-            let tangents = bone_segment_tangents(track.keys(), axis, true, sign, frames_per_second);
+        for (axis, channel) in plan.rotation_channels.iter().enumerate() {
+            let Some(channel) = channel else { continue };
             curves.push(UnityAnimationCurveDto {
                 path: bindings.bone_paths[bone].clone(),
                 property: format!("localEulerAnglesRaw.{}", axis_name(axis)),
-                keys: unity_keys(reduced, track.keys(), &values, &tangents, frames_per_second)?,
+                keys: unity_channel_keys(reduced, channel, frames_per_second)?,
             });
         }
     }
@@ -793,11 +771,674 @@ struct FbxAnimationData {
 
 struct FbxAnimationTrack {
     bone_index: usize,
+    optional_channels: bool,
+    rotation_defaults: [f32; 3],
+    translation_defaults: [f32; 3],
     frame_times: Vec<i64>,
     rotation_values: [Vec<f32>; 3],
     translation_values: [Vec<f32>; 3],
     rotation_attributes: [Option<FbxCurveAttributes>; 3],
     translation_attributes: [Option<FbxCurveAttributes>; 3],
+    rotation_channels: [Option<FbxAnimationChannel>; 3],
+    translation_channels: [Option<FbxAnimationChannel>; 3],
+}
+
+#[derive(Clone)]
+struct FbxAnimationChannel {
+    sample_indices: Vec<usize>,
+    frame_times: Vec<i64>,
+    values: Vec<f32>,
+    tangents: Vec<SegmentTangents>,
+    attributes: Option<FbxCurveAttributes>,
+}
+
+/// Return the Euler channel values used by the DCC adapter.
+///
+/// DCC reduction fits already carry an unwrapped XYZ branch for every segment.
+/// Preserve those endpoint values instead of decomposing each key quaternion
+/// again: a quaternion has no unique Euler representation, and a second
+/// decomposition can choose a different branch around gimbal crossings. The
+/// first key is the start endpoint of the first fitted segment (stored on the
+/// second reduced key); single-key tracks have no fitted segment and therefore
+/// use the quaternion as their only available source.
+fn dcc_rotation_values(
+    track: &ReducedBoneTrack,
+    options: &FbxExportOptions,
+    rotation_sign: [f32; 3],
+) -> [Vec<f32>; 3] {
+    let keys = track.keys();
+    if keys.len() < 2 {
+        return std::array::from_fn(|axis| {
+            keys.first()
+                .map(|key| {
+                    let q = key.rotation;
+                    let converted = convert_quat_to_fbx(
+                        [q.x as f64, q.y as f64, q.z as f64, q.w as f64],
+                        options,
+                    );
+                    // The quaternion conversion already applies the FBX
+                    // coordinate reflection for this fallback. Unlike the
+                    // fitted segment endpoints below, do not apply the
+                    // endpoint sign a second time.
+                    quat_to_euler_xyz(converted)[axis] as f32
+                })
+                .into_iter()
+                .collect()
+        });
+    }
+
+    let first = keys[1].dcc_segment.rotation_start_euler_xyz.to_array();
+    std::array::from_fn(|axis| {
+        let mut values = Vec::with_capacity(keys.len());
+        values.push(first[axis].to_degrees() * rotation_sign[axis]);
+        values.extend(keys.iter().skip(1).map(|key| {
+            key.dcc_segment.rotation_end_euler_xyz.to_array()[axis].to_degrees()
+                * rotation_sign[axis]
+        }));
+        values
+    })
+}
+
+fn build_dcc_channel_plans(
+    reduced: &ReducedPoseSequence,
+    options: &FbxExportOptions,
+) -> Result<Vec<DccBoneChannelPlan>, FbxExportError> {
+    let position_sign = [1.0, 1.0, if options.flip_z { -1.0 } else { 1.0 }];
+    let rotation_sign = [
+        if options.flip_z { -1.0 } else { 1.0 },
+        if options.flip_z { -1.0 } else { 1.0 },
+        1.0,
+    ];
+    let mut plans = Vec::with_capacity(reduced.bone_tracks().len());
+    for (bone_index, track) in reduced.bone_tracks().iter().enumerate() {
+        let sample_indices = track
+            .keys()
+            .iter()
+            .map(|key| key.sample_index)
+            .collect::<Vec<_>>();
+        let frame_times = sample_indices
+            .iter()
+            .copied()
+            .map(|sample| reduced_key_time(reduced, sample))
+            .collect::<Result<Vec<_>, _>>()?;
+        let translation_values = std::array::from_fn(|axis| {
+            track
+                .keys()
+                .iter()
+                .map(|key| key.translation.to_array()[axis] * position_sign[axis])
+                .collect::<Vec<_>>()
+        });
+        let rotation_values = dcc_rotation_values(track, options, rotation_sign);
+        let rest_translation = reduced.snapshot().rest_local_translations()[bone_index];
+        let rest_translation = [
+            rest_translation.x * position_sign[0],
+            rest_translation.y * position_sign[1],
+            rest_translation.z * position_sign[2],
+        ];
+        let rest_rotation = reduced.snapshot().rest_local_rotations()[bone_index];
+        let rest_rotation = convert_quat_to_fbx(
+            [
+                rest_rotation.x as f64,
+                rest_rotation.y as f64,
+                rest_rotation.z as f64,
+                rest_rotation.w as f64,
+            ],
+            options,
+        );
+        let rest_euler = quat_to_euler_xyz(rest_rotation);
+        let translation_channels = std::array::from_fn(|axis| {
+            dcc_channel(
+                &sample_indices,
+                &frame_times,
+                &translation_values[axis],
+                &bone_segment_tangents(track.keys(), axis, false, position_sign[axis], 30.0),
+                rest_translation[axis],
+                DCC_TRANSLATION_EPSILON,
+            )
+        });
+        let rotation_channels = std::array::from_fn(|axis| {
+            dcc_channel(
+                &sample_indices,
+                &frame_times,
+                &rotation_values[axis],
+                &bone_segment_tangents(track.keys(), axis, true, rotation_sign[axis], 30.0),
+                rest_euler[axis] as f32,
+                DCC_ROTATION_EPSILON_DEGREES,
+            )
+        });
+        plans.push(DccBoneChannelPlan {
+            rotation_defaults: [
+                canonical_dcc_scalar(rest_euler[0] as f32, DCC_ROTATION_EPSILON_DEGREES),
+                canonical_dcc_scalar(rest_euler[1] as f32, DCC_ROTATION_EPSILON_DEGREES),
+                canonical_dcc_scalar(rest_euler[2] as f32, DCC_ROTATION_EPSILON_DEGREES),
+            ],
+            translation_defaults: std::array::from_fn(|axis| {
+                canonical_dcc_scalar(rest_translation[axis], DCC_TRANSLATION_EPSILON)
+            }),
+            raw_rotation_defaults: [
+                rest_euler[0] as f32,
+                rest_euler[1] as f32,
+                rest_euler[2] as f32,
+            ],
+            raw_translation_defaults: rest_translation,
+            rotation_values,
+            translation_values,
+            rotation_channels,
+            translation_channels,
+        });
+    }
+
+    let raw_full_plans = build_raw_full_dcc_plans(reduced, &plans, options)?;
+
+    // A scalar channel can look constant in Euler space while changing a child
+    // world pose. Validate once; if the sparse plan fails, restore every
+    // omitted axis and perform one final all-full validation. This keeps the
+    // fallback deterministic and bounds validation work to two passes.
+    if let Some(failing_bones) = dcc_plans_failing_bones(&plans, &raw_full_plans, reduced) {
+        for bone in failing_bones {
+            let plan = &mut plans[bone];
+            plan.rotation_defaults = plan
+                .raw_rotation_defaults
+                .map(|value| canonical_dcc_scalar(value, 0.0));
+            plan.translation_defaults = plan
+                .raw_translation_defaults
+                .map(|value| canonical_dcc_scalar(value, 0.0));
+            for axis in 0..3 {
+                let rotation_values = plan.rotation_values[axis].clone();
+                let translation_values = plan.translation_values[axis].clone();
+                plan.rotation_channels[axis] = Some(full_dcc_channel(
+                    reduced,
+                    bone,
+                    axis,
+                    true,
+                    &rotation_values,
+                    options,
+                    0.0,
+                )?);
+                plan.translation_channels[axis] = Some(full_dcc_channel(
+                    reduced,
+                    bone,
+                    axis,
+                    false,
+                    &translation_values,
+                    options,
+                    0.0,
+                )?);
+            }
+        }
+        if !dcc_plans_validate(&plans, &raw_full_plans, reduced) {
+            return Err(FbxExportError::DccChannelPlanValidation);
+        }
+    }
+    Ok(plans)
+}
+
+fn dcc_channel(
+    sample_indices: &[usize],
+    frame_times: &[i64],
+    values: &[f32],
+    tangents: &[SegmentTangents],
+    default: f32,
+    epsilon: f32,
+) -> Option<FbxAnimationChannel> {
+    if values.is_empty() {
+        return None;
+    }
+    let constant = values
+        .iter()
+        .all(|value| (*value - values[0]).abs() <= epsilon)
+        && tangents.iter().all(|tangent| {
+            tangent.out_tangent.abs() <= epsilon && tangent.next_in_tangent.abs() <= epsilon
+        });
+    if constant && (values[0] - default).abs() <= epsilon {
+        return None;
+    }
+    if constant {
+        return Some(FbxAnimationChannel {
+            sample_indices: vec![sample_indices[0]],
+            frame_times: vec![frame_times[0]],
+            values: vec![canonical_dcc_scalar(values[0], epsilon)],
+            tangents: vec![SegmentTangents {
+                out_tangent: 0.0,
+                next_in_tangent: 0.0,
+            }],
+            attributes: Some(curve_attributes(&[SegmentTangents {
+                out_tangent: 0.0,
+                next_in_tangent: 0.0,
+            }])),
+        });
+    }
+    let tangents = tangents
+        .iter()
+        .map(|tangent| SegmentTangents {
+            out_tangent: canonical_dcc_scalar(tangent.out_tangent, epsilon),
+            next_in_tangent: canonical_dcc_scalar(tangent.next_in_tangent, epsilon),
+        })
+        .collect::<Vec<_>>();
+    let values = values
+        .iter()
+        .map(|value| canonical_dcc_scalar(*value, epsilon))
+        .collect::<Vec<_>>();
+    Some(FbxAnimationChannel {
+        sample_indices: sample_indices.to_vec(),
+        frame_times: frame_times.to_vec(),
+        values,
+        tangents: tangents.clone(),
+        attributes: Some(curve_attributes(&tangents)),
+    })
+}
+
+fn full_dcc_channel(
+    reduced: &ReducedPoseSequence,
+    bone: usize,
+    axis: usize,
+    rotation: bool,
+    values: &[f32],
+    options: &FbxExportOptions,
+    epsilon: f32,
+) -> Result<FbxAnimationChannel, FbxExportError> {
+    let track = &reduced.bone_tracks()[bone];
+    let sample_indices = track
+        .keys()
+        .iter()
+        .map(|key| key.sample_index)
+        .collect::<Vec<_>>();
+    let frame_times = sample_indices
+        .iter()
+        .copied()
+        .map(|sample| reduced_key_time(reduced, sample))
+        .collect::<Result<Vec<_>, _>>()?;
+    let sign = if rotation {
+        [
+            if options.flip_z { -1.0 } else { 1.0 },
+            if options.flip_z { -1.0 } else { 1.0 },
+            1.0,
+        ][axis]
+    } else {
+        [1.0, 1.0, if options.flip_z { -1.0 } else { 1.0 }][axis]
+    };
+    let tangents = bone_segment_tangents(track.keys(), axis, rotation, sign, 30.0);
+    let tangents = tangents
+        .iter()
+        .map(|tangent| SegmentTangents {
+            out_tangent: canonical_dcc_scalar(tangent.out_tangent, epsilon),
+            next_in_tangent: canonical_dcc_scalar(tangent.next_in_tangent, epsilon),
+        })
+        .collect::<Vec<_>>();
+    Ok(FbxAnimationChannel {
+        sample_indices,
+        frame_times,
+        values: values
+            .iter()
+            .map(|value| canonical_dcc_scalar(*value, epsilon))
+            .collect(),
+        tangents: tangents.clone(),
+        attributes: Some(curve_attributes(&tangents)),
+    })
+}
+
+fn build_raw_full_dcc_plans(
+    reduced: &ReducedPoseSequence,
+    plans: &[DccBoneChannelPlan],
+    options: &FbxExportOptions,
+) -> Result<Vec<DccBoneChannelPlan>, FbxExportError> {
+    plans
+        .iter()
+        .enumerate()
+        .map(|(bone, plan)| {
+            let rotation_channels = [
+                Some(full_dcc_channel(
+                    reduced,
+                    bone,
+                    0,
+                    true,
+                    &plan.rotation_values[0],
+                    options,
+                    0.0,
+                )?),
+                Some(full_dcc_channel(
+                    reduced,
+                    bone,
+                    1,
+                    true,
+                    &plan.rotation_values[1],
+                    options,
+                    0.0,
+                )?),
+                Some(full_dcc_channel(
+                    reduced,
+                    bone,
+                    2,
+                    true,
+                    &plan.rotation_values[2],
+                    options,
+                    0.0,
+                )?),
+            ];
+            let translation_channels = [
+                Some(full_dcc_channel(
+                    reduced,
+                    bone,
+                    0,
+                    false,
+                    &plan.translation_values[0],
+                    options,
+                    0.0,
+                )?),
+                Some(full_dcc_channel(
+                    reduced,
+                    bone,
+                    1,
+                    false,
+                    &plan.translation_values[1],
+                    options,
+                    0.0,
+                )?),
+                Some(full_dcc_channel(
+                    reduced,
+                    bone,
+                    2,
+                    false,
+                    &plan.translation_values[2],
+                    options,
+                    0.0,
+                )?),
+            ];
+            Ok(DccBoneChannelPlan {
+                rotation_defaults: plan
+                    .raw_rotation_defaults
+                    .map(|value| canonical_dcc_scalar(value, 0.0)),
+                translation_defaults: plan
+                    .raw_translation_defaults
+                    .map(|value| canonical_dcc_scalar(value, 0.0)),
+                raw_rotation_defaults: plan.raw_rotation_defaults,
+                raw_translation_defaults: plan.raw_translation_defaults,
+                rotation_values: plan.rotation_values.clone(),
+                translation_values: plan.translation_values.clone(),
+                rotation_channels,
+                translation_channels,
+            })
+        })
+        .collect()
+}
+
+fn canonical_dcc_scalar(value: f32, epsilon: f32) -> f32 {
+    if value.abs() <= epsilon { 0.0 } else { value }
+}
+
+fn dcc_plans_validate(
+    plans: &[DccBoneChannelPlan],
+    raw_full_plans: &[DccBoneChannelPlan],
+    reduced: &ReducedPoseSequence,
+) -> bool {
+    dcc_plans_failing_bones(plans, raw_full_plans, reduced).is_none()
+}
+
+fn dcc_plans_failing_bones(
+    plans: &[DccBoneChannelPlan],
+    raw_full_plans: &[DccBoneChannelPlan],
+    reduced: &ReducedPoseSequence,
+) -> Option<Vec<usize>> {
+    let order = evaluation_order(reduced.snapshot().parent_indices());
+    let mut baseline_world = vec![Mat4::IDENTITY; plans.len()];
+    let mut candidate_world = vec![Mat4::IDENTITY; plans.len()];
+    let mut failed_bones = BTreeSet::new();
+    for &frame in reduced.sample_frames() {
+        for &bone in &order {
+            let plan = &plans[bone];
+            let baseline = &raw_full_plans[bone];
+            let baseline_translation = [
+                sample_dcc_channel(
+                    reduced,
+                    &baseline.translation_channels[0],
+                    frame,
+                    baseline.translation_defaults[0],
+                ),
+                sample_dcc_channel(
+                    reduced,
+                    &baseline.translation_channels[1],
+                    frame,
+                    baseline.translation_defaults[1],
+                ),
+                sample_dcc_channel(
+                    reduced,
+                    &baseline.translation_channels[2],
+                    frame,
+                    baseline.translation_defaults[2],
+                ),
+            ];
+            let baseline_euler = [
+                sample_dcc_channel(
+                    reduced,
+                    &baseline.rotation_channels[0],
+                    frame,
+                    baseline.rotation_defaults[0],
+                ),
+                sample_dcc_channel(
+                    reduced,
+                    &baseline.rotation_channels[1],
+                    frame,
+                    baseline.rotation_defaults[1],
+                ),
+                sample_dcc_channel(
+                    reduced,
+                    &baseline.rotation_channels[2],
+                    frame,
+                    baseline.rotation_defaults[2],
+                ),
+            ];
+            let baseline_q = euler_xyz_to_quat(baseline_euler);
+            let baseline_local = Mat4::from_rotation_translation(
+                baseline_q,
+                glam::Vec3::from_array(baseline_translation),
+            );
+            let candidate_translation = [
+                sample_dcc_channel(
+                    reduced,
+                    &plan.translation_channels[0],
+                    frame,
+                    plan.translation_defaults[0],
+                ),
+                sample_dcc_channel(
+                    reduced,
+                    &plan.translation_channels[1],
+                    frame,
+                    plan.translation_defaults[1],
+                ),
+                sample_dcc_channel(
+                    reduced,
+                    &plan.translation_channels[2],
+                    frame,
+                    plan.translation_defaults[2],
+                ),
+            ];
+            let candidate_euler = [
+                sample_dcc_channel(
+                    reduced,
+                    &plan.rotation_channels[0],
+                    frame,
+                    plan.rotation_defaults[0],
+                ),
+                sample_dcc_channel(
+                    reduced,
+                    &plan.rotation_channels[1],
+                    frame,
+                    plan.rotation_defaults[1],
+                ),
+                sample_dcc_channel(
+                    reduced,
+                    &plan.rotation_channels[2],
+                    frame,
+                    plan.rotation_defaults[2],
+                ),
+            ];
+            let candidate_q = euler_xyz_to_quat(candidate_euler);
+            let candidate_local = Mat4::from_rotation_translation(
+                candidate_q,
+                glam::Vec3::from_array(candidate_translation),
+            );
+            baseline_world[bone] = if let Some(parent) = parent_of(reduced.snapshot(), bone) {
+                baseline_world[parent] * baseline_local
+            } else {
+                baseline_local
+            };
+            candidate_world[bone] = if let Some(parent) = parent_of(reduced.snapshot(), bone) {
+                candidate_world[parent] * candidate_local
+            } else {
+                candidate_local
+            };
+            let (_, baseline_rot, baseline_pos) =
+                baseline_world[bone].to_scale_rotation_translation();
+            let (_, candidate_rot, candidate_pos) =
+                candidate_world[bone].to_scale_rotation_translation();
+            let local_position_error = baseline_translation
+                .into_iter()
+                .zip(candidate_translation)
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0_f32, f32::max);
+            if local_position_error > DCC_LOCAL_POSITION_ADAPTER_EPSILON
+                || tight_quat_angle_radians(baseline_q, candidate_q)
+                    > DCC_LOCAL_ROTATION_ADAPTER_EPSILON_RADIANS
+                || baseline_pos.distance(candidate_pos) > DCC_WORLD_POSITION_EPSILON
+                || tight_quat_angle_radians(baseline_rot, candidate_rot)
+                    > DCC_WORLD_ROTATION_EPSILON_RADIANS
+            {
+                failed_bones.insert(bone);
+            }
+        }
+    }
+    if failed_bones.is_empty() {
+        None
+    } else {
+        let mut required = BTreeSet::new();
+        for mut bone in failed_bones {
+            loop {
+                if !required.insert(bone) {
+                    break;
+                }
+                let parent = reduced.snapshot().parent_indices()[bone];
+                if parent < 0 {
+                    break;
+                }
+                bone = parent as usize;
+            }
+        }
+        Some(required.into_iter().collect())
+    }
+}
+
+fn sample_dcc_channel(
+    reduced: &ReducedPoseSequence,
+    channel: &Option<FbxAnimationChannel>,
+    frame: f32,
+    default: f32,
+) -> f32 {
+    let Some(channel) = channel else {
+        return default;
+    };
+    if channel.values.len() <= 1 {
+        return channel.values.first().copied().unwrap_or(default);
+    }
+    let upper = channel
+        .sample_indices
+        .partition_point(|&sample| reduced.sample_frames()[sample] <= frame);
+    if upper == 0 {
+        return channel.values[0];
+    }
+    if upper == channel.values.len() {
+        return *channel.values.last().unwrap_or(&default);
+    }
+    let left_sample = channel.sample_indices[upper - 1];
+    let right_sample = channel.sample_indices[upper];
+    let left_frame = reduced.sample_frames()[left_sample];
+    let right_frame = reduced.sample_frames()[right_sample];
+    let duration = right_frame - left_frame;
+    if duration <= 0.0 {
+        return channel.values[upper - 1];
+    }
+    let amount = ((frame - left_frame) / duration).clamp(0.0, 1.0);
+    let left = channel.values[upper - 1];
+    let right = channel.values[upper];
+    let out_tangent = channel.tangents[upper - 1].out_tangent / 30.0;
+    let in_tangent = channel.tangents[upper - 1].next_in_tangent / 30.0;
+    sample_dcc_hermite(left, right, out_tangent, in_tangent, duration, amount)
+}
+
+fn sample_dcc_hermite(
+    left: f32,
+    right: f32,
+    out_tangent: f32,
+    in_tangent: f32,
+    duration: f32,
+    amount: f32,
+) -> f32 {
+    let t2 = amount * amount;
+    let t3 = t2 * amount;
+    (2.0 * t3 - 3.0 * t2 + 1.0) * left
+        + (t3 - 2.0 * t2 + amount) * duration * out_tangent
+        + (-2.0 * t3 + 3.0 * t2) * right
+        + (t3 - t2) * duration * in_tangent
+}
+
+fn evaluation_order(parents: &[i32]) -> Vec<usize> {
+    fn visit(index: usize, parents: &[i32], state: &mut [bool], order: &mut Vec<usize>) {
+        if state[index] {
+            return;
+        }
+        state[index] = true;
+        if parents[index] >= 0 {
+            visit(parents[index] as usize, parents, state, order);
+        }
+        order.push(index);
+    }
+    let mut state = vec![false; parents.len()];
+    let mut order = Vec::with_capacity(parents.len());
+    for index in 0..parents.len() {
+        visit(index, parents, &mut state, &mut order);
+    }
+    order
+}
+
+fn parent_of(snapshot: &SkeletonSnapshot, bone: usize) -> Option<usize> {
+    let parent = snapshot.parent_indices()[bone];
+    (parent >= 0).then_some(parent as usize)
+}
+
+fn euler_xyz_to_quat(value: [f32; 3]) -> glam::Quat {
+    let (sx, cx) = (0.5 * value[0].to_radians()).sin_cos();
+    let (sy, cy) = (0.5 * value[1].to_radians()).sin_cos();
+    let (sz, cz) = (0.5 * value[2].to_radians()).sin_cos();
+    glam::Quat::from_xyzw(
+        sx * cy * cz + cx * sy * sz,
+        cx * sy * cz - sx * cy * sz,
+        cx * cy * sz + sx * sy * cz,
+        cx * cy * cz - sx * sy * sz,
+    )
+    .normalize()
+}
+
+// `acos(dot)` quantizes tiny f32 angles to roughly 6.9e-4 radians. The
+// chord-length form remains useful at the adapter's tighter error scale.
+fn tight_quat_angle_radians(a: glam::Quat, b: glam::Quat) -> f32 {
+    let a = a.normalize();
+    let mut b = b.normalize();
+    if a.dot(b) < 0.0 {
+        b = -b;
+    }
+    let chord = (a - b).length().clamp(0.0, 2.0);
+    4.0 * (0.5 * chord).asin()
+}
+
+#[derive(Clone)]
+struct DccBoneChannelPlan {
+    rotation_defaults: [f32; 3],
+    translation_defaults: [f32; 3],
+    raw_rotation_defaults: [f32; 3],
+    raw_translation_defaults: [f32; 3],
+    rotation_values: [Vec<f32>; 3],
+    translation_values: [Vec<f32>; 3],
+    rotation_channels: [Option<FbxAnimationChannel>; 3],
+    translation_channels: [Option<FbxAnimationChannel>; 3],
 }
 
 struct FbxMorphAnimationTrack {
@@ -872,72 +1513,31 @@ impl FbxAnimationData {
         if last_frame < 0.0 || last_frame > u32::MAX as f32 {
             return Err(FbxExportError::ReducedPoseTime { frame: last_frame });
         }
-        let position_sign = [1.0, 1.0, if options.flip_z { -1.0 } else { 1.0 }];
-        let rotation_sign = [
-            if options.flip_z { -1.0 } else { 1.0 },
-            if options.flip_z { -1.0 } else { 1.0 },
-            1.0,
-        ];
+        let channel_plans = build_dcc_channel_plans(reduced, options)?;
         let mut tracks = Vec::new();
         for (bone_index, track) in reduced.bone_tracks().iter().enumerate() {
-            let rest_translation = reduced.snapshot().rest_local_translations()[bone_index];
-            let rest_rotation = reduced.snapshot().rest_local_rotations()[bone_index];
-            if track.keys().iter().all(|key| {
-                key.translation.distance(rest_translation) <= STATIC_BONE_EPSILON
-                    && key.rotation.dot(rest_rotation).abs() >= 1.0 - STATIC_BONE_EPSILON
-            }) {
+            let plan = &channel_plans[bone_index];
+            if plan.rotation_channels.iter().all(Option::is_none)
+                && plan.translation_channels.iter().all(Option::is_none)
+            {
                 continue;
             }
-            let frame_times = track
-                .keys()
-                .iter()
-                .map(|key| reduced_key_time(reduced, key.sample_index))
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut translation_values: [Vec<f32>; 3] = std::array::from_fn(|_| Vec::new());
-            let mut rotation_values: [Vec<f32>; 3] = std::array::from_fn(|_| Vec::new());
-            let mut previous_euler = None;
-            for key in track.keys() {
-                for axis in 0..3 {
-                    translation_values[axis]
-                        .push(key.translation.to_array()[axis] * position_sign[axis]);
-                }
-                let q = key.rotation;
-                let converted =
-                    convert_quat_to_fbx([q.x as f64, q.y as f64, q.z as f64, q.w as f64], options);
-                let euler = quat_to_euler_xyz(converted);
-                let filtered = previous_euler
-                    .map(|previous| euler_filter(euler, previous))
-                    .unwrap_or(euler);
-                previous_euler = Some(filtered);
-                for axis in 0..3 {
-                    rotation_values[axis].push(filtered[axis] as f32);
-                }
-            }
-            let rotation_attributes = std::array::from_fn(|axis| {
-                Some(curve_attributes(&bone_segment_tangents(
-                    track.keys(),
-                    axis,
-                    true,
-                    rotation_sign[axis],
-                    30.0,
-                )))
-            });
-            let translation_attributes = std::array::from_fn(|axis| {
-                Some(curve_attributes(&bone_segment_tangents(
-                    track.keys(),
-                    axis,
-                    false,
-                    position_sign[axis],
-                    30.0,
-                )))
-            });
             tracks.push(FbxAnimationTrack {
                 bone_index,
-                frame_times,
-                rotation_values,
-                translation_values,
-                rotation_attributes,
-                translation_attributes,
+                optional_channels: true,
+                rotation_defaults: plan.rotation_defaults,
+                translation_defaults: plan.translation_defaults,
+                frame_times: track
+                    .keys()
+                    .iter()
+                    .map(|key| reduced_key_time(reduced, key.sample_index))
+                    .collect::<Result<Vec<_>, _>>()?,
+                rotation_values: plan.rotation_values.clone(),
+                translation_values: plan.translation_values.clone(),
+                rotation_attributes: [None, None, None],
+                translation_attributes: [None, None, None],
+                rotation_channels: plan.rotation_channels.clone(),
+                translation_channels: plan.translation_channels.clone(),
             });
         }
 
@@ -1084,11 +1684,16 @@ impl FbxAnimationData {
             .filter(|track| track.changed_from_rest)
             .map(|track| FbxAnimationTrack {
                 bone_index: track.bone_index,
+                optional_channels: false,
+                rotation_defaults: [0.0; 3],
+                translation_defaults: [0.0; 3],
                 frame_times: frame_times.clone(),
                 rotation_values: track.rotation_values,
                 translation_values: track.translation_values,
                 rotation_attributes: [None, None, None],
                 translation_attributes: [None, None, None],
+                rotation_channels: [None, None, None],
+                translation_channels: [None, None, None],
             })
             .collect();
         let morph_tracks = if options.bones_only {
@@ -1174,11 +1779,16 @@ impl FbxAnimationData {
 
             tracks.push(FbxAnimationTrack {
                 bone_index: track.bone_index,
+                optional_channels: false,
+                rotation_defaults: [0.0; 3],
+                translation_defaults: [0.0; 3],
                 frame_times: frame_times.clone(),
                 rotation_values,
                 translation_values,
                 rotation_attributes: [None, None, None],
                 translation_attributes: [None, None, None],
+                rotation_channels: [None, None, None],
+                translation_channels: [None, None, None],
             });
         }
 
@@ -1312,18 +1922,32 @@ fn curve_attributes(tangents: &[SegmentTangents]) -> FbxCurveAttributes {
     }
 }
 
-fn unity_keys(
+fn unity_channel_keys(
     reduced: &ReducedPoseSequence,
-    source_keys: &[ReducedBoneKey],
-    values: &[f32],
-    tangents: &[SegmentTangents],
+    channel: &FbxAnimationChannel,
     frames_per_second: f32,
 ) -> Result<Vec<UnityAnimationKeyDto>, FbxExportError> {
+    // Keep the same finite-domain behavior as the FBX degree conversion: the
+    // host scale is formed in degrees per second before dividing by the 30 FPS
+    // plan scale, so an extreme FPS still reports a non-finite Unity key.
+    let tangent_scale = if frames_per_second > f32::MAX / 180.0 {
+        f32::INFINITY
+    } else {
+        frames_per_second / 30.0
+    };
+    let tangents = channel
+        .tangents
+        .iter()
+        .map(|tangent| SegmentTangents {
+            out_tangent: tangent.out_tangent * tangent_scale,
+            next_in_tangent: tangent.next_in_tangent * tangent_scale,
+        })
+        .collect::<Vec<_>>();
     unity_keys_from_indices(
         reduced,
-        source_keys.iter().map(|key| key.sample_index),
-        values,
-        tangents,
+        channel.sample_indices.iter().copied(),
+        &channel.values,
+        &tangents,
         frames_per_second,
     )
 }
@@ -1608,14 +2232,34 @@ fn convert_position_to_fbx(p: [f64; 3], options: &FbxExportOptions) -> [f64; 3] 
 
 fn quat_to_euler_xyz(q: [f64; 4]) -> [f64; 3] {
     let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
-    let sin_beta = (2.0 * (w * y - x * z)).clamp(-1.0, 1.0);
-    let beta = sin_beta.asin();
-    let (alpha, gamma) = if beta.cos().abs() < 1e-6 {
-        let a = (2.0 * (x * y + w * z)).atan2(1.0 - 2.0 * (y * y + z * z));
+    // Match glam's intrinsic XYZ convention used by the runtime reducer and
+    // the FBX SDK evaluation order configured on exported bone models. Keep
+    // this in f64 because the source pose is accumulated from world matrices
+    // before final f32 curves.
+    let sin_beta = (2.0 * (w * y + x * z)).clamp(-1.0, 1.0);
+    let alpha_numerator = 2.0 * (w * x - y * z);
+    let alpha_denominator = 1.0 - 2.0 * (x * x + y * y);
+    let cos_beta = alpha_numerator.hypot(alpha_denominator);
+    // FBX curve values are f32. Within about 0.001 rad of the singularity,
+    // recovering separate X/Z angles amplifies quaternion rounding enough to
+    // produce a larger rotation error than the canonical gimbal branch.
+    let is_gimbal = cos_beta < 1.0e-3;
+    // Derive beta with atan2 so f32 quaternion rounding cannot turn an exact
+    // negative gimbal pose into a visibly off-by-0.02-degree asin result.
+    let beta = if is_gimbal {
+        std::f64::consts::FRAC_PI_2.copysign(sin_beta)
+    } else {
+        sin_beta.atan2(cos_beta)
+    };
+    let (alpha, gamma) = if is_gimbal {
+        // At |beta| = pi/2, the regular alpha atan2 has a 0/0 denominator.
+        // Pick the canonical gamma=0 branch; alpha=2 atan2(x,w) preserves
+        // the combined X/Z rotation for either gimbal sign.
+        let a = 2.0 * x.atan2(w);
         (a, 0.0)
     } else {
-        let a = (2.0 * (y * z + w * x)).atan2(1.0 - 2.0 * (x * x + y * y));
-        let g = (2.0 * (x * y + w * z)).atan2(1.0 - 2.0 * (y * y + z * z));
+        let a = alpha_numerator.atan2(alpha_denominator);
+        let g = (2.0 * (w * z - x * y)).atan2(1.0 - 2.0 * (y * y + z * z));
         (a, g)
     };
     [alpha.to_degrees(), beta.to_degrees(), gamma.to_degrees()]
@@ -1832,10 +2476,25 @@ fn write_definitions<W: Write + Seek>(
     animation: Option<&FbxAnimationData>,
     include_mesh_assets: bool,
 ) -> Result<(), FbxExportError> {
-    let bone_animation_track_count = animation.map(|data| data.tracks.len()).unwrap_or(0);
+    let bone_animation_node_count = animation
+        .map(|data| {
+            data.tracks
+                .iter()
+                .map(track_animation_node_count)
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
     let morph_animation_track_count = animation.map(|data| data.morph_tracks.len()).unwrap_or(0);
+    let bone_animation_curve_count = animation
+        .map(|data| {
+            data.tracks
+                .iter()
+                .map(track_animation_curve_count)
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
     let animation_object_count = if animation.is_some() {
-        2 + bone_animation_track_count * 8 + morph_animation_track_count * 2
+        2 + bone_animation_node_count + bone_animation_curve_count + morph_animation_track_count * 2
     } else {
         0
     };
@@ -1874,7 +2533,8 @@ fn write_definitions<W: Write + Seek>(
     if animation.is_some() {
         write_animation_object_types(
             writer,
-            bone_animation_track_count as i32,
+            bone_animation_node_count as i32,
+            bone_animation_curve_count as i32,
             morph_animation_track_count as i32,
         )?;
     }
@@ -2033,17 +2693,38 @@ fn write_pose_object_type<W: Write + Seek>(writer: &mut Writer<W>) -> Result<(),
 fn write_animation_object_types<W: Write + Seek>(
     writer: &mut Writer<W>,
     bone_track_count: i32,
+    bone_curve_count: i32,
     morph_track_count: i32,
 ) -> Result<(), FbxExportError> {
     write_animation_stack_object_type(writer)?;
     write_animation_layer_object_type(writer)?;
-    write_animation_curve_node_object_type(writer, bone_track_count * 2 + morph_track_count)?;
+    write_animation_curve_node_object_type(writer, bone_track_count + morph_track_count)?;
     write_simple_object_type(
         writer,
         "AnimationCurve",
-        bone_track_count * 6 + morph_track_count,
+        bone_curve_count + morph_track_count,
     )?;
     Ok(())
+}
+
+fn track_animation_node_count(track: &FbxAnimationTrack) -> usize {
+    let rotation = !track.optional_channels || track.rotation_channels.iter().any(Option::is_some);
+    let translation =
+        !track.optional_channels || track.translation_channels.iter().any(Option::is_some);
+    rotation as usize + translation as usize
+}
+
+fn track_animation_curve_count(track: &FbxAnimationTrack) -> usize {
+    if !track.optional_channels {
+        6
+    } else {
+        track
+            .rotation_channels
+            .iter()
+            .chain(track.translation_channels.iter())
+            .filter(|channel| channel.is_some())
+            .count()
+    }
 }
 
 fn write_animation_stack_object_type<W: Write + Seek>(
@@ -2389,6 +3070,11 @@ fn write_bone_model<W: Write + Seek>(
     write_i32_node(writer, "Version", 232)?;
     begin_node(writer, "Properties70", |_| Ok(()))?;
     write_property_i32(writer, "RotationActive", "bool", "", "", 1)?;
+    // FBX's eEulerXYZ composes rotations in reverse order (Z * Y * X),
+    // while the runtime reducer and emitted curves use glam's intrinsic XYZ
+    // convention (X * Y * Z). Set eEulerZYX (5) so SDK evaluation matches
+    // the runtime quaternion convention at every sampled frame.
+    write_property_i32(writer, "RotationOrder", "enum", "", "", 5)?;
     write_property_i32(writer, "InheritType", "enum", "", "", 1)?;
     write_property_vec3(writer, "ScalingMax", "Vector3D", "Vector", "", [0.0; 3])?;
     write_property_i32(writer, "DefaultAttributeIndex", "int", "Integer", "", 0)?;
@@ -2993,33 +3679,59 @@ fn write_animation<W: Write + Seek>(
     write_animation_stack(writer, animation.last_time())?;
     write_animation_layer(writer)?;
     for track in &animation.tracks {
-        write_animation_curve_node(
-            writer,
-            animation_curvenode_rotation_id(track.bone_index),
-            "R",
-        )?;
-        write_animation_curve_node(
-            writer,
-            animation_curvenode_translation_id(track.bone_index),
-            "T",
-        )?;
-        for channel in 0..3 {
-            write_animation_curve(
+        if !track.optional_channels || track.rotation_channels.iter().any(Option::is_some) {
+            write_animation_curve_node(
                 writer,
-                animation_curve_id(track.bone_index, channel),
-                &track.frame_times,
-                &track.rotation_values[channel],
-                track.rotation_attributes[channel].as_ref(),
+                animation_curvenode_rotation_id(track.bone_index),
+                "R",
+                track.rotation_defaults,
             )?;
+            for channel in 0..3 {
+                if let Some(curve) = track.rotation_channels[channel].as_ref() {
+                    write_animation_curve(
+                        writer,
+                        animation_curve_id(track.bone_index, channel),
+                        &curve.frame_times,
+                        &curve.values,
+                        curve.attributes.as_ref(),
+                    )?;
+                } else if !track.optional_channels {
+                    write_animation_curve(
+                        writer,
+                        animation_curve_id(track.bone_index, channel),
+                        &track.frame_times,
+                        &track.rotation_values[channel],
+                        track.rotation_attributes[channel].as_ref(),
+                    )?;
+                }
+            }
         }
-        for channel in 0..3 {
-            write_animation_curve(
+        if !track.optional_channels || track.translation_channels.iter().any(Option::is_some) {
+            write_animation_curve_node(
                 writer,
-                animation_curve_id(track.bone_index, channel + 3),
-                &track.frame_times,
-                &track.translation_values[channel],
-                track.translation_attributes[channel].as_ref(),
+                animation_curvenode_translation_id(track.bone_index),
+                "T",
+                track.translation_defaults,
             )?;
+            for channel in 0..3 {
+                if let Some(curve) = track.translation_channels[channel].as_ref() {
+                    write_animation_curve(
+                        writer,
+                        animation_curve_id(track.bone_index, channel + 3),
+                        &curve.frame_times,
+                        &curve.values,
+                        curve.attributes.as_ref(),
+                    )?;
+                } else if !track.optional_channels {
+                    write_animation_curve(
+                        writer,
+                        animation_curve_id(track.bone_index, channel + 3),
+                        &track.frame_times,
+                        &track.translation_values[channel],
+                        track.translation_attributes[channel].as_ref(),
+                    )?;
+                }
+            }
         }
     }
     for (track_index, track) in animation.morph_tracks.iter().enumerate() {
@@ -3088,6 +3800,7 @@ fn write_animation_curve_node<W: Write + Seek>(
     writer: &mut Writer<W>,
     id: i64,
     name: &str,
+    defaults: [f32; 3],
 ) -> Result<(), FbxExportError> {
     let typed_name = format!("{name}\x00\x01AnimCurveNode");
     begin_node(writer, "AnimationCurveNode", |attrs| {
@@ -3097,9 +3810,9 @@ fn write_animation_curve_node<W: Write + Seek>(
         Ok(())
     })?;
     begin_node(writer, "Properties70", |_| Ok(()))?;
-    write_property_f64(writer, "d|X", "Number", "", "A", 0.0)?;
-    write_property_f64(writer, "d|Y", "Number", "", "A", 0.0)?;
-    write_property_f64(writer, "d|Z", "Number", "", "A", 0.0)?;
+    write_property_f64(writer, "d|X", "Number", "", "A", defaults[0] as f64)?;
+    write_property_f64(writer, "d|Y", "Number", "", "A", defaults[1] as f64)?;
+    write_property_f64(writer, "d|Z", "Number", "", "A", defaults[2] as f64)?;
     writer.close_node()?;
     writer.close_node()?;
     Ok(())
@@ -3242,26 +3955,34 @@ fn write_animation_connections<W: Write + Seek>(
         let rotation_node = animation_curvenode_rotation_id(track.bone_index);
         let translation_node = animation_curvenode_translation_id(track.bone_index);
 
-        write_oo_connection(writer, rotation_node, ANIM_LAYER_ID)?;
-        write_op_connection(writer, rotation_node, bone_model, "Lcl Rotation")?;
-        for (channel, property) in ["d|X", "d|Y", "d|Z"].into_iter().enumerate() {
-            write_op_connection(
-                writer,
-                animation_curve_id(track.bone_index, channel),
-                rotation_node,
-                property,
-            )?;
+        if !track.optional_channels || track.rotation_channels.iter().any(Option::is_some) {
+            write_oo_connection(writer, rotation_node, ANIM_LAYER_ID)?;
+            write_op_connection(writer, rotation_node, bone_model, "Lcl Rotation")?;
+            for (channel, property) in ["d|X", "d|Y", "d|Z"].into_iter().enumerate() {
+                if !track.optional_channels || track.rotation_channels[channel].is_some() {
+                    write_op_connection(
+                        writer,
+                        animation_curve_id(track.bone_index, channel),
+                        rotation_node,
+                        property,
+                    )?;
+                }
+            }
         }
 
-        write_oo_connection(writer, translation_node, ANIM_LAYER_ID)?;
-        write_op_connection(writer, translation_node, bone_model, "Lcl Translation")?;
-        for (channel, property) in ["d|X", "d|Y", "d|Z"].into_iter().enumerate() {
-            write_op_connection(
-                writer,
-                animation_curve_id(track.bone_index, channel + 3),
-                translation_node,
-                property,
-            )?;
+        if !track.optional_channels || track.translation_channels.iter().any(Option::is_some) {
+            write_oo_connection(writer, translation_node, ANIM_LAYER_ID)?;
+            write_op_connection(writer, translation_node, bone_model, "Lcl Translation")?;
+            for (channel, property) in ["d|X", "d|Y", "d|Z"].into_iter().enumerate() {
+                if !track.optional_channels || track.translation_channels[channel].is_some() {
+                    write_op_connection(
+                        writer,
+                        animation_curve_id(track.bone_index, channel + 3),
+                        translation_node,
+                        property,
+                    )?;
+                }
+            }
         }
     }
     for (track_index, track) in animation.morph_tracks.iter().enumerate() {
@@ -3643,6 +4364,7 @@ mod tests {
                 candidate_build: Duration::from_millis(1),
                 error_measure: Duration::from_millis(2),
                 dcc_fit: Duration::from_millis(1),
+                ancestor_prune: Duration::from_millis(4),
             },
         };
         let mut second = first.clone();
@@ -3651,6 +4373,7 @@ mod tests {
             candidate_build: Duration::from_secs(1),
             error_measure: Duration::from_secs(2),
             dcc_fit: Duration::from_secs(1),
+            ancestor_prune: Duration::from_secs(4),
         };
         assert_eq!(first, second);
     }
@@ -3766,6 +4489,88 @@ mod tests {
         (model, reduced, root)
     }
 
+    fn reduced_fbx_rotation_fixture() -> (ReducedPoseSequence, usize) {
+        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
+        let runtime = crate::import_pmx_runtime(pmx_data).unwrap().model;
+        let snapshot = SkeletonSnapshot::from_model(&runtime, 123).unwrap();
+        let root = snapshot
+            .parent_indices()
+            .iter()
+            .position(|parent| *parent < 0)
+            .unwrap();
+        let frame_count = 5;
+        let mut world = Vec::with_capacity(frame_count * snapshot.bone_count());
+        for frame in 0..frame_count {
+            let mut frame_world = vec![Mat4::IDENTITY; snapshot.bone_count()];
+            let mut resolved = vec![false; snapshot.bone_count()];
+            fn resolve(
+                bone: usize,
+                root: usize,
+                frame: usize,
+                snapshot: &SkeletonSnapshot,
+                world: &mut [Mat4],
+                resolved: &mut [bool],
+            ) {
+                if resolved[bone] {
+                    return;
+                }
+                let parent = snapshot.parent_indices()[bone];
+                if parent >= 0 {
+                    resolve(parent as usize, root, frame, snapshot, world, resolved);
+                }
+                let mut rotation = snapshot.rest_local_rotations()[bone];
+                if bone == root {
+                    rotation = glam::Quat::from_rotation_x(frame as f32 * 0.25);
+                }
+                let local = Mat4::from_rotation_translation(
+                    rotation,
+                    Vec3::from(snapshot.rest_local_translations()[bone]),
+                );
+                world[bone] = if parent < 0 {
+                    local
+                } else {
+                    world[parent as usize] * local
+                };
+                resolved[bone] = true;
+            }
+            for bone in 0..snapshot.bone_count() {
+                resolve(
+                    bone,
+                    root,
+                    frame,
+                    &snapshot,
+                    &mut frame_world,
+                    &mut resolved,
+                );
+            }
+            world.extend(frame_world);
+        }
+        let morphs = vec![0.0; frame_count * snapshot.morph_count()];
+        let reduced = reduce_dense_pose_sequence(
+            DensePoseSequenceView::new(
+                &world,
+                &morphs,
+                frame_count,
+                snapshot.bone_count(),
+                snapshot.morph_count(),
+                0.0,
+                1.0,
+            )
+            .unwrap(),
+            snapshot,
+            ReductionTolerances {
+                local_position: 0.01,
+                world_position: 0.01,
+                local_rotation_radians: 1.0e-6,
+                world_rotation_radians: 1.0e-6,
+                ..Default::default()
+            },
+            ReductionTarget::DccCubic,
+        )
+        .unwrap();
+        (reduced, root)
+    }
+
     #[test]
     fn reduced_pose_writes_sparse_per_key_user_tangents_and_replays_samples() {
         let (model, reduced, root) = reduced_fbx_fixture();
@@ -3832,6 +4637,238 @@ mod tests {
                 "{frame}: {actual} {expected}"
             );
         }
+    }
+
+    #[test]
+    fn reduced_pose_default_flip_z_uses_raw_baseline_gate() {
+        let (model, reduced, _) = reduced_fbx_fixture();
+        let bytes = export_pmx_fbx_binary_with_reduced_pose(
+            &model,
+            &reduced,
+            123,
+            &FbxExportOptions::default(),
+        )
+        .unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn dcc_channel_plan_samples_actual_mid_segment_and_reports_omissions() {
+        let (_model, reduced, root) = reduced_fbx_fixture();
+        let plan = build_dcc_channel_plans(
+            &reduced,
+            &FbxExportOptions {
+                flip_z: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(plan[root].translation_channels[0].is_some());
+        assert!(plan[root].translation_channels[1].is_none());
+        assert!(plan[root].rotation_channels.iter().all(Option::is_none));
+        let raw = build_raw_full_dcc_plans(
+            &reduced,
+            &plan,
+            &FbxExportOptions {
+                flip_z: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(dcc_plans_validate(&plan, &raw, &reduced,));
+        let channel = plan[root].translation_channels[0].as_ref().unwrap();
+        let frame = 4.0;
+        let actual = sample_dcc_channel(
+            &reduced,
+            &plan[root].translation_channels[0],
+            frame,
+            plan[root].translation_defaults[0],
+        );
+        let expected = reduced.sample(frame).unwrap().local_translations[root].x;
+        assert!((actual - expected).abs() <= 1.0e-4);
+        assert_eq!(
+            channel.values.len(),
+            reduced.bone_tracks()[root].keys().len()
+        );
+        assert_eq!(
+            canonical_dcc_scalar(-0.0, DCC_TRANSLATION_EPSILON).to_bits(),
+            0
+        );
+        let flipped = build_dcc_channel_plans(&reduced, &FbxExportOptions::default()).unwrap();
+        assert!(flipped[root].translation_channels[0].is_some());
+    }
+
+    #[test]
+    fn dcc_rotation_values_preserve_segment_euler_branch() {
+        let (reduced, root) = reduced_fbx_rotation_fixture();
+        let track = &reduced.bone_tracks()[root];
+        assert!(track.keys().len() >= 2);
+        let no_flip = dcc_rotation_values(
+            track,
+            &FbxExportOptions {
+                flip_z: false,
+                ..Default::default()
+            },
+            [1.0; 3],
+        );
+        let first = track.keys()[1]
+            .dcc_segment
+            .rotation_start_euler_xyz
+            .to_array();
+        for axis in 0..3 {
+            assert!((no_flip[axis][0] - first[axis].to_degrees()).abs() <= 1.0e-5);
+        }
+        let flipped = dcc_rotation_values(track, &FbxExportOptions::default(), [-1.0, -1.0, 1.0]);
+        for axis in 0..3 {
+            assert!(
+                (flipped[axis][0] - first[axis].to_degrees() * [-1.0, -1.0, 1.0][axis]).abs()
+                    <= 1.0e-5
+            );
+        }
+        for (index, key) in track.keys().iter().enumerate().skip(1) {
+            let end = key.dcc_segment.rotation_end_euler_xyz.to_array();
+            for axis in 0..3 {
+                assert!((no_flip[axis][index] - end[axis].to_degrees()).abs() <= 1.0e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn dcc_channel_constant_nondefault_is_one_key() {
+        let channel = dcc_channel(
+            &[0, 4, 8],
+            &[0, FBX_FRAME_DURATION * 4, FBX_FRAME_DURATION * 8],
+            &[2.0, 2.0, 2.0],
+            &[
+                SegmentTangents {
+                    out_tangent: 0.0,
+                    next_in_tangent: 0.0,
+                },
+                SegmentTangents {
+                    out_tangent: 0.0,
+                    next_in_tangent: 0.0,
+                },
+                SegmentTangents {
+                    out_tangent: 0.0,
+                    next_in_tangent: 0.0,
+                },
+            ],
+            0.0,
+            DCC_TRANSLATION_EPSILON,
+        )
+        .unwrap();
+        assert_eq!(channel.sample_indices, vec![0]);
+        assert_eq!(channel.values, vec![2.0]);
+        assert_eq!(channel.tangents.len(), 1);
+    }
+
+    #[test]
+    fn raw_full_channel_preserves_sub_epsilon_values_for_fallback() {
+        let (_model, reduced, root) = reduced_fbx_fixture();
+        let values = [-0.0_f32, 1.0e-7, -1.0e-7];
+        let channel = full_dcc_channel(
+            &reduced,
+            root,
+            0,
+            false,
+            &values,
+            &FbxExportOptions {
+                flip_z: false,
+                ..Default::default()
+            },
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(channel.values[0].to_bits(), 0);
+        assert_eq!(&channel.values[1..], &values[1..]);
+        assert_eq!(canonical_dcc_scalar(-0.0, 0.0).to_bits(), 0);
+    }
+
+    #[test]
+    fn fbx_euler_xyz_round_trips_non_commuting_rotation() {
+        let source = glam::Quat::from_xyzw(0.21, -0.37, 0.18, 0.88).normalize();
+        let euler = quat_to_euler_xyz([
+            source.x as f64,
+            source.y as f64,
+            source.z as f64,
+            source.w as f64,
+        ]);
+        let reconstructed = euler_xyz_to_quat(euler.map(|value| value as f32));
+        assert!(tight_quat_angle_radians(source, reconstructed) <= 1.0e-6);
+    }
+
+    #[test]
+    fn fbx_euler_xyz_round_trips_exact_gimbal_boundaries() {
+        for beta in [std::f64::consts::FRAC_PI_2, -std::f64::consts::FRAC_PI_2] {
+            let source = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.73, beta as f32, -0.41);
+            let euler = quat_to_euler_xyz([
+                source.x as f64,
+                source.y as f64,
+                source.z as f64,
+                source.w as f64,
+            ]);
+            let reconstructed = euler_xyz_to_quat(euler.map(|value| value as f32));
+            let error = tight_quat_angle_radians(source, reconstructed);
+            assert!(error <= 2.0e-5, "beta={beta} euler={euler:?} error={error}");
+        }
+    }
+
+    #[test]
+    fn fbx_euler_xyz_round_trips_near_gimbal_rotation() {
+        for beta in [
+            std::f32::consts::FRAC_PI_2 - 1.0e-4,
+            -std::f32::consts::FRAC_PI_2 + 1.0e-4,
+        ] {
+            let source = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.73, beta, -0.41);
+            let euler = quat_to_euler_xyz([
+                source.x as f64,
+                source.y as f64,
+                source.z as f64,
+                source.w as f64,
+            ]);
+            let reconstructed = euler_xyz_to_quat(euler.map(|value| value as f32));
+            let error = tight_quat_angle_radians(source, reconstructed);
+            assert!(error <= 2.0e-4, "beta={beta} euler={euler:?} error={error}");
+        }
+    }
+
+    #[test]
+    fn unity_dto_uses_actual_planned_channel_count() {
+        let (_model, reduced, root) = reduced_fbx_fixture();
+        let dto = reduced_pose_to_unity_animation_clip(
+            &reduced,
+            &UnityReducedPoseBindings {
+                model_identity: 123,
+                bone_paths: (0..reduced.snapshot().bone_count())
+                    .map(|bone| format!("bone{bone}"))
+                    .collect(),
+                morph_bindings: vec![None; reduced.snapshot().morph_count()],
+            },
+            false,
+        )
+        .unwrap();
+        let root_curves = dto
+            .curves
+            .iter()
+            .filter(|curve| curve.path == format!("bone{root}"))
+            .count();
+        assert!(root_curves < 6);
+        let plan = build_dcc_channel_plans(&reduced, &FbxExportOptions::default()).unwrap();
+        let expected_curve_count = plan
+            .iter()
+            .map(|plan| {
+                plan.translation_channels
+                    .iter()
+                    .chain(plan.rotation_channels.iter())
+                    .filter(|channel| channel.is_some())
+                    .count()
+            })
+            .sum::<usize>();
+        assert_eq!(dto.curves.len(), expected_curve_count);
+        assert_eq!(
+            dto.reduced_key_count,
+            reduced.report().reduced_bone_key_count
+        );
     }
 
     #[test]

@@ -254,6 +254,14 @@ impl MorphTrack {
         self.frame_numbers.len()
     }
 
+    /// Returns an owned view of one authored morph keyframe.
+    pub fn keyframe(&self, index: usize) -> Option<MorphKeyframe> {
+        Some(MorphKeyframe {
+            frame: *self.frame_numbers.get(index)?,
+            weight: *self.weights.get(index)?,
+        })
+    }
+
     pub fn sample(&self, frame: f32) -> Option<f32> {
         match self.frame_numbers.len() {
             0 => None,
@@ -341,6 +349,19 @@ impl PropertyAnimationBinding {
 
     pub fn keyframe_count(&self) -> usize {
         self.frame_numbers.len()
+    }
+
+    /// Returns an owned view of one authored property keyframe.
+    pub fn keyframe(&self, index: usize) -> Option<PropertyKeyframe> {
+        Some(PropertyKeyframe {
+            frame: *self.frame_numbers.get(index)?,
+            ik_enabled: self.ik_enabled.get(index)?.clone(),
+        })
+    }
+
+    /// Returns the total number of packed IK state bytes across all keys.
+    pub fn ik_enabled_count(&self) -> usize {
+        self.ik_enabled.iter().map(|state| state.len()).sum()
     }
 
     pub fn sample(&self, frame: f32) -> Option<&[u8]> {
@@ -568,6 +589,11 @@ impl AnimationClip {
 
     pub fn morph_track_count(&self) -> usize {
         self.morph_tracks.len()
+    }
+
+    /// Returns one authored morph track by clip order.
+    pub fn morph_track(&self, index: usize) -> Option<&MorphAnimationBinding> {
+        self.morph_tracks.get(index)
     }
 
     pub fn has_property_track(&self) -> bool {

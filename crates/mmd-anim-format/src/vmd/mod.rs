@@ -1,5 +1,6 @@
 use glam::{Quat, Vec3A};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use mmd_anim_runtime::{
     AnimationClip, BoneAnimationBinding, BoneIndex, InterpolationScalar, InterpolationVector3,
@@ -44,22 +45,6 @@ impl<'a> ByteReader<'a> {
         Ok(count)
     }
 
-    fn skip_optional_ignored_records(&mut self, record_size: usize) -> Result<bool, ImportError> {
-        let Some(count) = self.read_optional_u32_le()? else {
-            return Ok(false);
-        };
-        let Some(bytes) = (count as usize).checked_mul(record_size) else {
-            self.pos = self.data.len();
-            return Ok(false);
-        };
-        if bytes > self.remaining() {
-            self.pos = self.data.len();
-            return Ok(false);
-        }
-        self.read_slice(bytes)?;
-        Ok(true)
-    }
-
     fn read_optional_record_count(
         &mut self,
         record_size: usize,
@@ -77,21 +62,6 @@ impl<'a> ByteReader<'a> {
             return Ok(None);
         }
         Ok(Some(count))
-    }
-
-    fn read_quat(&mut self) -> Result<Quat, ImportError> {
-        Ok(Quat::from_xyzw(
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-            self.read_f32_le()?,
-        ))
-    }
-
-    fn read_shifts_jis_name(&mut self) -> Result<Vec<u8>, ImportError> {
-        let raw = self.read_slice(15)?;
-        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-        Ok(raw[..end].to_vec())
     }
 }
 
@@ -138,6 +108,168 @@ pub struct VmdImportResult {
     pub property_ik_frames: Vec<VmdPropertyIkFrame>,
 }
 
+/// Owns all VMD channels produced by one parser pass.
+///
+/// The parsed animation is the typed scene/raw-track view used by camera,
+/// light, self-shadow, and property consumers. The import result retains the
+/// runtime-facing bone/morph/property representation used by model-aware clip
+/// construction. Both views are owned by the context so callers can create a
+/// clip and copy scene channels without reparsing the input bytes.
+#[derive(Debug, Clone)]
+pub struct VmdSharedContext {
+    raw: VmdImportResult,
+    parsed: VmdParsedAnimation,
+    summary: VmdSharedContextSummary,
+}
+
+/// Counts for one VMD source channel in a shared-context summary.
+///
+/// Bone and morph track counts are the number of distinct raw target names.
+/// Camera, light, self-shadow, and property channels have one track when they
+/// contain at least one key. `key_count` always counts source keyframe records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmdSharedContextTrackSummary {
+    pub track_count: usize,
+    pub key_count: usize,
+}
+
+/// Fixed-width summary retained by a parsed shared VMD context.
+///
+/// `target_model_name_bytes` is the original 20-byte VMD header field. It is
+/// Shift-JIS/CP932 data with the same first-NUL trimming convention as the
+/// existing parsed model-name value. Counts remain `usize` inside the format
+/// layer; the native ABI exposes them as checked `uint32_t` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmdSharedContextSummary {
+    pub target_model_name_bytes: [u8; 20],
+    pub max_frame: u32,
+    pub bones: VmdSharedContextTrackSummary,
+    pub morphs: VmdSharedContextTrackSummary,
+    pub cameras: VmdSharedContextTrackSummary,
+    pub lights: VmdSharedContextTrackSummary,
+    pub self_shadows: VmdSharedContextTrackSummary,
+    pub properties: VmdSharedContextTrackSummary,
+    pub property_ik_entry_count: usize,
+}
+
+/// Errors returned by the non-materializing VMD summary scanner.
+///
+/// The summary-only validation surface is intentionally separate from
+/// `ImportError` so adding summary diagnostics does not make the existing
+/// public import error enum's exhaustive matches non-exhaustive.
+#[derive(Debug, Error, PartialEq)]
+pub enum VmdSummaryError {
+    #[error("VMD summary parse failed: {0}")]
+    Parse(ImportError),
+    #[error("invalid VMD summary data: {0}")]
+    Invalid(&'static str),
+}
+
+impl VmdSharedContextSummary {
+    fn from_parsed(target_model_name_bytes: [u8; 20], parsed: &VmdParsedAnimation) -> Self {
+        Self {
+            target_model_name_bytes,
+            max_frame: parsed.metadata.max_frame,
+            bones: VmdSharedContextTrackSummary {
+                track_count: distinct_name_count(
+                    parsed
+                        .bone_frames
+                        .iter()
+                        .map(|frame| frame.bone_name_bytes.as_slice()),
+                ),
+                key_count: parsed.bone_frames.len(),
+            },
+            morphs: VmdSharedContextTrackSummary {
+                track_count: distinct_name_count(
+                    parsed
+                        .morph_frames
+                        .iter()
+                        .map(|frame| frame.morph_name_bytes.as_slice()),
+                ),
+                key_count: parsed.morph_frames.len(),
+            },
+            cameras: singleton_track_summary(parsed.camera_frames.len()),
+            lights: singleton_track_summary(parsed.light_frames.len()),
+            self_shadows: singleton_track_summary(parsed.self_shadow_frames.len()),
+            properties: singleton_track_summary(parsed.property_frames.len()),
+            property_ik_entry_count: parsed
+                .property_frames
+                .iter()
+                .map(|frame| frame.ik_states.len())
+                .sum(),
+        }
+    }
+}
+
+fn distinct_name_count<'a>(names: impl Iterator<Item = &'a [u8]>) -> usize {
+    names
+        .map(|name| name.to_vec())
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn singleton_track_summary(key_count: usize) -> VmdSharedContextTrackSummary {
+    VmdSharedContextTrackSummary {
+        track_count: usize::from(key_count != 0),
+        key_count,
+    }
+}
+
+impl VmdSharedContext {
+    pub fn import_result(&self) -> &VmdImportResult {
+        &self.raw
+    }
+
+    pub fn parsed_animation(&self) -> &VmdParsedAnimation {
+        &self.parsed
+    }
+
+    pub fn summary(&self) -> &VmdSharedContextSummary {
+        &self.summary
+    }
+}
+
+/// Parses VMD bytes once and retains every supported channel for shared
+/// model-clip and scene-track consumers.
+pub fn parse_vmd_shared_context(data: &[u8]) -> Result<VmdSharedContext, ImportError> {
+    let scan = parse_vmd_scan(data, VmdScanOptions::BOTH)?;
+    let VmdScanResult {
+        raw,
+        parsed,
+        summary: _,
+        target_model_name_bytes,
+    } = scan;
+    let raw = raw.expect("combined VMD scan must produce raw output");
+    let parsed = parsed.expect("combined VMD scan must produce parsed output");
+    Ok(VmdSharedContext {
+        summary: VmdSharedContextSummary::from_parsed(target_model_name_bytes, &parsed),
+        raw,
+        parsed,
+    })
+}
+
+/// Reads only the fixed-width VMD summary without materializing raw or parsed
+/// keyframe tracks.
+///
+/// Bone and morph distinct-track counts borrow their fixed-width names from
+/// `data` for the duration of the scan. All other channels retain only their
+/// key and IK-entry counts. Optional camera/light/self-shadow tails preserve
+/// the compatibility parser's absent-tail behavior when a complete count is
+/// present but its records are unavailable; a partial four-byte count remains
+/// a structural parse error.
+pub fn parse_vmd_summary(data: &[u8]) -> Result<VmdSharedContextSummary, VmdSummaryError> {
+    let scan = parse_vmd_scan(data, VmdScanOptions::SUMMARY).map_err(|error| match error {
+        ImportError::UnsupportedFormat {
+            format: "VMD",
+            detail,
+        } => VmdSummaryError::Invalid(detail),
+        error => VmdSummaryError::Parse(error),
+    })?;
+    Ok(scan
+        .summary
+        .expect("summary-only VMD scan must produce summary output"))
+}
+
 pub fn read_header(data: &[u8]) -> Result<(VmdHeader, usize), ImportError> {
     let mut r = Reader::new(data);
 
@@ -155,126 +287,9 @@ pub fn read_header(data: &[u8]) -> Result<(VmdHeader, usize), ImportError> {
 }
 
 pub fn import_vmd_motion(data: &[u8]) -> Result<VmdImportResult, ImportError> {
-    let (_header, pos) = read_header(data)?;
-    let mut r = Reader { data, pos };
-
-    let bone_count = r.read_record_count(111)?;
-    let mut bone_keyframes = Vec::with_capacity(bone_count);
-    for _ in 0..bone_count {
-        let bone_name = r.read_shifts_jis_name()?;
-        let frame = r.read_u32_le()?;
-        let position = r.read_vec3()?;
-        let rotation = r.read_quat()?;
-        let interpolation: [u8; 64] = r.read_slice(64)?.try_into().unwrap();
-
-        let bone_name_normalized = normalize_vmd_name(&bone_name);
-
-        bone_keyframes.push(VmdBoneKeyframeRaw {
-            bone_mode: VmdBoneImportMode::ByName(bone_name),
-            frame,
-            position,
-            rotation,
-            interpolation,
-            bone_name_normalized,
-        });
-    }
-
-    let Some(morph_count) = r.read_optional_u32_le()? else {
-        return Ok(VmdImportResult {
-            bone_keyframes,
-            morph_keyframes: Vec::new(),
-            property_keyframes: Vec::new(),
-            property_ik_frames: Vec::new(),
-        });
-    };
-    let morph_count = morph_count as usize;
-    r.require_record_bytes(morph_count, 23)?;
-    let mut morph_keyframes = Vec::with_capacity(morph_count);
-    for _ in 0..morph_count {
-        let morph_name = r.read_shifts_jis_name()?;
-        let frame = r.read_u32_le()?;
-        let weight = r.read_f32_le()?;
-        morph_keyframes.push((morph_name, frame, weight));
-    }
-
-    if !r.skip_optional_ignored_records(61)? {
-        return Ok(VmdImportResult {
-            bone_keyframes,
-            morph_keyframes,
-            property_keyframes: Vec::new(),
-            property_ik_frames: Vec::new(),
-        });
-    }
-
-    if !r.skip_optional_ignored_records(28)? {
-        return Ok(VmdImportResult {
-            bone_keyframes,
-            morph_keyframes,
-            property_keyframes: Vec::new(),
-            property_ik_frames: Vec::new(),
-        });
-    }
-
-    if !r.skip_optional_ignored_records(9)? {
-        return Ok(VmdImportResult {
-            bone_keyframes,
-            morph_keyframes,
-            property_keyframes: Vec::new(),
-            property_ik_frames: Vec::new(),
-        });
-    }
-
-    let Some(show_ik_count) = r.read_optional_u32_le()? else {
-        return Ok(VmdImportResult {
-            bone_keyframes,
-            morph_keyframes,
-            property_keyframes: Vec::new(),
-            property_ik_frames: Vec::new(),
-        });
-    };
-    let show_ik_count = show_ik_count as usize;
-    r.require_record_bytes(show_ik_count, 9)?;
-    let mut property_keyframes = Vec::with_capacity(show_ik_count);
-    let mut property_ik_frames = Vec::with_capacity(show_ik_count);
-    for _ in 0..show_ik_count {
-        let frame = r.read_u32_le()?;
-        let show = r.read_u8()?;
-        let ik_count = r.read_u32_le()? as usize;
-        r.require_record_bytes(ik_count, 21)?;
-        let mut ik_enabled = Vec::with_capacity(ik_count);
-        let mut ik_entries = Vec::with_capacity(ik_count);
-        for _ in 0..ik_count {
-            let ik_name_bytes = r.read_slice(20)?.to_vec();
-            let enabled = r.read_u8()?;
-            let end = ik_name_bytes
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(ik_name_bytes.len());
-            let name_normalized = normalize_vmd_name(&ik_name_bytes[..end]);
-            ik_enabled.push(enabled);
-            ik_entries.push(VmdIkEntry {
-                name_bytes: ik_name_bytes,
-                enabled,
-                name_normalized,
-            });
-        }
-        property_keyframes.push(PropertyKeyframe::new(
-            frame,
-            ik_enabled.iter().map(|&b| b != 0).collect(),
-        ));
-        property_ik_frames.push(VmdPropertyIkFrame {
-            frame,
-            show,
-            entries: ik_entries,
-        });
-    }
-
-    Ok(VmdImportResult {
-        bone_keyframes,
-        morph_keyframes,
-        property_keyframes,
-        property_ik_frames,
-    })
+    Ok(parse_vmd_scan(data, VmdScanOptions::RAW)?
+        .raw
+        .expect("raw-only VMD scan must produce raw output"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -405,82 +420,397 @@ pub struct VmdParsedIkState {
     pub enabled: bool,
 }
 
-pub fn parse_vmd_animation(data: &[u8]) -> Result<VmdParsedAnimation, ImportError> {
-    let (_header, pos) = read_header(data)?;
+#[derive(Clone, Copy)]
+struct VmdScanOptions {
+    build_raw: bool,
+    build_parsed: bool,
+    build_summary: bool,
+}
+
+impl VmdScanOptions {
+    const RAW: Self = Self {
+        build_raw: true,
+        build_parsed: false,
+        build_summary: false,
+    };
+    const PARSED: Self = Self {
+        build_raw: false,
+        build_parsed: true,
+        build_summary: false,
+    };
+    const BOTH: Self = Self {
+        build_raw: true,
+        build_parsed: true,
+        build_summary: false,
+    };
+    const SUMMARY: Self = Self {
+        build_raw: false,
+        build_parsed: false,
+        build_summary: true,
+    };
+}
+
+struct VmdScanResult {
+    raw: Option<VmdImportResult>,
+    parsed: Option<VmdParsedAnimation>,
+    summary: Option<VmdSharedContextSummary>,
+    target_model_name_bytes: [u8; 20],
+}
+
+struct VmdPropertyFrameReadResult {
+    parsed_frames: Option<Vec<VmdParsedPropertyFrame>>,
+    raw_keyframes: Option<Vec<PropertyKeyframe>>,
+    raw_ik_frames: Option<Vec<VmdPropertyIkFrame>>,
+}
+
+struct VmdSummaryAccumulator {
+    bone_names: HashSet<Vec<u8>>,
+    morph_names: HashSet<Vec<u8>>,
+    bone_key_count: usize,
+    morph_key_count: usize,
+    camera_key_count: usize,
+    light_key_count: usize,
+    self_shadow_key_count: usize,
+    property_key_count: usize,
+    property_ik_entry_count: usize,
+}
+
+impl VmdSummaryAccumulator {
+    fn new() -> Self {
+        Self {
+            bone_names: HashSet::new(),
+            morph_names: HashSet::new(),
+            bone_key_count: 0,
+            morph_key_count: 0,
+            camera_key_count: 0,
+            light_key_count: 0,
+            self_shadow_key_count: 0,
+            property_key_count: 0,
+            property_ik_entry_count: 0,
+        }
+    }
+
+    fn record_bone(&mut self, name: &[u8]) -> Result<(), ImportError> {
+        validate_summary_name(name, "empty bone name")?;
+        self.bone_names.insert(name.to_vec());
+        self.bone_key_count = self
+            .bone_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn record_morph(&mut self, name: &[u8]) -> Result<(), ImportError> {
+        validate_summary_name(name, "empty morph name")?;
+        self.morph_names.insert(name.to_vec());
+        self.morph_key_count = self
+            .morph_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn record_camera(&mut self) -> Result<(), ImportError> {
+        self.camera_key_count = self
+            .camera_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn record_light(&mut self) -> Result<(), ImportError> {
+        self.light_key_count = self
+            .light_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn record_self_shadow(&mut self) -> Result<(), ImportError> {
+        self.self_shadow_key_count = self
+            .self_shadow_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn record_property(&mut self, ik_count: usize) -> Result<(), ImportError> {
+        self.property_key_count = self
+            .property_key_count
+            .checked_add(1)
+            .ok_or(ImportError::SectionOverflow)?;
+        self.property_ik_entry_count = self
+            .property_ik_entry_count
+            .checked_add(ik_count)
+            .ok_or(ImportError::SectionOverflow)?;
+        Ok(())
+    }
+
+    fn finish(self, target_model_name_bytes: [u8; 20], max_frame: u32) -> VmdSharedContextSummary {
+        VmdSharedContextSummary {
+            target_model_name_bytes,
+            max_frame,
+            bones: VmdSharedContextTrackSummary {
+                track_count: self.bone_names.len(),
+                key_count: self.bone_key_count,
+            },
+            morphs: VmdSharedContextTrackSummary {
+                track_count: self.morph_names.len(),
+                key_count: self.morph_key_count,
+            },
+            cameras: singleton_track_summary(self.camera_key_count),
+            lights: singleton_track_summary(self.light_key_count),
+            self_shadows: singleton_track_summary(self.self_shadow_key_count),
+            properties: singleton_track_summary(self.property_key_count),
+            property_ik_entry_count: self.property_ik_entry_count,
+        }
+    }
+}
+
+fn summary_invalid_error(detail: &'static str) -> ImportError {
+    ImportError::UnsupportedFormat {
+        format: "VMD",
+        detail,
+    }
+}
+
+fn validate_summary_name(name: &[u8], detail: &'static str) -> Result<(), ImportError> {
+    if vmd_fixed_name_is_blank(name) {
+        Err(summary_invalid_error(detail))
+    } else {
+        Ok(())
+    }
+}
+
+fn read_vmd_f32(
+    r: &mut Reader<'_>,
+    validate: bool,
+    field: &'static str,
+) -> Result<f32, ImportError> {
+    let value = r.read_f32_le()?;
+    if validate && !value.is_finite() {
+        return Err(summary_invalid_error(field));
+    }
+    Ok(value)
+}
+
+fn read_vmd_vec3(
+    r: &mut Reader<'_>,
+    validate: bool,
+    field: &'static str,
+) -> Result<Vec3A, ImportError> {
+    Ok(Vec3A::new(
+        read_vmd_f32(r, validate, field)?,
+        read_vmd_f32(r, validate, field)?,
+        read_vmd_f32(r, validate, field)?,
+    ))
+}
+
+fn read_vmd_quat(
+    r: &mut Reader<'_>,
+    validate: bool,
+    field: &'static str,
+) -> Result<Quat, ImportError> {
+    Ok(Quat::from_xyzw(
+        read_vmd_f32(r, validate, field)?,
+        read_vmd_f32(r, validate, field)?,
+        read_vmd_f32(r, validate, field)?,
+        read_vmd_f32(r, validate, field)?,
+    ))
+}
+
+fn vmd_fixed_name_is_blank(bytes: &[u8]) -> bool {
+    decode_sjis_fixed(bytes).trim().is_empty()
+}
+
+fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult, ImportError> {
+    let (header, pos) = read_header(data)?;
     let mut r = Reader { data, pos };
-    let model_name = decode_sjis_fixed(&_header.model_name_bytes);
-    let model_name_bytes = trim_fixed_bytes(&_header.model_name_bytes).to_vec();
+    let model_name = options
+        .build_parsed
+        .then(|| decode_sjis_fixed(&header.model_name_bytes));
+    let model_name_bytes = options
+        .build_parsed
+        .then(|| trim_fixed_bytes(&header.model_name_bytes).to_vec());
     let mut max_frame = 0u32;
+    let mut summary = options.build_summary.then(VmdSummaryAccumulator::new);
 
     let bone_count = r.read_record_count(111)?;
-    let mut bone_frames = Vec::with_capacity(bone_count);
+    let mut raw = options.build_raw.then(|| VmdImportResult {
+        bone_keyframes: Vec::with_capacity(bone_count),
+        morph_keyframes: Vec::new(),
+        property_keyframes: Vec::new(),
+        property_ik_frames: Vec::new(),
+    });
+    let mut bone_frames = options.build_parsed.then(|| Vec::with_capacity(bone_count));
     for _ in 0..bone_count {
-        let bone_name_bytes = r.read_slice(15)?;
-        let bone_name = decode_sjis_fixed(bone_name_bytes);
+        let bone_name_field = r.read_slice(15)?;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_bone(trim_fixed_bytes(bone_name_field))?;
+        }
+        let raw_bone_name = options
+            .build_raw
+            .then(|| trim_fixed_bytes(bone_name_field).to_vec());
+        let raw_bone_name_normalized = raw_bone_name
+            .as_ref()
+            .map(|name_bytes| normalize_vmd_name(name_bytes));
+        let parsed_bone_name = options
+            .build_parsed
+            .then(|| decode_sjis_fixed(bone_name_field));
+        let parsed_bone_name_bytes = options
+            .build_parsed
+            .then(|| trim_fixed_bytes(bone_name_field).to_vec());
         let frame = r.read_u32_le()?;
-        max_frame = max_frame.max(frame);
-        let position = r.read_vec3()?;
-        let rotation = r.read_quat()?;
+        if options.build_parsed || options.build_summary {
+            max_frame = max_frame.max(frame);
+        }
+        let position = read_vmd_vec3(&mut r, options.build_summary, "bone translation")?;
+        let rotation = read_vmd_quat(&mut r, options.build_summary, "bone rotation")?;
         let interpolation: [u8; 64] = r.read_slice(64)?.try_into().unwrap();
-        bone_frames.push(VmdParsedBoneFrame {
-            bone_name,
-            bone_name_bytes: trim_fixed_bytes(bone_name_bytes).to_vec(),
-            frame,
-            translation: [position.x, position.y, position.z],
-            rotation: [rotation.x, rotation.y, rotation.z, rotation.w],
-            interpolation: interpolation.to_vec(),
-        });
+        if let Some(raw) = raw.as_mut() {
+            raw.bone_keyframes.push(VmdBoneKeyframeRaw {
+                bone_mode: VmdBoneImportMode::ByName(
+                    raw_bone_name.expect("raw VMD scan must build bone names"),
+                ),
+                frame,
+                position,
+                rotation,
+                interpolation,
+                bone_name_normalized: raw_bone_name_normalized
+                    .expect("raw VMD scan must normalize bone names"),
+            });
+        }
+        if let Some(bone_frames) = bone_frames.as_mut() {
+            bone_frames.push(VmdParsedBoneFrame {
+                bone_name: parsed_bone_name.expect("parsed VMD scan must decode bone names"),
+                bone_name_bytes: parsed_bone_name_bytes
+                    .expect("parsed VMD scan must retain bone name bytes"),
+                frame,
+                translation: [position.x, position.y, position.z],
+                rotation: [rotation.x, rotation.y, rotation.z, rotation.w],
+                interpolation: interpolation.to_vec(),
+            });
+        }
     }
 
     let Some(morph_count) = r.read_optional_u32_le()? else {
-        return Ok(vmd_parsed_animation(
+        return Ok(vmd_scan_result(
             model_name,
             model_name_bytes,
+            header.model_name_bytes,
             max_frame,
-            VmdParsedSections {
+            raw,
+            bone_frames.map(|bone_frames| VmdParsedSections {
                 bone_frames,
                 morph_frames: Vec::new(),
                 camera_frames: Vec::new(),
                 light_frames: Vec::new(),
                 self_shadow_frames: Vec::new(),
                 property_frames: Vec::new(),
-            },
+            }),
+            summary.map(|summary| summary.finish(header.model_name_bytes, max_frame)),
         ));
     };
     let morph_count = morph_count as usize;
     r.require_record_bytes(morph_count, 23)?;
-    let mut morph_frames = Vec::with_capacity(morph_count);
+    if let Some(raw) = raw.as_mut() {
+        raw.morph_keyframes = Vec::with_capacity(morph_count);
+    }
+    let mut morph_frames = options
+        .build_parsed
+        .then(|| Vec::with_capacity(morph_count));
     for _ in 0..morph_count {
-        let morph_name_bytes = r.read_slice(15)?;
-        let morph_name = decode_sjis_fixed(morph_name_bytes);
+        let morph_name_field = r.read_slice(15)?;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_morph(trim_fixed_bytes(morph_name_field))?;
+        }
+        let raw_morph_name = options
+            .build_raw
+            .then(|| trim_fixed_bytes(morph_name_field).to_vec());
+        let parsed_morph_name = options
+            .build_parsed
+            .then(|| decode_sjis_fixed(morph_name_field));
+        let parsed_morph_name_bytes = options
+            .build_parsed
+            .then(|| trim_fixed_bytes(morph_name_field).to_vec());
         let frame = r.read_u32_le()?;
-        max_frame = max_frame.max(frame);
-        morph_frames.push(VmdParsedMorphFrame {
-            morph_name,
-            morph_name_bytes: trim_fixed_bytes(morph_name_bytes).to_vec(),
-            frame,
-            weight: r.read_f32_le()?,
-        });
+        if options.build_parsed || options.build_summary {
+            max_frame = max_frame.max(frame);
+        }
+        let weight = read_vmd_f32(&mut r, options.build_summary, "morph weight")?;
+        if let Some(raw) = raw.as_mut() {
+            raw.morph_keyframes.push((
+                raw_morph_name.expect("raw VMD scan must build morph names"),
+                frame,
+                weight,
+            ));
+        }
+        if let Some(morph_frames) = morph_frames.as_mut() {
+            morph_frames.push(VmdParsedMorphFrame {
+                morph_name: parsed_morph_name.expect("parsed VMD scan must decode morph names"),
+                morph_name_bytes: parsed_morph_name_bytes
+                    .expect("parsed VMD scan must retain morph name bytes"),
+                frame,
+                weight,
+            });
+        }
     }
 
-    let camera_frames = read_parsed_camera_frames(&mut r, &mut max_frame)?;
-    let light_frames = read_parsed_light_frames(&mut r, &mut max_frame)?;
-    let self_shadow_frames = read_parsed_self_shadow_frames(&mut r, &mut max_frame)?;
-    let property_frames = read_parsed_property_frames(&mut r, &mut max_frame)?;
+    let camera_frames = if options.build_parsed || options.build_summary {
+        read_camera_frames(&mut r, &mut max_frame, options.build_parsed, &mut summary)?
+    } else {
+        skip_optional_records(&mut r, 61)?;
+        None
+    };
+    let light_frames = if options.build_parsed || options.build_summary {
+        read_light_frames(&mut r, &mut max_frame, options.build_parsed, &mut summary)?
+    } else {
+        skip_optional_records(&mut r, 28)?;
+        None
+    };
+    let self_shadow_frames = if options.build_parsed || options.build_summary {
+        read_self_shadow_frames(&mut r, &mut max_frame, options.build_parsed, &mut summary)?
+    } else {
+        skip_optional_records(&mut r, 9)?;
+        None
+    };
+    let property_frames = read_property_frames(&mut r, &mut max_frame, options, &mut summary)?;
 
-    Ok(vmd_parsed_animation(
+    if let Some(raw) = raw.as_mut() {
+        raw.property_keyframes = property_frames
+            .raw_keyframes
+            .expect("raw VMD scan must build property keyframes");
+        raw.property_ik_frames = property_frames
+            .raw_ik_frames
+            .expect("raw VMD scan must build property IK frames");
+    }
+    let parsed = bone_frames.map(|bone_frames| VmdParsedSections {
+        bone_frames,
+        morph_frames: morph_frames.expect("parsed VMD scan must build morph frames"),
+        camera_frames: camera_frames.expect("parsed VMD scan must build camera frames"),
+        light_frames: light_frames.expect("parsed VMD scan must build light frames"),
+        self_shadow_frames: self_shadow_frames
+            .expect("parsed VMD scan must build self-shadow frames"),
+        property_frames: property_frames
+            .parsed_frames
+            .expect("parsed VMD scan must build property frames"),
+    });
+
+    Ok(vmd_scan_result(
         model_name,
         model_name_bytes,
+        header.model_name_bytes,
         max_frame,
-        VmdParsedSections {
-            bone_frames,
-            morph_frames,
-            camera_frames,
-            light_frames,
-            self_shadow_frames,
-            property_frames,
-        },
+        raw,
+        parsed,
+        summary.map(|summary| summary.finish(header.model_name_bytes, max_frame)),
     ))
+}
+
+pub fn parse_vmd_animation(data: &[u8]) -> Result<VmdParsedAnimation, ImportError> {
+    Ok(parse_vmd_scan(data, VmdScanOptions::PARSED)?
+        .parsed
+        .expect("parsed-only VMD scan must produce parsed output"))
 }
 
 fn default_vmd_kind() -> &'static str {
@@ -609,110 +939,229 @@ fn vmd_parsed_animation(
     }
 }
 
-fn read_parsed_camera_frames(
+fn vmd_scan_result(
+    model_name: Option<String>,
+    model_name_bytes: Option<Vec<u8>>,
+    target_model_name_bytes: [u8; 20],
+    max_frame: u32,
+    raw: Option<VmdImportResult>,
+    sections: Option<VmdParsedSections>,
+    summary: Option<VmdSharedContextSummary>,
+) -> VmdScanResult {
+    VmdScanResult {
+        raw,
+        target_model_name_bytes,
+        summary,
+        parsed: sections.map(|sections| {
+            vmd_parsed_animation(
+                model_name.expect("parsed VMD scan must decode model name"),
+                model_name_bytes.expect("parsed VMD scan must retain model name bytes"),
+                max_frame,
+                sections,
+            )
+        }),
+    }
+}
+
+fn skip_optional_records(r: &mut Reader<'_>, record_size: usize) -> Result<(), ImportError> {
+    if let Some(count) = r.read_optional_record_count(record_size)? {
+        r.skip(count * record_size)?;
+    }
+    Ok(())
+}
+
+fn read_camera_frames(
     r: &mut Reader<'_>,
     max_frame: &mut u32,
-) -> Result<Vec<VmdParsedCameraFrame>, ImportError> {
+    build_parsed: bool,
+    summary: &mut Option<VmdSummaryAccumulator>,
+) -> Result<Option<Vec<VmdParsedCameraFrame>>, ImportError> {
     let Some(count) = r.read_optional_record_count(61)? else {
-        return Ok(Vec::new());
+        return Ok(build_parsed.then(Vec::new));
     };
-    let mut frames = Vec::with_capacity(count);
+    let mut frames = build_parsed.then(|| Vec::with_capacity(count));
     for _ in 0..count {
         let frame = r.read_u32_le()?;
         *max_frame = (*max_frame).max(frame);
-        frames.push(VmdParsedCameraFrame {
-            frame,
-            distance: r.read_f32_le()?,
-            position: {
-                let p = r.read_vec3()?;
-                [p.x, p.y, p.z]
-            },
-            rotation: {
-                let p = r.read_vec3()?;
-                [p.x, p.y, p.z]
-            },
-            interpolation: r.read_slice(24)?.try_into().unwrap(),
-            fov: r.read_u32_le()?,
-            perspective: r.read_u8()? == 0,
-        });
+        let distance = read_vmd_f32(r, summary.is_some(), "camera distance")?;
+        let position = read_vmd_vec3(r, summary.is_some(), "camera position")?;
+        let rotation = read_vmd_vec3(r, summary.is_some(), "camera rotation")?;
+        let interpolation: [u8; 24] = r.read_slice(24)?.try_into().unwrap();
+        let fov = r.read_u32_le()?;
+        let perspective = r.read_u8()? == 0;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_camera()?;
+        }
+        if let Some(frames) = frames.as_mut() {
+            frames.push(VmdParsedCameraFrame {
+                frame,
+                distance,
+                position: [position.x, position.y, position.z],
+                rotation: [rotation.x, rotation.y, rotation.z],
+                interpolation,
+                fov,
+                perspective,
+            });
+        }
     }
     Ok(frames)
 }
 
-fn read_parsed_light_frames(
+fn read_light_frames(
     r: &mut Reader<'_>,
     max_frame: &mut u32,
-) -> Result<Vec<VmdParsedLightFrame>, ImportError> {
+    build_parsed: bool,
+    summary: &mut Option<VmdSummaryAccumulator>,
+) -> Result<Option<Vec<VmdParsedLightFrame>>, ImportError> {
     let Some(count) = r.read_optional_record_count(28)? else {
-        return Ok(Vec::new());
+        return Ok(build_parsed.then(Vec::new));
     };
-    let mut frames = Vec::with_capacity(count);
+    let mut frames = build_parsed.then(|| Vec::with_capacity(count));
     for _ in 0..count {
         let frame = r.read_u32_le()?;
         *max_frame = (*max_frame).max(frame);
-        let color = r.read_vec3()?;
-        let direction = r.read_vec3()?;
-        frames.push(VmdParsedLightFrame {
-            frame,
-            color: [color.x, color.y, color.z],
-            direction: [direction.x, direction.y, direction.z],
-        });
+        let color = read_vmd_vec3(r, summary.is_some(), "light color")?;
+        let direction = read_vmd_vec3(r, summary.is_some(), "light direction")?;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_light()?;
+        }
+        if let Some(frames) = frames.as_mut() {
+            frames.push(VmdParsedLightFrame {
+                frame,
+                color: [color.x, color.y, color.z],
+                direction: [direction.x, direction.y, direction.z],
+            });
+        }
     }
     Ok(frames)
 }
 
-fn read_parsed_self_shadow_frames(
+fn read_self_shadow_frames(
     r: &mut Reader<'_>,
     max_frame: &mut u32,
-) -> Result<Vec<VmdParsedSelfShadowFrame>, ImportError> {
+    build_parsed: bool,
+    summary: &mut Option<VmdSummaryAccumulator>,
+) -> Result<Option<Vec<VmdParsedSelfShadowFrame>>, ImportError> {
     let Some(count) = r.read_optional_record_count(9)? else {
-        return Ok(Vec::new());
+        return Ok(build_parsed.then(Vec::new));
     };
-    let mut frames = Vec::with_capacity(count);
+    let mut frames = build_parsed.then(|| Vec::with_capacity(count));
     for _ in 0..count {
         let frame = r.read_u32_le()?;
         *max_frame = (*max_frame).max(frame);
-        frames.push(VmdParsedSelfShadowFrame {
-            frame,
-            mode: r.read_u8()?,
-            distance: r.read_f32_le()?,
-        });
+        let mode = r.read_u8()?;
+        let distance = read_vmd_f32(r, summary.is_some(), "self-shadow distance")?;
+        if let Some(summary) = summary.as_mut() {
+            summary.record_self_shadow()?;
+        }
+        if let Some(frames) = frames.as_mut() {
+            frames.push(VmdParsedSelfShadowFrame {
+                frame,
+                mode,
+                distance,
+            });
+        }
     }
     Ok(frames)
 }
 
-fn read_parsed_property_frames(
+fn read_property_frames(
     r: &mut Reader<'_>,
     max_frame: &mut u32,
-) -> Result<Vec<VmdParsedPropertyFrame>, ImportError> {
+    options: VmdScanOptions,
+    summary: &mut Option<VmdSummaryAccumulator>,
+) -> Result<VmdPropertyFrameReadResult, ImportError> {
     let Some(count) = r.read_optional_u32_le()? else {
-        return Ok(Vec::new());
+        return Ok(VmdPropertyFrameReadResult {
+            parsed_frames: options.build_parsed.then(Vec::new),
+            raw_keyframes: options.build_raw.then(Vec::new),
+            raw_ik_frames: options.build_raw.then(Vec::new),
+        });
     };
     let count = count as usize;
     r.require_record_bytes(count, 9)?;
-    let mut frames = Vec::with_capacity(count);
+    let mut parsed_frames = options.build_parsed.then(|| Vec::with_capacity(count));
+    let mut raw_keyframes = options.build_raw.then(|| Vec::with_capacity(count));
+    let mut raw_ik_frames = options.build_raw.then(|| Vec::with_capacity(count));
     for _ in 0..count {
         let frame = r.read_u32_le()?;
-        *max_frame = (*max_frame).max(frame);
-        let visible = r.read_u8()? != 0;
+        if options.build_parsed || options.build_summary {
+            *max_frame = (*max_frame).max(frame);
+        }
+        let show = r.read_u8()?;
         let ik_count = r.read_u32_le()? as usize;
         r.require_record_bytes(ik_count, 21)?;
-        let mut ik_states = Vec::with_capacity(ik_count);
+        if let Some(summary) = summary.as_mut() {
+            summary.record_property(ik_count)?;
+        }
+        let mut raw_ik_enabled = options.build_raw.then(|| Vec::with_capacity(ik_count));
+        let mut raw_ik_entries = options.build_raw.then(|| Vec::with_capacity(ik_count));
+        let mut ik_states = options.build_parsed.then(|| Vec::with_capacity(ik_count));
         for _ in 0..ik_count {
-            let bone_name_bytes = r.read_slice(20)?;
-            ik_states.push(VmdParsedIkState {
-                bone_name: decode_sjis_fixed(bone_name_bytes),
-                bone_name_bytes: trim_fixed_bytes(bone_name_bytes).to_vec(),
-                enabled: r.read_u8()? != 0,
+            let name_field = r.read_slice(20)?;
+            if options.build_summary {
+                validate_summary_name(trim_fixed_bytes(name_field), "empty property IK name")?;
+            }
+            let raw_name_bytes = options.build_raw.then(|| name_field.to_vec());
+            let raw_name_normalized = raw_name_bytes
+                .as_ref()
+                .map(|name_bytes| normalize_vmd_name(trim_fixed_bytes(name_bytes)));
+            let parsed_name = options.build_parsed.then(|| decode_sjis_fixed(name_field));
+            let parsed_name_bytes = options
+                .build_parsed
+                .then(|| trim_fixed_bytes(name_field).to_vec());
+            let enabled = r.read_u8()?;
+            if let Some(raw_ik_enabled) = raw_ik_enabled.as_mut() {
+                raw_ik_enabled.push(enabled);
+            }
+            if let Some(raw_ik_entries) = raw_ik_entries.as_mut() {
+                raw_ik_entries.push(VmdIkEntry {
+                    name_bytes: raw_name_bytes
+                        .expect("raw VMD scan must retain property name bytes"),
+                    enabled,
+                    name_normalized: raw_name_normalized
+                        .expect("raw VMD scan must normalize property names"),
+                });
+            }
+            if let Some(ik_states) = ik_states.as_mut() {
+                ik_states.push(VmdParsedIkState {
+                    bone_name: parsed_name.expect("parsed VMD scan must decode property names"),
+                    bone_name_bytes: parsed_name_bytes
+                        .expect("parsed VMD scan must retain property name bytes"),
+                    enabled: enabled != 0,
+                });
+            }
+        }
+        if let Some(parsed_frames) = parsed_frames.as_mut() {
+            parsed_frames.push(VmdParsedPropertyFrame {
+                frame,
+                visible: show != 0,
+                ik_states: ik_states.expect("parsed VMD scan must build IK states"),
             });
         }
-        frames.push(VmdParsedPropertyFrame {
-            frame,
-            visible,
-            ik_states,
-        });
+        if let Some(raw_keyframes) = raw_keyframes.as_mut() {
+            raw_keyframes.push(PropertyKeyframe::new(
+                frame,
+                raw_ik_enabled
+                    .expect("raw VMD scan must build IK enabled values")
+                    .into_iter()
+                    .map(|value| value != 0)
+                    .collect(),
+            ));
+        }
+        if let Some(raw_ik_frames) = raw_ik_frames.as_mut() {
+            raw_ik_frames.push(VmdPropertyIkFrame {
+                frame,
+                show,
+                entries: raw_ik_entries.expect("raw VMD scan must build property IK entries"),
+            });
+        }
     }
-    Ok(frames)
+    Ok(VmdPropertyFrameReadResult {
+        parsed_frames,
+        raw_keyframes,
+        raw_ik_frames,
+    })
 }
 
 pub fn sample_vmd_camera_frames(
@@ -2003,6 +2452,399 @@ mod tests {
             .collect();
         assert_eq!(&name2[..], b"RightLegIK");
         assert_eq!(result.property_ik_frames[0].entries[1].enabled, 0);
+    }
+
+    #[test]
+    fn shared_context_preserves_raw_property_bytes_and_values() {
+        let mut buf = build_vmd_header_bytes();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bones
+        buf.extend_from_slice(&0u32.to_le_bytes()); // morphs
+        buf.extend_from_slice(&0u32.to_le_bytes()); // cameras
+        buf.extend_from_slice(&0u32.to_le_bytes()); // lights
+        buf.extend_from_slice(&0u32.to_le_bytes()); // self shadows
+        buf.extend_from_slice(&1u32.to_le_bytes()); // property frames
+        buf.extend_from_slice(&42u32.to_le_bytes());
+        buf.push(0x7f); // preserve a nonstandard show byte
+        buf.extend_from_slice(&1u32.to_le_bytes()); // IK entries
+        let mut name_bytes = [0u8; 20];
+        name_bytes[..2].copy_from_slice(b"IK");
+        name_bytes[2] = 0;
+        name_bytes[3] = 0xa5; // preserve bytes after the terminating NUL
+        name_bytes[19] = 0x5a;
+        buf.extend_from_slice(&name_bytes);
+        buf.push(0x7f); // preserve a nonstandard enabled byte
+
+        let shared = parse_vmd_shared_context(&buf).unwrap();
+        let raw = shared.import_result();
+        assert_eq!(raw.property_keyframes[0].frame, 42);
+        assert_eq!(raw.property_keyframes[0].ik_enabled.as_ref(), &[1]);
+        assert_eq!(raw.property_ik_frames[0].show, 0x7f);
+        assert_eq!(
+            raw.property_ik_frames[0].entries[0].name_bytes,
+            name_bytes.to_vec()
+        );
+        assert_eq!(raw.property_ik_frames[0].entries[0].enabled, 0x7f);
+        assert_eq!(
+            raw.property_ik_frames[0].entries[0].name_normalized,
+            normalize_vmd_name(b"IK")
+        );
+
+        let parsed = shared.parsed_animation();
+        assert!(parsed.property_frames[0].visible);
+        assert_eq!(parsed.property_frames[0].ik_states[0].bone_name, "IK");
+        assert!(parsed.property_frames[0].ik_states[0].enabled);
+    }
+
+    #[test]
+    fn shared_context_preserves_raw_bone_and_morph_bytes_order_and_interpolation() {
+        let mut buf = build_vmd_header_bytes();
+        buf.extend_from_slice(&2u32.to_le_bytes()); // bones
+
+        let mut first_bone_name = [0u8; 15];
+        first_bone_name[..3].copy_from_slice(&[0x82, 0xa0, b'1']);
+        first_bone_name[4] = 0xa5; // bytes after NUL stay outside the raw name
+        buf.extend_from_slice(&first_bone_name);
+        buf.extend_from_slice(&11u32.to_le_bytes());
+        buf.extend_from_slice(&1.0f32.to_le_bytes());
+        buf.extend_from_slice(&2.0f32.to_le_bytes());
+        buf.extend_from_slice(&3.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.1f32.to_le_bytes());
+        buf.extend_from_slice(&0.2f32.to_le_bytes());
+        buf.extend_from_slice(&1.0f32.to_le_bytes());
+        let first_interpolation = (0u8..64).collect::<Vec<_>>();
+        buf.extend_from_slice(&first_interpolation);
+
+        let mut second_bone_name = [0u8; 15];
+        second_bone_name[..4].copy_from_slice(b"bone");
+        buf.extend_from_slice(&second_bone_name);
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&4.0f32.to_le_bytes());
+        buf.extend_from_slice(&5.0f32.to_le_bytes());
+        buf.extend_from_slice(&6.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.3f32.to_le_bytes());
+        buf.extend_from_slice(&0.4f32.to_le_bytes());
+        buf.extend_from_slice(&0.5f32.to_le_bytes());
+        buf.extend_from_slice(&0.6f32.to_le_bytes());
+        let second_interpolation = (64u8..=127).collect::<Vec<_>>();
+        buf.extend_from_slice(&second_interpolation);
+
+        buf.extend_from_slice(&2u32.to_le_bytes()); // morphs
+        let mut first_morph_name = [0u8; 15];
+        first_morph_name[..2].copy_from_slice(&[0x83, 0x65]);
+        buf.extend_from_slice(&first_morph_name);
+        buf.extend_from_slice(&20u32.to_le_bytes());
+        buf.extend_from_slice(&0.25f32.to_le_bytes());
+
+        let mut second_morph_name = [0u8; 15];
+        second_morph_name[..5].copy_from_slice(b"morph");
+        buf.extend_from_slice(&second_morph_name);
+        buf.extend_from_slice(&7u32.to_le_bytes());
+        buf.extend_from_slice(&0.75f32.to_le_bytes());
+
+        // Empty camera, light, self-shadow, and property sections.
+        buf.extend_from_slice(&[0u8; 16]);
+
+        let context = parse_vmd_shared_context(&buf).unwrap();
+        let raw = context.import_result();
+        assert_eq!(raw.bone_keyframes.len(), 2);
+        assert_eq!(raw.morph_keyframes.len(), 2);
+        match &raw.bone_keyframes[0].bone_mode {
+            VmdBoneImportMode::ByName(name) => {
+                assert_eq!(name, &vec![0x82, 0xa0, b'1']);
+            }
+            VmdBoneImportMode::ByIndex(_) => panic!("raw VMD key must retain its name"),
+        }
+        assert_eq!(raw.bone_keyframes[0].frame, 11);
+        assert_eq!(
+            raw.bone_keyframes[0].interpolation,
+            [
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43,
+                44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+            ]
+        );
+        match &raw.bone_keyframes[1].bone_mode {
+            VmdBoneImportMode::ByName(name) => assert_eq!(name, &b"bone".to_vec()),
+            VmdBoneImportMode::ByIndex(_) => panic!("raw VMD key must retain its name"),
+        }
+        assert_eq!(raw.bone_keyframes[1].frame, 3);
+        assert_eq!(
+            raw.bone_keyframes[1].interpolation,
+            [
+                64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
+                85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+                104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+                120, 121, 122, 123, 124, 125, 126, 127,
+            ]
+        );
+        assert_eq!(raw.morph_keyframes[0], (vec![0x83, 0x65], 20, 0.25f32));
+        assert_eq!(raw.morph_keyframes[1], (b"morph".to_vec(), 7, 0.75f32));
+    }
+
+    #[test]
+    fn shared_context_summary_reports_target_and_channel_counts() {
+        let animation = VmdParsedAnimation {
+            kind: "vmd",
+            metadata: VmdParsedMetadata {
+                format: "vmd",
+                model_name: "target".to_owned(),
+                model_name_bytes: Vec::new(),
+                counts: VmdParsedCounts {
+                    bones: 3,
+                    morphs: 2,
+                    cameras: 1,
+                    lights: 1,
+                    self_shadows: 1,
+                    properties: 1,
+                },
+                max_frame: 0,
+            },
+            bone_frames: vec![
+                VmdParsedBoneFrame {
+                    bone_name: "bone".to_owned(),
+                    bone_name_bytes: Vec::new(),
+                    frame: 5,
+                    translation: [0.0; 3],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    interpolation: vec![0; 64],
+                },
+                VmdParsedBoneFrame {
+                    bone_name: "bone".to_owned(),
+                    bone_name_bytes: Vec::new(),
+                    frame: 10,
+                    translation: [0.0; 3],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    interpolation: vec![0; 64],
+                },
+                VmdParsedBoneFrame {
+                    bone_name: "other".to_owned(),
+                    bone_name_bytes: Vec::new(),
+                    frame: 15,
+                    translation: [0.0; 3],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    interpolation: vec![0; 64],
+                },
+            ],
+            morph_frames: vec![
+                VmdParsedMorphFrame {
+                    morph_name: "smile".to_owned(),
+                    morph_name_bytes: Vec::new(),
+                    frame: 20,
+                    weight: 0.5,
+                },
+                VmdParsedMorphFrame {
+                    morph_name: "smile".to_owned(),
+                    morph_name_bytes: Vec::new(),
+                    frame: 25,
+                    weight: 1.0,
+                },
+            ],
+            camera_frames: vec![VmdParsedCameraFrame {
+                frame: 30,
+                distance: -40.0,
+                position: [0.0; 3],
+                rotation: [0.0; 3],
+                interpolation: [0; 24],
+                fov: 45,
+                perspective: true,
+            }],
+            light_frames: vec![VmdParsedLightFrame {
+                frame: 35,
+                color: [1.0; 3],
+                direction: [0.0; 3],
+            }],
+            self_shadow_frames: vec![VmdParsedSelfShadowFrame {
+                frame: 40,
+                mode: 1,
+                distance: 10.0,
+            }],
+            property_frames: vec![VmdParsedPropertyFrame {
+                frame: 42,
+                visible: true,
+                ik_states: vec![
+                    VmdParsedIkState {
+                        bone_name: "ik_a".to_owned(),
+                        bone_name_bytes: Vec::new(),
+                        enabled: true,
+                    },
+                    VmdParsedIkState {
+                        bone_name: "ik_b".to_owned(),
+                        bone_name_bytes: Vec::new(),
+                        enabled: false,
+                    },
+                ],
+            }],
+        };
+
+        let bytes = export_vmd_animation(&animation);
+        let shared = parse_vmd_shared_context(&bytes).unwrap();
+        let summary_only = parse_vmd_summary(&bytes).unwrap();
+        assert_eq!(summary_only, *shared.summary());
+        let summary = shared.summary();
+        let mut expected_name = [0u8; 20];
+        expected_name[..6].copy_from_slice(b"target");
+
+        assert_eq!(summary.target_model_name_bytes, expected_name);
+        assert_eq!(summary.max_frame, 42);
+        assert_eq!(
+            summary.bones,
+            VmdSharedContextTrackSummary {
+                track_count: 2,
+                key_count: 3,
+            }
+        );
+        assert_eq!(
+            summary.morphs,
+            VmdSharedContextTrackSummary {
+                track_count: 1,
+                key_count: 2,
+            }
+        );
+        assert_eq!(
+            summary.cameras,
+            VmdSharedContextTrackSummary {
+                track_count: 1,
+                key_count: 1,
+            }
+        );
+        assert_eq!(summary.lights.key_count, 1);
+        assert_eq!(summary.self_shadows.key_count, 1);
+        assert_eq!(summary.properties.key_count, 1);
+        assert_eq!(summary.property_ik_entry_count, 2);
+    }
+
+    fn summary_validation_vmd_bytes() -> Vec<u8> {
+        let mut buf = build_vmd_header_bytes();
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one bone
+        let mut bone_name = [0u8; 15];
+        bone_name[..4].copy_from_slice(b"bone");
+        buf.extend_from_slice(&bone_name);
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 12]); // translation
+        buf.extend_from_slice(&[0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // rotation
+        buf.extend_from_slice(&[0u8; 64]); // interpolation
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one morph
+        let mut morph_name = [0u8; 15];
+        morph_name[..5].copy_from_slice(b"morph");
+        buf.extend_from_slice(&morph_name);
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one camera
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // distance
+        buf.extend_from_slice(&[0u8; 12]); // position
+        buf.extend_from_slice(&[0u8; 12]); // rotation
+        buf.extend_from_slice(&[0u8; 24]); // interpolation
+        buf.extend_from_slice(&45u32.to_le_bytes());
+        buf.push(0);
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one light
+        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 12]); // color
+        buf.extend_from_slice(&[0u8; 12]); // direction
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one self-shadow
+        buf.extend_from_slice(&5u32.to_le_bytes());
+        buf.push(1);
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one property
+        buf.extend_from_slice(&6u32.to_le_bytes());
+        buf.push(1);
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one IK entry
+        let mut ik_name = [0u8; 20];
+        ik_name[..2].copy_from_slice(b"ik");
+        buf.extend_from_slice(&ik_name);
+        buf.push(1);
+        buf
+    }
+
+    #[test]
+    fn summary_scanner_rejects_empty_names_and_non_finite_values() {
+        let mut empty_bone = summary_validation_vmd_bytes();
+        empty_bone[54..69].fill(0);
+        assert_eq!(
+            parse_vmd_summary(&empty_bone),
+            Err(VmdSummaryError::Invalid("empty bone name"))
+        );
+
+        let mut empty_morph = summary_validation_vmd_bytes();
+        empty_morph[169..184].fill(0);
+        assert_eq!(
+            parse_vmd_summary(&empty_morph),
+            Err(VmdSummaryError::Invalid("empty morph name"))
+        );
+
+        let non_finite_offsets = [
+            (73, "bone translation"),
+            (85, "bone rotation"),
+            (188, "morph weight"),
+            (200, "camera distance"),
+            (204, "camera position"),
+            (216, "camera rotation"),
+            (265, "light color"),
+            (277, "light direction"),
+            (298, "self-shadow distance"),
+        ];
+        for (offset, field) in non_finite_offsets {
+            let mut malformed = summary_validation_vmd_bytes();
+            malformed[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+            assert_eq!(
+                parse_vmd_summary(&malformed),
+                Err(VmdSummaryError::Invalid(field)),
+                "summary scanner must reject non-finite {field}"
+            );
+        }
+
+        let mut empty_property_ik = summary_validation_vmd_bytes();
+        empty_property_ik[315..335].fill(0);
+        assert_eq!(
+            parse_vmd_summary(&empty_property_ik),
+            Err(VmdSummaryError::Invalid("empty property IK name"))
+        );
+
+        let mut whitespace_property_ik = summary_validation_vmd_bytes();
+        whitespace_property_ik[315..335].fill(0x20);
+        assert_eq!(
+            parse_vmd_summary(&whitespace_property_ik),
+            Err(VmdSummaryError::Invalid("empty property IK name"))
+        );
+    }
+
+    #[test]
+    fn summary_scanner_preserves_optional_tail_absence_semantics() {
+        let bytes = summary_validation_vmd_bytes();
+        let context = parse_vmd_shared_context(&bytes).unwrap();
+
+        // The camera count starts after the 50-byte header, bone record, and
+        // morph record. A complete count with insufficient records is the
+        // same absent-tail condition used by the existing parser.
+        let mut truncated_camera_tail = bytes.clone();
+        truncated_camera_tail[192..196].copy_from_slice(&10u32.to_le_bytes());
+        let summary = parse_vmd_summary(&truncated_camera_tail).unwrap();
+        let parsed_context = parse_vmd_shared_context(&truncated_camera_tail).unwrap();
+        assert_eq!(summary, *parsed_context.summary());
+        assert_eq!(summary.bones, context.summary().bones);
+        assert_eq!(summary.morphs, context.summary().morphs);
+        let empty_track_summary = VmdSharedContextTrackSummary {
+            track_count: 0,
+            key_count: 0,
+        };
+        assert_eq!(summary.cameras, empty_track_summary);
+        assert_eq!(summary.lights, empty_track_summary);
+        assert_eq!(summary.properties, empty_track_summary);
+
+        let mut partial_camera_count = build_vmd_header_bytes();
+        partial_camera_count.extend_from_slice(&0u32.to_le_bytes()); // bones
+        partial_camera_count.extend_from_slice(&0u32.to_le_bytes()); // morphs
+        partial_camera_count.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(
+            parse_vmd_summary(&partial_camera_count),
+            Err(VmdSummaryError::Parse(ImportError::UnexpectedEof(1)))
+        );
     }
 
     #[test]

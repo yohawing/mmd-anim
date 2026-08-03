@@ -35,6 +35,14 @@ extern "C" {
    reduced-pose sparse tracks are available; bit 5
    (MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION) is set when compiled
    authored local bone-track introspection is available.
+   bit 9 (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT) is set when the opt-in
+   single-parse VMD context, summary, and raw scene/property readback APIs
+   are available; bit 10 (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK)
+   is set when raw model-resolved VMD bone readback is available; bit 11
+   (MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES) is set when the non-materializing
+   byte-summary endpoint is available; bit 12
+   (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK) is set when the
+   model-less raw bone/morph key readback endpoints are available.
    Check the relevant bit before calling each optional surface; when a
    surface's bit is unset, its status-returning functions return
    MMD_RUNTIME_STATUS_UNSUPPORTED (and optional count functions return zero).
@@ -100,6 +108,7 @@ typedef struct mmd_runtime_append_solver_t mmd_runtime_append_solver_t;
 typedef struct mmd_runtime_vmd_camera_track_t mmd_runtime_vmd_camera_track_t;
 typedef struct mmd_runtime_vmd_light_track_t mmd_runtime_vmd_light_track_t;
 typedef struct mmd_runtime_vmd_self_shadow_track_t mmd_runtime_vmd_self_shadow_track_t;
+typedef struct mmd_runtime_vmd_context_t mmd_runtime_vmd_context_t;
 typedef struct mmd_runtime_physics_world_t mmd_runtime_physics_world_t;
 typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 
@@ -125,10 +134,27 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS  (1u << 3)
 #define MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES (1u << 4)
 #define MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION (1u << 5)
+#define MMD_RUNTIME_FEATURE_CLIP_MORPH_TRACK_INTROSPECTION (1u << 6)
+#define MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION (1u << 7)
+#define MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION (1u << 8)
+#define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT (1u << 9)
+#define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK (1u << 10)
+#define MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES (1u << 11)
+#define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK (1u << 12)
 #define MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_SHARED_CONTEXT_RAW_READBACK_ABI_VERSION_V1 1u
+#define MMD_RUNTIME_VMD_SUMMARY_BYTES_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_NONE 0u
 #define MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER 1u
+#define MMD_RUNTIME_VMD_CURVE_NONE 0u
+#define MMD_RUNTIME_VMD_CURVE_CUBIC_BEZIER 1u
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_VERSION_V1      1u
 #define MMD_RUNTIME_MODEL_DESCRIPTOR_FLAGS_NONE     0u
 
@@ -325,6 +351,153 @@ typedef struct mmd_runtime_ffi_bone_track_key {
     mmd_runtime_ffi_bone_track_curve_t translation_z;
     mmd_runtime_ffi_bone_track_curve_t rotation;
 } mmd_runtime_ffi_bone_track_key_t;
+
+/* Compiled/authored morph-track introspection. Morph interpolation is
+   implicit linear interpolation; VMD has no per-key morph curve payload. */
+typedef struct mmd_runtime_ffi_morph_track_descriptor {
+    uint32_t morph_index;
+    size_t   key_count;
+} mmd_runtime_ffi_morph_track_descriptor_t;
+
+typedef struct mmd_runtime_ffi_morph_track_key {
+    uint32_t morph_index;
+    uint32_t frame;
+    float    weight;
+} mmd_runtime_ffi_morph_track_key_t;
+
+/* Compiled property/IK introspection. The state offsets refer to the packed
+   array returned by mmd_runtime_clip_copy_property_track_ik_enabled. */
+typedef struct mmd_runtime_ffi_property_track_descriptor {
+    size_t key_count;
+    size_t ik_enabled_count;
+} mmd_runtime_ffi_property_track_descriptor_t;
+
+typedef struct mmd_runtime_ffi_property_track_key {
+    uint32_t frame;
+    size_t   ik_enabled_offset;
+    size_t   ik_enabled_count;
+} mmd_runtime_ffi_property_track_key_t;
+
+/* Raw VMD camera interpolation curve. The first chronological key has NONE;
+   later keys describe the incoming segment from the previous key. */
+typedef struct mmd_runtime_ffi_vmd_curve {
+    uint32_t kind;
+    float    x1;
+    float    y1;
+    float    x2;
+    float    y2;
+} mmd_runtime_ffi_vmd_curve_t;
+
+/* Raw VMD camera keyframe. interpolation retains the original 24-byte
+   payload; the six curves decode position x/y/z, rotation, distance, FOV. */
+typedef struct mmd_runtime_ffi_vmd_camera_keyframe {
+    uint32_t frame;
+    float    distance;
+    float    position_xyz[3];
+    float    rotation_xyz[3];
+    uint8_t  interpolation[24];
+    uint32_t fov;
+    uint8_t  perspective;
+    mmd_runtime_ffi_vmd_curve_t position_x;
+    mmd_runtime_ffi_vmd_curve_t position_y;
+    mmd_runtime_ffi_vmd_curve_t position_z;
+    mmd_runtime_ffi_vmd_curve_t rotation;
+    mmd_runtime_ffi_vmd_curve_t distance_curve;
+    mmd_runtime_ffi_vmd_curve_t fov_curve;
+} mmd_runtime_ffi_vmd_camera_keyframe_t;
+
+/* Raw VMD bone keyframe resolved through the PMX model name map. The
+   position, rotation, and interpolation payload are copied without
+   clip-construction transforms. Output order is (bone_index, frame), with
+   stable VMD input order for duplicate-frame keys. Unresolved names are
+   skipped like model-aware clip construction and counted by out_skipped. */
+typedef struct mmd_runtime_ffi_vmd_bone_keyframe {
+    uint32_t bone_index;
+    uint32_t frame;
+    float    position_xyz[3];
+    float    rotation_xyzw[4];
+    uint8_t  interpolation[64];
+} mmd_runtime_ffi_vmd_bone_keyframe_t;
+
+/* Raw model-less VMD bone keyframe in source order. bone_name_bytes is the
+   trimmed CP932 source name copied into a 15-byte NUL-padded field. Position,
+   rotation, and interpolation are copied without model resolution or clip
+   construction transforms. */
+typedef struct mmd_runtime_ffi_vmd_raw_bone_keyframe {
+    uint8_t  bone_name_bytes[15];
+    uint32_t frame;
+    float    position_xyz[3];
+    float    rotation_xyzw[4];
+    uint8_t  interpolation[64];
+} mmd_runtime_ffi_vmd_raw_bone_keyframe_t;
+
+/* Raw model-less VMD morph keyframe in source order. morph_name_bytes is the
+   trimmed CP932 source name copied into a 15-byte NUL-padded field. */
+typedef struct mmd_runtime_ffi_vmd_raw_morph_keyframe {
+    uint8_t  morph_name_bytes[15];
+    uint32_t frame;
+    float    weight;
+} mmd_runtime_ffi_vmd_raw_morph_keyframe_t;
+
+typedef struct mmd_runtime_ffi_vmd_light_keyframe {
+    uint32_t frame;
+    float    color[3];
+    float    direction[3];
+} mmd_runtime_ffi_vmd_light_keyframe_t;
+
+typedef struct mmd_runtime_ffi_vmd_self_shadow_keyframe {
+    uint32_t frame;
+    uint8_t  mode;
+    float    distance;
+} mmd_runtime_ffi_vmd_self_shadow_keyframe_t;
+
+/* Raw VMD property/IK keyframe. visible is the authored VMD show byte and is
+   not normalized to 0/1. ik_entry_offset/count address the flat entries
+   returned by mmd_runtime_vmd_context_copy_property_ik_entries. */
+typedef struct mmd_runtime_ffi_vmd_property_keyframe {
+    uint32_t frame;
+    uint8_t  visible;
+    uint8_t  reserved[3];
+    size_t   ik_entry_offset;
+    size_t   ik_entry_count;
+} mmd_runtime_ffi_vmd_property_keyframe_t;
+
+/* Raw fixed-width VMD property IK entry. name_bytes is the original 20-byte
+   source field and enabled is the authored byte. Both fields are copied
+   without boolean or NUL-padding normalization. */
+typedef struct mmd_runtime_ffi_vmd_property_ik_entry {
+    uint8_t name_bytes[20];
+    uint8_t enabled;
+    uint8_t reserved[3];
+} mmd_runtime_ffi_vmd_property_ik_entry_t;
+
+/* Counts for one source VMD channel in the shared-context summary. Bone and
+   morph track_count values count distinct raw target names. Camera, light,
+   self-shadow, and property channels report one track when key_count is
+   non-zero. Both values are fixed-width uint32_t. */
+typedef struct mmd_runtime_ffi_vmd_track_summary {
+    uint32_t track_count;
+    uint32_t key_count;
+} mmd_runtime_ffi_vmd_track_summary_t;
+
+/* Fixed v1 summary returned by mmd_runtime_vmd_context_read_summary. The
+   target_model_name_bytes field is the original 20-byte VMD Shift-JIS/CP932
+   header field; callers use bytes before the first NUL to reproduce the
+   existing model-name value. struct_size and abi_version are populated by
+   the native function. */
+typedef struct mmd_runtime_ffi_vmd_context_summary {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint8_t  target_model_name_bytes[20];
+    uint32_t max_frame;
+    mmd_runtime_ffi_vmd_track_summary_t bones;
+    mmd_runtime_ffi_vmd_track_summary_t morphs;
+    mmd_runtime_ffi_vmd_track_summary_t cameras;
+    mmd_runtime_ffi_vmd_track_summary_t lights;
+    mmd_runtime_ffi_vmd_track_summary_t self_shadows;
+    mmd_runtime_ffi_vmd_track_summary_t properties;
+    uint32_t property_ik_entry_count;
+} mmd_runtime_ffi_vmd_context_summary_t;
 
 typedef struct mmd_runtime_ffi_morph_track {
     uint32_t morph_index;
@@ -586,12 +759,133 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_vmd_json(
     const uint8_t* data,
     size_t         len);
 
+/* Opt-in shared VMD context. The constructor parses the bytes once and owns
+   all retained channels. Clips made from it own independent compiled tracks
+   and remain valid after the context is freed. */
+mmd_runtime_vmd_context_t* mmd_runtime_vmd_context_create_from_vmd_bytes(
+    const uint8_t* data,
+    size_t         len);
+
+void mmd_runtime_vmd_context_free(
+    mmd_runtime_vmd_context_t* context);
+
+/* Reads the fixed v1 summary in one call. out_summary_size is the caller's
+   writable byte capacity and must be at least sizeof the output struct.
+   Invalid handles, unsupported capability, and short buffers fail without
+   writing the output. Counts are uint32_t and the output struct reports its
+   fixed size and ABI version. */
+mmd_runtime_status_t mmd_runtime_vmd_context_read_summary(
+    const mmd_runtime_vmd_context_t*            context,
+    mmd_runtime_ffi_vmd_context_summary_t*      out_summary,
+    size_t                                       out_summary_size);
+
+/* Reads the fixed v1 VMD summary directly from bytes. This summary-only
+   endpoint does not create a shared context or materialize keyframe tracks.
+   Invalid input, invalid VMD bytes, and short output buffers fail without
+   writing out_summary. */
+mmd_runtime_status_t mmd_runtime_vmd_summary_read_from_vmd_bytes(
+    const uint8_t*                              data,
+    size_t                                      data_len,
+    mmd_runtime_ffi_vmd_context_summary_t*      out_summary,
+    size_t                                      out_summary_size);
+
+size_t mmd_runtime_vmd_context_camera_frame_count(
+    const mmd_runtime_vmd_context_t* context);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_camera_keyframes(
+    const mmd_runtime_vmd_context_t*       context,
+    mmd_runtime_ffi_vmd_camera_keyframe_t* out_keys,
+    size_t                                  out_key_capacity,
+    size_t*                                 out_written);
+
+size_t mmd_runtime_vmd_context_light_frame_count(
+    const mmd_runtime_vmd_context_t* context);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_light_keyframes(
+    const mmd_runtime_vmd_context_t*      context,
+    mmd_runtime_ffi_vmd_light_keyframe_t* out_keys,
+    size_t                                 out_key_capacity,
+    size_t*                                out_written);
+
+size_t mmd_runtime_vmd_context_self_shadow_frame_count(
+    const mmd_runtime_vmd_context_t* context);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_self_shadow_keyframes(
+    const mmd_runtime_vmd_context_t*             context,
+    mmd_runtime_ffi_vmd_self_shadow_keyframe_t*  out_keys,
+    size_t                                       out_key_capacity,
+    size_t*                                      out_written);
+
+size_t mmd_runtime_vmd_context_property_frame_count(
+    const mmd_runtime_vmd_context_t* context);
+
+size_t mmd_runtime_vmd_context_property_ik_entry_count(
+    const mmd_runtime_vmd_context_t* context);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_property_keyframes(
+    const mmd_runtime_vmd_context_t*          context,
+    mmd_runtime_ffi_vmd_property_keyframe_t*  out_keys,
+    size_t                                     out_key_capacity,
+    size_t*                                    out_written);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_property_ik_entries(
+    const mmd_runtime_vmd_context_t*              context,
+    mmd_runtime_ffi_vmd_property_ik_entry_t*      out_entries,
+    size_t                                        out_entry_capacity,
+    size_t*                                       out_written);
+
+/* Raw model-resolved bone keyframes from the single-parse context. The count
+   excludes unresolved names. out_skipped reports the unresolved key count;
+   out_written and out_skipped are zero on failure after storage validation,
+   and short buffers are never partially written. */
+size_t mmd_runtime_vmd_context_bone_keyframe_count_for_model(
+    const mmd_runtime_model_t*       model,
+    const mmd_runtime_vmd_context_t* context);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_bone_keyframes_for_model(
+    const mmd_runtime_model_t*             model,
+    const mmd_runtime_vmd_context_t*       context,
+    mmd_runtime_ffi_vmd_bone_keyframe_t*   out_keys,
+    size_t                                 out_key_capacity,
+    size_t*                                out_written,
+    size_t*                                out_skipped);
+
+/* Raw model-less bone and morph keyframes from the single-parse context.
+   Names are fixed-width CP932 bytes, keys remain in source order, and
+   out_written is zero on failure. Short buffers never receive partial writes. */
+size_t mmd_runtime_vmd_context_bone_keyframe_count(
+    const mmd_runtime_vmd_context_t* context);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_bone_keyframes(
+    const mmd_runtime_vmd_context_t*             context,
+    mmd_runtime_ffi_vmd_raw_bone_keyframe_t*    out_keys,
+    size_t                                      out_key_capacity,
+    size_t*                                     out_written);
+
+size_t mmd_runtime_vmd_context_morph_keyframe_count(
+    const mmd_runtime_vmd_context_t* context);
+
+mmd_runtime_status_t mmd_runtime_vmd_context_copy_morph_keyframes(
+    const mmd_runtime_vmd_context_t*             context,
+    mmd_runtime_ffi_vmd_raw_morph_keyframe_t*   out_keys,
+    size_t                                      out_key_capacity,
+    size_t*                                     out_written);
+
 mmd_runtime_vmd_camera_track_t* mmd_runtime_vmd_camera_track_create_from_vmd_bytes(
     const uint8_t* data,
     size_t         len);
 
 size_t mmd_runtime_vmd_camera_track_frame_count(
     const mmd_runtime_vmd_camera_track_t* track);
+
+/* Copies all raw camera keyframes in chronological order. The first key has
+   MMD_RUNTIME_VMD_CURVE_NONE; later curve fields describe the incoming
+   segment. out_written is zero on failure after output storage validation. */
+mmd_runtime_status_t mmd_runtime_vmd_camera_track_copy_keyframes(
+    const mmd_runtime_vmd_camera_track_t*       track,
+    mmd_runtime_ffi_vmd_camera_keyframe_t*      out_keys,
+    size_t                                      out_key_capacity,
+    size_t*                                     out_written);
 
 bool mmd_runtime_vmd_camera_track_sample(
     const mmd_runtime_vmd_camera_track_t* track,
@@ -616,6 +910,12 @@ mmd_runtime_vmd_light_track_t* mmd_runtime_vmd_light_track_create_from_vmd_bytes
 size_t mmd_runtime_vmd_light_track_frame_count(
     const mmd_runtime_vmd_light_track_t* track);
 
+mmd_runtime_status_t mmd_runtime_vmd_light_track_copy_keyframes(
+    const mmd_runtime_vmd_light_track_t*       track,
+    mmd_runtime_ffi_vmd_light_keyframe_t*      out_keys,
+    size_t                                     out_key_capacity,
+    size_t*                                    out_written);
+
 bool mmd_runtime_vmd_light_track_sample(
     const mmd_runtime_vmd_light_track_t* track,
     float                                frame,
@@ -638,6 +938,12 @@ mmd_runtime_vmd_self_shadow_track_t* mmd_runtime_vmd_self_shadow_track_create_fr
 
 size_t mmd_runtime_vmd_self_shadow_track_frame_count(
     const mmd_runtime_vmd_self_shadow_track_t* track);
+
+mmd_runtime_status_t mmd_runtime_vmd_self_shadow_track_copy_keyframes(
+    const mmd_runtime_vmd_self_shadow_track_t*       track,
+    mmd_runtime_ffi_vmd_self_shadow_keyframe_t*      out_keys,
+    size_t                                           out_key_capacity,
+    size_t*                                          out_written);
 
 bool mmd_runtime_vmd_self_shadow_track_sample(
     const mmd_runtime_vmd_self_shadow_track_t* track,
@@ -1111,6 +1417,11 @@ mmd_runtime_clip_t* mmd_runtime_clip_create_from_vmd_bytes_for_model(
     const uint8_t*             data,
     size_t                     len);
 
+/* Creates an independent model-aware clip from a shared VMD context. */
+mmd_runtime_clip_t* mmd_runtime_clip_create_from_vmd_context_for_model(
+    const mmd_runtime_model_t*       model,
+    const mmd_runtime_vmd_context_t* context);
+
 size_t mmd_runtime_model_bone_count(
     const mmd_runtime_model_t* model);
 
@@ -1561,6 +1872,55 @@ mmd_runtime_status_t mmd_runtime_clip_copy_bone_track_keys(
     mmd_runtime_ffi_bone_track_key_t*      out_keys,
     size_t                                  out_key_capacity,
     size_t*                                out_written);
+
+/* Read-only introspection of compiled/authored local morph tracks. Morph
+   values are chronological and use implicit linear interpolation. */
+size_t mmd_runtime_clip_morph_track_count(
+    const mmd_runtime_clip_t* clip);
+
+mmd_runtime_status_t mmd_runtime_clip_morph_track_descriptor(
+    const mmd_runtime_clip_t*                  clip,
+    size_t                                     track_index,
+    mmd_runtime_ffi_morph_track_descriptor_t*  out_descriptor);
+
+size_t mmd_runtime_clip_morph_track_key_count(
+    const mmd_runtime_clip_t* clip,
+    size_t                  track_index);
+
+mmd_runtime_status_t mmd_runtime_clip_copy_morph_track_keys(
+    const mmd_runtime_clip_t*             clip,
+    size_t                                track_index,
+    mmd_runtime_ffi_morph_track_key_t*    out_keys,
+    size_t                                out_key_capacity,
+    size_t*                               out_written);
+
+/* Read-only introspection of the single compiled/authored property/IK track.
+   This track retains resolved IK enabled bytes. Raw VMD visibility and IK
+   names remain available from mmd_runtime_parse_vmd_json. */
+size_t mmd_runtime_clip_property_track_count(
+    const mmd_runtime_clip_t* clip);
+
+mmd_runtime_status_t mmd_runtime_clip_property_track_descriptor(
+    const mmd_runtime_clip_t*                    clip,
+    mmd_runtime_ffi_property_track_descriptor_t* out_descriptor);
+
+size_t mmd_runtime_clip_property_track_key_count(
+    const mmd_runtime_clip_t* clip);
+
+size_t mmd_runtime_clip_property_track_ik_enabled_count(
+    const mmd_runtime_clip_t* clip);
+
+mmd_runtime_status_t mmd_runtime_clip_copy_property_track_keys(
+    const mmd_runtime_clip_t*                clip,
+    mmd_runtime_ffi_property_track_key_t*    out_keys,
+    size_t                                   out_key_capacity,
+    size_t*                                  out_written);
+
+mmd_runtime_status_t mmd_runtime_clip_copy_property_track_ik_enabled(
+    const mmd_runtime_clip_t* clip,
+    uint8_t*                  out_states,
+    size_t                    out_state_capacity,
+    size_t*                   out_written);
 
 bool mmd_runtime_clip_frame_range(
     const mmd_runtime_clip_t* clip,

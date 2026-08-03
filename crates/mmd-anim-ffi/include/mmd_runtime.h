@@ -451,8 +451,9 @@ typedef struct mmd_runtime_ffi_vmd_self_shadow_keyframe {
     float    distance;
 } mmd_runtime_ffi_vmd_self_shadow_keyframe_t;
 
-/* Raw VMD property/IK keyframe. ik_entry_offset/count address the flat
-   entries returned by mmd_runtime_vmd_context_copy_property_ik_entries. */
+/* Raw VMD property/IK keyframe. visible is the authored VMD show byte and is
+   not normalized to 0/1. ik_entry_offset/count address the flat entries
+   returned by mmd_runtime_vmd_context_copy_property_ik_entries. */
 typedef struct mmd_runtime_ffi_vmd_property_keyframe {
     uint32_t frame;
     uint8_t  visible;
@@ -461,8 +462,9 @@ typedef struct mmd_runtime_ffi_vmd_property_keyframe {
     size_t   ik_entry_count;
 } mmd_runtime_ffi_vmd_property_keyframe_t;
 
-/* Raw fixed-width VMD property IK entry. name_bytes is the parsed name in a
-   20-byte field with NUL padding; enabled is an ABI-safe 0/1 byte. */
+/* Raw fixed-width VMD property IK entry. name_bytes is the original 20-byte
+   source field and enabled is the authored byte. Both fields are copied
+   without boolean or NUL-padding normalization. */
 typedef struct mmd_runtime_ffi_vmd_property_ik_entry {
     uint8_t name_bytes[20];
     uint8_t enabled;

@@ -457,6 +457,12 @@ struct VmdScanResult {
     target_model_name_bytes: [u8; 20],
 }
 
+struct VmdPropertyFrameReadResult {
+    parsed_frames: Option<Vec<VmdParsedPropertyFrame>>,
+    raw_keyframes: Option<Vec<PropertyKeyframe>>,
+    raw_ik_frames: Option<Vec<VmdPropertyIkFrame>>,
+}
+
 struct VmdSummaryAccumulator {
     bone_names: HashSet<Vec<u8>>,
     morph_names: HashSet<Vec<u8>>,
@@ -768,14 +774,15 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         skip_optional_records(&mut r, 9)?;
         None
     };
-    let (property_frames, raw_property_keyframes, raw_property_ik_frames) =
-        read_property_frames(&mut r, &mut max_frame, options, &mut summary)?;
+    let property_frames = read_property_frames(&mut r, &mut max_frame, options, &mut summary)?;
 
     if let Some(raw) = raw.as_mut() {
-        raw.property_keyframes =
-            raw_property_keyframes.expect("raw VMD scan must build property keyframes");
-        raw.property_ik_frames =
-            raw_property_ik_frames.expect("raw VMD scan must build property IK frames");
+        raw.property_keyframes = property_frames
+            .raw_keyframes
+            .expect("raw VMD scan must build property keyframes");
+        raw.property_ik_frames = property_frames
+            .raw_ik_frames
+            .expect("raw VMD scan must build property IK frames");
     }
     let parsed = bone_frames.map(|bone_frames| VmdParsedSections {
         bone_frames,
@@ -784,7 +791,9 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         light_frames: light_frames.expect("parsed VMD scan must build light frames"),
         self_shadow_frames: self_shadow_frames
             .expect("parsed VMD scan must build self-shadow frames"),
-        property_frames: property_frames.expect("parsed VMD scan must build property frames"),
+        property_frames: property_frames
+            .parsed_frames
+            .expect("parsed VMD scan must build property frames"),
     });
 
     Ok(vmd_scan_result(
@@ -1061,20 +1070,13 @@ fn read_property_frames(
     max_frame: &mut u32,
     options: VmdScanOptions,
     summary: &mut Option<VmdSummaryAccumulator>,
-) -> Result<
-    (
-        Option<Vec<VmdParsedPropertyFrame>>,
-        Option<Vec<PropertyKeyframe>>,
-        Option<Vec<VmdPropertyIkFrame>>,
-    ),
-    ImportError,
-> {
+) -> Result<VmdPropertyFrameReadResult, ImportError> {
     let Some(count) = r.read_optional_u32_le()? else {
-        return Ok((
-            options.build_parsed.then(Vec::new),
-            options.build_raw.then(Vec::new),
-            options.build_raw.then(Vec::new),
-        ));
+        return Ok(VmdPropertyFrameReadResult {
+            parsed_frames: options.build_parsed.then(Vec::new),
+            raw_keyframes: options.build_raw.then(Vec::new),
+            raw_ik_frames: options.build_raw.then(Vec::new),
+        });
     };
     let count = count as usize;
     r.require_record_bytes(count, 9)?;
@@ -1155,7 +1157,11 @@ fn read_property_frames(
             });
         }
     }
-    Ok((parsed_frames, raw_keyframes, raw_ik_frames))
+    Ok(VmdPropertyFrameReadResult {
+        parsed_frames,
+        raw_keyframes,
+        raw_ik_frames,
+    })
 }
 
 pub fn sample_vmd_camera_frames(

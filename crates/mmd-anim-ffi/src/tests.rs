@@ -6385,8 +6385,58 @@ fn shared_vmd_context_reads_all_channels_and_keeps_clip_alive_after_free() {
     assert!(!clip.is_null());
     unsafe { mmd_runtime_vmd_context_free(context) };
     unsafe { mmd_runtime_model_free(model) };
-    assert!(unsafe { &(*clip).clip }.sample_at(5.0).bone_samples().len() > 0);
+    assert!(
+        !unsafe { &(*clip).clip }
+            .sample_at(5.0)
+            .bone_samples()
+            .is_empty()
+    );
     unsafe { mmd_runtime_clip_free(clip) };
+}
+
+#[test]
+fn shared_vmd_context_raw_property_readback_preserves_source_bytes() {
+    let (vmd, expected_name) = raw_property_vmd_bytes();
+    let context = unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(vmd.as_ptr(), vmd.len()) };
+    assert!(!context.is_null());
+
+    let mut property_keys = [MmdRuntimeFfiVmdPropertyKeyframe::default(); 1];
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_property_keyframes(
+                context,
+                property_keys.as_mut_ptr(),
+                property_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 1);
+    assert_eq!(property_keys[0].frame, 42);
+    assert_eq!(property_keys[0].visible, 0x7f);
+    assert_eq!(property_keys[0].ik_entry_offset, 0);
+    assert_eq!(property_keys[0].ik_entry_count, 1);
+
+    let mut entries = [MmdRuntimeFfiVmdPropertyIkEntry::default(); 1];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_property_ik_entries(
+                context,
+                entries.as_mut_ptr(),
+                entries.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 1);
+    assert_eq!(entries[0].name_bytes, expected_name);
+    assert_eq!(entries[0].enabled, 0x7f);
+
+    unsafe { mmd_runtime_vmd_context_free(context) };
 }
 
 #[test]
@@ -7057,6 +7107,26 @@ fn shared_vmd_context_probe_bytes() -> Vec<u8> {
         ],
     }];
     mmd_anim_format::export_vmd_animation(&parsed)
+}
+
+fn raw_property_vmd_bytes() -> (Vec<u8>, [u8; 20]) {
+    let mut bytes = b"Vocaloid Motion Data 0002\0\0\0\0\0".to_vec();
+    bytes.extend_from_slice(&[0; 20]); // model name
+    for _ in 0..5 {
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // property frames
+    bytes.extend_from_slice(&42u32.to_le_bytes());
+    bytes.push(0x7f); // authored show byte
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // IK entries
+    let mut name = [0u8; 20];
+    name[..2].copy_from_slice(b"IK");
+    name[2] = 0;
+    name[3] = 0xa5;
+    name[19] = 0x5a;
+    bytes.extend_from_slice(&name);
+    bytes.push(0x7f); // authored enabled byte
+    (bytes, name)
 }
 
 fn light_and_self_shadow_vmd_bytes() -> Vec<u8> {

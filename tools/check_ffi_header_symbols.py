@@ -42,7 +42,10 @@ CLIP_TRACK_CONSTANTS = {
     "MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1": 1,
     "MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1": 1,
     "MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1": 1,
+    "MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1": 1,
     "MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1": 1,
+    "MMD_RUNTIME_VMD_SHARED_CONTEXT_RAW_READBACK_ABI_VERSION_V1": 1,
+    "MMD_RUNTIME_VMD_SUMMARY_BYTES_ABI_VERSION_V1": 1,
     "MMD_RUNTIME_BONE_TRACK_CURVE_NONE": 0,
     "MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER": 1,
     "MMD_RUNTIME_VMD_CURVE_NONE": 0,
@@ -56,6 +59,8 @@ CLIP_TRACK_FEATURE_BITS = {
     "MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION": 8,
     "MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT": 9,
     "MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK": 10,
+    "MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES": 11,
+    "MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK": 12,
 }
 
 GENERIC_STRUCTS = {
@@ -199,6 +204,57 @@ CLIP_TRACK_STRUCTS = {
     "MmdRuntimeFfiVmdSelfShadowKeyframe": (
         "mmd_runtime_ffi_vmd_self_shadow_keyframe_t",
         [("frame", "u32"), ("mode", "u8"), ("distance", "f32")],
+    ),
+}
+
+VMD_SHARED_CONTEXT_STRUCTS = {
+    "MmdRuntimeFfiVmdPropertyKeyframe": (
+        "mmd_runtime_ffi_vmd_property_keyframe_t",
+        [
+            ("frame", "u32"),
+            ("visible", "u8"),
+            ("reserved", "u8[3]"),
+            ("ik_entry_offset", "usize"),
+            ("ik_entry_count", "usize"),
+        ],
+    ),
+    "MmdRuntimeFfiVmdPropertyIkEntry": (
+        "mmd_runtime_ffi_vmd_property_ik_entry_t",
+        [("name_bytes", "u8[20]"), ("enabled", "u8"), ("reserved", "u8[3]")],
+    ),
+    "MmdRuntimeFfiVmdRawBoneKeyframe": (
+        "mmd_runtime_ffi_vmd_raw_bone_keyframe_t",
+        [
+            ("bone_name_bytes", "u8[15]"),
+            ("frame", "u32"),
+            ("position_xyz", "f32[3]"),
+            ("rotation_xyzw", "f32[4]"),
+            ("interpolation", "u8[64]"),
+        ],
+    ),
+    "MmdRuntimeFfiVmdRawMorphKeyframe": (
+        "mmd_runtime_ffi_vmd_raw_morph_keyframe_t",
+        [("morph_name_bytes", "u8[15]"), ("frame", "u32"), ("weight", "f32")],
+    ),
+    "MmdRuntimeFfiVmdTrackSummary": (
+        "mmd_runtime_ffi_vmd_track_summary_t",
+        [("track_count", "u32"), ("key_count", "u32")],
+    ),
+    "MmdRuntimeFfiVmdContextSummary": (
+        "mmd_runtime_ffi_vmd_context_summary_t",
+        [
+            ("struct_size", "u32"),
+            ("abi_version", "u32"),
+            ("target_model_name_bytes", "u8[20]"),
+            ("max_frame", "u32"),
+            ("bones", "vmd_track_summary"),
+            ("morphs", "vmd_track_summary"),
+            ("cameras", "vmd_track_summary"),
+            ("lights", "vmd_track_summary"),
+            ("self_shadows", "vmd_track_summary"),
+            ("properties", "vmd_track_summary"),
+            ("property_ik_entry_count", "u32"),
+        ],
     ),
 }
 
@@ -349,6 +405,96 @@ CLIP_TRACK_FUNCTIONS = {
 }
 
 VMD_SHARED_CONTEXT_FUNCTIONS = {
+    "mmd_runtime_vmd_context_create_from_vmd_bytes": (
+        "mut_vmd_context_ptr",
+        [("data", "const_u8_ptr"), ("len", "usize")],
+    ),
+    "mmd_runtime_vmd_context_free": (
+        "void",
+        [("context", "mut_vmd_context_ptr")],
+    ),
+    "mmd_runtime_vmd_context_read_summary": (
+        "status",
+        [
+            ("context", "const_vmd_context_ptr"),
+            ("out_summary", "vmd_context_summary_ptr"),
+            ("out_summary_size", "usize"),
+        ],
+    ),
+    "mmd_runtime_vmd_summary_read_from_vmd_bytes": (
+        "status",
+        [
+            ("data", "const_u8_ptr"),
+            ("data_len", "usize"),
+            ("out_summary", "vmd_context_summary_ptr"),
+            ("out_summary_size", "usize"),
+        ],
+    ),
+    "mmd_runtime_vmd_context_camera_frame_count": (
+        "usize",
+        [("context", "const_vmd_context_ptr")],
+    ),
+    "mmd_runtime_vmd_context_copy_camera_keyframes": (
+        "status",
+        [
+            ("context", "const_vmd_context_ptr"),
+            ("out_keys", "vmd_camera_keyframe_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_vmd_context_light_frame_count": (
+        "usize",
+        [("context", "const_vmd_context_ptr")],
+    ),
+    "mmd_runtime_vmd_context_copy_light_keyframes": (
+        "status",
+        [
+            ("context", "const_vmd_context_ptr"),
+            ("out_keys", "vmd_light_keyframe_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_vmd_context_self_shadow_frame_count": (
+        "usize",
+        [("context", "const_vmd_context_ptr")],
+    ),
+    "mmd_runtime_vmd_context_copy_self_shadow_keyframes": (
+        "status",
+        [
+            ("context", "const_vmd_context_ptr"),
+            ("out_keys", "vmd_self_shadow_keyframe_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_vmd_context_property_frame_count": (
+        "usize",
+        [("context", "const_vmd_context_ptr")],
+    ),
+    "mmd_runtime_vmd_context_property_ik_entry_count": (
+        "usize",
+        [("context", "const_vmd_context_ptr")],
+    ),
+    "mmd_runtime_vmd_context_copy_property_keyframes": (
+        "status",
+        [
+            ("context", "const_vmd_context_ptr"),
+            ("out_keys", "vmd_property_keyframe_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_vmd_context_copy_property_ik_entries": (
+        "status",
+        [
+            ("context", "const_vmd_context_ptr"),
+            ("out_entries", "vmd_property_ik_entry_ptr"),
+            ("out_entry_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
     "mmd_runtime_vmd_context_bone_keyframe_count_for_model": (
         "usize",
         [
@@ -365,6 +511,39 @@ VMD_SHARED_CONTEXT_FUNCTIONS = {
             ("out_key_capacity", "usize"),
             ("out_written", "usize_ptr"),
             ("out_skipped", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_vmd_context_bone_keyframe_count": (
+        "usize",
+        [("context", "const_vmd_context_ptr")],
+    ),
+    "mmd_runtime_vmd_context_copy_bone_keyframes": (
+        "status",
+        [
+            ("context", "const_vmd_context_ptr"),
+            ("out_keys", "vmd_raw_bone_keyframe_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_vmd_context_morph_keyframe_count": (
+        "usize",
+        [("context", "const_vmd_context_ptr")],
+    ),
+    "mmd_runtime_vmd_context_copy_morph_keyframes": (
+        "status",
+        [
+            ("context", "const_vmd_context_ptr"),
+            ("out_keys", "vmd_raw_morph_keyframe_ptr"),
+            ("out_key_capacity", "usize"),
+            ("out_written", "usize_ptr"),
+        ],
+    ),
+    "mmd_runtime_clip_create_from_vmd_context_for_model": (
+        "mut_clip_ptr",
+        [
+            ("model", "const_model_ptr"),
+            ("context", "const_vmd_context_ptr"),
         ],
     ),
 }
@@ -442,6 +621,8 @@ def canonical_rust_type(type_name: str) -> str:
         "MmdRuntimeFfiByteBuffer": "ffi_byte_buffer",
         "*const MmdRuntimeReducedPose": "const_reduced_pose_ptr",
         "*const MmdRuntimeClip": "const_clip_ptr",
+        "*mut MmdRuntimeClip": "mut_clip_ptr",
+        "*mut MmdRuntimeVmdContext": "mut_vmd_context_ptr",
         "*const MmdRuntimeModel": "const_model_ptr",
         "*const MmdRuntimeVmdContext": "const_vmd_context_ptr",
         "*const MmdRuntimeVmdCameraTrack": "const_vmd_camera_ptr",
@@ -467,6 +648,12 @@ def canonical_rust_type(type_name: str) -> str:
         "*mut MmdRuntimeFfiVmdBoneKeyframe": "vmd_bone_keyframe_ptr",
         "*mut MmdRuntimeFfiVmdLightKeyframe": "vmd_light_keyframe_ptr",
         "*mut MmdRuntimeFfiVmdSelfShadowKeyframe": "vmd_self_shadow_keyframe_ptr",
+        "*mut MmdRuntimeFfiVmdPropertyKeyframe": "vmd_property_keyframe_ptr",
+        "*mut MmdRuntimeFfiVmdPropertyIkEntry": "vmd_property_ik_entry_ptr",
+        "*mut MmdRuntimeFfiVmdRawBoneKeyframe": "vmd_raw_bone_keyframe_ptr",
+        "*mut MmdRuntimeFfiVmdRawMorphKeyframe": "vmd_raw_morph_keyframe_ptr",
+        "*mut MmdRuntimeFfiVmdContextSummary": "vmd_context_summary_ptr",
+        "MmdRuntimeFfiVmdTrackSummary": "vmd_track_summary",
     }.get(compact, compact)
 
 
@@ -509,6 +696,14 @@ def canonical_c_type(type_name: str) -> str:
         "mmd_runtime_ffi_vmd_bone_keyframe_t*": "vmd_bone_keyframe_ptr",
         "mmd_runtime_ffi_vmd_light_keyframe_t*": "vmd_light_keyframe_ptr",
         "mmd_runtime_ffi_vmd_self_shadow_keyframe_t*": "vmd_self_shadow_keyframe_ptr",
+        "mmd_runtime_ffi_vmd_property_keyframe_t*": "vmd_property_keyframe_ptr",
+        "mmd_runtime_ffi_vmd_property_ik_entry_t*": "vmd_property_ik_entry_ptr",
+        "mmd_runtime_ffi_vmd_raw_bone_keyframe_t*": "vmd_raw_bone_keyframe_ptr",
+        "mmd_runtime_ffi_vmd_raw_morph_keyframe_t*": "vmd_raw_morph_keyframe_ptr",
+        "mmd_runtime_ffi_vmd_context_summary_t*": "vmd_context_summary_ptr",
+        "mmd_runtime_ffi_vmd_track_summary_t": "vmd_track_summary",
+        "mmd_runtime_vmd_context_t*": "mut_vmd_context_ptr",
+        "mmd_runtime_clip_t*": "mut_clip_ptr",
     }.get(compact, compact)
 
 
@@ -549,7 +744,7 @@ def c_struct_fields(text: str, alias: str) -> list[tuple[str, str]]:
 
 def rust_function_shape(text: str, name: str) -> tuple[str, list[tuple[str, str]]]:
     match = re.search(
-        rf'pub unsafe extern "C" fn {re.escape(name)}\s*\((.*?)\)\s*->\s*(\w+)',
+        rf'pub unsafe extern "C" fn {re.escape(name)}\s*\((.*?)\)\s*(?:->\s*([^{{]+?))?\s*\{{',
         text,
         re.DOTALL,
     )
@@ -559,13 +754,15 @@ def rust_function_shape(text: str, name: str) -> tuple[str, list[tuple[str, str]
         (param_name, canonical_rust_type(type_name))
         for param_name, type_name in re.findall(r"(\w+)\s*:\s*([^,]+),?", match.group(1))
     ]
-    return canonical_rust_type(match.group(2)), params
+    return canonical_rust_type(match.group(2).strip()) if match.group(2) else "void", params
 
 
 def c_function_shape(text: str, name: str) -> tuple[str, list[tuple[str, str]]]:
     stripped = strip_c_comments(text)
     match = re.search(
-        rf"(\w+)\s+{re.escape(name)}\s*\((.*?)\)\s*;", stripped, re.DOTALL
+        rf"((?:\w+\s*\*)|\w+)\s+{re.escape(name)}\s*\((.*?)\)\s*;",
+        stripped,
+        re.DOTALL,
     )
     if match is None:
         raise ValueError(f"missing C function {name}")
@@ -620,6 +817,13 @@ def check_abi_shapes(rust_text: str, header_text: str) -> list[str]:
                 f"struct {rust_name}/{c_alias}: Rust={rust_fields}, header={c_fields}, expected={expected}"
             )
     for rust_name, (c_alias, expected) in CLIP_TRACK_STRUCTS.items():
+        rust_fields = rust_struct_fields(rust_text, rust_name)
+        c_fields = c_struct_fields(header_text, c_alias)
+        if rust_fields != expected or c_fields != expected or rust_fields != c_fields:
+            errors.append(
+                f"struct {rust_name}/{c_alias}: Rust={rust_fields}, header={c_fields}, expected={expected}"
+            )
+    for rust_name, (c_alias, expected) in VMD_SHARED_CONTEXT_STRUCTS.items():
         rust_fields = rust_struct_fields(rust_text, rust_name)
         c_fields = c_struct_fields(header_text, c_alias)
         if rust_fields != expected or c_fields != expected or rust_fields != c_fields:

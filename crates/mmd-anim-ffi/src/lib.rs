@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::{ptr, slice, str, sync::Arc};
+use std::{mem::size_of, ptr, slice, str, sync::Arc};
 
 #[cfg(feature = "physics-bullet-native")]
 use serde::{Deserialize, Deserializer, Serialize};
@@ -39,11 +39,20 @@ pub const MMD_RUNTIME_FEATURE_CLIP_BONE_TRACK_INTROSPECTION: u32 = 1 << 5;
 pub const MMD_RUNTIME_FEATURE_CLIP_MORPH_TRACK_INTROSPECTION: u32 = 1 << 6;
 pub const MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION: u32 = 1 << 7;
 pub const MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 = 1 << 8;
+pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT: u32 = 1 << 9;
+pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK: u32 = 1 << 10;
+pub const MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES: u32 = 1 << 11;
+pub const MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK: u32 = 1 << 12;
 pub const MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_CLIP_PROPERTY_TRACK_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_VMD_TRACK_KEYFRAME_INTROSPECTION_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_SHARED_CONTEXT_RAW_READBACK_ABI_VERSION_V1: u32 = 1;
+pub const MMD_RUNTIME_VMD_SUMMARY_BYTES_ABI_VERSION_V1: u32 = 1;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_NONE: u32 = 0;
 pub const MMD_RUNTIME_BONE_TRACK_CURVE_CUBIC_BEZIER: u32 = 1;
 pub const MMD_RUNTIME_VMD_CURVE_NONE: u32 = 0;
@@ -63,6 +72,12 @@ const FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION: u32 =
     MMD_RUNTIME_FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION;
 const FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION: u32 =
     MMD_RUNTIME_FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION;
+const FEATURE_VMD_SHARED_CONTEXT: u32 = MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT;
+const FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK: u32 =
+    MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK;
+const FEATURE_VMD_SUMMARY_BYTES: u32 = MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES;
+const FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK: u32 =
+    MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK;
 
 pub struct MmdRuntimeModel {
     model: Arc<ModelArena>,
@@ -125,6 +140,10 @@ pub struct MmdRuntimeVmdLightTrack {
 
 pub struct MmdRuntimeVmdSelfShadowTrack {
     frames: Vec<mmd_anim_format::vmd::VmdParsedSelfShadowFrame>,
+}
+
+pub struct MmdRuntimeVmdContext {
+    context: mmd_anim_format::vmd::VmdSharedContext,
 }
 
 pub struct MmdRuntimePmxMaterialSplit {
@@ -394,6 +413,36 @@ pub struct MmdRuntimeFfiVmdCameraKeyframe {
     pub fov_curve: MmdRuntimeFfiVmdCurve,
 }
 
+/// One raw VMD bone keyframe resolved through a PMX model's bone name map.
+///
+/// The position, rotation, and 64-byte interpolation block are copied from
+/// the shared context without clip-construction transformations. Keys are
+/// returned in stable `(bone_index, frame)` order; equal-frame keys retain VMD
+/// input order. Unresolved VMD bone names use the same skip semantics as model
+/// aware clip construction and are reported through `out_skipped` on the copy
+/// endpoint.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MmdRuntimeFfiVmdBoneKeyframe {
+    pub bone_index: u32,
+    pub frame: u32,
+    pub position_xyz: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+    pub interpolation: [u8; 64],
+}
+
+impl Default for MmdRuntimeFfiVmdBoneKeyframe {
+    fn default() -> Self {
+        Self {
+            bone_index: 0,
+            frame: 0,
+            position_xyz: [0.0; 3],
+            rotation_xyzw: [0.0; 4],
+            interpolation: [0; 64],
+        }
+    }
+}
+
 /// One raw VMD light keyframe in chronological order. Light values have no
 /// authored VMD interpolation payload and are sampled linearly by the format
 /// layer.
@@ -413,6 +462,104 @@ pub struct MmdRuntimeFfiVmdSelfShadowKeyframe {
     pub frame: u32,
     pub mode: u8,
     pub distance: f32,
+}
+
+/// One raw VMD property/IK keyframe. `visible` is the authored VMD `show`
+/// byte, not a normalized boolean. The packed IK entries are returned by
+/// `mmd_runtime_vmd_context_copy_property_ik_entries`; offsets/counts refer to
+/// that flat caller-owned array.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiVmdPropertyKeyframe {
+    pub frame: u32,
+    pub visible: u8,
+    pub reserved: [u8; 3],
+    pub ik_entry_offset: usize,
+    pub ik_entry_count: usize,
+}
+
+/// One raw fixed-layout VMD property IK entry. `name_bytes` contains the
+/// original 20-byte VMD name field and `enabled` contains the authored byte.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiVmdPropertyIkEntry {
+    pub name_bytes: [u8; 20],
+    pub enabled: u8,
+    pub reserved: [u8; 3],
+}
+
+/// One raw model-less VMD bone keyframe in source order.
+///
+/// `bone_name_bytes` is the trimmed CP932 payload from the fixed-width VMD
+/// name field, copied into a 15-byte NUL-padded ABI field. Position,
+/// rotation, and interpolation are copied without model resolution or clip
+/// construction transforms.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MmdRuntimeFfiVmdRawBoneKeyframe {
+    pub bone_name_bytes: [u8; 15],
+    pub frame: u32,
+    pub position_xyz: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+    pub interpolation: [u8; 64],
+}
+
+impl Default for MmdRuntimeFfiVmdRawBoneKeyframe {
+    fn default() -> Self {
+        Self {
+            bone_name_bytes: [0; 15],
+            frame: 0,
+            position_xyz: [0.0; 3],
+            rotation_xyzw: [0.0; 4],
+            interpolation: [0; 64],
+        }
+    }
+}
+
+/// One raw model-less VMD morph keyframe in source order.
+///
+/// `morph_name_bytes` is the trimmed CP932 payload from the fixed-width VMD
+/// name field, copied into a 15-byte NUL-padded ABI field.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MmdRuntimeFfiVmdRawMorphKeyframe {
+    pub morph_name_bytes: [u8; 15],
+    pub frame: u32,
+    pub weight: f32,
+}
+
+/// Counts for one source VMD channel in the shared-context summary.
+///
+/// Bone and morph `track_count` values count distinct raw target names.
+/// Camera, light, self-shadow, and property channels report one track when
+/// their `key_count` is non-zero. Both values are fixed-width ABI `uint32_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiVmdTrackSummary {
+    pub track_count: u32,
+    pub key_count: u32,
+}
+
+/// One fixed-layout summary readback for an opaque shared VMD context.
+///
+/// `target_model_name_bytes` is the original 20-byte VMD Shift-JIS/CP932
+/// header field; callers use bytes before the first NUL to reproduce the
+/// existing model-name value. `struct_size` and `abi_version` are populated by
+/// the native function and let callers validate the returned layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmdRuntimeFfiVmdContextSummary {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub target_model_name_bytes: [u8; 20],
+    pub max_frame: u32,
+    pub bones: MmdRuntimeFfiVmdTrackSummary,
+    pub morphs: MmdRuntimeFfiVmdTrackSummary,
+    pub cameras: MmdRuntimeFfiVmdTrackSummary,
+    pub lights: MmdRuntimeFfiVmdTrackSummary,
+    pub self_shadows: MmdRuntimeFfiVmdTrackSummary,
+    pub properties: MmdRuntimeFfiVmdTrackSummary,
+    pub property_ik_entry_count: u32,
 }
 
 #[repr(C)]
@@ -1019,6 +1166,10 @@ fn runtime_feature_flags() -> u32 {
         | FEATURE_CLIP_MORPH_TRACK_INTROSPECTION
         | FEATURE_CLIP_PROPERTY_TRACK_INTROSPECTION
         | FEATURE_VMD_TRACK_KEYFRAME_INTROSPECTION
+        | FEATURE_VMD_SHARED_CONTEXT
+        | FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK
+        | FEATURE_VMD_SUMMARY_BYTES
+        | FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE
         } else {
@@ -1423,6 +1574,156 @@ pub unsafe extern "C" fn mmd_runtime_parse_vmd_json(
     })
 }
 
+/// Parses VMD bytes once and returns an opaque shared context containing the
+/// model-clip, camera, light, self-shadow, and property/IK channels.
+///
+/// The context owns all parsed data and never borrows `data` after this call.
+/// A valid VMD with no optional channels is still a valid context.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_create_from_vmd_bytes(
+    data: *const u8,
+    len: usize,
+) -> *mut MmdRuntimeVmdContext {
+    ffi_guard(ptr::null_mut(), || {
+        if data.is_null() || len == 0 {
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
+        }
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        let context = match mmd_anim_format::vmd::parse_vmd_shared_context(bytes) {
+            Ok(context) => context,
+            Err(_) => return null_mut_failure(FFI_ERR_VMD_PARSE_FAILED),
+        };
+        Box::into_raw(Box::new(MmdRuntimeVmdContext { context }))
+    })
+}
+
+/// Frees a shared VMD context. Clips created from the context own their
+/// compiled tracks independently and remain valid after this call.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_free(context: *mut MmdRuntimeVmdContext) {
+    ffi_guard_void(|| {
+        if !context.is_null() {
+            unsafe {
+                drop(Box::from_raw(context));
+            }
+        }
+    })
+}
+
+/// Reads the fixed v1 summary for a shared VMD context in one call.
+///
+/// `out_summary_size` is the caller's writable byte capacity and must be at
+/// least `sizeof(MmdRuntimeFfiVmdContextSummary)`. The output is not written
+/// on invalid handles, unsupported capability, short capacity, or summary
+/// count conversion failure. The caller must provide a naturally aligned,
+/// writable output region that does not overlap `context`.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`. On a non-null output,
+/// `out_summary_size` bytes must be writable and the pointer must be aligned
+/// for `MmdRuntimeFfiVmdContextSummary`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_read_summary(
+    context: *const MmdRuntimeVmdContext,
+    out_summary: *mut MmdRuntimeFfiVmdContextSummary,
+    out_summary_size: usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if context.is_null() || out_summary.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_summary_size < size_of::<MmdRuntimeFfiVmdContextSummary>() {
+            return status_failure(
+                MmdRuntimeStatus::BufferTooSmall,
+                "shared VMD summary output buffer too small",
+            );
+        }
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT == 0 {
+            return status_failure(
+                MmdRuntimeStatus::Unsupported,
+                "shared VMD context summary is unsupported",
+            );
+        }
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let summary = match vmd_context_summary(context) {
+            Ok(summary) => summary,
+            Err(message) => return status_failure(MmdRuntimeStatus::Error, message),
+        };
+        unsafe {
+            ptr::write(out_summary, summary);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
+/// Reads the fixed v1 VMD summary directly from bytes without creating a
+/// shared context or materializing raw/parsed keyframe tracks.
+///
+/// `out_summary_size` is the caller's writable byte capacity and must be at
+/// least `sizeof(MmdRuntimeFfiVmdContextSummary)`. Invalid input, invalid VMD
+/// bytes, and short output capacity leave the output untouched.
+///
+/// # Safety
+///
+/// When `data_len` is non-zero, `data` must point to `data_len` readable
+/// bytes. When `out_summary` is non-null, it must be naturally aligned and
+/// point to a writable region of at least `out_summary_size` bytes that does
+/// not overlap `data`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_summary_read_from_vmd_bytes(
+    data: *const u8,
+    data_len: usize,
+    out_summary: *mut MmdRuntimeFfiVmdContextSummary,
+    out_summary_size: usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if data.is_null() || data_len == 0 || out_summary.is_null() {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if out_summary_size < size_of::<MmdRuntimeFfiVmdContextSummary>() {
+            return status_failure(
+                MmdRuntimeStatus::BufferTooSmall,
+                "shared VMD summary output buffer too small",
+            );
+        }
+        if runtime_feature_flags() & FEATURE_VMD_SUMMARY_BYTES == 0 {
+            return status_failure(
+                MmdRuntimeStatus::Unsupported,
+                "VMD byte summary is unsupported",
+            );
+        }
+
+        let bytes = unsafe { slice::from_raw_parts(data, data_len) };
+        let summary = match mmd_anim_format::vmd::parse_vmd_summary(bytes) {
+            Ok(summary) => summary,
+            Err(_) => {
+                return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_VMD_PARSE_FAILED);
+            }
+        };
+        let summary = match vmd_summary_from_format(&summary) {
+            Ok(summary) => summary,
+            Err(message) => return status_failure(MmdRuntimeStatus::Error, message),
+        };
+        unsafe {
+            ptr::write(out_summary, summary);
+        }
+        MmdRuntimeStatus::Ok
+    })
+}
+
 /// Parses VMD bytes and returns an owned camera-track handle.
 ///
 /// # Safety
@@ -1495,51 +1796,32 @@ pub unsafe extern "C" fn mmd_runtime_vmd_camera_track_copy_keyframes(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(track, out_keys, out_key_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-
-        let Some(track) = (unsafe { track.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let required = track.frames.len();
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_key_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-
-        let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedCameraFrame> =
-            track.frames.iter().collect();
-        sorted.sort_by_key(|keyframe| keyframe.frame);
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the VMD camera key staging buffer",
-            );
-        }
-        for (index, keyframe) in sorted.into_iter().enumerate() {
-            let Ok(key) = vmd_camera_keyframe(keyframe, index != 0) else {
-                return status_failure(
-                    MmdRuntimeStatus::InvalidInput,
-                    "VMD camera keyframe contains a non-finite value",
-                );
-            };
-            keys.push(key);
-        }
-        unsafe {
-            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+        copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: track,
+                out_keys,
+                out_key_capacity,
+                out_written,
+            },
+            |track| Ok(track.frames.len()),
+            |_| Ok(()),
+            "failed to allocate the VMD camera key staging buffer",
+            |track, keys| {
+                let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedCameraFrame> =
+                    track.frames.iter().collect();
+                sorted.sort_by_key(|keyframe| keyframe.frame);
+                for (index, keyframe) in sorted.into_iter().enumerate() {
+                    let key = vmd_camera_keyframe(keyframe, index != 0).map_err(|_| {
+                        (
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD camera keyframe contains a non-finite value",
+                        )
+                    })?;
+                    keys.push(key);
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -1708,55 +1990,36 @@ pub unsafe extern "C" fn mmd_runtime_vmd_light_track_copy_keyframes(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(track, out_keys, out_key_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-
-        let Some(track) = (unsafe { track.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let required = track.frames.len();
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_key_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-
-        let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedLightFrame> =
-            track.frames.iter().collect();
-        sorted.sort_by_key(|keyframe| keyframe.frame);
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the VMD light key staging buffer",
-            );
-        }
-        for keyframe in sorted {
-            if !all_finite(&keyframe.color) || !all_finite(&keyframe.direction) {
-                return status_failure(
-                    MmdRuntimeStatus::InvalidInput,
-                    "VMD light keyframe contains a non-finite value",
-                );
-            }
-            keys.push(MmdRuntimeFfiVmdLightKeyframe {
-                frame: keyframe.frame,
-                color: keyframe.color,
-                direction: keyframe.direction,
-            });
-        }
-        unsafe {
-            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+        copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: track,
+                out_keys,
+                out_key_capacity,
+                out_written,
+            },
+            |track| Ok(track.frames.len()),
+            |_| Ok(()),
+            "failed to allocate the VMD light key staging buffer",
+            |track, keys| {
+                let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedLightFrame> =
+                    track.frames.iter().collect();
+                sorted.sort_by_key(|keyframe| keyframe.frame);
+                for keyframe in sorted {
+                    if !all_finite(&keyframe.color) || !all_finite(&keyframe.direction) {
+                        return Err((
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD light keyframe contains a non-finite value",
+                        ));
+                    }
+                    keys.push(MmdRuntimeFfiVmdLightKeyframe {
+                        frame: keyframe.frame,
+                        color: keyframe.color,
+                        direction: keyframe.direction,
+                    });
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -1921,55 +2184,36 @@ pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_copy_keyframes(
     out_written: *mut usize,
 ) -> MmdRuntimeStatus {
     ffi_guard(MmdRuntimeStatus::Error, || {
-        if let Err(message) =
-            validate_key_copy_storage(track, out_keys, out_key_capacity, out_written)
-        {
-            return status_failure(MmdRuntimeStatus::InvalidInput, message);
-        }
-        unsafe { ptr::write(out_written, 0) };
-
-        let Some(track) = (unsafe { track.as_ref() }) else {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        };
-        let required = track.frames.len();
-        if required == 0 {
-            return MmdRuntimeStatus::Ok;
-        }
-        if out_keys.is_null() {
-            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
-        }
-        if out_key_capacity < required {
-            return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
-        }
-
-        let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedSelfShadowFrame> =
-            track.frames.iter().collect();
-        sorted.sort_by_key(|keyframe| keyframe.frame);
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(required).is_err() {
-            return status_failure(
-                MmdRuntimeStatus::Error,
-                "failed to allocate the VMD self-shadow key staging buffer",
-            );
-        }
-        for keyframe in sorted {
-            if !keyframe.distance.is_finite() {
-                return status_failure(
-                    MmdRuntimeStatus::InvalidInput,
-                    "VMD self-shadow keyframe contains a non-finite value",
-                );
-            }
-            keys.push(MmdRuntimeFfiVmdSelfShadowKeyframe {
-                frame: keyframe.frame,
-                mode: keyframe.mode,
-                distance: keyframe.distance,
-            });
-        }
-        unsafe {
-            slice::from_raw_parts_mut(out_keys, required).copy_from_slice(&keys);
-            ptr::write(out_written, required);
-        }
-        MmdRuntimeStatus::Ok
+        copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: track,
+                out_keys,
+                out_key_capacity,
+                out_written,
+            },
+            |track| Ok(track.frames.len()),
+            |_| Ok(()),
+            "failed to allocate the VMD self-shadow key staging buffer",
+            |track, keys| {
+                let mut sorted: Vec<&mmd_anim_format::vmd::VmdParsedSelfShadowFrame> =
+                    track.frames.iter().collect();
+                sorted.sort_by_key(|keyframe| keyframe.frame);
+                for keyframe in sorted {
+                    if !keyframe.distance.is_finite() {
+                        return Err((
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD self-shadow keyframe contains a non-finite value",
+                        ));
+                    }
+                    keys.push(MmdRuntimeFfiVmdSelfShadowKeyframe {
+                        frame: keyframe.frame,
+                        mode: keyframe.mode,
+                        distance: keyframe.distance,
+                    });
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -2064,6 +2308,828 @@ pub unsafe extern "C" fn mmd_runtime_vmd_self_shadow_track_free(
                 drop(Box::from_raw(track));
             }
         }
+    })
+}
+
+fn sorted_context_camera_frames(
+    context: &MmdRuntimeVmdContext,
+) -> Vec<&mmd_anim_format::vmd::VmdParsedCameraFrame> {
+    let mut frames: Vec<_> = context
+        .context
+        .parsed_animation()
+        .camera_frames
+        .iter()
+        .collect();
+    frames.sort_by_key(|keyframe| keyframe.frame);
+    frames
+}
+
+fn context_bone_keyframe_counts(
+    model: &MmdRuntimeModel,
+    context: &MmdRuntimeVmdContext,
+) -> Result<(usize, usize), &'static str> {
+    let mut resolved = 0usize;
+    let mut skipped = 0usize;
+    for keyframe in &context.context.import_result().bone_keyframes {
+        let count = if model
+            .bone_name_to_index
+            .contains_key(&keyframe.bone_name_normalized)
+        {
+            &mut resolved
+        } else {
+            &mut skipped
+        };
+        *count = count
+            .checked_add(1)
+            .ok_or("shared VMD bone keyframe count overflow")?;
+    }
+    Ok((resolved, skipped))
+}
+
+fn stage_context_bone_keyframes(
+    model: &MmdRuntimeModel,
+    context: &MmdRuntimeVmdContext,
+    keys: &mut Vec<MmdRuntimeFfiVmdBoneKeyframe>,
+) -> Result<(), (MmdRuntimeStatus, &'static str)> {
+    let raw_keyframes = &context.context.import_result().bone_keyframes;
+    let mut resolved = Vec::new();
+    resolved.try_reserve_exact(keys.capacity()).map_err(|_| {
+        (
+            MmdRuntimeStatus::Error,
+            "failed to allocate the shared VMD bone key staging index buffer",
+        )
+    })?;
+    for (source_index, keyframe) in raw_keyframes.iter().enumerate() {
+        let Some(&bone_index) = model.bone_name_to_index.get(&keyframe.bone_name_normalized) else {
+            continue;
+        };
+        resolved.push((bone_index.0, source_index));
+    }
+    // Match model-aware clip construction: tracks are grouped by ascending
+    // model bone index, and each track is chronologically ordered. Stable
+    // sorting retains VMD input order for duplicate-frame keys.
+    resolved.sort_by_key(|(bone_index, source_index)| {
+        (*bone_index, raw_keyframes[*source_index].frame)
+    });
+    for (bone_index, source_index) in resolved {
+        let keyframe = &raw_keyframes[source_index];
+        let position_xyz = keyframe.position.to_array();
+        let rotation_xyzw = keyframe.rotation.to_array();
+        if !all_finite(&position_xyz) || !all_finite(&rotation_xyzw) {
+            return Err((
+                MmdRuntimeStatus::InvalidInput,
+                "VMD bone keyframe contains a non-finite value",
+            ));
+        }
+        keys.push(MmdRuntimeFfiVmdBoneKeyframe {
+            bone_index,
+            frame: keyframe.frame,
+            position_xyz,
+            rotation_xyzw,
+            interpolation: keyframe.interpolation,
+        });
+    }
+    Ok(())
+}
+
+fn stage_context_raw_bone_keyframes(
+    context: &MmdRuntimeVmdContext,
+    keys: &mut Vec<MmdRuntimeFfiVmdRawBoneKeyframe>,
+) -> Result<(), (MmdRuntimeStatus, &'static str)> {
+    for keyframe in &context.context.import_result().bone_keyframes {
+        let mmd_anim_format::vmd::VmdBoneImportMode::ByName(name_bytes) = &keyframe.bone_mode
+        else {
+            return Err((
+                MmdRuntimeStatus::Error,
+                "shared VMD raw bone keyframe has no source name",
+            ));
+        };
+        if name_bytes.len() > 15 {
+            return Err((
+                MmdRuntimeStatus::Error,
+                "shared VMD raw bone name exceeds the ABI field width",
+            ));
+        }
+        let position_xyz = keyframe.position.to_array();
+        let rotation_xyzw = keyframe.rotation.to_array();
+        if !all_finite(&position_xyz) || !all_finite(&rotation_xyzw) {
+            return Err((
+                MmdRuntimeStatus::InvalidInput,
+                "VMD raw bone keyframe contains a non-finite value",
+            ));
+        }
+        let mut name = [0u8; 15];
+        name[..name_bytes.len()].copy_from_slice(name_bytes);
+        keys.push(MmdRuntimeFfiVmdRawBoneKeyframe {
+            bone_name_bytes: name,
+            frame: keyframe.frame,
+            position_xyz,
+            rotation_xyzw,
+            interpolation: keyframe.interpolation,
+        });
+    }
+    Ok(())
+}
+
+fn stage_context_raw_morph_keyframes(
+    context: &MmdRuntimeVmdContext,
+    keys: &mut Vec<MmdRuntimeFfiVmdRawMorphKeyframe>,
+) -> Result<(), (MmdRuntimeStatus, &'static str)> {
+    for (name_bytes, frame, weight) in &context.context.import_result().morph_keyframes {
+        if name_bytes.len() > 15 {
+            return Err((
+                MmdRuntimeStatus::Error,
+                "shared VMD raw morph name exceeds the ABI field width",
+            ));
+        }
+        if !weight.is_finite() {
+            return Err((
+                MmdRuntimeStatus::InvalidInput,
+                "VMD raw morph keyframe contains a non-finite value",
+            ));
+        }
+        let mut name = [0u8; 15];
+        name[..name_bytes.len()].copy_from_slice(name_bytes);
+        keys.push(MmdRuntimeFfiVmdRawMorphKeyframe {
+            morph_name_bytes: name,
+            frame: *frame,
+            weight: *weight,
+        });
+    }
+    Ok(())
+}
+
+/// Returns the number of raw model-less VMD bone keys retained by a shared
+/// context. Keys remain in source order and retain their CP932 source names.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_bone_keyframe_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK == 0 {
+            return 0;
+        }
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.import_result().bone_keyframes.len()
+    })
+}
+
+/// Copies raw model-less VMD bone keys from a shared context in source order.
+/// The source name bytes and 64-byte interpolation payload are copied without
+/// decoding, model resolution, or clip-construction transforms.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`. `out_written` must point
+/// to writable, aligned `usize` storage. When `out_key_capacity` is non-zero,
+/// `out_keys` must point to a writable, aligned array of that many entries.
+/// Output storage must not overlap the context handle or `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_bone_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdRawBoneKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK == 0 {
+            return status_failure(
+                MmdRuntimeStatus::Unsupported,
+                "shared VMD raw track readback is unsupported",
+            );
+        }
+        copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: context,
+                out_keys,
+                out_key_capacity,
+                out_written,
+            },
+            |context| Ok(context.context.import_result().bone_keyframes.len()),
+            |_| Ok(()),
+            "failed to allocate the shared VMD raw bone key staging buffer",
+            stage_context_raw_bone_keyframes,
+        )
+    })
+}
+
+/// Returns the number of raw model-less VMD morph keys retained by a shared
+/// context. Keys remain in source order and retain their CP932 source names.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_morph_keyframe_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK == 0 {
+            return 0;
+        }
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.import_result().morph_keyframes.len()
+    })
+}
+
+/// Copies raw model-less VMD morph keys from a shared context in source order.
+/// The source name bytes are copied without decoding or name resolution.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`. `out_written` must point
+/// to writable, aligned `usize` storage. When `out_key_capacity` is non-zero,
+/// `out_keys` must point to a writable, aligned array of that many entries.
+/// Output storage must not overlap the context handle or `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_morph_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdRawMorphKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK == 0 {
+            return status_failure(
+                MmdRuntimeStatus::Unsupported,
+                "shared VMD raw track readback is unsupported",
+            );
+        }
+        copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: context,
+                out_keys,
+                out_key_capacity,
+                out_written,
+            },
+            |context| Ok(context.context.import_result().morph_keyframes.len()),
+            |_| Ok(()),
+            "failed to allocate the shared VMD raw morph key staging buffer",
+            stage_context_raw_morph_keyframes,
+        )
+    })
+}
+
+fn sorted_context_light_frames(
+    context: &MmdRuntimeVmdContext,
+) -> Vec<&mmd_anim_format::vmd::VmdParsedLightFrame> {
+    let mut frames: Vec<_> = context
+        .context
+        .parsed_animation()
+        .light_frames
+        .iter()
+        .collect();
+    frames.sort_by_key(|keyframe| keyframe.frame);
+    frames
+}
+
+fn sorted_context_self_shadow_frames(
+    context: &MmdRuntimeVmdContext,
+) -> Vec<&mmd_anim_format::vmd::VmdParsedSelfShadowFrame> {
+    let mut frames: Vec<_> = context
+        .context
+        .parsed_animation()
+        .self_shadow_frames
+        .iter()
+        .collect();
+    frames.sort_by_key(|keyframe| keyframe.frame);
+    frames
+}
+
+fn sorted_context_raw_property_frames(
+    context: &MmdRuntimeVmdContext,
+) -> Vec<&mmd_anim_format::vmd::VmdPropertyIkFrame> {
+    let mut frames: Vec<_> = context
+        .context
+        .import_result()
+        .property_ik_frames
+        .iter()
+        .collect();
+    frames.sort_by_key(|keyframe| keyframe.frame);
+    frames
+}
+
+fn context_property_entry_count(context: &MmdRuntimeVmdContext) -> Option<usize> {
+    sorted_context_raw_property_frames(context)
+        .into_iter()
+        .try_fold(0usize, |total, frame| {
+            total.checked_add(frame.entries.len())
+        })
+}
+
+fn checked_vmd_summary_count(value: usize) -> Result<u32, &'static str> {
+    u32::try_from(value).map_err(|_| "shared VMD summary count exceeds uint32_t")
+}
+
+fn vmd_context_summary(
+    context: &MmdRuntimeVmdContext,
+) -> Result<MmdRuntimeFfiVmdContextSummary, &'static str> {
+    vmd_summary_from_format(context.context.summary())
+}
+
+fn vmd_summary_from_format(
+    summary: &mmd_anim_format::vmd::VmdSharedContextSummary,
+) -> Result<MmdRuntimeFfiVmdContextSummary, &'static str> {
+    Ok(MmdRuntimeFfiVmdContextSummary {
+        struct_size: size_of::<MmdRuntimeFfiVmdContextSummary>() as u32,
+        abi_version: MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1,
+        target_model_name_bytes: summary.target_model_name_bytes,
+        max_frame: summary.max_frame,
+        bones: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.bones.track_count)?,
+            key_count: checked_vmd_summary_count(summary.bones.key_count)?,
+        },
+        morphs: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.morphs.track_count)?,
+            key_count: checked_vmd_summary_count(summary.morphs.key_count)?,
+        },
+        cameras: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.cameras.track_count)?,
+            key_count: checked_vmd_summary_count(summary.cameras.key_count)?,
+        },
+        lights: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.lights.track_count)?,
+            key_count: checked_vmd_summary_count(summary.lights.key_count)?,
+        },
+        self_shadows: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.self_shadows.track_count)?,
+            key_count: checked_vmd_summary_count(summary.self_shadows.key_count)?,
+        },
+        properties: MmdRuntimeFfiVmdTrackSummary {
+            track_count: checked_vmd_summary_count(summary.properties.track_count)?,
+            key_count: checked_vmd_summary_count(summary.properties.key_count)?,
+        },
+        property_ik_entry_count: checked_vmd_summary_count(summary.property_ik_entry_count)?,
+    })
+}
+
+/// Returns the number of resolved raw VMD bone keys for a PMX model and
+/// shared VMD context. Unresolved VMD bone names are excluded from this count;
+/// the copy endpoint reports their count explicitly through `out_skipped`.
+/// Keys are ordered by model bone index and then frame, with stable VMD input
+/// order for duplicate-frame keys.
+///
+/// # Safety
+///
+/// `model` and `context` must be null or live handles returned by this
+/// library. The model must have name maps populated by PMX import.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_bone_keyframe_count_for_model(
+    model: *const MmdRuntimeModel,
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK == 0 {
+            return 0;
+        }
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return 0;
+        };
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        match context_bone_keyframe_counts(model, context) {
+            Ok((resolved, _)) => resolved,
+            Err(message) => {
+                set_last_error(message);
+                0
+            }
+        }
+    })
+}
+
+/// Copies raw VMD bone keys from a shared context after resolving names
+/// through the imported PMX model map. The position, rotation, and original
+/// 64-byte interpolation payload are copied without clip-construction
+/// transforms. The output is ordered by `(bone_index, frame)`; equal-frame
+/// keys retain VMD input order. Unresolved names follow model-aware clip
+/// construction's skip semantics and are reported in `out_skipped`.
+///
+/// `out_written` and `out_skipped` are zero on every failure after output
+/// storage validation. Short buffers never receive partial key writes.
+///
+/// # Safety
+///
+/// `model` and `context` must be null or live handles returned by this
+/// library. `out_written` and `out_skipped` must each point to one writable,
+/// naturally aligned `size_t`. When resolved keys exist, `out_keys` must be
+/// writable and naturally aligned for `out_key_capacity` keys. Outputs must
+/// not overlap either handle or one another.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_bone_keyframes_for_model(
+    model: *const MmdRuntimeModel,
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdBoneKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+    out_skipped: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if let Err(message) = validate_model_context_bone_key_copy_storage(
+            model,
+            context,
+            out_keys,
+            out_key_capacity,
+            out_written,
+            out_skipped,
+        ) {
+            return status_failure(MmdRuntimeStatus::InvalidInput, message);
+        }
+        unsafe {
+            ptr::write(out_written, 0);
+            ptr::write(out_skipped, 0);
+        }
+
+        if runtime_feature_flags() & FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK == 0 {
+            return status_failure(
+                MmdRuntimeStatus::Unsupported,
+                "shared VMD bone readback is unsupported",
+            );
+        }
+        let Some(model_ref) = (unsafe { model.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let Some(context_ref) = (unsafe { context.as_ref() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let (required, skipped) = match context_bone_keyframe_counts(model_ref, context_ref) {
+            Ok(counts) => counts,
+            Err(message) => return status_failure(MmdRuntimeStatus::Error, message),
+        };
+
+        let status = copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: model,
+                out_keys,
+                out_key_capacity,
+                out_written,
+            },
+            |_| Ok(required),
+            |_| Ok(()),
+            "failed to allocate the shared VMD bone key staging buffer",
+            |_, keys| stage_context_bone_keyframes(model_ref, context_ref, keys),
+        );
+        if status == MmdRuntimeStatus::Ok {
+            unsafe {
+                ptr::write(out_skipped, skipped);
+            }
+        }
+        status
+    })
+}
+
+/// Returns the number of camera keys retained by a shared VMD context.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_camera_frame_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.parsed_animation().camera_frames.len()
+    })
+}
+
+/// Copies raw camera keys from a shared VMD context in chronological order.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`. `out_written` must point
+/// to writable, aligned `usize` storage. When `out_key_capacity` is non-zero,
+/// `out_keys` must point to a writable, aligned array of that many entries.
+/// Output storage must not overlap the context handle or `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_camera_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdCameraKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: context,
+                out_keys,
+                out_key_capacity,
+                out_written,
+            },
+            |context| Ok(context.context.parsed_animation().camera_frames.len()),
+            |_| Ok(()),
+            "failed to allocate the shared VMD camera key staging buffer",
+            |context, keys| {
+                for (index, frame) in sorted_context_camera_frames(context)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let key = vmd_camera_keyframe(frame, index != 0).map_err(|_| {
+                        (
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD camera keyframe contains a non-finite value",
+                        )
+                    })?;
+                    keys.push(key);
+                }
+                Ok(())
+            },
+        )
+    })
+}
+
+/// Returns the number of light keys retained by a shared VMD context.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_light_frame_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.parsed_animation().light_frames.len()
+    })
+}
+
+/// Copies raw light keys from a shared VMD context in chronological order.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`. `out_written` must point
+/// to writable, aligned `usize` storage. When `out_key_capacity` is non-zero,
+/// `out_keys` must point to a writable, aligned array of that many entries.
+/// Output storage must not overlap the context handle or `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_light_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdLightKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: context,
+                out_keys,
+                out_key_capacity,
+                out_written,
+            },
+            |context| Ok(context.context.parsed_animation().light_frames.len()),
+            |_| Ok(()),
+            "failed to allocate the shared VMD light key staging buffer",
+            |context, keys| {
+                for frame in sorted_context_light_frames(context) {
+                    if !all_finite(&frame.color) || !all_finite(&frame.direction) {
+                        return Err((
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD light keyframe contains a non-finite value",
+                        ));
+                    }
+                    keys.push(MmdRuntimeFfiVmdLightKeyframe {
+                        frame: frame.frame,
+                        color: frame.color,
+                        direction: frame.direction,
+                    });
+                }
+                Ok(())
+            },
+        )
+    })
+}
+
+/// Returns the number of self-shadow keys retained by a shared VMD context.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_self_shadow_frame_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.parsed_animation().self_shadow_frames.len()
+    })
+}
+
+/// Copies raw self-shadow keys from a shared VMD context in chronological
+/// order.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`. `out_written` must point
+/// to writable, aligned `usize` storage. When `out_key_capacity` is non-zero,
+/// `out_keys` must point to a writable, aligned array of that many entries.
+/// Output storage must not overlap the context handle or `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_self_shadow_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdSelfShadowKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: context,
+                out_keys,
+                out_key_capacity,
+                out_written,
+            },
+            |context| Ok(context.context.parsed_animation().self_shadow_frames.len()),
+            |_| Ok(()),
+            "failed to allocate the shared VMD self-shadow key staging buffer",
+            |context, keys| {
+                for frame in sorted_context_self_shadow_frames(context) {
+                    if !frame.distance.is_finite() {
+                        return Err((
+                            MmdRuntimeStatus::InvalidInput,
+                            "VMD self-shadow keyframe contains a non-finite value",
+                        ));
+                    }
+                    keys.push(MmdRuntimeFfiVmdSelfShadowKeyframe {
+                        frame: frame.frame,
+                        mode: frame.mode,
+                        distance: frame.distance,
+                    });
+                }
+                Ok(())
+            },
+        )
+    })
+}
+
+/// Returns the number of property/IK keyframes retained by a shared VMD
+/// context.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_property_frame_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context.context.parsed_animation().property_frames.len()
+    })
+}
+
+/// Returns the total number of flattened property IK entries in a shared VMD
+/// context.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_property_ik_entry_count(
+    context: *const MmdRuntimeVmdContext,
+) -> usize {
+    ffi_guard(0, || {
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return 0;
+        };
+        context_property_entry_count(context).unwrap_or(0)
+    })
+}
+
+/// Copies property/IK keyframe descriptors from a shared VMD context. The
+/// returned offsets/counts address the flat entry array copied by
+/// `mmd_runtime_vmd_context_copy_property_ik_entries`.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`. `out_written` must point
+/// to writable, aligned `usize` storage. When `out_key_capacity` is non-zero,
+/// `out_keys` must point to a writable, aligned array of that many entries.
+/// Output storage must not overlap the context handle or `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_property_keyframes(
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdPropertyKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: context,
+                out_keys,
+                out_key_capacity,
+                out_written,
+            },
+            |context| Ok(context.context.parsed_animation().property_frames.len()),
+            |context| {
+                context_property_entry_count(context).map(|_| ()).ok_or((
+                    MmdRuntimeStatus::Error,
+                    "shared VMD property entry count overflow",
+                ))
+            },
+            "failed to allocate the shared VMD property key staging buffer",
+            |context, keys| {
+                let mut offset = 0usize;
+                for frame in sorted_context_raw_property_frames(context) {
+                    let count = frame.entries.len();
+                    let next_offset = offset.checked_add(count).ok_or((
+                        MmdRuntimeStatus::Error,
+                        "shared VMD property entry offset overflow",
+                    ))?;
+                    keys.push(MmdRuntimeFfiVmdPropertyKeyframe {
+                        frame: frame.frame,
+                        visible: frame.show,
+                        reserved: [0; 3],
+                        ik_entry_offset: offset,
+                        ik_entry_count: count,
+                    });
+                    offset = next_offset;
+                }
+                Ok(())
+            },
+        )
+    })
+}
+
+/// Copies the flattened fixed-layout property IK entries from a shared VMD
+/// context in the same chronological/key order as the property descriptors.
+///
+/// # Safety
+///
+/// `context` must be null or a live handle returned by
+/// `mmd_runtime_vmd_context_create_from_vmd_bytes`. `out_written` must point
+/// to writable, aligned `usize` storage. When `out_entry_capacity` is
+/// non-zero, `out_entries` must point to a writable, aligned array of that
+/// many entries. Output storage must not overlap the context handle or
+/// `out_written`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_vmd_context_copy_property_ik_entries(
+    context: *const MmdRuntimeVmdContext,
+    out_entries: *mut MmdRuntimeFfiVmdPropertyIkEntry,
+    out_entry_capacity: usize,
+    out_written: *mut usize,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        copy_vmd_keyframes(
+            VmdKeyframeCopyBuffers {
+                owner: context,
+                out_keys: out_entries,
+                out_key_capacity: out_entry_capacity,
+                out_written,
+            },
+            |context| {
+                context_property_entry_count(context).ok_or((
+                    MmdRuntimeStatus::Error,
+                    "shared VMD property entry count overflow",
+                ))
+            },
+            |_| Ok(()),
+            "failed to allocate the shared VMD property entry staging buffer",
+            |context, entries| {
+                for frame in sorted_context_raw_property_frames(context) {
+                    for state in &frame.entries {
+                        let mut name_bytes = [0u8; 20];
+                        let copy_len = state.name_bytes.len().min(name_bytes.len());
+                        name_bytes[..copy_len].copy_from_slice(&state.name_bytes[..copy_len]);
+                        entries.push(MmdRuntimeFfiVmdPropertyIkEntry {
+                            name_bytes,
+                            enabled: state.enabled,
+                            reserved: [0; 3],
+                        });
+                    }
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -3982,6 +5048,45 @@ pub unsafe extern "C" fn mmd_runtime_clip_create_from_vmd_bytes_for_model(
         let clip = match mmd_anim_format::build_mmd_registered_pair_clip(
             &model.model,
             &motion,
+            &model.bone_name_to_index,
+            &model.morph_name_to_index,
+            &model.ik_solver_bone_name_to_index,
+            solver_count,
+        ) {
+            Ok(clip) => clip,
+            Err(_) => return null_mut_failure(FFI_ERR_CLIP_CREATE_FAILED),
+        };
+        Box::into_raw(Box::new(MmdRuntimeClip { clip }))
+    })
+}
+
+/// Creates an independent model-aware animation clip from a shared VMD
+/// context. The returned clip owns all compiled tracks and remains valid
+/// after both `context` and `model` are freed.
+///
+/// # Safety
+///
+/// `model` and `context` must be null or live handles returned by this
+/// library. The model must have name maps populated by PMX import.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_clip_create_from_vmd_context_for_model(
+    model: *const MmdRuntimeModel,
+    context: *const MmdRuntimeVmdContext,
+) -> *mut MmdRuntimeClip {
+    ffi_guard(ptr::null_mut(), || {
+        let Some(model) = (unsafe { model.as_ref() }) else {
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(context) = (unsafe { context.as_ref() }) else {
+            return null_mut_failure(FFI_ERR_INVALID_INPUT);
+        };
+        if model.bone_name_to_index.is_empty() && model.morph_name_to_index.is_empty() {
+            return null_mut_failure(FFI_ERR_CLIP_CREATE_FAILED);
+        }
+        let solver_count = model.model.ik_count();
+        let clip = match mmd_anim_format::build_mmd_registered_pair_clip(
+            &model.model,
+            context.context.import_result(),
             &model.bone_name_to_index,
             &model.morph_name_to_index,
             &model.ik_solver_bone_name_to_index,
@@ -8434,6 +9539,73 @@ fn checked_pointer_range<T>(ptr: *const T, len: usize) -> Option<(usize, usize)>
     Some((start, start.checked_add(byte_len)?))
 }
 
+struct VmdKeyframeCopyBuffers<Owner, Key> {
+    owner: *const Owner,
+    out_keys: *mut Key,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+}
+
+fn copy_vmd_keyframes<Owner, Key, Required, Preflight, Stage>(
+    buffers: VmdKeyframeCopyBuffers<Owner, Key>,
+    required: Required,
+    preflight: Preflight,
+    staging_error: &'static str,
+    stage: Stage,
+) -> MmdRuntimeStatus
+where
+    Key: Copy,
+    Required: FnOnce(&Owner) -> Result<usize, (MmdRuntimeStatus, &'static str)>,
+    Preflight: FnOnce(&Owner) -> Result<(), (MmdRuntimeStatus, &'static str)>,
+    Stage: FnOnce(&Owner, &mut Vec<Key>) -> Result<(), (MmdRuntimeStatus, &'static str)>,
+{
+    if let Err(message) = validate_key_copy_storage(
+        buffers.owner,
+        buffers.out_keys,
+        buffers.out_key_capacity,
+        buffers.out_written,
+    ) {
+        return status_failure(MmdRuntimeStatus::InvalidInput, message);
+    }
+    unsafe { ptr::write(buffers.out_written, 0) };
+
+    let Some(owner) = (unsafe { buffers.owner.as_ref() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    let required = match required(owner) {
+        Ok(required) => required,
+        Err((status, message)) => return status_failure(status, message),
+    };
+    if required == 0 {
+        return MmdRuntimeStatus::Ok;
+    }
+    if buffers.out_keys.is_null() {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    }
+    if buffers.out_key_capacity < required {
+        return status_failure(MmdRuntimeStatus::BufferTooSmall, "output buffer too small");
+    }
+    if let Err((status, message)) = preflight(owner) {
+        return status_failure(status, message);
+    }
+
+    let mut keys = Vec::new();
+    if keys.try_reserve_exact(required).is_err() {
+        return status_failure(MmdRuntimeStatus::Error, staging_error);
+    }
+    if let Err((status, message)) = stage(owner, &mut keys) {
+        return status_failure(status, message);
+    }
+    if keys.len() != required {
+        return status_failure(MmdRuntimeStatus::Error, "staged key count mismatch");
+    }
+    unsafe {
+        slice::from_raw_parts_mut(buffers.out_keys, required).copy_from_slice(&keys);
+        ptr::write(buffers.out_written, required);
+    }
+    MmdRuntimeStatus::Ok
+}
+
 fn validate_key_copy_storage<Owner, Key>(
     owner: *const Owner,
     out_keys: *mut Key,
@@ -8457,6 +9629,56 @@ fn validate_key_copy_storage<Owner, Key>(
     }
     if owner_range.is_some_and(|range| pointer_ranges_overlap(output_range, range)) {
         return Err("key buffer must not alias the track handle");
+    }
+    Ok(())
+}
+
+fn validate_model_context_bone_key_copy_storage(
+    model: *const MmdRuntimeModel,
+    context: *const MmdRuntimeVmdContext,
+    out_keys: *mut MmdRuntimeFfiVmdBoneKeyframe,
+    out_key_capacity: usize,
+    out_written: *mut usize,
+    out_skipped: *mut usize,
+) -> Result<(), &'static str> {
+    validate_key_copy_storage(model, out_keys, out_key_capacity, out_written)?;
+
+    let model_range = if model.is_null() {
+        None
+    } else {
+        Some(checked_pointer_range(model, 1).ok_or("invalid model handle")?)
+    };
+    let context_range = if context.is_null() {
+        None
+    } else {
+        Some(checked_pointer_range(context, 1).ok_or("invalid VMD context handle")?)
+    };
+    let skipped_range =
+        checked_pointer_range(out_skipped, 1).ok_or("invalid out_skipped storage")?;
+    let written_range =
+        checked_pointer_range(out_written, 1).ok_or("invalid out_written storage")?;
+    let output_range =
+        checked_pointer_range(out_keys, out_key_capacity).ok_or("invalid key buffer")?;
+
+    if pointer_ranges_overlap(skipped_range, written_range) {
+        return Err("out_skipped must not alias out_written");
+    }
+    if pointer_ranges_overlap(output_range, skipped_range) {
+        return Err("key buffer must not alias out_skipped");
+    }
+    if model_range.is_some_and(|range| {
+        pointer_ranges_overlap(range, skipped_range)
+            || pointer_ranges_overlap(range, written_range)
+            || pointer_ranges_overlap(range, output_range)
+    }) {
+        return Err("outputs must not alias the model handle");
+    }
+    if context_range.is_some_and(|range| {
+        pointer_ranges_overlap(range, skipped_range)
+            || pointer_ranges_overlap(range, written_range)
+            || pointer_ranges_overlap(range, output_range)
+    }) {
+        return Err("outputs must not alias the VMD context handle");
     }
     Ok(())
 }

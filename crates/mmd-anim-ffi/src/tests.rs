@@ -1,7 +1,7 @@
 use super::*;
 use mmd_anim_runtime::InterpolationVector3;
 use std::ffi::CStr;
-use std::mem::MaybeUninit;
+use std::mem::{MaybeUninit, align_of};
 
 fn last_error_cstr() -> Option<&'static CStr> {
     let ptr = mmd_runtime_last_error_message();
@@ -6076,6 +6076,1057 @@ fn vmd_camera_sample_rejects_invalid_inputs() {
     assert!(!unsafe {
         mmd_runtime_vmd_sample_camera([0u8; 1].as_ptr(), 1, 0.0, values.as_mut_ptr(), values.len())
     });
+}
+
+#[test]
+fn shared_vmd_context_reads_all_channels_and_keeps_clip_alive_after_free() {
+    assert_eq!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT,
+        MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT
+    );
+    assert_eq!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK,
+        MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK
+    );
+    assert_eq!(
+        MMD_RUNTIME_VMD_SHARED_CONTEXT_ABI_VERSION_V1, 1,
+        "shared context capability version is explicitly versioned"
+    );
+    assert_eq!(
+        MMD_RUNTIME_VMD_SHARED_CONTEXT_BONE_READBACK_ABI_VERSION_V1, 1,
+        "raw shared-context bone readback capability version is explicitly versioned"
+    );
+    assert_eq!(
+        MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1, 1,
+        "shared-context summary capability version is explicitly versioned"
+    );
+    assert_eq!(
+        MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES,
+        1 << 11,
+        "VMD byte summary capability has a dedicated feature bit"
+    );
+    assert_eq!(
+        MMD_RUNTIME_VMD_SUMMARY_BYTES_ABI_VERSION_V1, 1,
+        "VMD byte summary capability version is explicitly versioned"
+    );
+    assert_eq!(std::mem::size_of::<MmdRuntimeFfiVmdTrackSummary>(), 8);
+    assert_eq!(std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>(), 84);
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdContextSummary, struct_size),
+        0
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdContextSummary, abi_version),
+        4
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdContextSummary, target_model_name_bytes),
+        8
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdContextSummary, max_frame),
+        28
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdContextSummary, property_ik_entry_count),
+        80
+    );
+    assert_eq!(size_of::<MmdRuntimeFfiVmdPropertyKeyframe>(), 24);
+    assert_eq!(size_of::<MmdRuntimeFfiVmdPropertyIkEntry>(), 24);
+    assert_eq!(size_of::<MmdRuntimeFfiVmdBoneKeyframe>(), 100);
+    assert_eq!(std::mem::align_of::<MmdRuntimeFfiVmdBoneKeyframe>(), 4);
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdBoneKeyframe, bone_index),
+        0
+    );
+    assert_eq!(std::mem::offset_of!(MmdRuntimeFfiVmdBoneKeyframe, frame), 4);
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdBoneKeyframe, position_xyz),
+        8
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdBoneKeyframe, rotation_xyzw),
+        20
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdBoneKeyframe, interpolation),
+        36
+    );
+
+    let pmx: &[u8] =
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/model_descriptor_parity.pmx");
+    let vmd = shared_vmd_context_probe_bytes();
+    let context = unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(vmd.as_ptr(), vmd.len()) };
+    assert!(!context.is_null());
+
+    let mut summary = MmdRuntimeFfiVmdContextSummary::default();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_read_summary(
+                context,
+                &mut summary,
+                std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        summary.struct_size as usize,
+        std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>()
+    );
+    assert_eq!(
+        summary.abi_version,
+        MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1
+    );
+    assert_eq!(&summary.target_model_name_bytes[..16], b"registered_probe");
+    assert_eq!(summary.target_model_name_bytes[16..], [0; 4]);
+    assert_eq!(summary.max_frame, 30);
+    assert_eq!(summary.bones.track_count, 2);
+    assert_eq!(summary.bones.key_count, 4);
+    assert_eq!(summary.morphs, MmdRuntimeFfiVmdTrackSummary::default());
+    assert_eq!(summary.cameras.track_count, 1);
+    assert_eq!(summary.cameras.key_count, 2);
+    assert_eq!(summary.lights.track_count, 1);
+    assert_eq!(summary.lights.key_count, 2);
+    assert_eq!(summary.self_shadows.track_count, 1);
+    assert_eq!(summary.self_shadows.key_count, 2);
+    assert_eq!(summary.properties.track_count, 1);
+    assert_eq!(summary.properties.key_count, 1);
+    assert_eq!(summary.property_ik_entry_count, 2);
+
+    let summary_sentinel = MmdRuntimeFfiVmdContextSummary {
+        struct_size: 0xfeed_beef,
+        abi_version: 0xdead_beef,
+        target_model_name_bytes: [0xa5; 20],
+        max_frame: 1234,
+        bones: MmdRuntimeFfiVmdTrackSummary {
+            track_count: 11,
+            key_count: 12,
+        },
+        ..MmdRuntimeFfiVmdContextSummary::default()
+    };
+    let mut short_summary = summary_sentinel;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_read_summary(
+                context,
+                &mut short_summary,
+                std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>() - 1,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(short_summary, summary_sentinel);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_read_summary(
+                ptr::null(),
+                &mut short_summary,
+                std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(short_summary, summary_sentinel);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_read_summary(
+                context,
+                ptr::null_mut(),
+                std::mem::size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    assert_eq!(
+        unsafe { mmd_runtime_vmd_context_camera_frame_count(context) },
+        2
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_vmd_context_light_frame_count(context) },
+        2
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_vmd_context_self_shadow_frame_count(context) },
+        2
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_vmd_context_property_frame_count(context) },
+        1
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_vmd_context_property_ik_entry_count(context) },
+        2
+    );
+
+    let mut camera_keys = [MmdRuntimeFfiVmdCameraKeyframe::default(); 2];
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_camera_keyframes(
+                context,
+                camera_keys.as_mut_ptr(),
+                camera_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    assert_eq!(camera_keys[0].frame, 0);
+    assert_eq!(camera_keys[0].distance, -40.0);
+    assert_eq!(camera_keys[1].frame, 20);
+    assert_eq!(camera_keys[1].fov, 50);
+
+    let mut light_keys = [MmdRuntimeFfiVmdLightKeyframe::default(); 2];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_light_keyframes(
+                context,
+                light_keys.as_mut_ptr(),
+                light_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    assert_eq!(light_keys[0].frame, 10);
+    assert_eq!(light_keys[1].frame, 30);
+    assert_eq!(light_keys[1].color, [1.0, 0.5, 0.0]);
+
+    let mut shadow_keys = [MmdRuntimeFfiVmdSelfShadowKeyframe::default(); 2];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_self_shadow_keyframes(
+                context,
+                shadow_keys.as_mut_ptr(),
+                shadow_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    assert_eq!(shadow_keys[0].frame, 10);
+    assert_eq!(shadow_keys[1].mode, 2);
+
+    let mut property_keys = [MmdRuntimeFfiVmdPropertyKeyframe::default(); 1];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_property_keyframes(
+                context,
+                property_keys.as_mut_ptr(),
+                property_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 1);
+    assert_eq!(property_keys[0].frame, 7);
+    assert_eq!(property_keys[0].visible, 0);
+    assert_eq!(property_keys[0].ik_entry_offset, 0);
+    assert_eq!(property_keys[0].ik_entry_count, 2);
+
+    let mut property_entries = [MmdRuntimeFfiVmdPropertyIkEntry::default(); 2];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_property_ik_entries(
+                context,
+                property_entries.as_mut_ptr(),
+                property_entries.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 2);
+    assert_eq!(&property_entries[0].name_bytes[..4], b"ik_a");
+    assert_eq!(property_entries[0].enabled, 0);
+    assert_eq!(&property_entries[1].name_bytes[..4], b"ik_b");
+    assert_eq!(property_entries[1].enabled, 1);
+
+    let sentinel = MmdRuntimeFfiVmdLightKeyframe {
+        frame: 1234,
+        ..MmdRuntimeFfiVmdLightKeyframe::default()
+    };
+    let mut short = [sentinel];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_light_keyframes(
+                context,
+                short.as_mut_ptr(),
+                short.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(written, 0);
+    assert_eq!(short, [sentinel]);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_light_keyframes(context, ptr::null_mut(), 0, &mut written)
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 0);
+
+    let model = unsafe { mmd_runtime_model_create_from_pmx_bytes(pmx.as_ptr(), pmx.len()) };
+    assert!(!model.is_null());
+    let clip = unsafe { mmd_runtime_clip_create_from_vmd_context_for_model(model, context) };
+    assert!(!clip.is_null());
+    unsafe { mmd_runtime_vmd_context_free(context) };
+    unsafe { mmd_runtime_model_free(model) };
+    assert!(
+        !unsafe { &(*clip).clip }
+            .sample_at(5.0)
+            .bone_samples()
+            .is_empty()
+    );
+    unsafe { mmd_runtime_clip_free(clip) };
+}
+
+#[test]
+fn shared_vmd_context_raw_property_readback_preserves_source_bytes() {
+    let (vmd, expected_name) = raw_property_vmd_bytes();
+    let context = unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(vmd.as_ptr(), vmd.len()) };
+    assert!(!context.is_null());
+
+    let mut property_keys = [MmdRuntimeFfiVmdPropertyKeyframe::default(); 1];
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_property_keyframes(
+                context,
+                property_keys.as_mut_ptr(),
+                property_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 1);
+    assert_eq!(property_keys[0].frame, 42);
+    assert_eq!(property_keys[0].visible, 0x7f);
+    assert_eq!(property_keys[0].ik_entry_offset, 0);
+    assert_eq!(property_keys[0].ik_entry_count, 1);
+
+    let mut entries = [MmdRuntimeFfiVmdPropertyIkEntry::default(); 1];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_property_ik_entries(
+                context,
+                entries.as_mut_ptr(),
+                entries.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, 1);
+    assert_eq!(entries[0].name_bytes, expected_name);
+    assert_eq!(entries[0].enabled, 0x7f);
+
+    unsafe { mmd_runtime_vmd_context_free(context) };
+}
+
+#[test]
+fn vmd_summary_bytes_endpoint_matches_context_summary_and_fails_closed() {
+    assert_eq!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES,
+        MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES
+    );
+
+    let vmd = shared_vmd_context_probe_bytes();
+    let sentinel = MmdRuntimeFfiVmdContextSummary {
+        struct_size: 0xfeed_beef,
+        abi_version: 0xdead_beef,
+        target_model_name_bytes: [0xa5; 20],
+        max_frame: 1234,
+        bones: MmdRuntimeFfiVmdTrackSummary {
+            track_count: 11,
+            key_count: 12,
+        },
+        ..MmdRuntimeFfiVmdContextSummary::default()
+    };
+    let mut direct = sentinel;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                vmd.as_ptr(),
+                vmd.len(),
+                &mut direct,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(
+        direct.struct_size as usize,
+        size_of::<MmdRuntimeFfiVmdContextSummary>()
+    );
+    assert_eq!(
+        direct.abi_version,
+        MMD_RUNTIME_VMD_SHARED_CONTEXT_SUMMARY_ABI_VERSION_V1
+    );
+    assert_eq!(&direct.target_model_name_bytes[..16], b"registered_probe");
+    assert_eq!(direct.max_frame, 30);
+    assert_eq!(direct.bones.track_count, 2);
+    assert_eq!(direct.bones.key_count, 4);
+    assert_eq!(direct.morphs, MmdRuntimeFfiVmdTrackSummary::default());
+    assert_eq!(direct.cameras.key_count, 2);
+    assert_eq!(direct.lights.key_count, 2);
+    assert_eq!(direct.self_shadows.key_count, 2);
+    assert_eq!(direct.properties.key_count, 1);
+    assert_eq!(direct.property_ik_entry_count, 2);
+
+    let context = unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(vmd.as_ptr(), vmd.len()) };
+    assert!(!context.is_null());
+    let mut from_context = MmdRuntimeFfiVmdContextSummary::default();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_read_summary(
+                context,
+                &mut from_context,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(direct, from_context);
+    unsafe { mmd_runtime_vmd_context_free(context) };
+
+    let mut short = sentinel;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                vmd.as_ptr(),
+                vmd.len(),
+                &mut short,
+                size_of::<MmdRuntimeFfiVmdContextSummary>() - 1,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(short, sentinel);
+
+    let mut invalid = sentinel;
+    let garbage = [0u8; 16];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                garbage.as_ptr(),
+                garbage.len(),
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VMD_PARSE_FAILED.as_bytes()
+    );
+
+    let truncated = &vmd[..vmd.len() - 1];
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                truncated.as_ptr(),
+                truncated.len(),
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                ptr::null(),
+                0,
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                vmd.as_ptr(),
+                vmd.len(),
+                ptr::null_mut(),
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    let mut malformed = mmd_anim_format::parse_vmd_animation(&registered_vmd_probe_bytes())
+        .expect("registered VMD probe");
+    malformed.bone_frames[0].bone_name.clear();
+    malformed.bone_frames[0].bone_name_bytes.clear();
+    let malformed = mmd_anim_format::export_vmd_animation(&malformed);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                malformed.as_ptr(),
+                malformed.len(),
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+
+    let mut malformed = mmd_anim_format::parse_vmd_animation(&shared_vmd_context_probe_bytes())
+        .expect("shared VMD probe");
+    malformed.property_frames[0].ik_states[0].bone_name.clear();
+    malformed.property_frames[0].ik_states[0]
+        .bone_name_bytes
+        .clear();
+    let malformed = mmd_anim_format::export_vmd_animation(&malformed);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                malformed.as_ptr(),
+                malformed.len(),
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+
+    let mut malformed = mmd_anim_format::parse_vmd_animation(&registered_vmd_probe_bytes())
+        .expect("registered VMD probe");
+    malformed.bone_frames[0].translation[0] = f32::NAN;
+    let malformed = mmd_anim_format::export_vmd_animation(&malformed);
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_summary_read_from_vmd_bytes(
+                malformed.as_ptr(),
+                malformed.len(),
+                &mut invalid,
+                size_of::<MmdRuntimeFfiVmdContextSummary>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(invalid, sentinel);
+}
+
+#[test]
+fn shared_vmd_context_raw_bone_readback_preserves_payload_mapping_and_order() {
+    let pmx: &[u8] =
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/model_descriptor_parity.pmx");
+    let vmd = registered_vmd_probe_bytes();
+    let model = unsafe { mmd_runtime_model_create_from_pmx_bytes(pmx.as_ptr(), pmx.len()) };
+    let context = unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(vmd.as_ptr(), vmd.len()) };
+    assert!(!model.is_null());
+    assert!(!context.is_null());
+
+    let import = mmd_anim_format::import_pmx_runtime(pmx).expect("PMX fixture import");
+    let motion = mmd_anim_format::import_vmd_motion(&vmd).expect("VMD fixture import");
+    let mut expected = motion
+        .bone_keyframes
+        .iter()
+        .filter_map(|keyframe| {
+            import
+                .bone_name_to_index
+                .get(&keyframe.bone_name_normalized)
+                .map(|bone_index| {
+                    (
+                        bone_index.0,
+                        keyframe.frame,
+                        keyframe.position.to_array(),
+                        keyframe.rotation.to_array(),
+                        keyframe.interpolation,
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    expected.sort_by_key(|(bone_index, frame, _, _, _)| (*bone_index, *frame));
+
+    assert_eq!(
+        unsafe { mmd_runtime_vmd_context_bone_keyframe_count_for_model(model, context) },
+        expected.len()
+    );
+    let mut keys = vec![MmdRuntimeFfiVmdBoneKeyframe::default(); expected.len()];
+    let mut written = 99;
+    let mut skipped = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_bone_keyframes_for_model(
+                model,
+                context,
+                keys.as_mut_ptr(),
+                keys.len(),
+                &mut written,
+                &mut skipped,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, expected.len());
+    assert_eq!(skipped, 0);
+    for (actual, (bone_index, frame, position, rotation, interpolation)) in
+        keys.iter().zip(expected)
+    {
+        assert_eq!(actual.bone_index, bone_index);
+        assert_eq!(actual.frame, frame);
+        assert_eq!(actual.position_xyz, position);
+        assert_eq!(actual.rotation_xyzw, rotation);
+        assert_eq!(actual.interpolation, interpolation);
+    }
+
+    unsafe {
+        mmd_runtime_vmd_context_free(context);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[test]
+fn shared_vmd_context_model_less_raw_readback_preserves_cp932_names_order_and_interpolation() {
+    assert_eq!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK,
+        MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK
+    );
+    assert_eq!(
+        MMD_RUNTIME_VMD_SHARED_CONTEXT_RAW_READBACK_ABI_VERSION_V1,
+        1
+    );
+    assert_eq!(size_of::<MmdRuntimeFfiVmdRawBoneKeyframe>(), 112);
+    assert_eq!(align_of::<MmdRuntimeFfiVmdRawBoneKeyframe>(), 4);
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdRawBoneKeyframe, bone_name_bytes),
+        0
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdRawBoneKeyframe, frame),
+        16
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdRawBoneKeyframe, position_xyz),
+        20
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdRawBoneKeyframe, rotation_xyzw),
+        32
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdRawBoneKeyframe, interpolation),
+        48
+    );
+    assert_eq!(size_of::<MmdRuntimeFfiVmdRawMorphKeyframe>(), 24);
+    assert_eq!(align_of::<MmdRuntimeFfiVmdRawMorphKeyframe>(), 4);
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdRawMorphKeyframe, morph_name_bytes),
+        0
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdRawMorphKeyframe, frame),
+        16
+    );
+    assert_eq!(
+        std::mem::offset_of!(MmdRuntimeFfiVmdRawMorphKeyframe, weight),
+        20
+    );
+
+    let mut parsed = mmd_anim_format::parse_vmd_animation(&shared_vmd_context_probe_bytes())
+        .expect("shared VMD probe");
+    parsed.morph_frames = vec![
+        mmd_anim_format::vmd::VmdParsedMorphFrame {
+            morph_name: "テスト".to_owned(),
+            morph_name_bytes: vec![0x83, 0x65, 0x83, 0x58, 0x83, 0x67],
+            frame: 21,
+            weight: 0.25,
+        },
+        mmd_anim_format::vmd::VmdParsedMorphFrame {
+            morph_name: "morph".to_owned(),
+            morph_name_bytes: Vec::new(),
+            frame: 7,
+            weight: 0.75,
+        },
+    ];
+    let vmd = mmd_anim_format::export_vmd_animation(&parsed);
+    let context = unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(vmd.as_ptr(), vmd.len()) };
+    assert!(!context.is_null());
+
+    let expected = mmd_anim_format::import_vmd_motion(&vmd).expect("raw VMD import");
+    assert_eq!(
+        unsafe { mmd_runtime_vmd_context_bone_keyframe_count(context) },
+        expected.bone_keyframes.len()
+    );
+    let mut bone_keys =
+        vec![MmdRuntimeFfiVmdRawBoneKeyframe::default(); expected.bone_keyframes.len()];
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_bone_keyframes(
+                context,
+                bone_keys.as_mut_ptr(),
+                bone_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, expected.bone_keyframes.len());
+    for (actual, expected) in bone_keys.iter().zip(expected.bone_keyframes.iter()) {
+        let mmd_anim_format::vmd::VmdBoneImportMode::ByName(name) = &expected.bone_mode else {
+            panic!("raw VMD key must retain its source name");
+        };
+        assert_eq!(&actual.bone_name_bytes[..name.len()], name);
+        assert!(
+            actual.bone_name_bytes[name.len()..]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
+        assert_eq!(actual.frame, expected.frame);
+        assert_eq!(actual.position_xyz, expected.position.to_array());
+        assert_eq!(actual.rotation_xyzw, expected.rotation.to_array());
+        assert_eq!(actual.interpolation, expected.interpolation);
+    }
+
+    assert_eq!(
+        unsafe { mmd_runtime_vmd_context_morph_keyframe_count(context) },
+        expected.morph_keyframes.len()
+    );
+    let mut morph_keys =
+        vec![MmdRuntimeFfiVmdRawMorphKeyframe::default(); expected.morph_keyframes.len()];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_morph_keyframes(
+                context,
+                morph_keys.as_mut_ptr(),
+                morph_keys.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, expected.morph_keyframes.len());
+    for (actual, (name, frame, weight)) in morph_keys.iter().zip(expected.morph_keyframes.iter()) {
+        assert_eq!(&actual.morph_name_bytes[..name.len()], name);
+        assert!(
+            actual.morph_name_bytes[name.len()..]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
+        assert_eq!(actual.frame, *frame);
+        assert_eq!(actual.weight, *weight);
+    }
+
+    let bone_sentinel = MmdRuntimeFfiVmdRawBoneKeyframe {
+        frame: 0xdead_beef,
+        bone_name_bytes: [0xa5; 15],
+        ..MmdRuntimeFfiVmdRawBoneKeyframe::default()
+    };
+    let mut short_bone = [bone_sentinel];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_bone_keyframes(
+                context,
+                short_bone.as_mut_ptr(),
+                short_bone.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(written, 0);
+    assert_eq!(short_bone, [bone_sentinel]);
+
+    let morph_sentinel = MmdRuntimeFfiVmdRawMorphKeyframe {
+        frame: 0xdead_beef,
+        morph_name_bytes: [0xa5; 15],
+        ..MmdRuntimeFfiVmdRawMorphKeyframe::default()
+    };
+    let mut short_morph = [morph_sentinel];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_morph_keyframes(
+                context,
+                short_morph.as_mut_ptr(),
+                short_morph.len(),
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(written, 0);
+    assert_eq!(short_morph, [morph_sentinel]);
+
+    unsafe { mmd_runtime_vmd_context_free(context) };
+}
+
+#[test]
+fn shared_vmd_context_raw_bone_readback_reports_skips_and_short_buffers_are_atomic() {
+    let pmx: &[u8] =
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/model_descriptor_parity.pmx");
+    let mut parsed = mmd_anim_format::parse_vmd_animation(&registered_vmd_probe_bytes())
+        .expect("registered VMD probe");
+    parsed
+        .bone_frames
+        .push(mmd_anim_format::vmd::VmdParsedBoneFrame {
+            bone_name: "unresolved_bone".to_owned(),
+            bone_name_bytes: Vec::new(),
+            frame: 99,
+            translation: [9.0, 8.0, 7.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            interpolation: (63u8..=126).collect(),
+        });
+    let vmd = mmd_anim_format::export_vmd_animation(&parsed);
+    let model = unsafe { mmd_runtime_model_create_from_pmx_bytes(pmx.as_ptr(), pmx.len()) };
+    let context = unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(vmd.as_ptr(), vmd.len()) };
+    assert!(!model.is_null());
+    assert!(!context.is_null());
+
+    let required = unsafe { mmd_runtime_vmd_context_bone_keyframe_count_for_model(model, context) };
+    assert_eq!(required, 4);
+    let sentinel = MmdRuntimeFfiVmdBoneKeyframe {
+        bone_index: 0xfeed_beef,
+        frame: 0xdead_beef,
+        position_xyz: [11.0, 12.0, 13.0],
+        rotation_xyzw: [0.1, 0.2, 0.3, 0.4],
+        interpolation: [0xa5; 64],
+    };
+    let mut short = [sentinel];
+    let mut written = 99;
+    let mut skipped = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_bone_keyframes_for_model(
+                model,
+                context,
+                short.as_mut_ptr(),
+                short.len(),
+                &mut written,
+                &mut skipped,
+            )
+        },
+        MmdRuntimeStatus::BufferTooSmall
+    );
+    assert_eq!(written, 0);
+    assert_eq!(skipped, 0);
+    assert_eq!(short, [sentinel]);
+
+    let mut keys = vec![MmdRuntimeFfiVmdBoneKeyframe::default(); required];
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_bone_keyframes_for_model(
+                model,
+                context,
+                keys.as_mut_ptr(),
+                keys.len(),
+                &mut written,
+                &mut skipped,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(written, required);
+    assert_eq!(skipped, 1);
+    assert!(keys.iter().all(|key| key.frame != 99));
+
+    written = 99;
+    skipped = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_bone_keyframes_for_model(
+                ptr::null(),
+                context,
+                ptr::null_mut(),
+                0,
+                &mut written,
+                &mut skipped,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 0);
+    assert_eq!(skipped, 0);
+
+    written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_bone_keyframes_for_model(
+                model,
+                context,
+                ptr::null_mut(),
+                0,
+                &mut written,
+                model.cast::<usize>(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 99);
+    assert_eq!(
+        unsafe { mmd_runtime_vmd_context_bone_keyframe_count_for_model(ptr::null(), context) },
+        0
+    );
+
+    unsafe {
+        mmd_runtime_vmd_context_free(context);
+        mmd_runtime_model_free(model);
+    }
+}
+
+#[test]
+fn shared_vmd_context_rejects_empty_malformed_and_null_inputs() {
+    let byte = 0u8;
+    assert!(unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(ptr::null(), 0) }.is_null());
+    assert!(unsafe { mmd_runtime_vmd_context_create_from_vmd_bytes(&byte, 0) }.is_null());
+    let malformed = [0u8; 16];
+    assert!(
+        unsafe {
+            mmd_runtime_vmd_context_create_from_vmd_bytes(malformed.as_ptr(), malformed.len())
+        }
+        .is_null()
+    );
+    assert_eq!(
+        last_error_cstr()
+            .expect("malformed VMD should set last error")
+            .to_bytes(),
+        FFI_ERR_VMD_PARSE_FAILED.as_bytes()
+    );
+
+    let valid = shared_vmd_context_probe_bytes();
+    let truncated = &valid[..valid.len() - 1];
+    assert!(
+        unsafe {
+            mmd_runtime_vmd_context_create_from_vmd_bytes(truncated.as_ptr(), truncated.len())
+        }
+        .is_null()
+    );
+    assert_eq!(
+        last_error_cstr()
+            .expect("truncated VMD should set last error")
+            .to_bytes(),
+        FFI_ERR_VMD_PARSE_FAILED.as_bytes()
+    );
+
+    let mut written = 99;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_vmd_context_copy_property_keyframes(
+                ptr::null(),
+                ptr::null_mut(),
+                0,
+                &mut written,
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(written, 0);
+}
+
+fn shared_vmd_context_probe_bytes() -> Vec<u8> {
+    let mut parsed = mmd_anim_format::parse_vmd_animation(&registered_vmd_probe_bytes())
+        .expect("registered VMD probe");
+    parsed.camera_frames = vec![
+        mmd_anim_format::vmd::VmdParsedCameraFrame {
+            frame: 0,
+            distance: -40.0,
+            position: [0.0, 1.0, 2.0],
+            rotation: [0.1, 0.2, 0.3],
+            interpolation: [0; 24],
+            fov: 45,
+            perspective: true,
+        },
+        mmd_anim_format::vmd::VmdParsedCameraFrame {
+            frame: 20,
+            distance: -20.0,
+            position: [2.0, 3.0, 4.0],
+            rotation: [0.4, 0.5, 0.6],
+            interpolation: [1; 24],
+            fov: 50,
+            perspective: false,
+        },
+    ];
+    parsed.light_frames = vec![
+        mmd_anim_format::vmd::VmdParsedLightFrame {
+            frame: 10,
+            color: [0.0, 0.0, 1.0],
+            direction: [1.0, 0.0, 0.0],
+        },
+        mmd_anim_format::vmd::VmdParsedLightFrame {
+            frame: 30,
+            color: [1.0, 0.5, 0.0],
+            direction: [0.0, -1.0, 0.0],
+        },
+    ];
+    parsed.self_shadow_frames = vec![
+        mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+            frame: 10,
+            mode: 1,
+            distance: 20.0,
+        },
+        mmd_anim_format::vmd::VmdParsedSelfShadowFrame {
+            frame: 30,
+            mode: 2,
+            distance: 60.0,
+        },
+    ];
+    parsed.property_frames = vec![mmd_anim_format::vmd::VmdParsedPropertyFrame {
+        frame: 7,
+        visible: false,
+        ik_states: vec![
+            mmd_anim_format::vmd::VmdParsedIkState {
+                bone_name: "ik_a".to_owned(),
+                bone_name_bytes: Vec::new(),
+                enabled: false,
+            },
+            mmd_anim_format::vmd::VmdParsedIkState {
+                bone_name: "ik_b".to_owned(),
+                bone_name_bytes: Vec::new(),
+                enabled: true,
+            },
+        ],
+    }];
+    mmd_anim_format::export_vmd_animation(&parsed)
+}
+
+fn raw_property_vmd_bytes() -> (Vec<u8>, [u8; 20]) {
+    let mut bytes = b"Vocaloid Motion Data 0002\0\0\0\0\0".to_vec();
+    bytes.extend_from_slice(&[0; 20]); // model name
+    for _ in 0..5 {
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // property frames
+    bytes.extend_from_slice(&42u32.to_le_bytes());
+    bytes.push(0x7f); // authored show byte
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // IK entries
+    let mut name = [0u8; 20];
+    name[..2].copy_from_slice(b"IK");
+    name[2] = 0;
+    name[3] = 0xa5;
+    name[19] = 0x5a;
+    bytes.extend_from_slice(&name);
+    bytes.push(0x7f); // authored enabled byte
+    (bytes, name)
 }
 
 fn light_and_self_shadow_vmd_bytes() -> Vec<u8> {

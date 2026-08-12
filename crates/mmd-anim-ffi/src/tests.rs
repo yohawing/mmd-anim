@@ -3411,6 +3411,33 @@ fn physics_world_bake_clip_frames_seed_only_state_contract() {
         "continuation first sample must step physics: {report:?}"
     );
 
+    // A clip switch can re-arm seed-only without paying the reset settle.
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_rearm_bake_seed(world) },
+        MmdRuntimeStatus::Ok
+    );
+    report = zero_physics_step_report();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_bake_clip_frames(
+                world,
+                instance,
+                clip,
+                0.0,
+                15.0,
+                1.0 / 60.0,
+                1,
+                world_out.as_mut_ptr(),
+                world_out.len(),
+                morphs.as_mut_ptr(),
+                morphs.len(),
+                &mut report,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_zero_physics_step_report(&report);
+
     // Successful reset re-arms seed-only.
     assert_eq!(
         unsafe { mmd_runtime_physics_world_reset(world, instance, ptr::null_mut()) },

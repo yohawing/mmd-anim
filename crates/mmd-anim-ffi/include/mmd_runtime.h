@@ -1579,6 +1579,11 @@ mmd_runtime_status_t mmd_runtime_physics_world_reset(
     mmd_runtime_instance_t*      instance,
     size_t*                      out_seeded_rigidbody_count);
 
+/* Arms the next sequential clip-bake sample to reseed from its evaluated pose
+   without running the reset settle. The world must remain model-compatible. */
+mmd_runtime_status_t mmd_runtime_physics_world_rearm_bake_seed(
+    mmd_runtime_physics_world_t* world);
+
 /* Forward steps feed static bodies only; DynamicBone bodies are seeded by
    reset and remain solver-owned. A successful explicit step disarms bake
    seed-only state so the next bake sample advances physics normally. */

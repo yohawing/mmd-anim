@@ -6019,6 +6019,22 @@ pub unsafe extern "C" fn mmd_runtime_physics_world_reset(
     })
 }
 
+/// Arms the next sequential clip-bake sample to reseed the existing Bullet
+/// world from that sample's evaluated pose without running the reset settle.
+/// This is intended for changing clips while retaining a compatible world.
+///
+/// # Safety
+///
+/// `world` must be a valid physics-world handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_physics_world_rearm_bake_seed(
+    world: *mut MmdRuntimePhysicsWorld,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        physics_world_rearm_bake_seed_impl(world)
+    })
+}
+
 /// Steps a physics world using the runtime's fixed-step physics clock.
 ///
 /// This live-evaluation path feeds static bodies before the step. DynamicBone
@@ -6303,6 +6319,11 @@ fn physics_world_reset_impl(
     _instance: *mut MmdRuntimeInstance,
     _out_seeded_rigidbody_count: *mut usize,
 ) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
+fn physics_world_rearm_bake_seed_impl(_world: *mut MmdRuntimePhysicsWorld) -> MmdRuntimeStatus {
     status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
 }
 
@@ -6760,6 +6781,15 @@ fn physics_world_reset_impl(
         }
         Err(err) => status_failure(MmdRuntimeStatus::Error, err.to_string().as_str()),
     }
+}
+
+#[cfg(feature = "physics-bullet-native")]
+fn physics_world_rearm_bake_seed_impl(world: *mut MmdRuntimePhysicsWorld) -> MmdRuntimeStatus {
+    let Some(world) = (unsafe { world.as_mut() }) else {
+        return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+    };
+    world.next_bake_sample_is_seed_only = true;
+    MmdRuntimeStatus::Ok
 }
 
 #[cfg(feature = "physics-bullet-native")]

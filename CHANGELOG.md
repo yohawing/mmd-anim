@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.1 - 2026-08-13
+
+Improved MMD knee IK parity and clip-switch physics reuse for native hosts.
+
+### Added
+
+- Added an experimental C ABI operation that rearms the next sequential
+  clip-bake sample from its evaluated pose without paying the reset-settle cost
+  when reusing a model-compatible Bullet physics world.
+
+### Fixed
+
+- Matched MMD's one-sided knee constraints by solving compatible knee links
+  around the raw local X axis and preserving the authored pose as the rollback
+  floor when a constrained IK candidate is worse.
+
+### Known limitations
+
+- Physics-world reuse requires the same compatible PMX model; hosts must rebuild
+  the world when model compatibility is not guaranteed.
+- The C ABI, WASM wrapper, PMM document conversion, and Python binding remain
+  experimental and may change before 1.0.
+
 ## 0.4.0 - 2026-08-03
 
 Expanded raw VMD diagnostics and versioned native-host ABI contracts.

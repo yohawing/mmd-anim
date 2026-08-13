@@ -120,8 +120,14 @@ impl IkChainSolver {
         self.apply_link_rotations();
         self.update_world_matrices(input);
 
-        let mut final_distance = f32::MAX;
-        let mut best_distance = f32::MAX;
+        // The input local pose is the rollback floor. A constrained IK
+        // candidate can be worse than the authored pose, so it must not become
+        // the best pose merely because it is the first finite distance seen.
+        let mut final_distance = {
+            let eff_pos = translation(self.world_matrices[self.definition.target_slot]);
+            (eff_pos - input.goal_position).length()
+        };
+        let mut best_distance = final_distance;
         let mut executed_iterations = 0u32;
         let mut link_steps = 0u32;
 
@@ -846,13 +852,44 @@ pub(crate) fn solve_plane_link_step(input: PlaneLinkStepInput<'_>) {
         1 => Vec3A::new(0.0, 1.0, 0.0),
         _ => Vec3A::new(0.0, 0.0, 1.0),
     };
-    let (q_b, q_b_inv) = match input.local_axis_basis {
-        Some(basis) if basis.is_finite() => (basis.normalize(), basis.normalize().inverse()),
-        _ => (Quat::IDENTITY, Quat::IDENTITY),
+    let (lower, upper) = limit_axis_bounds(input.limits, input.axis_index);
+    // MMD-compatible knee links are one-sided rotations around the raw local
+    // X axis. PMX localAxis is a manipulator frame and must not become the
+    // knee pole/rotation axis here. On the first pass, measure the target
+    // against the authored (pre-IK) link orientation so the resulting angle
+    // is an absolute knee angle; later passes continue from planeModeAngle.
+    let axis_aligned_with_bone = match input.local_axis_basis {
+        Some(basis) if basis.is_finite() && basis.length_squared() > f32::EPSILON => {
+            basis
+                .normalize()
+                .mul_vec3a(Vec3A::X)
+                .dot(input.local_effector.normalize())
+                .abs()
+                > 0.95
+        }
+        _ => true,
     };
-    // Solve the plane limit in local-axis space, then conjugate back.
+    let mmd_knee_plane = input.axis_index == 0
+        && axis_aligned_with_bone
+        && ((lower < 0.0 && upper <= 0.0) || (lower >= 0.0 && upper > 0.0));
+    let (q_b, q_b_inv) = if mmd_knee_plane {
+        (Quat::IDENTITY, Quat::IDENTITY)
+    } else {
+        match input.local_axis_basis {
+            Some(basis) if basis.is_finite() => (basis.normalize(), basis.normalize().inverse()),
+            _ => (Quat::IDENTITY, Quat::IDENTITY),
+        }
+    };
+    let base = input.base_rotations[input.link_index];
+    let local_target = if mmd_knee_plane && input.iteration == 0 {
+        (input.ik_rotations[input.link_index] * base)
+            .normalize()
+            .mul_vec3a(*input.local_target)
+    } else {
+        *input.local_target
+    };
     let local_eff_n = q_b_inv.mul_vec3a(*input.local_effector).normalize();
-    let local_tgt_n = q_b_inv.mul_vec3a(*input.local_target).normalize();
+    let local_tgt_n = q_b_inv.mul_vec3a(local_target).normalize();
 
     let dot = local_eff_n.dot(local_tgt_n).clamp(-1.0, 1.0);
     let raw_angle = dot.acos();
@@ -874,12 +911,6 @@ pub(crate) fn solve_plane_link_step(input: PlaneLinkStepInput<'_>) {
 
     let state = &mut input.chain_states[input.link_index];
     let mut next_angle = state.plane_mode_angle + signed_angle;
-    let (lower, upper) = match input.axis_index {
-        0 => (input.limits.min.x, input.limits.max.x),
-        1 => (input.limits.min.y, input.limits.max.y),
-        _ => (input.limits.min.z, input.limits.max.z),
-    };
-    let base = input.base_rotations[input.link_index];
 
     if input.iteration == 0 && (next_angle < lower || next_angle > upper) {
         if -next_angle > lower && -next_angle < upper {

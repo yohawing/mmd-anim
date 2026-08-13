@@ -3411,6 +3411,33 @@ fn physics_world_bake_clip_frames_seed_only_state_contract() {
         "continuation first sample must step physics: {report:?}"
     );
 
+    // A clip switch can re-arm seed-only without paying the reset settle.
+    assert_eq!(
+        unsafe { mmd_runtime_physics_world_rearm_bake_seed(world) },
+        MmdRuntimeStatus::Ok
+    );
+    report = zero_physics_step_report();
+    assert_eq!(
+        unsafe {
+            mmd_runtime_physics_world_bake_clip_frames(
+                world,
+                instance,
+                clip,
+                0.0,
+                15.0,
+                1.0 / 60.0,
+                1,
+                world_out.as_mut_ptr(),
+                world_out.len(),
+                morphs.as_mut_ptr(),
+                morphs.len(),
+                &mut report,
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_zero_physics_step_report(&report);
+
     // Successful reset re-arms seed-only.
     assert_eq!(
         unsafe { mmd_runtime_physics_world_reset(world, instance, ptr::null_mut()) },
@@ -9884,7 +9911,9 @@ fn model_descriptor_fixture_matches_pmx_model_arena_and_behavior() {
         },
         MmdRuntimeFfiBoneKeyframe {
             frame: 0,
-            position_xyz: [0.06, 0.0, 0.0],
+            // Keep the controller off the authored chain so property IK has
+            // an observable enabled-vs-disabled effect in this parity test.
+            position_xyz: [1.0, 0.0, 0.0],
             rotation_xyzw: controller_rotation,
         },
     ];
@@ -10009,11 +10038,28 @@ fn model_descriptor_fixture_matches_pmx_model_arena_and_behavior() {
             disabled_ik_world.len(),
         )
     });
-    let ik_bone = fixture.ik_solvers[0].ik_bone_index as usize;
     assert_ne!(
-        &enabled_world[ik_bone * 16..ik_bone * 16 + 16],
-        &disabled_ik_world[ik_bone * 16..ik_bone * 16 + 16],
-        "IK enabled/disabled must change controller matrix"
+        enabled_world, disabled_ik_world,
+        "IK enabled must change at least one fixture bone matrix"
+    );
+    let ik_bone = fixture.ik_solvers[0].ik_bone_index as usize;
+    let target_bone = fixture.ik_solvers[0].target_bone_index as usize;
+    let matrix_translation = |world: &[f32], bone: usize| {
+        glam::Vec3A::new(
+            world[bone * 16 + 12],
+            world[bone * 16 + 13],
+            world[bone * 16 + 14],
+        )
+    };
+    let enabled_distance = (matrix_translation(&enabled_world, target_bone)
+        - matrix_translation(&enabled_world, ik_bone))
+    .length();
+    let disabled_distance = (matrix_translation(&disabled_ik_world, target_bone)
+        - matrix_translation(&disabled_ik_world, ik_bone))
+    .length();
+    assert!(
+        enabled_distance <= disabled_distance + 1.0e-5,
+        "IK enabled must not replace a better authored pose: enabled={enabled_distance} disabled={disabled_distance}"
     );
 
     let mut no_append_descriptor = fixture.descriptor();

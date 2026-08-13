@@ -411,6 +411,57 @@ fn solves_one_link_ik_toward_controller_bone() {
 }
 
 #[test]
+fn ik_rollback_preserves_better_fk_pose_than_limited_candidate() {
+    // The authored FK pose is intentionally outside the narrow IK angle box.
+    // Its effector is already almost at the controller, so clamping it toward
+    // the IK limits would be a worse candidate and must be rolled back.
+    let base_rotation = Quat::from_rotation_z(1.0);
+    let target_position = base_rotation.mul_vec3a(Vec3A::X) + Vec3A::new(0.01, 0.0, 0.0);
+    let angle_limit = IkAngleLimit::new(Vec3A::splat(-0.1), Vec3A::splat(0.1));
+    let model = Arc::new(
+        ModelArena::new_with_ik(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::X),
+                BoneInit::new(None, target_position),
+            ],
+            vec![IkSolverInit {
+                ik_bone: BoneIndex(2),
+                target_bone: BoneIndex(1),
+                links: vec![IkLinkInit::new(BoneIndex(0)).with_angle_limit(angle_limit)],
+                iteration_count: 1,
+                limit_angle: 0.0,
+            }],
+        )
+        .unwrap(),
+    );
+
+    let mut baseline = RuntimeInstance::new(Arc::clone(&model));
+    baseline
+        .pose_mut()
+        .set_local_rotation(BoneIndex(0), base_rotation);
+    baseline.evaluate_current_pose_without_ik();
+    let baseline_distance = (translation(baseline.world_matrices()[1])
+        - translation(baseline.world_matrices()[2]))
+    .length();
+
+    let mut solved = RuntimeInstance::new(model);
+    solved
+        .pose_mut()
+        .set_local_rotation(BoneIndex(0), base_rotation);
+    solved.evaluate_current_pose();
+    let solved_distance = (translation(solved.world_matrices()[1])
+        - translation(solved.world_matrices()[2]))
+    .length();
+
+    assert!(
+        solved_distance <= baseline_distance + 1.0e-5,
+        "IK must not replace a better FK pose: baseline={baseline_distance} solved={solved_distance}"
+    );
+    assert_eq!(solved.ik_runtime_stats()[0].rollback_breaks, 1);
+}
+
+#[test]
 fn skips_disabled_ik_solver() {
     let model = Arc::new(
         ModelArena::new_with_ik(
@@ -2404,6 +2455,39 @@ fn plane_link_step_matches_saba_total_axis_rotation() {
         Quat::from_rotation_z(std::f32::consts::FRAC_PI_2).mul_vec3a(Vec3A::X),
     );
     assert_vec3a_near(effective.mul_vec3a(Vec3A::Z), Vec3A::Z);
+}
+
+#[test]
+fn one_sided_x_plane_uses_authored_frame_not_pmx_local_axis() {
+    let base = Quat::from_rotation_x(-0.8);
+    let expected = Quat::from_rotation_x(-0.7);
+    let local_effector = Vec3A::new(0.0, -1.0, 0.0);
+    let parent_target = expected.mul_vec3a(local_effector);
+    let local_target = base.inverse().mul_vec3a(parent_target);
+    let base_rotations = vec![base];
+    let mut ik_rotations = vec![Quat::IDENTITY];
+    let mut chain_states = vec![super::ChainLinkState::default()];
+
+    super::solve_plane_link_step(super::PlaneLinkStepInput {
+        local_effector: &local_effector,
+        local_target: &local_target,
+        link_index: 0,
+        base_rotations: &base_rotations,
+        ik_rotations: &mut ik_rotations,
+        chain_states: &mut chain_states,
+        axis_index: 0,
+        limits: IkAngleLimit::new(
+            Vec3A::new(-std::f32::consts::PI, 0.0, 0.0),
+            Vec3A::new(-0.01, 0.0, 0.0),
+        ),
+        iteration: 0,
+        limit_angle: 0.0,
+        local_axis_basis: Some(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
+    });
+
+    let effective = (ik_rotations[0] * base).normalize();
+    assert_vec3a_near(effective.mul_vec3a(local_effector), parent_target);
+    assert_near(chain_states[0].plane_mode_angle, -0.7);
 }
 
 #[test]

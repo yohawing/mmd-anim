@@ -477,7 +477,7 @@ struct DirtyRanges {
 
 impl DirtyRanges {
     fn full(frame_count: usize, bone_count: usize, morph_count: usize) -> Self {
-        let range = || vec![0..=frame_count.saturating_sub(1)];
+        let range = || Vec::from([0..=frame_count.saturating_sub(1)]);
         Self {
             bone_local: (0..bone_count).map(|_| range()).collect(),
             morph: (0..morph_count).map(|_| range()).collect(),

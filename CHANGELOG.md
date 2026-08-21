@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added the native `mmd_runtime_export_vmd_from_parts` C ABI. It validates
+  typed Bone/Morph SoA input and low-density metadata, then returns an owned
+  complete VMD 0002 buffer without performing file I/O.
+
 ## 0.4.1 - 2026-08-13
 
 Improved MMD knee IK parity and clip-switch physics reuse for native hosts.

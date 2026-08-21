@@ -1409,6 +1409,31 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_export_pmx_from_parts(
     const float*   skin_weights,
     const float*   edge_scale);
 
+/* Builds a complete VMD 0002 byte stream from low-density metadata and
+   caller-owned typed Bone/Morph SoA arrays. No file I/O is performed and the
+   returned Rust-owned buffer must be freed with mmd_runtime_byte_buffer_free.
+   Every pointer is nullable only when its paired length is zero; all lengths
+   are explicit so hosts can validate their SoA layout before the call. */
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_export_vmd_from_parts(
+    const uint8_t* metadata_json,
+    size_t         metadata_json_len,
+    const uint32_t* bone_name_indices,
+    size_t         bone_name_index_count,
+    const uint32_t* bone_frames,
+    size_t         bone_frame_count,
+    const float*   bone_translations_xyz,
+    size_t         bone_translation_f32_len,
+    const float*   bone_rotations_xyzw,
+    size_t         bone_rotation_f32_len,
+    const uint8_t* bone_interpolations,
+    size_t         bone_interpolation_u8_len,
+    const uint32_t* morph_name_indices,
+    size_t         morph_name_index_count,
+    const uint32_t* morph_frames,
+    size_t         morph_frame_count,
+    const float*   morph_weights,
+    size_t         morph_weight_count);
+
 /* The PMX-paired constructor resolves names through the imported model and
    applies MMD registration semantics, including fixed-axis projection and
    the registered 64-byte VMD interpolation layout. */

@@ -34,6 +34,446 @@ fn last_error_message_survives_read_without_clearing() {
 }
 
 #[test]
+fn vmd_from_parts_returns_owned_buffer_and_rejects_schema_mismatch() {
+    let metadata = r#"{
+        "schema":"mmd-anim-vmd-parts",
+        "version":1,
+        "modelName":"parts",
+        "modelNameBytes":[],
+        "boneNames":[{"name":"センター","nameBytes":[]}],
+        "morphNames":[{"name":"笑い","nameBytes":[]}],
+        "cameraFrames":[{"frame":12,"distance":4.5,"position":[1.0,2.0,3.0],"rotation":[0.1,0.2,0.3],"interpolation":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24],"fov":45,"perspective":false}],
+        "lightFrames":[{"frame":13,"color":[0.1,0.2,0.3],"direction":[0.0,1.0,0.0]}],
+        "selfShadowFrames":[{"frame":14,"mode":1,"distance":0.25}],
+        "propertyFrames":[{"frame":15,"visible":true,"ikStates":[{"boneName":"IK","boneNameBytes":[73,75],"enabled":false}]}]
+    }"#;
+    let bone_names = [0u32];
+    let bone_frames = [7u32];
+    let translations = [1.0f32, 2.0, 3.0];
+    let rotations = [0.0f32, 0.0, 0.0, 1.0];
+    let interpolation = [0x5au8; 64];
+    let morph_names = [0u32];
+    let morph_frames = [9u32];
+    let weights = [0.75f32];
+    let buffer = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            metadata.as_ptr(),
+            metadata.len(),
+            bone_names.as_ptr(),
+            bone_names.len(),
+            bone_frames.as_ptr(),
+            bone_frames.len(),
+            translations.as_ptr(),
+            translations.len(),
+            rotations.as_ptr(),
+            rotations.len(),
+            interpolation.as_ptr(),
+            interpolation.len(),
+            morph_names.as_ptr(),
+            morph_names.len(),
+            morph_frames.as_ptr(),
+            morph_frames.len(),
+            weights.as_ptr(),
+            weights.len(),
+        )
+    };
+    assert!(!buffer.data.is_null());
+    assert!(buffer.len > 50);
+    let bytes = unsafe { std::slice::from_raw_parts(buffer.data, buffer.len) };
+    let parsed = mmd_anim_format::parse_vmd_animation(bytes).expect("valid VMD output");
+    assert_eq!(parsed.bone_frames[0].frame, 7);
+    assert_eq!(parsed.bone_frames[0].interpolation, interpolation.to_vec());
+    assert_eq!(parsed.morph_frames[0].frame, 9);
+    assert_eq!(parsed.morph_frames[0].weight, 0.75);
+    assert_eq!(parsed.camera_frames[0].frame, 12);
+    assert_eq!(
+        parsed.camera_frames[0].interpolation,
+        [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+        ]
+    );
+    assert!(!parsed.camera_frames[0].perspective);
+    assert_eq!(parsed.light_frames[0].color, [0.1, 0.2, 0.3]);
+    assert_eq!(parsed.self_shadow_frames[0].distance, 0.25);
+    assert!(parsed.property_frames[0].visible);
+    assert!(!parsed.property_frames[0].ik_states[0].enabled);
+    unsafe { mmd_runtime_byte_buffer_free(buffer) };
+
+    let bad_metadata = r#"{
+        "schema":"wrong", "version":1, "modelName":"parts", "modelNameBytes":[],
+        "boneNames":[], "morphNames":[], "cameraFrames":[], "lightFrames":[],
+        "selfShadowFrames":[], "propertyFrames":[]
+    }"#;
+    let empty = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            bad_metadata.as_ptr(),
+            bad_metadata.len(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    assert!(empty.data.is_null());
+    assert_eq!(empty.len, 0);
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
+    );
+    unsafe { mmd_runtime_byte_buffer_free(empty) };
+
+    let empty_metadata = br#"{"schema":"mmd-anim-vmd-parts","version":1,"modelName":"empty","modelNameBytes":[],"boneNames":[],"morphNames":[],"cameraFrames":[],"lightFrames":[],"selfShadowFrames":[],"propertyFrames":[]}"#;
+    let empty_animation = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            empty_metadata.as_ptr(),
+            empty_metadata.len(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    assert!(!empty_animation.data.is_null());
+    let empty_bytes =
+        unsafe { std::slice::from_raw_parts(empty_animation.data, empty_animation.len) };
+    let empty_parsed = mmd_anim_format::parse_vmd_animation(empty_bytes).unwrap();
+    assert!(empty_parsed.bone_frames.is_empty());
+    assert!(empty_parsed.morph_frames.is_empty());
+    assert!(empty_parsed.camera_frames.is_empty());
+    assert!(empty_parsed.light_frames.is_empty());
+    assert!(empty_parsed.self_shadow_frames.is_empty());
+    assert!(empty_parsed.property_frames.is_empty());
+    unsafe { mmd_runtime_byte_buffer_free(empty_animation) };
+}
+
+#[test]
+fn vmd_from_parts_rejects_null_mismatch_nonfinite_and_bad_index() {
+    let metadata = br#"{"schema":"mmd-anim-vmd-parts","version":1,"modelName":"x","modelNameBytes":[],"boneNames":[{"name":"x","nameBytes":[]}],"morphNames":[],"cameraFrames":[],"lightFrames":[],"selfShadowFrames":[],"propertyFrames":[]}"#;
+    for invalid_metadata in [
+        br#"{"schema":"mmd-anim-vmd-parts","version":1,"modelName":"x","modelNameBytes":[],"boneNames":[],"morphNames":[],"cameraFrames":[],"lightFrames":[],"selfShadowFrames":[],"propertyFrames":[],"unknown":1}"#.as_slice(),
+        br#"not json"#.as_slice(),
+    ] {
+        let failed = unsafe {
+            mmd_runtime_export_vmd_from_parts(
+                invalid_metadata.as_ptr(),
+                invalid_metadata.len(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert!(failed.data.is_null());
+        assert_eq!(last_error_cstr().unwrap().to_bytes(), FFI_ERR_INVALID_INPUT.as_bytes());
+        unsafe { mmd_runtime_byte_buffer_free(failed) };
+    }
+    let empty = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            std::ptr::null(),
+            metadata.len(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    assert!(empty.data.is_null());
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
+    );
+    unsafe { mmd_runtime_byte_buffer_free(empty) };
+
+    let names = [0u32];
+    let frames = [1u32];
+    let translations = [0.0f32, 0.0, 0.0];
+    let rotations = [0.0f32, 0.0, 0.0, 1.0];
+    let interpolation = [0u8; 64];
+    let mismatch = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            metadata.as_ptr(),
+            metadata.len(),
+            names.as_ptr(),
+            1,
+            frames.as_ptr(),
+            1,
+            translations.as_ptr(),
+            2,
+            rotations.as_ptr(),
+            rotations.len(),
+            interpolation.as_ptr(),
+            interpolation.len(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    assert!(mismatch.data.is_null());
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
+    );
+    let null_typed = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            metadata.as_ptr(),
+            metadata.len(),
+            names.as_ptr(),
+            1,
+            frames.as_ptr(),
+            1,
+            std::ptr::null(),
+            3,
+            rotations.as_ptr(),
+            rotations.len(),
+            interpolation.as_ptr(),
+            interpolation.len(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    assert!(null_typed.data.is_null());
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
+    );
+    unsafe { mmd_runtime_byte_buffer_free(null_typed) };
+
+    let mut misaligned_storage = [0u8; 16];
+    let misaligned_f32 = unsafe { misaligned_storage.as_mut_ptr().add(1) as *const f32 };
+    let misaligned = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            metadata.as_ptr(),
+            metadata.len(),
+            names.as_ptr(),
+            1,
+            frames.as_ptr(),
+            1,
+            misaligned_f32,
+            3,
+            rotations.as_ptr(),
+            rotations.len(),
+            interpolation.as_ptr(),
+            interpolation.len(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    assert!(misaligned.data.is_null());
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
+    );
+    unsafe { mmd_runtime_byte_buffer_free(misaligned) };
+
+    let overflow = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            metadata.as_ptr(),
+            metadata.len(),
+            std::ptr::null(),
+            usize::MAX,
+            std::ptr::null(),
+            usize::MAX,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    assert!(overflow.data.is_null());
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_INVALID_INPUT.as_bytes()
+    );
+    unsafe { mmd_runtime_byte_buffer_free(overflow) };
+
+    let nan = [f32::NAN, 0.0, 0.0];
+    let failed = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            metadata.as_ptr(),
+            metadata.len(),
+            names.as_ptr(),
+            1,
+            frames.as_ptr(),
+            1,
+            nan.as_ptr(),
+            nan.len(),
+            rotations.as_ptr(),
+            rotations.len(),
+            interpolation.as_ptr(),
+            interpolation.len(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    assert!(failed.data.is_null());
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VMD_EXPORT_FAILED.as_bytes()
+    );
+
+    let infinite_rotation = [f32::INFINITY, 0.0, 0.0, 1.0];
+    let failed = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            metadata.as_ptr(),
+            metadata.len(),
+            names.as_ptr(),
+            1,
+            frames.as_ptr(),
+            1,
+            translations.as_ptr(),
+            translations.len(),
+            infinite_rotation.as_ptr(),
+            infinite_rotation.len(),
+            interpolation.as_ptr(),
+            interpolation.len(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    assert!(failed.data.is_null());
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VMD_EXPORT_FAILED.as_bytes()
+    );
+
+    let morph_names = [0u32];
+    let morph_frames = [2u32];
+    let infinite_weight = [f32::INFINITY];
+    let morph_metadata = br#"{"schema":"mmd-anim-vmd-parts","version":1,"modelName":"x","modelNameBytes":[],"boneNames":[],"morphNames":[{"name":"m","nameBytes":[]}],"cameraFrames":[],"lightFrames":[],"selfShadowFrames":[],"propertyFrames":[]}"#;
+    let failed = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            morph_metadata.as_ptr(),
+            morph_metadata.len(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            morph_names.as_ptr(),
+            morph_names.len(),
+            morph_frames.as_ptr(),
+            morph_frames.len(),
+            infinite_weight.as_ptr(),
+            infinite_weight.len(),
+        )
+    };
+    assert!(failed.data.is_null());
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VMD_EXPORT_FAILED.as_bytes()
+    );
+
+    let bad_index = [1u32];
+    let failed = unsafe {
+        mmd_runtime_export_vmd_from_parts(
+            metadata.as_ptr(),
+            metadata.len(),
+            bad_index.as_ptr(),
+            1,
+            frames.as_ptr(),
+            1,
+            translations.as_ptr(),
+            translations.len(),
+            rotations.as_ptr(),
+            rotations.len(),
+            interpolation.as_ptr(),
+            interpolation.len(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    assert!(failed.data.is_null());
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VMD_EXPORT_FAILED.as_bytes()
+    );
+}
+
+#[test]
 fn failing_ffi_parse_sets_last_error_message() {
     let garbage = [0u8; 16];
     let buf = unsafe { mmd_runtime_parse_vmd_json(garbage.as_ptr(), garbage.len()) };

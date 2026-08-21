@@ -45,11 +45,12 @@ pub use pmx::{
 };
 pub use vmd::{
     VmdCameraState, VmdClipBuildError, VmdClipBuildOptions, VmdExportMorphKind, VmdExportName,
-    VmdIkEntry, VmdImportResult, VmdLightState, VmdParsedAnimation, VmdPoseExport,
-    VmdPoseExportBindings, VmdPoseExportError, VmdPoseExportReport, VmdPropertyIkFrame,
-    VmdSelfShadowState, build_clip_from_import, build_mmd_registered_pair_clip,
-    build_mmd_registered_pair_clip_with_options, build_pair_clip, build_pair_clip_with_options,
-    build_property_binding_with_ik_resolver, export_reduced_pose_to_vmd, export_vmd_animation,
+    VmdIkEntry, VmdImportResult, VmdLightState, VmdParsedAnimation, VmdPartsDescriptor,
+    VmdPartsInput, VmdPartsNameEntry, VmdPoseExport, VmdPoseExportBindings, VmdPoseExportError,
+    VmdPoseExportReport, VmdPropertyIkFrame, VmdSelfShadowState, build_clip_from_import,
+    build_mmd_registered_pair_clip, build_mmd_registered_pair_clip_with_options, build_pair_clip,
+    build_pair_clip_with_options, build_property_binding_with_ik_resolver,
+    build_vmd_animation_from_parts, export_reduced_pose_to_vmd, export_vmd_animation,
     import_vmd_motion, parse_vmd_animation, sample_vmd_camera_frames, sample_vmd_light_frames,
     sample_vmd_self_shadow_frames,
 };

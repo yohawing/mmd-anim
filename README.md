@@ -81,7 +81,7 @@ Format support overview. "Loading" means parsing a file into structured data.
 
 ```toml
 [dependencies]
-mmd-anim = "0.4.1"
+mmd-anim = "0.4.2"
 ```
 
 ## Native Hosts (C ABI)
@@ -90,6 +90,13 @@ Native applications and game engines can use the C ABI from `mmd-anim-ffi`.
 It is not tied to a specific engine; any host that can call a C ABI can use it
 (Unity is one example).
 The header is [crates/mmd-anim-ffi/include/mmd_runtime.h](crates/mmd-anim-ffi/include/mmd_runtime.h).
+
+For native VMD export, `mmd_runtime_export_vmd_from_parts` accepts typed
+Bone/Morph SoA arrays plus JSON metadata for names and low-density camera,
+light, self-shadow, and property/IK sections. The function performs no file
+I/O and returns an owned VMD 0002 byte buffer; release it with
+`mmd_runtime_byte_buffer_free`. High-density key values are not expanded into
+the metadata JSON.
 
 ```c
 // 1. Create a model from PMX bytes

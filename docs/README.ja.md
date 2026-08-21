@@ -74,7 +74,7 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 
 ```toml
 [dependencies]
-mmd-anim = "0.3.2"
+mmd-anim = "0.4.2"
 ```
 
 ## ネイティブ (C ABI) から使う
@@ -83,6 +83,12 @@ mmd-anim = "0.3.2"
 これは特定のエンジンに限定したものではなく、C ABI を呼び出せる環境であれば利用できます
 （Unity はその一例です）。
 ヘッダーは [crates/mmd-anim-ffi/include/mmd_runtime.h](../crates/mmd-anim-ffi/include/mmd_runtime.h) です。
+
+ネイティブ VMD 書き出しでは、`mmd_runtime_export_vmd_from_parts` に型付き
+Bone/Morph SoA 配列と、名前および低密度のカメラ・ライト・セルフシャドウ・
+Property/IK セクションを含む JSON メタデータを渡せます。ファイル I/O は行わず、
+所有権を移した VMD 0002 バイト列を返します。返却バッファは
+`mmd_runtime_byte_buffer_free` で解放してください。高密度のキー値は JSON に展開しません。
 
 ```c
 // 1. PMX のバイト列からモデルを作成

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.2 - 2026-08-21
+
+Added native VMD export from typed Bone/Morph SoA data for Maya and other
+native hosts.
+
+### Added
+
+- Added the native `mmd_runtime_export_vmd_from_parts` C ABI. It validates
+  typed Bone/Morph SoA input and low-density metadata, then returns an owned
+  complete VMD 0002 buffer without performing file I/O.
+
+### Known limitations
+
+- The native API materializes validated SoA data through the existing VMD
+  writer; streaming export and key reduction remain separate work.
+- The C ABI, WASM wrapper, PMM document conversion, and Python binding remain
+  experimental and may change before 1.0.
+
 ## 0.4.1 - 2026-08-13
 
 Improved MMD knee IK parity and clip-switch physics reuse for native hosts.

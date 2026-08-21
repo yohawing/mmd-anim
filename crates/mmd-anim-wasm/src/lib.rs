@@ -2380,6 +2380,41 @@ mod tests {
     }
 
     #[test]
+    fn vmd_from_parts_matches_wasm_json_export_at_parse_level() {
+        let descriptor: mmd_anim_format::VmdPartsDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "schema": "mmd-anim-vmd-parts",
+                "version": 1,
+                "modelName": "wasm_parts",
+                "modelNameBytes": [],
+                "boneNames": [{"name": "センター", "nameBytes": []}],
+                "morphNames": [],
+                "cameraFrames": [],
+                "lightFrames": [],
+                "selfShadowFrames": [],
+                "propertyFrames": []
+            }))
+            .unwrap();
+        let animation =
+            mmd_anim_format::build_vmd_animation_from_parts(mmd_anim_format::VmdPartsInput {
+                descriptor,
+                bone_name_indices: &[0],
+                bone_frames: &[3],
+                bone_translations_xyz: &[1.0, 2.0, 3.0],
+                bone_rotations_xyzw: &[0.0, 0.0, 0.0, 1.0],
+                bone_interpolations: &[0x2a; 64],
+                morph_name_indices: &[],
+                morph_frames: &[],
+                morph_weights: &[],
+            })
+            .unwrap();
+        let parts_bytes = mmd_anim_format::export_vmd_animation(&animation);
+        let json = serde_json::to_string(&animation).unwrap();
+        let json_bytes = export_vmd_animation_json_bytes(&json).unwrap();
+        assert_eq!(parts_bytes, json_bytes);
+    }
+
+    #[test]
     fn samples_vmd_camera_array_layout() {
         let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");
         let parsed = mmd_anim_format::parse_vmd_animation(bytes).unwrap();

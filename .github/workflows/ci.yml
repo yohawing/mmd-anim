@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Install Rust
         run: |
@@ -47,16 +47,28 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - name: Configure MSVC developer environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Run shared native Python/C ABI release gate
+      - name: Run shared native Python/C ABI release gate (Unix)
+        if: runner.os != 'Windows'
         run: python tools/check_python_ffi_release.py
+
+      - name: Run shared native Python/C ABI release gate (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installPath) {
+            throw 'Visual Studio with the x64 C++ toolchain was not found.'
+          }
+          & (Join-Path $installPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          python tools/check_python_ffi_release.py
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }

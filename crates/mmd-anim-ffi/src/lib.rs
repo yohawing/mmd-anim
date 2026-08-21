@@ -1036,6 +1036,7 @@ const FFI_ERR_PMX_IMPORT_FAILED: &str = "pmx import failed";
 const FFI_ERR_VMD_IMPORT_FAILED: &str = "vmd import failed";
 const FFI_ERR_CLIP_CREATE_FAILED: &str = "clip create failed";
 const FFI_ERR_PMX_EXPORT_FAILED: &str = "pmx export failed";
+const FFI_ERR_VMD_EXPORT_FAILED: &str = "vmd export failed";
 const FFI_ERR_JSON_ENCODE_FAILED: &str = "json encode failed";
 const FFI_ERR_WORKER_PANIC: &str = "worker panic";
 
@@ -4683,6 +4684,175 @@ pub unsafe extern "C" fn mmd_runtime_export_pmx_from_parts(
             };
         byte_buffer_from_vec(mmd_anim_format::export_pmx_model(&model))
     })
+}
+
+/// Exports a VMD from converted typed SoA channels and low-density metadata.
+///
+/// # Safety
+///
+/// Each non-null pointer must reference the number of readable elements given
+/// by its paired length for the duration of this call, and must be aligned for
+/// its element type. A pointer may be null only when its length is zero. The
+/// returned buffer is owned by the caller and must be released with
+/// `mmd_runtime_byte_buffer_free`; no input pointer is retained.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn mmd_runtime_export_vmd_from_parts(
+    metadata_json: *const u8,
+    metadata_json_len: usize,
+    bone_name_indices: *const u32,
+    bone_name_index_count: usize,
+    bone_frames: *const u32,
+    bone_frame_count: usize,
+    bone_translations_xyz: *const f32,
+    bone_translation_f32_len: usize,
+    bone_rotations_xyzw: *const f32,
+    bone_rotation_f32_len: usize,
+    bone_interpolations: *const u8,
+    bone_interpolation_u8_len: usize,
+    morph_name_indices: *const u32,
+    morph_name_index_count: usize,
+    morph_frames: *const u32,
+    morph_frame_count: usize,
+    morph_weights: *const f32,
+    morph_weight_count: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        if metadata_json.is_null() || metadata_json_len == 0 {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
+        if bone_frame_count != bone_name_index_count || morph_frame_count != morph_name_index_count
+        {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
+        let Some(expected_translation_len) = bone_name_index_count.checked_mul(3) else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(expected_rotation_len) = bone_name_index_count.checked_mul(4) else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(expected_interpolation_len) = bone_name_index_count.checked_mul(64) else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        if bone_translation_f32_len != expected_translation_len
+            || bone_rotation_f32_len != expected_rotation_len
+            || bone_interpolation_u8_len != expected_interpolation_len
+            || morph_weight_count != morph_name_index_count
+            || bone_name_index_count > u32::MAX as usize
+            || morph_name_index_count > u32::MAX as usize
+        {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
+
+        // Validate every pointer's nullability, alignment, and slice
+        // addressability before creating any slice. Readability of the
+        // pointed-to allocation remains the caller's documented C contract.
+        if !ffi_slice_valid(metadata_json, metadata_json_len)
+            || !ffi_slice_valid(bone_name_indices, bone_name_index_count)
+            || !ffi_slice_valid(bone_frames, bone_frame_count)
+            || !ffi_slice_valid(bone_translations_xyz, bone_translation_f32_len)
+            || !ffi_slice_valid(bone_rotations_xyzw, bone_rotation_f32_len)
+            || !ffi_slice_valid(bone_interpolations, bone_interpolation_u8_len)
+            || !ffi_slice_valid(morph_name_indices, morph_name_index_count)
+            || !ffi_slice_valid(morph_frames, morph_frame_count)
+            || !ffi_slice_valid(morph_weights, morph_weight_count)
+        {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
+        let Some(metadata_bytes) = (unsafe { ffi_checked_slice(metadata_json, metadata_json_len) })
+        else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(bone_name_indices) =
+            (unsafe { ffi_checked_slice(bone_name_indices, bone_name_index_count) })
+        else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(bone_frames) = (unsafe { ffi_checked_slice(bone_frames, bone_frame_count) })
+        else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(bone_translations_xyz) =
+            (unsafe { ffi_checked_slice(bone_translations_xyz, bone_translation_f32_len) })
+        else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(bone_rotations_xyzw) =
+            (unsafe { ffi_checked_slice(bone_rotations_xyzw, bone_rotation_f32_len) })
+        else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(bone_interpolations) =
+            (unsafe { ffi_checked_slice(bone_interpolations, bone_interpolation_u8_len) })
+        else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(morph_name_indices) =
+            (unsafe { ffi_checked_slice(morph_name_indices, morph_name_index_count) })
+        else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(morph_frames) = (unsafe { ffi_checked_slice(morph_frames, morph_frame_count) })
+        else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+        let Some(morph_weights) = (unsafe { ffi_checked_slice(morph_weights, morph_weight_count) })
+        else {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        };
+
+        let metadata_json = match str::from_utf8(metadata_bytes) {
+            Ok(json) => json,
+            Err(_) => return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT),
+        };
+        let descriptor: mmd_anim_format::VmdPartsDescriptor =
+            match serde_json::from_str(metadata_json) {
+                Ok(descriptor) => descriptor,
+                Err(_) => return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT),
+            };
+        if descriptor.schema != "mmd-anim-vmd-parts" || descriptor.version != 1 {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
+        let animation =
+            match mmd_anim_format::build_vmd_animation_from_parts(mmd_anim_format::VmdPartsInput {
+                descriptor,
+                bone_name_indices,
+                bone_frames,
+                bone_translations_xyz,
+                bone_rotations_xyzw,
+                bone_interpolations,
+                morph_name_indices,
+                morph_frames,
+                morph_weights,
+            }) {
+                Ok(animation) => animation,
+                Err(_) => return empty_byte_buffer_failure(FFI_ERR_VMD_EXPORT_FAILED),
+            };
+        byte_buffer_from_vec(mmd_anim_format::export_vmd_animation(&animation))
+    })
+}
+
+unsafe fn ffi_checked_slice<'a, T>(ptr: *const T, len: usize) -> Option<&'a [T]> {
+    if len == 0 {
+        return Some(&[]);
+    }
+    if ptr.is_null()
+        || !(ptr as usize).is_multiple_of(std::mem::align_of::<T>())
+        || len > isize::MAX as usize / std::mem::size_of::<T>()
+    {
+        return None;
+    }
+    // SAFETY: the caller's C contract guarantees that this pointer is live and
+    // readable for `len` elements; the checks above establish null, alignment,
+    // and addressable-slice preconditions before constructing the borrow.
+    Some(unsafe { slice::from_raw_parts(ptr, len) })
+}
+
+fn ffi_slice_valid<T>(ptr: *const T, len: usize) -> bool {
+    len == 0
+        || (!ptr.is_null()
+            && (ptr as usize).is_multiple_of(std::mem::align_of::<T>())
+            && len <= isize::MAX as usize / std::mem::size_of::<T>())
 }
 
 macro_rules! create_runtime_model_ffi {

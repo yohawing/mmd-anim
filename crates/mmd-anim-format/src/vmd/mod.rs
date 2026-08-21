@@ -1,3 +1,4 @@
+use encoding_rs::SHIFT_JIS;
 use glam::{Quat, Vec3A};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -304,6 +305,288 @@ pub struct VmdParsedAnimation {
     pub light_frames: Vec<VmdParsedLightFrame>,
     pub self_shadow_frames: Vec<VmdParsedSelfShadowFrame>,
     pub property_frames: Vec<VmdParsedPropertyFrame>,
+}
+
+/// Metadata for the native VMD from-parts exporter.
+///
+/// Bone and morph key values intentionally do not occur in this JSON object:
+/// callers pass those high-density channels as typed SoA slices through the
+/// FFI.  The `deny_unknown_fields` contract prevents a host from accidentally
+/// falling back to a dense JSON representation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmdPartsDescriptor {
+    pub schema: String,
+    pub version: u32,
+    pub model_name: String,
+    pub model_name_bytes: Vec<u8>,
+    pub bone_names: Vec<VmdPartsNameEntry>,
+    pub morph_names: Vec<VmdPartsNameEntry>,
+    pub camera_frames: Vec<VmdParsedCameraFrame>,
+    pub light_frames: Vec<VmdParsedLightFrame>,
+    pub self_shadow_frames: Vec<VmdParsedSelfShadowFrame>,
+    pub property_frames: Vec<VmdParsedPropertyFrame>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmdPartsNameEntry {
+    pub name: String,
+    pub name_bytes: Vec<u8>,
+}
+
+/// Typed SoA channels consumed by [`build_vmd_animation_from_parts`].
+#[derive(Debug, Clone)]
+pub struct VmdPartsInput<'a> {
+    pub descriptor: VmdPartsDescriptor,
+    pub bone_name_indices: &'a [u32],
+    pub bone_frames: &'a [u32],
+    pub bone_translations_xyz: &'a [f32],
+    pub bone_rotations_xyzw: &'a [f32],
+    pub bone_interpolations: &'a [u8],
+    pub morph_name_indices: &'a [u32],
+    pub morph_frames: &'a [u32],
+    pub morph_weights: &'a [f32],
+}
+
+/// Validates and materializes typed VMD SoA channels into the existing parsed
+/// animation representation.  The binary writer remains
+/// [`export_vmd_animation`]; this helper only performs validation and the
+/// unavoidable typed record construction needed by that writer.
+pub fn build_vmd_animation_from_parts(
+    input: VmdPartsInput<'_>,
+) -> Result<VmdParsedAnimation, String> {
+    let descriptor = input.descriptor;
+    if descriptor.schema != "mmd-anim-vmd-parts" || descriptor.version != 1 {
+        return Err("unsupported VMD parts schema".to_owned());
+    }
+    validate_vmd_parts_name(&descriptor.model_name_bytes, 20, "model name")?;
+    for entry in &descriptor.bone_names {
+        validate_vmd_parts_name(&entry.name_bytes, 15, "bone name")?;
+    }
+    for entry in &descriptor.morph_names {
+        validate_vmd_parts_name(&entry.name_bytes, 15, "morph name")?;
+    }
+    for frame in &descriptor.camera_frames {
+        validate_vmd_parts_camera(frame)?;
+    }
+    for frame in &descriptor.light_frames {
+        validate_vmd_parts_light(frame)?;
+    }
+    for frame in &descriptor.self_shadow_frames {
+        if !frame.distance.is_finite() || frame.mode > 2 {
+            return Err("invalid self-shadow frame".to_owned());
+        }
+    }
+    for frame in &descriptor.property_frames {
+        validate_vmd_parts_count(frame.ik_states.len(), "IK")?;
+        for state in &frame.ik_states {
+            validate_vmd_parts_name(&state.bone_name_bytes, 20, "IK bone name")?;
+        }
+    }
+
+    let bone_count = input.bone_name_indices.len();
+    let morph_count = input.morph_name_indices.len();
+    let bone_translation_len = bone_count
+        .checked_mul(3)
+        .ok_or_else(|| "bone translation length overflow".to_owned())?;
+    let bone_rotation_len = bone_count
+        .checked_mul(4)
+        .ok_or_else(|| "bone rotation length overflow".to_owned())?;
+    let bone_interpolation_len = bone_count
+        .checked_mul(64)
+        .ok_or_else(|| "bone interpolation length overflow".to_owned())?;
+    if input.bone_frames.len() != bone_count
+        || input.bone_translations_xyz.len() != bone_translation_len
+        || input.bone_rotations_xyzw.len() != bone_rotation_len
+        || input.bone_interpolations.len() != bone_interpolation_len
+    {
+        return Err("bone SoA lengths do not match".to_owned());
+    }
+    let morph_weight_len = morph_count;
+    if input.morph_frames.len() != morph_count || input.morph_weights.len() != morph_weight_len {
+        return Err("morph SoA lengths do not match".to_owned());
+    }
+    validate_vmd_parts_count(bone_count, "bone")?;
+    validate_vmd_parts_count(morph_count, "morph")?;
+    validate_vmd_parts_count(descriptor.camera_frames.len(), "camera")?;
+    validate_vmd_parts_count(descriptor.light_frames.len(), "light")?;
+    validate_vmd_parts_count(descriptor.self_shadow_frames.len(), "self-shadow")?;
+    validate_vmd_parts_count(descriptor.property_frames.len(), "property")?;
+
+    for (index, _frame) in input.bone_frames.iter().enumerate() {
+        let name_index = input.bone_name_indices[index] as usize;
+        if name_index >= descriptor.bone_names.len() {
+            return Err("bone name index out of range".to_owned());
+        }
+        if !input.bone_translations_xyz[index * 3..index * 3 + 3]
+            .iter()
+            .all(|value| value.is_finite())
+            || !input.bone_rotations_xyzw[index * 4..index * 4 + 4]
+                .iter()
+                .all(|value| value.is_finite())
+        {
+            return Err("bone value is not finite".to_owned());
+        }
+    }
+    for (index, _frame) in input.morph_frames.iter().enumerate() {
+        let name_index = input.morph_name_indices[index] as usize;
+        if name_index >= descriptor.morph_names.len() {
+            return Err("morph name index out of range".to_owned());
+        }
+        if !input.morph_weights[index].is_finite() {
+            return Err("morph weight is not finite".to_owned());
+        }
+    }
+
+    let mut max_frame = 0u32;
+    for &frame in input.bone_frames {
+        max_frame = max_frame.max(frame);
+    }
+    for &frame in input.morph_frames {
+        max_frame = max_frame.max(frame);
+    }
+    for frame in &descriptor.camera_frames {
+        max_frame = max_frame.max(frame.frame);
+    }
+    for frame in &descriptor.light_frames {
+        max_frame = max_frame.max(frame.frame);
+    }
+    for frame in &descriptor.self_shadow_frames {
+        max_frame = max_frame.max(frame.frame);
+    }
+    for frame in &descriptor.property_frames {
+        max_frame = max_frame.max(frame.frame);
+    }
+
+    // Check all writer arithmetic before allocating/materializing records.
+    let mut output_size = 50usize;
+    output_size = checked_vmd_parts_size(output_size, bone_count, 111)?;
+    output_size = checked_vmd_parts_size(output_size, morph_count, 23)?;
+    output_size = checked_vmd_parts_size(output_size, descriptor.camera_frames.len(), 61)?;
+    output_size = checked_vmd_parts_size(output_size, descriptor.light_frames.len(), 28)?;
+    output_size = checked_vmd_parts_size(output_size, descriptor.self_shadow_frames.len(), 9)?;
+    output_size = output_size
+        .checked_add(4)
+        .ok_or_else(|| "VMD output size overflow".to_owned())?;
+    for frame in &descriptor.property_frames {
+        output_size = output_size
+            .checked_add(9)
+            .ok_or_else(|| "VMD output size overflow".to_owned())?;
+        for _ in &frame.ik_states {
+            output_size = output_size
+                .checked_add(21)
+                .ok_or_else(|| "VMD output size overflow".to_owned())?;
+        }
+    }
+    if output_size > isize::MAX as usize {
+        return Err("VMD output size exceeds addressable range".to_owned());
+    }
+
+    let bone_frames = input
+        .bone_frames
+        .iter()
+        .enumerate()
+        .map(|(index, &frame)| {
+            let name = &descriptor.bone_names[input.bone_name_indices[index] as usize];
+            Ok(VmdParsedBoneFrame {
+                bone_name: name.name.clone(),
+                bone_name_bytes: name.name_bytes.clone(),
+                frame,
+                translation: input.bone_translations_xyz[index * 3..index * 3 + 3]
+                    .try_into()
+                    .expect("validated translation stride"),
+                rotation: input.bone_rotations_xyzw[index * 4..index * 4 + 4]
+                    .try_into()
+                    .expect("validated rotation stride"),
+                interpolation: input.bone_interpolations[index * 64..index * 64 + 64].to_vec(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let morph_frames: Vec<VmdParsedMorphFrame> = input
+        .morph_frames
+        .iter()
+        .enumerate()
+        .map(|(index, &frame)| {
+            let name = &descriptor.morph_names[input.morph_name_indices[index] as usize];
+            VmdParsedMorphFrame {
+                morph_name: name.name.clone(),
+                morph_name_bytes: name.name_bytes.clone(),
+                frame,
+                weight: input.morph_weights[index],
+            }
+        })
+        .collect();
+    Ok(VmdParsedAnimation {
+        kind: "vmd",
+        metadata: VmdParsedMetadata {
+            format: "vmd",
+            model_name: descriptor.model_name,
+            model_name_bytes: descriptor.model_name_bytes,
+            counts: VmdParsedCounts {
+                bones: bone_frames.len(),
+                morphs: morph_frames.len(),
+                cameras: descriptor.camera_frames.len(),
+                lights: descriptor.light_frames.len(),
+                self_shadows: descriptor.self_shadow_frames.len(),
+                properties: descriptor.property_frames.len(),
+            },
+            max_frame,
+        },
+        bone_frames,
+        morph_frames,
+        camera_frames: descriptor.camera_frames,
+        light_frames: descriptor.light_frames,
+        self_shadow_frames: descriptor.self_shadow_frames,
+        property_frames: descriptor.property_frames,
+    })
+}
+
+fn validate_vmd_parts_count(count: usize, section: &str) -> Result<(), String> {
+    if count > u32::MAX as usize {
+        Err(format!("{section} section count exceeds u32"))
+    } else {
+        Ok(())
+    }
+}
+
+fn checked_vmd_parts_size(size: usize, count: usize, stride: usize) -> Result<usize, String> {
+    size.checked_add(4)
+        .and_then(|size| {
+            count
+                .checked_mul(stride)
+                .and_then(|bytes| size.checked_add(bytes))
+        })
+        .ok_or_else(|| "VMD output size overflow".to_owned())
+}
+
+fn validate_vmd_parts_name(bytes: &[u8], width: usize, field: &str) -> Result<(), String> {
+    if bytes.len() > width || bytes.contains(&0) {
+        return Err(format!("invalid {field} raw bytes"));
+    }
+    if !bytes.is_empty() && SHIFT_JIS.decode(bytes).2 {
+        return Err(format!("invalid {field} CP932 bytes"));
+    }
+    Ok(())
+}
+
+fn validate_vmd_parts_camera(frame: &VmdParsedCameraFrame) -> Result<(), String> {
+    if !frame.distance.is_finite()
+        || !frame.position.iter().all(|value| value.is_finite())
+        || !frame.rotation.iter().all(|value| value.is_finite())
+    {
+        return Err("camera value is not finite".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_vmd_parts_light(frame: &VmdParsedLightFrame) -> Result<(), String> {
+    if !frame.color.iter().all(|value| value.is_finite())
+        || !frame.direction.iter().all(|value| value.is_finite())
+    {
+        return Err("light value is not finite".to_owned());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1775,6 +2058,437 @@ mod tests {
     use super::*;
     #[allow(unused_imports)]
     use serde_json;
+
+    #[test]
+    fn vmd_parts_preserves_soa_order_interpolation_and_all_sections() {
+        let descriptor = VmdPartsDescriptor {
+            schema: "mmd-anim-vmd-parts".to_owned(),
+            version: 1,
+            model_name: "parts".to_owned(),
+            model_name_bytes: vec![0x82, 0xa0],
+            bone_names: vec![VmdPartsNameEntry {
+                name: "あ".to_owned(),
+                name_bytes: vec![0x82, 0xa0],
+            }],
+            morph_names: vec![VmdPartsNameEntry {
+                name: "い".to_owned(),
+                name_bytes: vec![0x82, 0xa2],
+            }],
+            camera_frames: vec![VmdParsedCameraFrame {
+                frame: 20,
+                distance: 30.0,
+                position: [1.0, 2.0, 3.0],
+                rotation: [0.1, 0.2, 0.3],
+                interpolation: [0x31; 24],
+                fov: 45,
+                perspective: true,
+            }],
+            light_frames: vec![VmdParsedLightFrame {
+                frame: 21,
+                color: [0.1, 0.2, 0.3],
+                direction: [0.0, 1.0, 0.0],
+            }],
+            self_shadow_frames: vec![VmdParsedSelfShadowFrame {
+                frame: 22,
+                mode: 1,
+                distance: 0.5,
+            }],
+            property_frames: vec![VmdParsedPropertyFrame {
+                frame: 23,
+                visible: true,
+                ik_states: vec![VmdParsedIkState {
+                    bone_name: "IK".to_owned(),
+                    bone_name_bytes: b"IK".to_vec(),
+                    enabled: false,
+                }],
+            }],
+        };
+        let metadata_json = serde_json::to_string(&descriptor).unwrap();
+        let metadata_value: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        assert!(metadata_value.get("boneFrames").is_none());
+        assert!(metadata_value.get("morphFrames").is_none());
+        let input = VmdPartsInput {
+            descriptor,
+            bone_name_indices: &[0, 0],
+            bone_frames: &[10, 5],
+            bone_translations_xyz: &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            bone_rotations_xyzw: &[0.0, 0.0, 0.0, 1.0, 0.1, 0.2, 0.3, 0.9],
+            bone_interpolations: &[0x11; 64 * 2],
+            morph_name_indices: &[0],
+            morph_frames: &[11],
+            morph_weights: &[0.75],
+        };
+        let animation = build_vmd_animation_from_parts(input).unwrap();
+        let first = export_vmd_animation(&animation);
+        let second = export_vmd_animation(&animation);
+        assert_eq!(first, second);
+        let parsed = parse_vmd_animation(&first).unwrap();
+        assert_eq!(parsed.bone_frames.len(), 2);
+        assert_eq!(parsed.bone_frames[0].frame, 10);
+        assert_eq!(parsed.bone_frames[1].frame, 5);
+        assert_eq!(parsed.bone_frames[0].bone_name_bytes, vec![0x82, 0xa0]);
+        assert_eq!(parsed.bone_frames[0].translation, [1.0, 2.0, 3.0]);
+        assert_eq!(parsed.bone_frames[1].rotation, [0.1, 0.2, 0.3, 0.9]);
+        assert_eq!(parsed.bone_frames[0].interpolation, vec![0x11; 64]);
+        assert_eq!(parsed.morph_frames[0].morph_name_bytes, vec![0x82, 0xa2]);
+        assert_eq!(parsed.morph_frames[0].weight, 0.75);
+        assert_eq!(parsed.camera_frames[0].interpolation, [0x31; 24]);
+        assert_eq!(parsed.camera_frames[0].distance, 30.0);
+        assert_eq!(parsed.camera_frames[0].position, [1.0, 2.0, 3.0]);
+        assert_eq!(parsed.camera_frames[0].rotation, [0.1, 0.2, 0.3]);
+        assert_eq!(parsed.camera_frames[0].fov, 45);
+        assert!(parsed.camera_frames[0].perspective);
+        assert_eq!(parsed.light_frames.len(), 1);
+        assert_eq!(parsed.light_frames[0].color, [0.1, 0.2, 0.3]);
+        assert_eq!(parsed.light_frames[0].direction, [0.0, 1.0, 0.0]);
+        assert_eq!(parsed.self_shadow_frames.len(), 1);
+        assert_eq!(parsed.self_shadow_frames[0].mode, 1);
+        assert_eq!(parsed.self_shadow_frames[0].distance, 0.5);
+        assert!(parsed.property_frames[0].visible);
+        assert_eq!(parsed.property_frames[0].ik_states[0].bone_name, "IK");
+        assert_eq!(
+            parsed.property_frames[0].ik_states[0].bone_name_bytes,
+            b"IK".to_vec()
+        );
+        assert!(!parsed.property_frames[0].ik_states[0].enabled);
+        assert_eq!(parsed.metadata.model_name_bytes, vec![0x82, 0xa0]);
+        assert_eq!(parsed.metadata.max_frame, 23);
+    }
+
+    fn minimal_vmd_parts_descriptor() -> VmdPartsDescriptor {
+        VmdPartsDescriptor {
+            schema: "mmd-anim-vmd-parts".to_owned(),
+            version: 1,
+            model_name: "model".to_owned(),
+            model_name_bytes: Vec::new(),
+            bone_names: vec![VmdPartsNameEntry {
+                name: "bone".to_owned(),
+                name_bytes: Vec::new(),
+            }],
+            morph_names: vec![VmdPartsNameEntry {
+                name: "morph".to_owned(),
+                name_bytes: Vec::new(),
+            }],
+            camera_frames: Vec::new(),
+            light_frames: Vec::new(),
+            self_shadow_frames: Vec::new(),
+            property_frames: Vec::new(),
+        }
+    }
+
+    fn one_key_vmd_parts<'a>(
+        descriptor: VmdPartsDescriptor,
+        translation: &'a [f32],
+        rotation: &'a [f32],
+        weight: &'a [f32],
+    ) -> VmdPartsInput<'a> {
+        VmdPartsInput {
+            descriptor,
+            bone_name_indices: &[0],
+            bone_frames: &[1],
+            bone_translations_xyz: translation,
+            bone_rotations_xyzw: rotation,
+            bone_interpolations: &[0; 64],
+            morph_name_indices: &[0],
+            morph_frames: &[2],
+            morph_weights: weight,
+        }
+    }
+
+    #[test]
+    fn vmd_parts_accepts_exact_raw_widths_and_rejects_invalid_raw_names() {
+        let mut descriptor = minimal_vmd_parts_descriptor();
+        descriptor.model_name_bytes = vec![b'M'; 20];
+        descriptor.bone_names[0].name_bytes = vec![b'B'; 15];
+        descriptor.morph_names[0].name_bytes = vec![b'R'; 15];
+        let animation = build_vmd_animation_from_parts(one_key_vmd_parts(
+            descriptor.clone(),
+            &[1.0, 2.0, 3.0],
+            &[0.0, 0.0, 0.0, 1.0],
+            &[0.5],
+        ))
+        .unwrap();
+        let parsed = parse_vmd_animation(&export_vmd_animation(&animation)).unwrap();
+        assert_eq!(parsed.metadata.model_name_bytes, vec![b'M'; 20]);
+        assert_eq!(parsed.bone_frames[0].bone_name_bytes, vec![b'B'; 15]);
+        assert_eq!(parsed.morph_frames[0].morph_name_bytes, vec![b'R'; 15]);
+
+        for (field, bytes) in [
+            ("model", vec![b'M'; 21]),
+            ("bone", vec![b'B'; 16]),
+            ("morph", vec![b'R'; 16]),
+        ] {
+            let mut invalid = descriptor.clone();
+            match field {
+                "model" => invalid.model_name_bytes = bytes,
+                "bone" => invalid.bone_names[0].name_bytes = bytes,
+                _ => invalid.morph_names[0].name_bytes = bytes,
+            }
+            assert!(
+                build_vmd_animation_from_parts(one_key_vmd_parts(
+                    invalid,
+                    &[1.0, 2.0, 3.0],
+                    &[0.0, 0.0, 0.0, 1.0],
+                    &[0.5],
+                ))
+                .is_err()
+            );
+        }
+
+        for (field, bytes) in [
+            ("model", vec![b'M', 0]),
+            ("bone", vec![b'B', 0]),
+            ("morph", vec![b'R', 0]),
+            ("model", vec![0x82]),
+        ] {
+            let mut invalid = descriptor.clone();
+            match field {
+                "model" => invalid.model_name_bytes = bytes,
+                "bone" => invalid.bone_names[0].name_bytes = bytes,
+                _ => invalid.morph_names[0].name_bytes = bytes,
+            }
+            assert!(
+                build_vmd_animation_from_parts(one_key_vmd_parts(
+                    invalid,
+                    &[1.0, 2.0, 3.0],
+                    &[0.0, 0.0, 0.0, 1.0],
+                    &[0.5],
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn vmd_parts_rejects_soa_mismatch_indices_nonfinite_and_low_density_floats() {
+        let descriptor = minimal_vmd_parts_descriptor();
+        let mut mismatch = one_key_vmd_parts(
+            descriptor.clone(),
+            &[1.0, 2.0, 3.0],
+            &[0.0, 0.0, 0.0, 1.0],
+            &[0.5],
+        );
+        mismatch.bone_translations_xyz = &[1.0, 2.0];
+        assert!(build_vmd_animation_from_parts(mismatch).is_err());
+        let short_rotation = one_key_vmd_parts(
+            descriptor.clone(),
+            &[1.0, 2.0, 3.0],
+            &[0.0, 0.0, 1.0],
+            &[0.5],
+        );
+        assert!(build_vmd_animation_from_parts(short_rotation).is_err());
+        let mut short_interpolation = one_key_vmd_parts(
+            descriptor.clone(),
+            &[1.0, 2.0, 3.0],
+            &[0.0, 0.0, 0.0, 1.0],
+            &[0.5],
+        );
+        short_interpolation.bone_interpolations = &[0; 63];
+        assert!(build_vmd_animation_from_parts(short_interpolation).is_err());
+        let mut morph_mismatch = one_key_vmd_parts(
+            descriptor.clone(),
+            &[1.0, 2.0, 3.0],
+            &[0.0, 0.0, 0.0, 1.0],
+            &[0.5],
+        );
+        morph_mismatch.morph_frames = &[];
+        assert!(build_vmd_animation_from_parts(morph_mismatch).is_err());
+        let mut bad_index = one_key_vmd_parts(
+            descriptor.clone(),
+            &[1.0, 2.0, 3.0],
+            &[0.0, 0.0, 0.0, 1.0],
+            &[0.5],
+        );
+        bad_index.bone_name_indices = &[1];
+        assert!(build_vmd_animation_from_parts(bad_index).is_err());
+        let mut bad_morph_index = one_key_vmd_parts(
+            descriptor.clone(),
+            &[1.0, 2.0, 3.0],
+            &[0.0, 0.0, 0.0, 1.0],
+            &[0.5],
+        );
+        bad_morph_index.morph_name_indices = &[1];
+        assert!(build_vmd_animation_from_parts(bad_morph_index).is_err());
+
+        let camera_with_short_interpolation = serde_json::json!({
+            "schema": "mmd-anim-vmd-parts",
+            "version": 1,
+            "modelName": "model",
+            "modelNameBytes": [],
+            "boneNames": [],
+            "morphNames": [],
+            "cameraFrames": [{
+                "frame": 0,
+                "distance": 0.0,
+                "position": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0],
+                "interpolation": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "fov": 30,
+                "perspective": true
+            }],
+            "lightFrames": [],
+            "selfShadowFrames": [],
+            "propertyFrames": []
+        });
+        assert!(
+            serde_json::from_value::<VmdPartsDescriptor>(camera_with_short_interpolation).is_err()
+        );
+
+        for (translation, rotation, weight) in [
+            (
+                &[f32::NAN, 0.0, 0.0][..],
+                &[0.0, 0.0, 0.0, 1.0][..],
+                &[0.5][..],
+            ),
+            (
+                &[0.0, 0.0, 0.0][..],
+                &[f32::INFINITY, 0.0, 0.0, 1.0][..],
+                &[0.5][..],
+            ),
+            (
+                &[0.0, 0.0, 0.0][..],
+                &[0.0, 0.0, 0.0, 1.0][..],
+                &[f32::INFINITY][..],
+            ),
+        ] {
+            assert!(
+                build_vmd_animation_from_parts(one_key_vmd_parts(
+                    descriptor.clone(),
+                    translation,
+                    rotation,
+                    weight,
+                ))
+                .is_err()
+            );
+        }
+
+        let mut camera = descriptor.clone();
+        camera.camera_frames.push(VmdParsedCameraFrame {
+            frame: 1,
+            distance: f32::NAN,
+            position: [0.0; 3],
+            rotation: [0.0; 3],
+            interpolation: [0; 24],
+            fov: 30,
+            perspective: false,
+        });
+        assert!(
+            build_vmd_animation_from_parts(one_key_vmd_parts(
+                camera,
+                &[0.0, 0.0, 0.0],
+                &[0.0, 0.0, 0.0, 1.0],
+                &[0.5],
+            ))
+            .is_err()
+        );
+        let mut light = descriptor.clone();
+        light.light_frames.push(VmdParsedLightFrame {
+            frame: 1,
+            color: [f32::INFINITY, 0.0, 0.0],
+            direction: [0.0; 3],
+        });
+        assert!(
+            build_vmd_animation_from_parts(one_key_vmd_parts(
+                light,
+                &[0.0, 0.0, 0.0],
+                &[0.0, 0.0, 0.0, 1.0],
+                &[0.5],
+            ))
+            .is_err()
+        );
+        let mut self_shadow = descriptor;
+        self_shadow
+            .self_shadow_frames
+            .push(VmdParsedSelfShadowFrame {
+                frame: 1,
+                mode: 1,
+                distance: f32::NAN,
+            });
+        assert!(
+            build_vmd_animation_from_parts(one_key_vmd_parts(
+                self_shadow,
+                &[0.0, 0.0, 0.0],
+                &[0.0, 0.0, 0.0, 1.0],
+                &[0.5],
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vmd_parts_checked_helpers_reject_overflow() {
+        assert!(checked_vmd_parts_size(usize::MAX, 1, 1).is_err());
+        assert!(checked_vmd_parts_size(0, usize::MAX, 2).is_err());
+        if usize::BITS > 32 {
+            assert!(validate_vmd_parts_count(u32::MAX as usize + 1, "test").is_err());
+        }
+    }
+
+    #[test]
+    fn vmd_parts_empty_animation_reparses_six_empty_sections() {
+        let animation = build_vmd_animation_from_parts(VmdPartsInput {
+            descriptor: minimal_vmd_parts_descriptor(),
+            bone_name_indices: &[],
+            bone_frames: &[],
+            bone_translations_xyz: &[],
+            bone_rotations_xyzw: &[],
+            bone_interpolations: &[],
+            morph_name_indices: &[],
+            morph_frames: &[],
+            morph_weights: &[],
+        })
+        .unwrap();
+        let parsed = parse_vmd_animation(&export_vmd_animation(&animation)).unwrap();
+        assert!(parsed.bone_frames.is_empty());
+        assert!(parsed.morph_frames.is_empty());
+        assert!(parsed.camera_frames.is_empty());
+        assert!(parsed.light_frames.is_empty());
+        assert!(parsed.self_shadow_frames.is_empty());
+        assert!(parsed.property_frames.is_empty());
+        assert_eq!(parsed.metadata.counts.bones, 0);
+        assert_eq!(parsed.metadata.counts.morphs, 0);
+        assert_eq!(parsed.metadata.counts.cameras, 0);
+        assert_eq!(parsed.metadata.counts.lights, 0);
+        assert_eq!(parsed.metadata.counts.self_shadows, 0);
+        assert_eq!(parsed.metadata.counts.properties, 0);
+    }
+
+    #[test]
+    fn vmd_parts_large_key_metadata_stays_sparse_and_output_size_is_checked() {
+        let key_count = 3_000usize;
+        let descriptor = minimal_vmd_parts_descriptor();
+        let metadata_json = serde_json::to_string(&descriptor).unwrap();
+        assert!(metadata_json.len() < 1_024);
+        assert!(!metadata_json.contains("boneFrames"));
+        assert!(!metadata_json.contains("morphFrames"));
+        let bone_name_indices = vec![0u32; key_count];
+        let bone_frames: Vec<u32> = (0..key_count as u32).collect();
+        let translations = vec![0.0f32; key_count * 3];
+        let rotations = vec![0.0f32; key_count * 4];
+        let interpolations = vec![0u8; key_count * 64];
+        let morph_name_indices = vec![0u32; key_count];
+        let morph_frames: Vec<u32> = (0..key_count as u32).collect();
+        let weights = vec![0.25f32; key_count];
+        let animation = build_vmd_animation_from_parts(VmdPartsInput {
+            descriptor,
+            bone_name_indices: &bone_name_indices,
+            bone_frames: &bone_frames,
+            bone_translations_xyz: &translations,
+            bone_rotations_xyzw: &rotations,
+            bone_interpolations: &interpolations,
+            morph_name_indices: &morph_name_indices,
+            morph_frames: &morph_frames,
+            morph_weights: &weights,
+        })
+        .unwrap();
+        let bytes = export_vmd_animation(&animation);
+        let expected = 74 + key_count * 111 + key_count * 23;
+        assert_eq!(bytes.len(), expected);
+        let parsed = parse_vmd_animation(&bytes).unwrap();
+        assert_eq!(parsed.metadata.counts.bones, key_count);
+        assert_eq!(parsed.metadata.counts.morphs, key_count);
+    }
 
     fn build_vmd_header_bytes() -> Vec<u8> {
         let mut buf = Vec::new();

@@ -563,6 +563,32 @@ PHYSICS_PARAM_FUNCTIONS = {
     ),
 }
 
+VMD_FROM_PARTS_FUNCTIONS = {
+    "mmd_runtime_export_vmd_from_parts": (
+        "ffi_byte_buffer",
+        [
+            ("metadata_json", "const_u8_ptr"),
+            ("metadata_json_len", "usize"),
+            ("bone_name_indices", "const_u32_ptr"),
+            ("bone_name_index_count", "usize"),
+            ("bone_frames", "const_u32_ptr"),
+            ("bone_frame_count", "usize"),
+            ("bone_translations_xyz", "const_f32_ptr"),
+            ("bone_translation_f32_len", "usize"),
+            ("bone_rotations_xyzw", "const_f32_ptr"),
+            ("bone_rotation_f32_len", "usize"),
+            ("bone_interpolations", "const_u8_ptr"),
+            ("bone_interpolation_u8_len", "usize"),
+            ("morph_name_indices", "const_u32_ptr"),
+            ("morph_name_index_count", "usize"),
+            ("morph_frames", "const_u32_ptr"),
+            ("morph_frame_count", "usize"),
+            ("morph_weights", "const_f32_ptr"),
+            ("morph_weight_count", "usize"),
+        ],
+    ),
+}
+
 
 def rust_exported_symbols(text: str) -> set[str]:
     lines = text.splitlines()
@@ -631,6 +657,8 @@ def canonical_rust_type(type_name: str) -> str:
         "*const MmdRuntimePhysicsWorld": "const_physics_world_ptr",
         "*mut MmdRuntimePhysicsWorld": "physics_world_ptr",
         "*const u8": "const_u8_ptr",
+        "*const u32": "const_u32_ptr",
+        "*const f32": "const_f32_ptr",
         "*mut u8": "mut_u8_ptr",
         "*mut usize": "usize_ptr",
         "*mut MmdRuntimeFfiGenericCurveInfo": "generic_info_ptr",
@@ -679,6 +707,8 @@ def canonical_c_type(type_name: str) -> str:
         "const mmd_runtime_physics_world_t*": "const_physics_world_ptr",
         "mmd_runtime_physics_world_t*": "physics_world_ptr",
         "const uint8_t*": "const_u8_ptr",
+        "const uint32_t*": "const_u32_ptr",
+        "const float*": "const_f32_ptr",
         "uint8_t*": "mut_u8_ptr",
         "size_t*": "usize_ptr",
         "mmd_runtime_ffi_generic_curve_info_t*": "generic_info_ptr",
@@ -852,6 +882,13 @@ def check_abi_shapes(rust_text: str, header_text: str) -> list[str]:
                 f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
             )
     for name, expected in PHYSICS_PARAM_FUNCTIONS.items():
+        rust_shape = rust_function_shape(rust_text, name)
+        c_shape = c_function_shape(header_text, name)
+        if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
+            errors.append(
+                f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
+            )
+    for name, expected in VMD_FROM_PARTS_FUNCTIONS.items():
         rust_shape = rust_function_shape(rust_text, name)
         c_shape = c_function_shape(header_text, name)
         if rust_shape != expected or c_shape != expected or rust_shape != c_shape:

@@ -111,12 +111,28 @@ def _prepare_node(case: OracleCase, result: dict[str, Any], runner: CommandRunne
     command = ("node", str(node_root / "src" / "cli.mjs"), "oracle-batch", "--manifest", str(manifest_path), "--out-dir", str(work_root), "--dry-run", "true")
     outcome = runner.run(command, node_root)
     _set_backend_diagnostics(result, outcome)
+    try:
+        report = _json_stdout(outcome.stdout)
+    except ValueError:
+        if outcome.exit_code != 0:
+            _fail(result, "generator", f"node backend exited with {outcome.exit_code}")
+            return False
+        raise
+    cases = report.get("results") if isinstance(report, dict) else None
+    node_case = next((item for item in cases if isinstance(item, dict) and item.get("name") == artifact_name), None) if isinstance(cases, list) else None
+    if case.camera_vmd is not None and isinstance(node_case, dict) and node_case.get("ok") is not True:
+        source = node_case.get("sourceCounts")
+        try:
+            camera_counts = _node_counts(source.get("cameraVmd")) if isinstance(source, dict) else None
+        except ValueError:
+            camera_counts = None
+        camera_result = _verify_node_camera_comparison(node_case.get("cameraComparison"), camera_counts["cameraFrames"] if camera_counts else None)
+        result["comparison"]["camera"] = camera_result
+        if camera_result["status"] != "verified":
+            result["comparison"]["status"] = "failed"
     if outcome.exit_code != 0:
         _fail(result, "generator", f"node backend exited with {outcome.exit_code}")
         return False
-    report = _json_stdout(outcome.stdout)
-    cases = report.get("results") if isinstance(report, dict) else None
-    node_case = next((item for item in cases if isinstance(item, dict) and item.get("name") == artifact_name), None) if isinstance(cases, list) else None
     if not isinstance(node_case, dict):
         _fail(result, "generator", "node backend result did not contain the requested case")
         return False
@@ -165,8 +181,15 @@ def _prepare_node(case: OracleCase, result: dict[str, Any], runner: CommandRunne
             _fail(result, "artifacts", "node backend skipped VMD tracks absent from the PMX")
         elif not comparison_ok:
             _fail(result, "artifacts", "node PMM/VMD keyframe comparison failed")
-    if case.camera_vmd is not None and result["comparison"]["status"] in ("verified", "not-applicable"):
-        result["comparison"].update(status="partial", camera={"status": "not-verified", "reason": "camera PMM/VMD keyframes were not compared"})
+    if case.camera_vmd is not None:
+        camera_report = node_case.get("cameraComparison")
+        camera_result = _verify_node_camera_comparison(camera_report, camera["cameraFrames"] if camera is not None else None)
+        result["comparison"]["camera"] = camera_result
+        if camera_result["status"] != "verified":
+            result["comparison"]["status"] = "failed"
+            _fail(result, "artifacts", camera_result["reason"])
+        elif result["comparison"]["status"] == "not-applicable":
+            result["comparison"]["status"] = "partial"
     if property_count != body["propertyFrames"]:
         _fail(result, "artifacts", "node property-frame drop count did not match preflight")
     return not result["errors"]
@@ -322,6 +345,29 @@ def _node_counts(counts: Any) -> dict[str, int]:
     if not isinstance(counts, dict) or any(type(counts.get(name)) is not int or counts[name] < 0 for name in names):
         raise ValueError("node backend did not return valid source channel counts")
     return {name: counts[name] for name in names}
+
+
+def _verify_node_camera_comparison(report: Any, expected_count: int | None) -> dict[str, Any]:
+    if not isinstance(report, dict):
+        return {"status": "failed", "reason": "node backend did not return camera comparison"}
+    expected = report.get("expected")
+    actual = report.get("actual")
+    mismatches = report.get("mismatches")
+    verified = (
+        report.get("ok") is True
+        and type(expected_count) is int
+        and expected_count > 0
+        and type(expected) is int
+        and type(actual) is int
+        and expected == expected_count
+        and actual == expected
+        and isinstance(mismatches, list)
+        and not mismatches
+    )
+    if verified:
+        return {"status": "verified", "comparison": report}
+    reason = report.get("reason") if isinstance(report.get("reason"), str) else "node camera PMM/VMD keyframe comparison failed"
+    return {"status": "failed", "reason": reason, "comparison": report}
 
 
 def _json_stdout(stdout: str) -> Any:

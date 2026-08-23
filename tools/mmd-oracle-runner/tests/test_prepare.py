@@ -6,8 +6,24 @@ from pathlib import Path
 
 from mmd_oracle_runner.case import load_case
 from mmd_oracle_runner.cli import main
-from mmd_oracle_runner.prepare import SubprocessRunner, prepare_case
+from mmd_oracle_runner.prepare import CommandResult, SubprocessRunner, prepare_case
 from prepare_test_support import FakeRunner, REPO_ROOT, write_case as _write_case
+
+
+class CameraComparisonRunner(FakeRunner):
+    def __init__(self, report, *, mode="node-success", case_ok=True):
+        super().__init__(mode=mode)
+        self.report = report
+        self.case_ok = case_ok
+
+    def run(self, command, cwd):
+        outcome = super().run(command, cwd)
+        if outcome.exit_code == 0 and command and command[0] == "node" and "oracle-batch" in command:
+            payload = json.loads(outcome.stdout)
+            payload["results"][0]["cameraComparison"] = self.report
+            payload["results"][0]["ok"] = self.case_ok
+            return CommandResult(outcome.command, outcome.cwd, 0 if self.case_ok else 1, json.dumps(payload), outcome.stderr)
+        return outcome
 
 
 def test_fake_node_prepare_writes_stable_result_and_never_records(tmp_path: Path):
@@ -211,21 +227,60 @@ def test_camera_source_counts_reject_non_camera_channels(tmp_path: Path):
 def test_camera_artifacts_report_partial_comparison(tmp_path: Path):
     case = load_case(_write_case(tmp_path, camera=True))
 
-    result = prepare_case(case, runner=FakeRunner(), repo_root=REPO_ROOT)
+    result = prepare_case(case, runner=CameraComparisonRunner({"ok": True, "expected": 1, "actual": 1, "mismatches": []}), repo_root=REPO_ROOT)
 
     assert result["ok"] is True and result["phase"] == "complete"
-    assert result["comparison"]["status"] == "partial"
-    assert result["comparison"]["camera"]["status"] == "not-verified"
+    assert result["comparison"]["status"] == "verified"
+    assert result["comparison"]["camera"]["status"] == "verified"
+    assert result["comparison"]["camera"]["comparison"]["expected"] == 1
     assert result["artifacts"]["project"]["exists"] is True
 
 
 def test_camera_with_empty_body_is_partial_not_verified(tmp_path: Path):
     case = load_case(_write_case(tmp_path, camera=True))
 
-    result = prepare_case(case, runner=FakeRunner(mode="node-empty"), repo_root=REPO_ROOT)
+    result = prepare_case(case, runner=CameraComparisonRunner({"ok": True, "expected": 1, "actual": 1, "mismatches": []}, mode="node-empty"), repo_root=REPO_ROOT)
 
     assert result["ok"] is True
     assert result["comparison"]["status"] == "partial"
+    assert result["comparison"]["camera"]["status"] == "verified"
+
+
+def test_camera_comparison_report_is_required(tmp_path: Path):
+    case = load_case(_write_case(tmp_path, camera=True))
+
+    result = prepare_case(case, runner=FakeRunner(), repo_root=REPO_ROOT)
+
+    assert result["ok"] is False
+    assert result["phase"] == "artifacts"
+    assert result["comparison"]["status"] == "failed"
+    assert result["comparison"]["camera"]["status"] == "failed"
+    assert "did not return camera comparison" in result["comparison"]["camera"]["reason"]
+
+
+def test_camera_comparison_mismatch_is_non_pass(tmp_path: Path):
+    case = load_case(_write_case(tmp_path, camera=True))
+    report = {"ok": False, "expected": 1, "actual": 1, "mismatches": [{"kind": "camera", "key": "0"}]}
+
+    result = prepare_case(case, runner=CameraComparisonRunner(report), repo_root=REPO_ROOT)
+
+    assert result["ok"] is False
+    assert result["phase"] == "artifacts"
+    assert result["comparison"]["status"] == "failed"
+    assert result["comparison"]["camera"]["status"] == "failed"
+    assert result["comparison"]["camera"]["comparison"] == report
+
+
+def test_camera_comparison_failure_detail_survives_node_case_failure(tmp_path: Path):
+    case = load_case(_write_case(tmp_path, camera=True))
+    report = {"ok": False, "expected": 1, "actual": 1, "mismatches": [{"kind": "camera", "key": "0"}]}
+
+    result = prepare_case(case, runner=CameraComparisonRunner(report, case_ok=False), repo_root=REPO_ROOT)
+
+    assert result["ok"] is False
+    assert result["phase"] == "generator"
+    assert result["comparison"]["camera"]["status"] == "failed"
+    assert result["comparison"]["camera"]["comparison"] == report
 
 
 def test_all_skipped_tracks_keep_names_in_failure_result(tmp_path: Path):

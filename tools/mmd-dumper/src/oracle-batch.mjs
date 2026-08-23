@@ -4,6 +4,8 @@ import { deriveOracleFrames, prepareOracleFromVmd, recordOracleFromVmd } from ".
 import { defaultMmdExePath } from "./mmd-paths.mjs";
 import { stageMmdCompatiblePmx } from "./pmx-mmd-compat.mjs";
 import { writePmmFromPmxVmd } from "./pmm-from-pmx-vmd.mjs";
+import { readPmmDocumentKeyframes } from "./pmm-document-keyframes.mjs";
+import { comparePmmDocumentToVmd } from "./pmm-document-vmd-compare.mjs";
 import { recordWithMmd, toPortableFixture } from "./runner.mjs";
 import { readVmdInventory } from "./vmd-inventory.mjs";
 
@@ -132,6 +134,9 @@ async function runOneTemplateFreeCase(testCase, options) {
     cameraVmd: testCase.cameraVmd,
     out: project,
   });
+  const cameraComparison = testCase.cameraVmd
+    ? await compareTemplateFreeCamera(project, cameraVmd)
+    : undefined;
   const fixture = {
     name: testCase.name,
     mmdVersion: "9.32-x64",
@@ -152,7 +157,10 @@ async function runOneTemplateFreeCase(testCase, options) {
     physics: testCase.physics,
   };
   await writeFile(fixturePath, `${JSON.stringify(toPortableFixture(fixture), null, 2)}\n`, "utf8");
-  const records = options.dryRun
+  const cameraVerified = !testCase.cameraVmd || cameraComparison?.ok === true;
+  const records = !cameraVerified
+    ? undefined
+    : options.dryRun
     ? undefined
     : await recordWithMmd(fixture, {
         fixturePath,
@@ -161,7 +169,7 @@ async function runOneTemplateFreeCase(testCase, options) {
         keepInitialFrameZero: testCase.keepInitialFrameZero,
       });
   return {
-    ok: true,
+    ok: cameraVerified,
     name: testCase.name,
     mode: isEmptyVmd(vmd) ? "pmx-generated-pmm" : "pmx-vmd-generated-pmm",
     pmx: testCase.pmx,
@@ -185,8 +193,37 @@ async function runOneTemplateFreeCase(testCase, options) {
       rewriteCount: pmm.patch?.rewriteCount,
       counts: pmm.patch?.comparison?.counts,
     },
+    ...(cameraComparison ? { cameraComparison } : {}),
     filter: pmm?.filter ?? null,
   };
+}
+
+async function compareTemplateFreeCamera(project, cameraVmd) {
+  try {
+    const pmm = await readPmmDocumentKeyframes(project);
+    const report = comparePmmDocumentToVmd(pmm, cameraVmd);
+    const comparison = report.cameraComparison;
+    if (!comparison || comparison.ok !== true) {
+      return {
+        ...(comparison && typeof comparison === "object" ? comparison : {}),
+        ok: false,
+        reason: "CAMERA_KEYFRAME_COMPARISON_FAILED",
+      };
+    }
+    if (cameraVmd.counts.cameraFrames <= 0) {
+      return { ...comparison, ok: false, reason: "CAMERA_FRAMES_MISSING" };
+    }
+    if (comparison.expected !== cameraVmd.counts.cameraFrames || comparison.actual !== comparison.expected) {
+      return { ...comparison, ok: false, reason: "CAMERA_KEYFRAME_COUNT_MISMATCH" };
+    }
+    return comparison;
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "CAMERA_COMPARISON_ERROR",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function isEmptyVmd(vmd) {

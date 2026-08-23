@@ -258,6 +258,10 @@ test("prepares a template-free camera dump batch with camera VMD and camera-mode
 
   assert.equal(result.ok, true);
   assert.match(result.results[0].cameraVmd, /camera\.vmd$/);
+  assert.equal(result.results[0].cameraComparison.ok, true);
+  assert.equal(result.results[0].cameraComparison.expected, 2);
+  assert.equal(result.results[0].cameraComparison.actual, 2);
+  assert.deepEqual(result.results[0].cameraComparison.mismatches, []);
   assert.deepEqual(result.results[0].sourceCounts, {
     bodyVmd: {
       boneFrames: 0,
@@ -291,6 +295,30 @@ test("prepares a template-free camera dump batch with camera VMD and camera-mode
   assert.equal(fixture.playback, true);
   assert.deepEqual(fixture.framesRange, { start: 0, end: 30, step: 1 });
   assert.equal(fixture.frames.length, 31);
+});
+
+test("fails a template-free camera batch closed when the camera VMD has no keyframes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mmddumper-oracle-batch-camera-missing-"));
+  const pmx = join(dir, "model.pmx");
+  const vmd = join(dir, "motion.vmd");
+  const cameraVmd = join(dir, "camera-empty.vmd");
+  const outDir = join(dir, "out");
+  const manifestPath = join(dir, "oracle-batch.json");
+  await writeFile(pmx, makeMinimalPmx());
+  await writeFile(vmd, createSyntheticVmd());
+  await writeFile(cameraVmd, createSyntheticVmd());
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify({ defaults: { outDir }, cases: [{ name: "camera-missing", assets: { model: pmx, motion: vmd, cameraMotion: cameraVmd } }] }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const result = await prepareOracleBatch({ manifest: manifestPath });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.results[0].ok, false);
+  assert.equal(result.results[0].cameraComparison.ok, false);
+  assert.equal(result.results[0].cameraComparison.reason, "CAMERA_FRAMES_MISSING");
 });
 
 function skipMissing(t, entries) {

@@ -3,15 +3,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from . import artifacts
 from .case import OracleCase
 
-TEMPORARY_ARTIFACT_KEYS = ("fixtureTemp", "outputTemp", "doneTemp", "proxyLogTemp")
+LEGACY_TEMPORARY_ARTIFACT_KEYS = ("fixtureTemp", "outputTemp", "doneTemp", "proxyLogTemp")
+TEMPORARY_ARTIFACT_KEYS = (*LEGACY_TEMPORARY_ARTIFACT_KEYS, "failureBundleTemp", "attemptTemp")
+FAILURE_ARTIFACT_KEYS = ("failureBundle",)
+ATTEMPT_ARTIFACT_KEYS = (*TEMPORARY_ARTIFACT_KEYS, *FAILURE_ARTIFACT_KEYS)
 _RECORD_ARTIFACT_KEYS = (
-    "output", "done", "result", *TEMPORARY_ARTIFACT_KEYS, "attempt", "resultTemp", "backupOutput", "backupDone"
+    "output", "done", "result", *TEMPORARY_ARTIFACT_KEYS, *FAILURE_ARTIFACT_KEYS,
+    "attempt", "resultTemp", "backupOutput", "backupDone"
 )
 
 
@@ -26,7 +31,10 @@ def paths(run_dir: Path) -> dict[str, Path]:
         "outputTemp": run_dir / ".oracle.actual.jsonl.tmp",
         "doneTemp": run_dir / ".oracle.actual.jsonl.done.tmp",
         "proxyLogTemp": run_dir / ".oracle.actual.jsonl.tmp.proxy.log",
+        "failureBundle": run_dir / "record-failure.zip",
+        "failureBundleTemp": run_dir / ".record-failure.zip.tmp",
         "attempt": run_dir / ".record-attempt.json",
+        "attemptTemp": run_dir / ".record-attempt.json.tmp",
         "resultTemp": run_dir / ".record-result.json.tmp",
         "backupOutput": run_dir / ".record-backup-output.tmp",
         "backupDone": run_dir / ".record-backup-done.tmp",
@@ -117,7 +125,9 @@ def recover_interrupted_record_artifacts(paths: dict[str, Path], case: OracleCas
         raise ValueError("record promotion recovery did not restore a valid stable dump")
 
 
-def validate_existing_record_artifacts(paths: dict[str, Path], case: OracleCase, input_inventory: dict[str, Any]) -> set[str]:
+def validate_existing_record_artifacts(
+    paths: dict[str, Path], case: OracleCase, input_inventory: dict[str, Any]
+) -> set[str]:
     artifacts.reject_reparse(*paths.values())
     existing = [paths[key] for key in _RECORD_ARTIFACT_KEYS if paths[key].exists()]
     if not existing:
@@ -149,9 +159,9 @@ def write_attempt_marker(
     input_inventory: dict[str, Any],
     mmd_executable: dict[str, Any],
 ) -> set[str]:
-    marker = paths["attempt"]
-    artifacts.reject_reparse(marker, *(paths[key] for key in TEMPORARY_ARTIFACT_KEYS))
-    owned = {str(marker.resolve()), *(str(paths[key].resolve()) for key in TEMPORARY_ARTIFACT_KEYS)}
+    marker, temporary = paths["attempt"], paths["attemptTemp"]
+    artifacts.reject_reparse(marker, temporary, *(paths[key] for key in ATTEMPT_ARTIFACT_KEYS))
+    owned = {str(marker.resolve()), *(str(paths[key].resolve()) for key in ATTEMPT_ARTIFACT_KEYS)}
     payload = {
         "schemaVersion": 1,
         "phase": "record-attempt",
@@ -164,16 +174,17 @@ def write_attempt_marker(
     }
     created = False
     try:
-        with marker.open("x", encoding="utf-8") as stream:
+        with temporary.open("x", encoding="utf-8") as stream:
             created = True
             json.dump(payload, stream, ensure_ascii=True, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        os.replace(temporary, marker)
     except BaseException as error:
         if created:
             try:
-                marker.unlink(missing_ok=True)
+                temporary.unlink(missing_ok=True)
             except OSError as cleanup_error:
                 raise OSError(f"cannot remove partial record attempt marker after write failure: {cleanup_error}") from error
         raise
@@ -291,6 +302,46 @@ def remove_temporary_artifacts(paths: dict[str, Path], owned_paths: set[str]) ->
             if str(path.resolve()) not in owned_paths:
                 raise OSError(f"record temporary artifact is not owned by this run: {path}")
             path.unlink()
+
+
+def retain_failure_artifacts(paths: dict[str, Path], owned_paths: set[str]) -> None:
+    """Atomically replace the prior failure bundle with raw files from this attempt."""
+    entries = [
+        ("oracle.actual.jsonl", paths["outputTemp"]),
+        ("proxy.log", paths["proxyLogTemp"]),
+    ]
+    if paths["outputTemp"].is_file():
+        entries.insert(1, ("oracle.actual.jsonl.done", paths["doneTemp"]))
+    entries = [(name, source) for name, source in entries if source.exists()]
+    bundle, temporary = paths["failureBundle"], paths["failureBundleTemp"]
+    if not entries:
+        artifacts.reject_reparse(bundle)
+        if bundle.exists():
+            if not bundle.is_file() or str(bundle.resolve()) not in owned_paths:
+                raise OSError(f"existing record failure artifact is not owned by this run: {bundle}")
+            bundle.unlink()
+        return
+
+    artifacts.reject_reparse(bundle, temporary, *(source for _, source in entries))
+    for _, source in entries:
+        if not source.is_file() or str(source.resolve()) not in owned_paths:
+            raise OSError(f"record failure source is not owned by this run: {source}")
+    if bundle.exists() and (not bundle.is_file() or str(bundle.resolve()) not in owned_paths):
+        raise OSError(f"existing record failure artifact is not owned by this run: {bundle}")
+
+    created = False
+    try:
+        with zipfile.ZipFile(temporary, "x", compression=zipfile.ZIP_STORED) as archive:
+            created = True
+            for name, source in entries:
+                archive.write(source, name)
+        with temporary.open("r+b") as stream:
+            os.fsync(stream.fileno())
+        os.replace(temporary, bundle)
+    except BaseException:
+        if created:
+            temporary.unlink(missing_ok=True)
+        raise
 
 
 def promote_record(paths: dict[str, Path], journal: dict[str, Any]) -> None:
@@ -445,9 +496,13 @@ def _load_record_marker(path: Path, case: OracleCase, paths: dict[str, Path], in
     return marker
 
 
-def _load_attempt_marker(path: Path, case: OracleCase, paths: dict[str, Path], input_inventory: dict[str, Any]) -> set[str]:
+def _load_attempt_marker(
+    path: Path, case: OracleCase, paths: dict[str, Path], input_inventory: dict[str, Any]
+) -> set[str]:
     marker = read_json_object(path, "record attempt marker")
-    expected_owned = {str(path.resolve()), *(str(paths[key].resolve()) for key in TEMPORARY_ARTIFACT_KEYS)}
+    current_owned = {str(path.resolve()), *(str(paths[key].resolve()) for key in ATTEMPT_ARTIFACT_KEYS)}
+    legacy_owned = {str(path.resolve()), *(str(paths[key].resolve()) for key in LEGACY_TEMPORARY_ARTIFACT_KEYS)}
+    marker_owned = _owned_paths(marker, "record attempt marker")
     if (
         marker.get("schemaVersion") != 1
         or marker.get("phase") != "record-attempt"
@@ -455,10 +510,10 @@ def _load_attempt_marker(path: Path, case: OracleCase, paths: dict[str, Path], i
         or marker.get("artifactName") != paths["result"].parent.name
         or marker.get("inputInventory") != input_inventory
         or marker.get("frames") != list(case.frames)
-        or _owned_paths(marker, "record attempt marker") != expected_owned
+        or marker_owned not in (current_owned, legacy_owned)
     ):
         raise ValueError("record attempt marker does not match the current case")
-    return expected_owned
+    return marker_owned
 
 
 def _owned_paths(marker: dict[str, Any], label: str) -> set[str]:

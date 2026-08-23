@@ -28,6 +28,7 @@ from .record_artifacts import (
     refresh as _refresh_artifacts,
     remove_attempt_marker as _remove_attempt_marker,
     remove_temporary_artifacts as _remove_temporary_artifacts,
+    retain_failure_artifacts as _retain_failure_artifacts,
     rollback_promotion as _rollback_promotion,
     valid_done as _valid_done,
     validate_existing_record_artifacts as _validate_existing_record_artifacts,
@@ -65,6 +66,7 @@ def record_case(
     attempt_owned: set[str] = set()
     existing_owned: set[str] = set()
     persist_result = True
+    record_attempted = False
 
     try:
         artifacts.reject_reparse(case.output_root, run_dir, *paths.values())
@@ -110,7 +112,6 @@ def record_case(
 
         fixture = prepared["fixture"]
         _remove_temporary_artifacts(paths, existing_owned)
-        _remove_attempt_marker(paths, existing_owned)
         temporary_owned = {str(paths[key].resolve()) for key in TEMPORARY_ARTIFACT_KEYS}
         attempt_owned = _write_attempt_marker(paths, case, result["inputInventory"], result["mmdExecutable"])
         temp_fixture = _write_temp_fixture(run_dir, fixture, mmd_path, output=paths["outputTemp"], done=paths["doneTemp"])
@@ -122,6 +123,7 @@ def record_case(
             result["phases"]["dialog"] = {"status": "pass", "optIn": True}
         else:
             result["phases"]["dialog"] = {"status": "not_run", "optIn": False}
+        record_attempted = True
         outcome = runner.run(record_command, node_cwd)
         _set_command(result, "record", outcome)
         stderr = _text(outcome.stderr)
@@ -164,13 +166,21 @@ def record_case(
     except (OSError, ValueError, json.JSONDecodeError) as error:
         _fail(result, "preflight", str(error))
     finally:
+        preserve_temporaries = False
+        if record_attempted and not result["recorded"]:
+            try:
+                _retain_failure_artifacts(paths, existing_owned | temporary_owned)
+            except OSError as error:
+                _fail(result, "artifacts", f"cannot retain record failure artifacts: {error}")
+                preserve_temporaries = True
         temporary_cleanup_ok = False
-        try:
-            _remove_temporary_artifacts(paths, temporary_owned)
-            temporary_cleanup_ok = True
-        except OSError as error:
-            _fail(result, "artifacts", f"cannot remove temporary record artifacts: {error}")
-        if temporary_cleanup_ok:
+        if not preserve_temporaries:
+            try:
+                _remove_temporary_artifacts(paths, temporary_owned)
+                temporary_cleanup_ok = True
+            except OSError as error:
+                _fail(result, "artifacts", f"cannot remove temporary record artifacts: {error}")
+        if temporary_cleanup_ok and result["recorded"]:
             try:
                 _remove_attempt_marker(paths, attempt_owned)
             except OSError as error:

@@ -7,6 +7,7 @@ from .case import (
     ValidationIssue,
     load_case,
 )
+from .prepare import prepare_case
 
 __all__ = [
     "CaseValidationError",
@@ -14,6 +15,7 @@ __all__ = [
     "OracleCase",
     "ValidationIssue",
     "load_case",
+    "prepare_case",
 ]
 
 __version__ = "0.1.0"

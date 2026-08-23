@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .case import CaseValidationError, load_case
+from .prepare import prepare_case
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,13 +19,18 @@ def main(argv: list[str] | None = None) -> int:
         _print_json(
             {
                 "ok": False,
-                "command": "validate",
+                "command": args.command,
                 "caseFile": str(case_path.resolve()),
                 "error": error.as_dict(),
             },
             stream=sys.stderr,
         )
         return 2
+
+    if args.command == "prepare":
+        result = prepare_case(case)
+        _print_json(result)
+        return 0 if result["ok"] else 1
 
     _print_json(
         {
@@ -42,6 +48,8 @@ def _build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     validate = commands.add_parser("validate", help="validate one case contract")
     validate.add_argument("--case", required=True, help="absolute case JSON path")
+    prepare = commands.add_parser("prepare", help="prepare one case without launching MMD")
+    prepare.add_argument("--case", required=True, help="absolute case JSON path")
     return parser
 
 

@@ -25,7 +25,7 @@ def reject_reparse(*paths: Path) -> None:
             probe = probe.parent
 
 
-def cleanup(result: dict[str, Any], paths: tuple[Path, ...], marker: Path) -> None:
+def cleanup(result: dict[str, Any], paths: tuple[Path, ...], marker: Path, *, preserve: tuple[Path, ...] = ()) -> None:
     inputs = {_normalized(entry["path"]) for entry in result["inputInventory"].values()}
     if any(_normalized(path) in inputs for path in paths):
         raise ValueError("artifact path collides with an input path")
@@ -45,10 +45,12 @@ def cleanup(result: dict[str, Any], paths: tuple[Path, ...], marker: Path) -> No
     owned = prior.get("ownedArtifacts")
     if not isinstance(owned, list) or any(not isinstance(path, str) for path in owned) or any(str(path) not in owned for path in existing):
         raise ValueError("prepare-result marker does not own every existing artifact")
+    preserved = {_normalized(path) for path in preserve} if prior.get("inputInventory") == result["inputInventory"] else set()
     for path in existing:
         if not path.is_file():
             raise OSError(f"owned artifact path is not a file: {path}")
-        path.unlink()
+        if _normalized(path) not in preserved:
+            path.unlink()
 
 
 def record(result: dict[str, Any], paths: tuple[Path, ...]) -> None:

@@ -35,6 +35,17 @@ def test_collision_and_staging_are_rejected(tmp_path: Path):
     assert source.read_bytes() == b"input"
 
 
+def test_cleanup_can_preserve_owned_stable_artifacts(tmp_path: Path):
+    scene, marker = tmp_path / "scene.pmm", tmp_path / "prepare-result.json"
+    scene.write_bytes(b"last-good")
+    marker.write_text(json.dumps({**_result(), "ownedArtifacts": [str(scene), str(marker)]}), encoding="utf-8")
+
+    artifacts.cleanup(_result(), (scene, marker), marker, preserve=(scene, marker))
+
+    assert scene.read_bytes() == b"last-good"
+    assert marker.exists()
+
+
 def test_atomic_result_replaces_temp(tmp_path: Path):
     result = _result()
     path, temporary = tmp_path / "prepare-result.json", tmp_path / ".prepare-result.json.tmp"

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
+from .artifacts import reject_reparse
+
 GeneratorBackend = Literal["node-mmddumper", "rust-build-pmm"]
 _GENERATOR_BACKENDS = frozenset(("node-mmddumper", "rust-build-pmm"))
 _UNSUPPORTED_FEATURES = frozenset(("multi-model", "accessory"))
@@ -204,13 +206,21 @@ def _optional_absolute_file(
 
 
 def _required_absolute_path(payload: Mapping[str, Any], field: str, issues: list[ValidationIssue]) -> Path | None:
-    path = _absolute_path(payload.get(field), field, issues)
+    raw_path = _absolute_path(payload.get(field), field, issues, resolve=False)
+    if raw_path is None:
+        return None
+    try:
+        reject_reparse(raw_path)
+    except OSError as error:
+        issues.append(ValidationIssue(field, str(error)))
+        return None
+    path = raw_path.resolve()
     if path is not None and path.exists() and not path.is_dir():
         issues.append(ValidationIssue(field, "must be a directory when the path already exists"))
     return path
 
 
-def _absolute_path(value: Any, field: str, issues: list[ValidationIssue]) -> Path | None:
+def _absolute_path(value: Any, field: str, issues: list[ValidationIssue], *, resolve: bool = True) -> Path | None:
     if not isinstance(value, str) or not value.strip():
         issues.append(ValidationIssue(field, "must be a non-empty absolute path"))
         return None
@@ -218,7 +228,7 @@ def _absolute_path(value: Any, field: str, issues: list[ValidationIssue]) -> Pat
     if not path.is_absolute():
         issues.append(ValidationIssue(field, "must be an absolute path"))
         return None
-    return path.resolve()
+    return path.resolve() if resolve else path
 
 
 def _frames(value: Any, issues: list[ValidationIssue]) -> tuple[int, ...]:

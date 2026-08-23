@@ -87,6 +87,20 @@ def test_existing_output_file_is_rejected(tmp_path: Path):
     assert any(issue.field == "outputRoot" and "directory" in issue.reason for issue in issues)
 
 
+def test_output_root_symlink_is_rejected_when_supported(tmp_path: Path):
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    link = tmp_path / "output-link"
+    try:
+        link.symlink_to(destination, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+
+    issues = _issues(tmp_path, outputRoot=str(link))
+
+    assert any(issue.field == "outputRoot" and "reparse point" in issue.reason for issue in issues)
+
+
 def test_missing_input_file_is_rejected(tmp_path: Path):
     missing = tmp_path / "assets" / "missing.pmx"
     issues = _issues(tmp_path, input={"pmx": str(missing)})

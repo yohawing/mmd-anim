@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
+import { createUnittestOneBoneTemplate } from "./unittest-pmm-fixture.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -12,7 +13,8 @@ test("CLI generates counted bone keys and writes compact verified PMM output", a
   const dir = await mkdtemp(join(tmpdir(), "mmddumper-cli-keys-"));
   const vmdFile = join(dir, "five-position-keys.vmd");
   const pmmFile = join(dir, "five-position-keys.pmm");
-  const templateFile = join(process.cwd(), "..", "data", "pmm", "unittest_with_one_bone_key.pmm");
+  const templateFile = join(dir, "unittest_with_one_bone_key.pmm");
+  await writeFile(templateFile, createUnittestOneBoneTemplate());
 
   const vmd = await runCli([
     "write-test-vmd",
@@ -65,7 +67,8 @@ test("CLI VMD-driven PMM writer reads dense keys beyond the default VMD sample l
   const dir = await mkdtemp(join(tmpdir(), "mmddumper-cli-many-keys-"));
   const vmdFile = join(dir, "many-position-keys.vmd");
   const pmmFile = join(dir, "many-position-keys.pmm");
-  const templateFile = join(process.cwd(), "..", "data", "pmm", "unittest_with_one_bone_key.pmm");
+  const templateFile = join(dir, "unittest_with_one_bone_key.pmm");
+  await writeFile(templateFile, createUnittestOneBoneTemplate());
 
   const vmd = await runCli([
     "write-test-vmd",
@@ -175,7 +178,8 @@ test("CLI generates counted transform keys and writes verified PMM output", asyn
   const dir = await mkdtemp(join(tmpdir(), "mmddumper-cli-many-transform-keys-"));
   const vmdFile = join(dir, "many-transform-keys.vmd");
   const pmmFile = join(dir, "many-transform-keys.pmm");
-  const templateFile = join(process.cwd(), "..", "data", "pmm", "unittest_with_one_bone_key.pmm");
+  const templateFile = join(dir, "unittest_with_one_bone_key.pmm");
+  await writeFile(templateFile, createUnittestOneBoneTemplate());
 
   const vmd = await runCli([
     "write-test-vmd",

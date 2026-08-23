@@ -2,9 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { normalizeFixture } from "../src/fixture.mjs";
 import { validateFixtureInputs } from "../src/mmd-paths.mjs";
+
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("normalizes fixture-relative paths", () => {
   const fixture = normalizeFixture(
@@ -22,7 +25,7 @@ test("normalizes fixture-relative paths", () => {
   assert.match(fixture.project, /fixtures[\\/]sample[\\/]scene\.pmm$/);
   assert.match(fixture.output, /fixtures[\\/]sample[\\/]oracle\.actual\.jsonl$/);
   assert.match(fixture.done, /fixtures[\\/]sample[\\/]oracle\.actual\.jsonl\.done$/);
-  assert.match(fixture.mmdExe, /MMDDumper[\\/]MikuMikuDance_v932x64[\\/]MikuMikuDance\.exe$/);
+  assert.equal(fixture.mmdExe, resolve(packageRoot, "MikuMikuDance_v932x64", "MikuMikuDance.exe"));
 });
 
 test("expands fixture frame ranges", () => {

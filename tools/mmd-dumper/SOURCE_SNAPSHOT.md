@@ -28,3 +28,16 @@ missing external PMM assets, and 4 are PMM parser fixture/EOF failures. From
 this relocated directory, the initial result is **139 passing / 10 failing**;
 the 3 additional failures retain a hard-coded source-repository path. This
 snapshot does not fix or reinterpret those failures.
+
+## Post-portability result
+
+The imported test suite now runs from this repository without the source
+repository, external `data/` assets, an MMD executable, or network access. The
+three external PMM-template tests use a deterministic repository-owned test
+builder, and the four EOF failures were corrected by completing the synthetic
+PMMv2 camera and parameter sections; strict parser EOF checks remain unchanged.
+
+Current full-suite result: **140 passing / 0 failing / 9 skipped** tests (149 total).
+The skipped tests are the explicitly reported real-PMM checks whose external
+PMM/VMD fixtures are not part of this repository; no real external fixture is
+claimed as executed.

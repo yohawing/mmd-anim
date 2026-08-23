@@ -34,9 +34,9 @@ test("parses PMMv2 model bone/morph keyframe sections by nanoem document layout"
   assert.equal(model.morphKeyframes[0].weight, 0.5);
 });
 
-test("parses real Tda PMM transform keyframes without VMD diff profiles", async () => {
+test("parses real Tda PMM transform keyframes without VMD diff profiles", async (t) => {
   const fixture = new URL("../../data/pmm/tda_parent_center_groove_transform_keys.pmm", import.meta.url);
-  if (!existsSync(fixture)) {
+  if (skipMissing(t, [["Tda transform PMM", fixture]])) {
     return;
   }
   const report = parsePmmDocumentKeyframes(await readFile(fixture), { keyframeLimit: 16 });
@@ -158,10 +158,10 @@ test("compares VMD frame 0 against PMM initialBoneKeyframes / initialMorphKeyfra
   assert.equal(comparison.counts.pmmMorphKeyframes, 2);
 });
 
-test("compares real Tda PMM transform keyframes against VMD without base PMM diff", async () => {
+test("compares real Tda PMM transform keyframes against VMD without base PMM diff", async (t) => {
   const pmmFixture = new URL("../../data/pmm/tda_parent_center_groove_transform_keys.pmm", import.meta.url);
   const vmdFixture = new URL("../out/pmm-analysis/tda-parent-center-groove-transform-keys.vmd", import.meta.url);
-  if (!existsSync(pmmFixture) || !existsSync(vmdFixture)) {
+  if (skipMissing(t, [["Tda transform PMM", pmmFixture], ["Tda target VMD", vmdFixture]])) {
     return;
   }
 
@@ -199,9 +199,9 @@ test("patches same-shape PMMv2 document bone and morph keyframes from VMD", () =
   assert.equal(patched.comparison.ok, true);
 });
 
-test("patches PMMv2 bone interpolation from VMD interpolation bytes", async () => {
+test("patches PMMv2 bone interpolation from VMD interpolation bytes", async (t) => {
   const template = new URL("../../data/pmm/tda_base_no_motion.pmm", import.meta.url);
-  if (!existsSync(template)) {
+  if (skipMissing(t, [["Tda base PMM", template]])) {
     return;
   }
   const targetVmd = inspectVmd(
@@ -296,10 +296,10 @@ test("rebuilds resized PMMv2 document bone and morph keyframe sections from VMD"
   assert.equal(patched.comparison.counts.mismatches, 0);
 });
 
-test("patches real Tda same-shape PMM document keyframes from a target VMD", async () => {
+test("patches real Tda same-shape PMM document keyframes from a target VMD", async (t) => {
   const template = new URL("../../data/pmm/tda_parent_center_groove_transform_keys.pmm", import.meta.url);
   const targetVmdFile = new URL("../out/pmm-analysis/tda-parent-center-groove-transform-keys-target.vmd", import.meta.url);
-  if (!existsSync(template) || !existsSync(targetVmdFile)) {
+  if (skipMissing(t, [["Tda transform PMM", template], ["Tda target VMD", targetVmdFile]])) {
     return;
   }
 
@@ -312,10 +312,10 @@ test("patches real Tda same-shape PMM document keyframes from a target VMD", asy
   assert.equal(patched.comparison.counts.mismatches, 0);
 });
 
-test("grows real Tda base PMM document keyframe section from VMD without donor diff", async () => {
+test("grows real Tda base PMM document keyframe section from VMD without donor diff", async (t) => {
   const template = new URL("../../data/pmm/tda_base_no_motion.pmm", import.meta.url);
   const targetVmdFile = new URL("../out/pmm-analysis/tda-parent-center-groove-transform-keys-target.vmd", import.meta.url);
-  if (!existsSync(template) || !existsSync(targetVmdFile)) {
+  if (skipMissing(t, [["Tda base PMM", template], ["Tda target VMD", targetVmdFile]])) {
     return;
   }
 
@@ -341,10 +341,10 @@ test("grows real Tda base PMM document keyframe section from VMD without donor d
   assert.equal(patched.comparison.counts.mismatches, 0);
 });
 
-test("parses and grows a selected slot in a real two-model PMM document", async () => {
+test("parses and grows a selected slot in a real two-model PMM document", async (t) => {
   const template = new URL("../../data/pmm/tda_two_models_base_no_motion.pmm", import.meta.url);
   const targetVmdFile = new URL("../out/pmm-analysis/tda-multimodel-slot-transform-keys-target.vmd", import.meta.url);
-  if (!existsSync(template) || !existsSync(targetVmdFile)) {
+  if (skipMissing(t, [["Tda two-model PMM", template], ["Tda multimodel target VMD", targetVmdFile]])) {
     return;
   }
 
@@ -368,10 +368,10 @@ test("parses and grows a selected slot in a real two-model PMM document", async 
   assert.equal(patched.comparison.counts.mismatches, 0);
 });
 
-test("parses and grows a selected slot in a real multi-PMX PMM document", async () => {
+test("parses and grows a selected slot in a real multi-PMX PMM document", async (t) => {
   const template = new URL("../../data/pmm/tda_sour_base_no_motion.pmm", import.meta.url);
   const targetVmdFile = new URL("../out/pmm-analysis/tda-sour-common-transform-keys-target.vmd", import.meta.url);
-  if (!existsSync(template) || !existsSync(targetVmdFile)) {
+  if (skipMissing(t, [["Tda Sour PMM", template], ["Tda Sour target VMD", targetVmdFile]])) {
     return;
   }
 
@@ -447,7 +447,118 @@ function makeMinimalPmmV2() {
   writer.float32(1);
   writer.byte(0);
   writer.byte(0);
+  appendMinimalPmmV2Tail(writer);
   return writer.buffer();
+}
+
+function appendMinimalPmmV2Tail(writer) {
+  const zeroFloats = (count) => {
+    for (let index = 0; index < count; index += 1) {
+      writer.float32(0);
+    }
+  };
+
+  // Camera: initial keyframe, no additional keyframes, and current state.
+  writer.int32(0);
+  writer.int32(0);
+  writer.int32(0);
+  writer.float32(0);
+  zeroFloats(6);
+  writer.int32(-1);
+  writer.int32(-1);
+  writer.bytes(new Uint8Array(24));
+  writer.byte(1);
+  writer.int32(30);
+  writer.byte(0);
+  writer.int32(0);
+  zeroFloats(9);
+  writer.byte(1);
+
+  // Light: initial keyframe, no additional keyframes, and current state.
+  writer.int32(0);
+  writer.int32(0);
+  writer.int32(0);
+  zeroFloats(6);
+  writer.byte(0);
+  writer.int32(0);
+  zeroFloats(6);
+
+  // Accessory list is empty.
+  writer.byte(0);
+  writer.int32(0);
+  writer.byte(0);
+
+  // Timeline state.
+  writer.int32(0);
+  writer.int32(0);
+  writer.int32(0);
+  writer.int32(0);
+  writer.byte(0);
+  writer.byte(0);
+  writer.byte(0);
+  writer.byte(0);
+  writer.int32(0);
+  writer.int32(0);
+
+  // Audio, background video, and background image are disabled and empty.
+  writer.byte(0);
+  writer.fixedString("", 256);
+  writer.int32(0);
+  writer.int32(0);
+  writer.float32(1);
+  writer.fixedString("", 256);
+  writer.int32(0);
+  writer.int32(0);
+  writer.int32(0);
+  writer.float32(1);
+  writer.fixedString("", 256);
+  writer.byte(0);
+
+  // Display state.
+  writer.byte(0);
+  writer.byte(0);
+  writer.byte(0);
+  writer.float32(30);
+  writer.int32(0);
+  writer.int32(0);
+  writer.float32(0);
+  writer.byte(0);
+  writer.byte(0);
+
+  // Gravity: current state, initial keyframe, and no additional keyframes.
+  writer.float32(0);
+  writer.int32(0);
+  zeroFloats(3);
+  writer.byte(0);
+  writer.int32(0);
+  writer.int32(0);
+  writer.int32(0);
+  writer.byte(0);
+  writer.int32(0);
+  writer.float32(0);
+  zeroFloats(3);
+  writer.byte(0);
+  writer.int32(0);
+
+  // Self-shadow: current state, initial keyframe, and no additional keyframes.
+  writer.byte(0);
+  writer.float32(0);
+  writer.int32(0);
+  writer.int32(0);
+  writer.int32(0);
+  writer.byte(0);
+  writer.float32(0);
+  writer.byte(0);
+  writer.int32(0);
+}
+
+function skipMissing(t, entries) {
+  const missing = entries.filter(([, path]) => !existsSync(path)).map(([label, path]) => `${label}: ${path}`);
+  if (missing.length > 0) {
+    t.skip(`External fixture unavailable (${missing.join(", ")})`);
+    return true;
+  }
+  return false;
 }
 
 class BinaryWriter {

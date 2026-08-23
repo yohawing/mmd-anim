@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import iconv from "iconv-lite";
 import { inspectTemplateWriteProfile, planPmmTemplateCreation, writePmmFromTemplateProfile } from "../src/pmm-template-create.mjs";
 import { createSyntheticVmd } from "../src/vmd-writer.mjs";
+import { createUnittestOneBoneTemplate } from "./unittest-pmm-fixture.mjs";
 
 test("plans PMM template creation for a matching model slot and VMD", () => {
   const report = planPmmTemplateCreation({
@@ -175,19 +175,6 @@ function createSlotReport(overrides = {}) {
     boneNameCollisions: [],
     ...overrides,
   };
-}
-
-function createUnittestOneBoneTemplate(options = {}) {
-  const bytes = Buffer.alloc(0x400);
-  Buffer.from("Polygon Movie maker 0002\0", "latin1").copy(bytes, 0);
-  bytes.writeUInt16LE(1, 0x1ce);
-  bytes.writeUInt32LE(30, 0x1d6);
-  Buffer.from("14141414", "hex").copy(bytes, 0x1e2);
-  if (options.modelPath) {
-    const encoded = iconv.encode(options.modelPath, "cp932");
-    encoded.copy(bytes, 0x260);
-  }
-  return bytes;
 }
 
 function createVmd(bones) {

@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { normalizeOracleBatchManifest, prepareOracleBatch } from "../src/oracle-batch.mjs";
 import { createSyntheticVmd } from "../src/vmd-writer.mjs";
+
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("normalizes oracle batch PMX/VMD cases with template registry", () => {
   const manifest = normalizeOracleBatchManifest(
@@ -14,15 +17,15 @@ test("normalizes oracle batch PMX/VMD cases with template registry", () => {
       templates: [{ pmx: "../data/pmx/model.pmx", templatePmm: "../data/pmm/model_base.pmm", targetSlot: 2 }],
       cases: [{ name: "walk", pmx: "../data/pmx/model.pmx", vmd: "motions/walk.vmd" }],
     },
-    "F:/Develop/MMDDev/MMDDumper/oracle-batch.json",
+    resolve(packageRoot, "oracle-batch.json"),
   );
 
   assert.equal(manifest.cases[0].name, "walk");
-  assert.equal(manifest.outDir, resolve("out", "oracles"));
+  assert.equal(manifest.outDir, resolve(packageRoot, "out", "oracles"));
   assert.match(manifest.cases[0].pmx, /data[\\/]pmx[\\/]model\.pmx$/);
   assert.match(manifest.cases[0].templatePmm, /data[\\/]pmm[\\/]model_base\.pmm$/);
   assert.equal(manifest.cases[0].targetSlot, 2);
-  assert.match(manifest.cases[0].vmd, /MMDDumper[\\/]motions[\\/]walk\.vmd$/);
+  assert.equal(manifest.cases[0].vmd, resolve(packageRoot, "motions", "walk.vmd"));
 });
 
 test("normalizes oracle batch sendKeyAfterMs defaults and case overrides", () => {
@@ -34,7 +37,7 @@ test("normalizes oracle batch sendKeyAfterMs defaults and case overrides", () =>
         { name: "case-delay", pmx: "model.pmx", vmd: "motion.vmd", sendKeyAfterMs: 30000 },
       ],
     },
-    "F:/Develop/MMDDev/MMDDumper/oracle-batch.json",
+    resolve(packageRoot, "oracle-batch.json"),
   );
 
   assert.equal(manifest.cases[0].sendKeyAfterMs, 12000);
@@ -64,14 +67,14 @@ test("normalizes numeric-compare manifest cases from assets and oracle fields", 
         },
       ],
     },
-    "F:/Develop/MMDDev/MMDDumper/manifests/motion.json",
+    resolve(packageRoot, "manifests", "motion.json"),
   );
 
   assert.equal(manifest.cases[0].name, "walk");
-  assert.match(manifest.cases[0].pmx, /MMDDumper[\\/]data[\\/]pmx[\\/]model\.pmx$/);
-  assert.match(manifest.cases[0].templatePmm, /MMDDumper[\\/]data[\\/]pmm[\\/]model_base\.pmm$/);
-  assert.match(manifest.cases[0].vmd, /MMDDumper[\\/]manifests[\\/]motions[\\/]walk\.vmd$/);
-  assert.match(manifest.cases[0].oraclePath, /MMDDumper[\\/]runs[\\/]motion[\\/]walk[\\/]oracle\.actual\.jsonl$/);
+  assert.equal(manifest.cases[0].pmx, resolve(packageRoot, "data", "pmx", "model.pmx"));
+  assert.equal(manifest.cases[0].templatePmm, resolve(packageRoot, "data", "pmm", "model_base.pmm"));
+  assert.equal(manifest.cases[0].vmd, resolve(packageRoot, "manifests", "motions", "walk.vmd"));
+  assert.equal(manifest.cases[0].oraclePath, resolve(packageRoot, "runs", "motion", "walk", "oracle.actual.jsonl"));
   assert.deepEqual(manifest.cases[0].frames, [0, 30]);
 });
 
@@ -94,7 +97,7 @@ test("normalizes only mmd-native compatible cases from mixed camera manifests", 
         },
       ],
     },
-    "F:/Develop/MMDDev/MMDDumper/manifests/camera_motion.json",
+    resolve(packageRoot, "manifests", "camera_motion.json"),
   );
 
   assert.equal(manifest.cases.length, 1);
@@ -108,23 +111,23 @@ test("resolves oracle batch relative paths from the manifest directory", () => {
       defaults: { outDir: "out/nested-check" },
       cases: [{ name: "walk", pmx: "model.pmx", vmd: "motion.vmd" }],
     },
-    "F:/Develop/MMDDev/MMDDumper/out/nested-check/oracle-batch.json",
+    resolve(packageRoot, "out", "nested-check", "oracle-batch.json"),
   );
 
-  assert.match(manifest.outDir, /out[\\/]nested-check[\\/]out[\\/]nested-check$/);
-  assert.match(manifest.cases[0].pmx, /out[\\/]nested-check[\\/]model\.pmx$/);
-  assert.match(manifest.cases[0].vmd, /out[\\/]nested-check[\\/]motion\.vmd$/);
+  assert.equal(manifest.outDir, resolve(packageRoot, "out", "nested-check", "out", "nested-check"));
+  assert.equal(manifest.cases[0].pmx, resolve(packageRoot, "out", "nested-check", "model.pmx"));
+  assert.equal(manifest.cases[0].vmd, resolve(packageRoot, "out", "nested-check", "motion.vmd"));
 });
 
-test("prepares an oracle batch from PMX/VMD case inputs without launching MMD", async () => {
-  const pmx = resolve("..", "data", "pmx", "Tda式初音ミクV4X_Ver1.00", "Tda式初音ミクV4X_Ver1.00.pmx");
-  const templatePmm = resolve("..", "data", "pmm", "tda_base_no_motion.pmm");
-  const vmd = resolve("out", "pmm-analysis", "tda-parent-center-groove-transform-keys-target.vmd");
-  if (!existsSync(pmx) || !existsSync(templatePmm) || !existsSync(vmd)) {
+test("prepares an oracle batch from PMX/VMD case inputs without launching MMD", async (t) => {
+  const pmx = resolve(packageRoot, "..", "data", "pmx", "Tda式初音ミクV4X_Ver1.00", "Tda式初音ミクV4X_Ver1.00.pmx");
+  const templatePmm = resolve(packageRoot, "..", "data", "pmm", "tda_base_no_motion.pmm");
+  const vmd = resolve(packageRoot, "out", "pmm-analysis", "tda-parent-center-groove-transform-keys-target.vmd");
+  if (skipMissing(t, [["PMX", pmx], ["template PMM", templatePmm], ["target VMD", vmd]])) {
     return;
   }
 
-  const outDir = resolve("out", "test-oracle-batch");
+  const outDir = resolve(packageRoot, "out", "test-oracle-batch");
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
   const manifestPath = resolve(outDir, "oracle-batch.json");
@@ -189,7 +192,7 @@ test("prepares an oracle batch from PMX/VMD inputs without a template PMM", asyn
   assert.equal(result.results[0].patch.counts.mismatches, 0);
   assert.deepEqual(result.results[0].filter.skippedCounts, { boneFrames: 0, morphFrames: 0 });
   const fixture = JSON.parse(await readFile(result.results[0].fixturePath, "utf8"));
-  assert.match(fixture.mmdExe, /MMDDumper[\\/]MikuMikuDance_v932x64[\\/]MikuMikuDance\.exe$/);
+  assert.equal(fixture.mmdExe, resolve(packageRoot, "MikuMikuDance_v932x64", "MikuMikuDance.exe"));
   assert.equal(existsSync(result.results[0].project), true);
   assert.equal(existsSync(result.results[0].fixturePath), true);
 });
@@ -258,6 +261,15 @@ test("prepares a template-free camera dump batch with camera VMD and camera-mode
   assert.deepEqual(fixture.framesRange, { start: 0, end: 30, step: 1 });
   assert.equal(fixture.frames.length, 31);
 });
+
+function skipMissing(t, entries) {
+  const missing = entries.filter(([, path]) => !existsSync(path)).map(([label, path]) => `${label}: ${path}`);
+  if (missing.length > 0) {
+    t.skip(`External fixture unavailable (${missing.join(", ")})`);
+    return true;
+  }
+  return false;
+}
 
 function makeMinimalPmx() {
   const parts = [];

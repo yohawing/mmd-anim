@@ -59,6 +59,12 @@ def test_minimal_case_is_typed_and_normalized(tmp_path: Path):
     assert case.output_root == (tmp_path / "output").resolve()
 
 
+def test_frames_are_normalized_to_ascending_order(tmp_path: Path):
+    case = load_case(_write_case(tmp_path, frames=[30, 0, 15]))
+
+    assert case.frames == (0, 15, 30)
+
+
 def test_node_backend_accepts_camera_case(tmp_path: Path):
     case_path = _write_case(tmp_path, input={"cameraVmd": str(tmp_path / "assets" / "camera.vmd")})
 

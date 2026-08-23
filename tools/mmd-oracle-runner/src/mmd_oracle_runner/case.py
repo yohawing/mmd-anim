@@ -242,7 +242,7 @@ def _frames(value: Any, issues: list[ValidationIssue]) -> tuple[int, ...]:
     valid_frames = [frame for frame in value if isinstance(frame, int) and not isinstance(frame, bool)]
     if len(set(valid_frames)) != len(valid_frames):
         issues.append(ValidationIssue("frames", "duplicate frame values are not allowed"))
-    return tuple(valid_frames)
+    return tuple(sorted(valid_frames))
 
 
 def _backend(value: Any, issues: list[ValidationIssue]) -> GeneratorBackend | None:

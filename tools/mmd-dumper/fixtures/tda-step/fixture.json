@@ -1,0 +1,13 @@
+{
+  "name": "tda-step",
+  "mmdVersion": "9.32-x64",
+  "project": "../../../data/pmm/tda_step.pmm",
+  "frames": [0, 30, 60],
+  "dump": {
+    "bones": true,
+    "morphs": true,
+    "rigidBodies": false
+  },
+  "output": "oracle.actual.jsonl",
+  "timeoutMs": 60000
+}

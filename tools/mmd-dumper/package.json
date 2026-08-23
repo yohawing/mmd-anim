@@ -1,0 +1,43 @@
+{
+  "name": "mmd-oracle-dumper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.3.0",
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "test:all": "node --test \"test/**/*.test.mjs\" && node scripts/native-smoke.mjs",
+    "native:test": "node scripts/native-smoke.mjs",
+    "native:package": "node scripts/package-native.mjs",
+    "mmd:smoke:d3d9": "node scripts/mmd-first-load-smoke.mjs --trigger d3d9",
+    "mmd:smoke:d3d9-next-frame": "node scripts/mmd-first-load-smoke.mjs --trigger d3d9 --send-key-after-ms 3000 --send-key right --min-records 2 --min-last-frame 1",
+    "mmd:smoke:mmdplugin": "node scripts/mmd-first-load-smoke.mjs --trigger mmdplugin",
+    "mmd:smoke:mmdplugin-playback": "node scripts/mmd-first-load-smoke.mjs --trigger mmdplugin --send-key-after-ms 3000 --send-key p",
+    "mmd:smoke:mmdplugin-capture": "node scripts/mmd-first-load-smoke.mjs --trigger mmdplugin --send-key-after-ms 3000 --send-key p --min-records 0",
+    "capture:video": "node scripts/capture-to-video.mjs",
+    "mmd:capture-mp4": "node scripts/mmdplugin-capture-mp4.mjs",
+    "oracle-batch": "node src/cli.mjs oracle-batch",
+    "static-render": "node src/cli.mjs static-render",
+    "oracle-from-vmd": "node src/cli.mjs oracle-from-vmd",
+    "create-base-pmm-from-pmx": "node src/cli.mjs create-base-pmm-from-pmx",
+    "create-pmm-from-pmx-vmd": "node src/cli.mjs create-pmm-from-pmx-vmd",
+    "record": "node src/cli.mjs record",
+    "capture": "node src/cli.mjs capture",
+    "export-image": "node src/cli.mjs export-image",
+    "export-avi": "node src/cli.mjs export-avi",
+    "export-mp4": "node src/cli.mjs export-mp4",
+    "validate": "node src/cli.mjs validate",
+    "compare": "node src/cli.mjs compare",
+    "inspect-vmd": "node src/cli.mjs inspect-vmd",
+    "inspect-pmm-document-keyframes": "node src/cli.mjs inspect-pmm-document-keyframes",
+    "compare-pmm-document-vmd-keyframes": "node src/cli.mjs compare-pmm-document-vmd-keyframes",
+    "patch-pmm-document-vmd-keyframes": "node src/cli.mjs patch-pmm-document-vmd-keyframes",
+    "verify-coverage": "node src/cli.mjs verify-coverage"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.7.2"
+  }
+}

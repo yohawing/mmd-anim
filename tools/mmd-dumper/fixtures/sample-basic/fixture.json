@@ -1,0 +1,13 @@
+{
+  "name": "sample-basic",
+  "mmdVersion": "9.32-x64",
+  "project": "../../MikuMikuDance_v932x64/UserFile/サンプル（きしめん).pmm",
+  "frames": [0, 30, 60],
+  "dump": {
+    "bones": true,
+    "morphs": true,
+    "rigidBodies": false
+  },
+  "output": "oracle.actual.jsonl",
+  "timeoutMs": 60000
+}

@@ -46,8 +46,29 @@ export function comparePmmDocumentToVmd(pmm, vmd, options = {}) {
     vmdFrames: vmd.morphs,
     compareFrame: (pmmFrame, vmdFrame) => compareMorphFrame(pmmFrame, vmdFrame, options),
   });
+  const vmdCameraFrames = vmd.cameraFrames || [];
+  const vmdCameraFrame0 = vmdCameraFrames.some((frame) => frame.frame === 0);
+  const explicitPmmCameraFrame0 = (pmm.camera?.keyframes || []).some((frame) => frame.frame === 0);
+  const pmmCameraFrames = vmdCameraFrames.length > 0
+    ? [
+        ...(vmdCameraFrame0 && pmm.camera?.initialKeyframe && !explicitPmmCameraFrame0
+          ? [pmm.camera.initialKeyframe]
+          : []),
+        ...(pmm.camera?.keyframes || []),
+      ]
+    : [];
+  const cameraComparison = compareFrames({
+    kind: "camera",
+    pmmFrames: pmmCameraFrames,
+    vmdFrames: vmdCameraFrames,
+    keyOf: (frame) => String(frame.frame),
+    compareFrame: (pmmFrame, vmdFrame) => compareCameraFrame(pmmFrame, vmdFrame, options),
+  });
   const mismatchCount =
-    unsupportedChannels.length + boneComparison.mismatches.length + morphComparison.mismatches.length;
+    unsupportedChannels.length +
+    boneComparison.mismatches.length +
+    morphComparison.mismatches.length +
+    cameraComparison.mismatches.length;
   return {
     ok: mismatchCount === 0,
     targetSlot,
@@ -72,12 +93,12 @@ export function comparePmmDocumentToVmd(pmm, vmd, options = {}) {
     },
     boneComparison,
     morphComparison,
+    cameraComparison,
   };
 }
 
 function unsupportedVmdChannels(vmd) {
   return [
-    ["cameraFrames", vmd.counts.cameraFrames],
     ["lightFrames", vmd.counts.lightFrames],
     ["selfShadowFrames", vmd.counts.selfShadowFrames],
     ["propertyFrames", vmd.counts.propertyFrames],
@@ -87,8 +108,12 @@ function unsupportedVmdChannels(vmd) {
 }
 
 function compareNamedFrames({ kind, pmmFrames, vmdFrames, compareFrame }) {
-  const pmmByKey = frameMap(pmmFrames);
-  const vmdByKey = frameMap(vmdFrames);
+  return compareFrames({ kind, pmmFrames, vmdFrames, compareFrame });
+}
+
+function compareFrames({ kind, pmmFrames, vmdFrames, keyOf = namedFrameKey, compareFrame }) {
+  const pmmByKey = frameMap(pmmFrames, keyOf);
+  const vmdByKey = frameMap(vmdFrames, keyOf);
   const keys = [...new Set([...pmmByKey.keys(), ...vmdByKey.keys()])].sort();
   const mismatches = [];
   for (const key of keys) {
@@ -147,10 +172,113 @@ function compareMorphFrame(pmmFrame, vmdFrame, options) {
   return null;
 }
 
-function frameMap(frames) {
+function compareCameraFrame(pmmFrame, vmdFrame, options) {
+  const invalidFields = invalidCameraFields(pmmFrame, vmdFrame);
+  if (invalidFields.length > 0) {
+    return {
+      reason: "CAMERA_KEYFRAME_INVALID",
+      invalidFields,
+      pmm: cameraValues(pmmFrame, pmmFrame.interpolation),
+      vmd: cameraValues(vmdFrame, cameraInterpolationFromVmdFrame(vmdFrame)),
+    };
+  }
+  const distanceDiff = Math.abs(pmmFrame.distance - vmdFrame.distance);
+  const positionDiff = maxAbsDiff(pmmFrame.position, vmdFrame.position);
+  const rotationDiff = maxAbsDiff(pmmFrame.rotation, vmdFrame.rotation);
+  const fovDiff = Math.abs(pmmFrame.fov - vmdFrame.fov);
+  const pmmInterpolation = pmmFrame.interpolation;
+  const vmdInterpolation = cameraInterpolationFromVmdFrame(vmdFrame);
+  const interpolationMismatch = !equalNestedArrays(pmmInterpolation, vmdInterpolation);
+  const vmdPerspective = vmdFrame.perspective === 0 || vmdFrame.perspective === true;
+  const perspectiveMismatch = pmmFrame.perspective !== vmdPerspective;
+  const distanceEpsilon = options.cameraDistanceEpsilon ?? options.distanceEpsilon ?? 1e-5;
+  const positionEpsilon = options.cameraPositionEpsilon ?? options.positionEpsilon ?? 1e-5;
+  const rotationEpsilon = options.cameraRotationEpsilon ?? options.rotationEpsilon ?? 1e-5;
+  const fovEpsilon = options.cameraFovEpsilon ?? options.fovEpsilon ?? 0;
+  if (
+    distanceDiff > distanceEpsilon ||
+    positionDiff > positionEpsilon ||
+    rotationDiff > rotationEpsilon ||
+    fovDiff > fovEpsilon ||
+    perspectiveMismatch ||
+    interpolationMismatch
+  ) {
+    return {
+      reason: "CAMERA_KEYFRAME_MISMATCH",
+      distanceDiff,
+      positionDiff,
+      rotationDiff,
+      fovDiff,
+      perspectiveMismatch,
+      interpolationMismatch,
+      pmm: cameraValues(pmmFrame, pmmInterpolation),
+      vmd: cameraValues({ ...vmdFrame, perspective: vmdPerspective }, vmdInterpolation),
+    };
+  }
+  return null;
+}
+
+function invalidCameraFields(pmmFrame, vmdFrame) {
+  const invalid = [];
+  for (const [side, frame] of [["pmm", pmmFrame], ["vmd", vmdFrame]]) {
+    for (const field of ["distance", "fov"]) {
+      if (!Number.isFinite(frame[field])) {
+        invalid.push(`${side}.${field}`);
+      }
+    }
+    for (const field of ["position", "rotation"]) {
+      if (!isFiniteVector3(frame[field])) {
+        invalid.push(`${side}.${field}`);
+      }
+    }
+  }
+  return invalid;
+}
+
+function isFiniteVector3(value) {
+  return Array.isArray(value) && value.length === 3 && value.every(Number.isFinite);
+}
+
+function cameraValues(frame, interpolation) {
+  return {
+    distance: frame.distance,
+    position: frame.position,
+    rotation: frame.rotation,
+    interpolation,
+    fov: frame.fov,
+    perspective: frame.perspective,
+  };
+}
+
+function cameraInterpolationFromVmdFrame(frame) {
+  if (typeof frame.interpolationHex !== "string" || !/^[0-9a-f]{48}$/iu.test(frame.interpolationHex)) {
+    return null;
+  }
+  const bytes = Buffer.from(frame.interpolationHex, "hex");
+  return Array.from({ length: 6 }, (_, index) => [...bytes.subarray(index * 4, index * 4 + 4)]);
+}
+
+function equalNestedArrays(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  return left.every(
+    (values, index) =>
+      Array.isArray(values) &&
+      Array.isArray(right[index]) &&
+      values.length === right[index].length &&
+      values.every((value, valueIndex) => value === right[index][valueIndex]),
+  );
+}
+
+function namedFrameKey(frame) {
+  return `${frame.name}\u0000${frame.frame}`;
+}
+
+function frameMap(frames, keyOf = namedFrameKey) {
   const map = new Map();
   for (const frame of frames) {
-    const key = `${frame.name}\u0000${frame.frame}`;
+    const key = keyOf(frame);
     if (map.has(key)) {
       map.set(key, { duplicate: true, frame });
     }

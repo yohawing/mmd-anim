@@ -7,7 +7,8 @@ from typing import Any, Literal, Mapping
 
 GeneratorBackend = Literal["node-mmddumper", "rust-build-pmm"]
 _GENERATOR_BACKENDS = frozenset(("node-mmddumper", "rust-build-pmm"))
-_UNSUPPORTED_FEATURES = frozenset(("multi-model", "accessory", "property-ik"))
+_UNSUPPORTED_FEATURES = frozenset(("multi-model", "accessory"))
+_NODE_OPT_IN_FEATURES = frozenset(("property-ik",))
 
 
 @dataclass(frozen=True)
@@ -130,7 +131,14 @@ def _validate_payload(payload: Any, source_path: Path) -> OracleCase:
     for feature in requested_features:
         if feature in _UNSUPPORTED_FEATURES:
             issues.append(ValidationIssue("requestedFeatures", f"unsupported capability: {feature}"))
-        else:
+        elif feature in _NODE_OPT_IN_FEATURES and backend == "rust-build-pmm":
+            issues.append(
+                ValidationIssue(
+                    "requestedFeatures",
+                    "capability unsupported for generatorBackend rust-build-pmm: property-ik",
+                )
+            )
+        elif feature not in _NODE_OPT_IN_FEATURES:
             issues.append(ValidationIssue("requestedFeatures", f"unknown or unsupported capability: {feature}"))
 
     if issues:

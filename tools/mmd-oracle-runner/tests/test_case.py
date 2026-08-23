@@ -121,9 +121,21 @@ def test_rust_backend_rejects_camera_capability(tmp_path: Path):
 
 
 def test_unsupported_feature_is_fail_closed(tmp_path: Path):
-    issues = _issues(tmp_path, requestedFeatures=["property-ik"])
+    issues = _issues(tmp_path, requestedFeatures=["multi-model"])
 
     assert any(issue.field == "requestedFeatures" and "unsupported capability" in issue.reason for issue in issues)
+
+
+def test_property_feature_is_explicit_node_opt_in(tmp_path: Path):
+    case = load_case(_write_case(tmp_path, requestedFeatures=["property-ik"]))
+
+    assert case.requested_features == ("property-ik",)
+
+
+def test_rust_backend_rejects_property_feature(tmp_path: Path):
+    issues = _issues(tmp_path, generatorBackend="rust-build-pmm", requestedFeatures=["property-ik"])
+
+    assert any(issue.field == "requestedFeatures" and "rust-build-pmm" in issue.reason for issue in issues)
 
 
 def test_cli_emits_stable_success_json_and_zero(tmp_path: Path, capsys):
@@ -159,6 +171,7 @@ def test_cli_escapes_non_ascii_for_legacy_console(tmp_path: Path, monkeypatch):
     assert main(["validate", "--case", str(case_path)]) == 0
     payload = json.loads(stream.getvalue())
     assert payload["case"]["name"] == "体"
+    assert payload["caseFile"].endswith("ケース.json")
 
 
 class _NarrowStringStream(io.StringIO):

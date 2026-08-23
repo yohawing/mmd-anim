@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .case import CaseValidationError, load_case
 from .prepare import prepare_case
+from .record import record_case
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -31,6 +32,10 @@ def main(argv: list[str] | None = None) -> int:
         result = prepare_case(case)
         _print_json(result)
         return 0 if result["ok"] else 1
+    if args.command == "record":
+        result = record_case(case, args.mmd_exe)
+        _print_json(result)
+        return 0 if result["ok"] else 1
 
     _print_json(
         {
@@ -50,6 +55,9 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--case", required=True, help="absolute case JSON path")
     prepare = commands.add_parser("prepare", help="prepare one case without launching MMD")
     prepare.add_argument("--case", required=True, help="absolute case JSON path")
+    record = commands.add_parser("record", help="record one prepared case through MMD")
+    record.add_argument("--case", required=True, help="absolute case JSON path")
+    record.add_argument("--mmd-exe", required=True, help="absolute MikuMikuDance executable path")
     return parser
 
 

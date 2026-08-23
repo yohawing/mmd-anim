@@ -31,7 +31,7 @@ class CommandRunner(Protocol):
 
 
 class SubprocessRunner:
-    def __init__(self, timeout_seconds: float = 120.0):
+    def __init__(self, timeout_seconds: float | None = 120.0):
         self.timeout_seconds = timeout_seconds
 
     def run(self, command: Sequence[str], cwd: Path) -> CommandResult:

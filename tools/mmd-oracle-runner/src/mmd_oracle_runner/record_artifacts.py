@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from . import artifacts
 from .case import OracleCase
 
-TEMPORARY_ARTIFACT_KEYS = ("outputTemp", "doneTemp", "proxyLogTemp")
+TEMPORARY_ARTIFACT_KEYS = ("fixtureTemp", "outputTemp", "doneTemp", "proxyLogTemp")
 _RECORD_ARTIFACT_KEYS = (
     "output", "done", "result", *TEMPORARY_ARTIFACT_KEYS, "attempt", "resultTemp", "backupOutput", "backupDone"
 )
@@ -22,6 +22,7 @@ def paths(run_dir: Path) -> dict[str, Path]:
         "output": run_dir / "oracle.actual.jsonl",
         "done": run_dir / "oracle.actual.jsonl.done",
         "result": run_dir / "record-result.json",
+        "fixtureTemp": run_dir / ".record-fixture.json.tmp",
         "outputTemp": run_dir / ".oracle.actual.jsonl.tmp",
         "doneTemp": run_dir / ".oracle.actual.jsonl.done.tmp",
         "proxyLogTemp": run_dir / ".oracle.actual.jsonl.tmp.proxy.log",
@@ -86,11 +87,17 @@ def recover_interrupted_record_artifacts(paths: dict[str, Path], case: OracleCas
             _load_record_marker(result_path, case, paths, input_inventory)
         os.replace(result_temp, result_path)
 
+    marker = _load_record_marker(result_path, case, paths, input_inventory) if result_path.exists() else None
+    if marker is not None and marker.get("phase") == "promotion":
+        _rollback_interrupted_promotion(paths, marker)
+        return
+
     backups = ((paths["backupOutput"], paths["output"]), (paths["backupDone"], paths["done"]))
     existing_backups = [(backup, target) for backup, target in backups if backup.exists()]
     if not existing_backups:
         return
-    marker = _load_record_marker(result_path, case, paths, input_inventory)
+    if marker is None:
+        raise ValueError("interrupted record promotion requires record-result.json")
     owned = _owned_paths(marker, "record-result.json")
     completed = marker.get("ok") is True and marker.get("recorded") is True and marker.get("phase") == "complete"
     if completed and all(str(backup.resolve()) in owned for backup, _ in existing_backups):
@@ -187,9 +194,48 @@ def validate_mmd_exe(value: str | Path) -> Path:
     path = Path(value)
     if not path.is_absolute():
         raise ValueError("mmd_exe must be an absolute path")
+    artifacts.reject_reparse(path)
     if not path.is_file():
         raise ValueError("mmd_exe must point to an existing file")
-    return path
+    return path.resolve()
+
+
+def validate_record_path_separation(paths: dict[str, Path], input_inventory: dict[str, Any], mmd_exe: Path) -> None:
+    protected = {
+        **{name: Path(str(entry["path"])) for name, entry in input_inventory.items()},
+        "mmdExecutable": mmd_exe,
+        "project": paths["project"],
+        "fixture": paths["fixture"],
+    }
+    for key in _RECORD_ARTIFACT_KEYS:
+        writable = paths[key]
+        for protected_name, protected_path in protected.items():
+            same_path = artifacts.normalized_path(writable) == artifacts.normalized_path(protected_path)
+            same_file = writable.exists() and protected_path.exists() and os.path.samefile(writable, protected_path)
+            if same_path or same_file:
+                raise ValueError(f"record artifact {key} collides with protected path {protected_name}")
+
+
+def promotion_state(paths: dict[str, Path]) -> dict[str, Any]:
+    artifacts.reject_reparse(
+        paths["output"], paths["done"], paths["outputTemp"], paths["doneTemp"],
+        paths["backupOutput"], paths["backupDone"],
+    )
+    if paths["backupOutput"].exists() or paths["backupDone"].exists():
+        raise OSError("stale record promotion backup exists")
+    if not paths["outputTemp"].is_file() or not paths["doneTemp"].is_file():
+        raise OSError("validated temporary record artifacts are missing")
+    rewrite_done_output(paths["doneTemp"], paths["output"])
+    return {
+        "priorStable": {
+            key: artifact_identity(paths[key]) if paths[key].is_file() else None
+            for key in ("output", "done")
+        },
+        "candidateStable": {
+            "output": artifact_identity(paths["outputTemp"]),
+            "done": artifact_identity(paths["doneTemp"]),
+        },
+    }
 
 
 def fixture_path(fixture: dict[str, Any], field: str, run_dir: Path) -> Path:
@@ -214,23 +260,24 @@ def write_temp_fixture(
     artifacts.reject_reparse(run_dir, output, done, expected["proxyLogTemp"])
     if output.resolve() != expected["outputTemp"].resolve() or done.resolve() != expected["doneTemp"].resolve():
         raise ValueError("temporary record output paths must remain in the prepared artifact directory")
-    fd, raw_path = tempfile.mkstemp(prefix=".record-fixture-", suffix=".json", dir=run_dir)
-    path = Path(raw_path)
+    path = expected["fixtureTemp"]
+    artifacts.reject_reparse(path)
+    created = False
     try:
         payload = dict(fixture)
         payload["mmdExe"] = str(mmd_exe)
         payload["output"] = str(output)
         payload["done"] = str(done)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        with path.open("x", encoding="utf-8") as stream:
+            created = True
             json.dump(payload, stream, ensure_ascii=True, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
     except BaseException:
-        try:
+        if created:
             path.unlink(missing_ok=True)
-        finally:
-            raise
+        raise
     return path
 
 
@@ -246,49 +293,34 @@ def remove_temporary_artifacts(paths: dict[str, Path], owned_paths: set[str]) ->
             path.unlink()
 
 
-def promote_record(paths: dict[str, Path]) -> None:
+def promote_record(paths: dict[str, Path], journal: dict[str, Any]) -> None:
     output, done = paths["output"], paths["done"]
     temp_output, temp_done = paths["outputTemp"], paths["doneTemp"]
     backup_output, backup_done = paths["backupOutput"], paths["backupDone"]
     artifacts.reject_reparse(output, done, temp_output, temp_done, backup_output, backup_done)
     if backup_output.exists() or backup_done.exists():
         raise OSError("stale record promotion backup exists")
-    had_output, had_done = output.is_file(), done.is_file()
+    _, candidate = _promotion_artifacts(journal)
+    if (
+        not temp_output.is_file()
+        or not temp_done.is_file()
+        or artifact_identity(temp_output) != candidate["output"]
+        or artifact_identity(temp_done) != candidate["done"]
+    ):
+        raise ValueError("temporary record artifacts do not match the promotion journal")
     try:
-        rewrite_done_output(temp_done, output)
-        if had_output:
+        if output.is_file():
             os.replace(output, backup_output)
-        if had_done:
+        if done.is_file():
             os.replace(done, backup_done)
         os.replace(temp_output, output)
         os.replace(temp_done, done)
-    except OSError:
+    except OSError as error:
         try:
-            if output.exists() and not had_output:
-                output.unlink()
-            if done.exists() and not had_done:
-                done.unlink()
-            if backup_output.exists():
-                os.replace(backup_output, output)
-            if backup_done.exists():
-                os.replace(backup_done, done)
-        except OSError:
-            pass
+            _rollback_interrupted_promotion(paths, journal)
+        except (OSError, ValueError) as rollback_error:
+            raise OSError(f"record promotion failed and rollback is pending: {rollback_error}") from error
         raise
-
-
-def rollback_unpersisted_record(paths: dict[str, Path]) -> None:
-    pairs = ((paths["backupOutput"], paths["output"]), (paths["backupDone"], paths["done"]))
-    artifacts.reject_reparse(*(path for pair in pairs for path in pair))
-    for backup, target in pairs:
-        if backup.exists():
-            if not backup.is_file():
-                raise OSError(f"record promotion backup is not a file: {backup}")
-            os.replace(backup, target)
-        elif target.exists():
-            if not target.is_file():
-                raise OSError(f"unpersisted record artifact is not a file: {target}")
-            target.unlink()
 
 
 def rewrite_done_output(done: Path, output: Path) -> None:
@@ -359,10 +391,17 @@ def persist_result(result: dict[str, Any], paths: dict[str, Path]) -> None:
             "output": artifacts.exists(paths["backupOutput"]),
             "done": artifacts.exists(paths["backupDone"]),
         }
+        promotion_keys: set[str] = set()
+        if result.get("phase") == "promotion":
+            _promotion_artifacts(result)
+            promotion_keys = {"output", "done", "backupOutput", "backupDone"}
         result["ownedArtifacts"] = [
             str(paths[key])
             for key in _RECORD_ARTIFACT_KEYS
-            if artifacts.exists(paths[key]) or key in ("result", "resultTemp") or missing_recovery_targets.get(key, False)
+            if artifacts.exists(paths[key])
+            or key in ("result", "resultTemp")
+            or key in promotion_keys
+            or missing_recovery_targets.get(key, False)
         ]
         result["artifacts"]["result"]["exists"] = True
         with temporary.open("x", encoding="utf-8") as stream:
@@ -427,6 +466,74 @@ def _owned_paths(marker: dict[str, Any], label: str) -> set[str]:
     if not isinstance(owned, list) or any(not isinstance(path, str) for path in owned):
         raise ValueError(f"{label} ownedArtifacts is invalid")
     return {str(Path(path).resolve()) for path in owned}
+
+
+def _rollback_interrupted_promotion(paths: dict[str, Path], marker: dict[str, Any]) -> None:
+    prior, candidate = _promotion_artifacts(marker)
+    owned = _owned_paths(marker, "record-result.json")
+    for key, backup_key in (("output", "backupOutput"), ("done", "backupDone")):
+        target, backup = paths[key], paths[backup_key]
+        if str(target.resolve()) not in owned or str(backup.resolve()) not in owned:
+            raise ValueError("promotion journal does not own every recovery path")
+        artifacts.reject_reparse(target, backup)
+        if target.exists() and not target.is_file():
+            raise ValueError(f"interrupted stable {key} must be a regular file")
+        if backup.exists() and not backup.is_file():
+            raise ValueError(f"interrupted {backup_key} must be a regular file")
+        current_identity = artifact_identity(target) if target.is_file() else None
+        if backup.exists():
+            if current_identity is not None and current_identity != candidate[key]:
+                raise ValueError(f"interrupted stable {key} does not match the promoted candidate")
+            if prior[key] is None or artifact_identity(backup) != prior[key]:
+                raise ValueError(f"interrupted {backup_key} does not match the promotion journal")
+            os.replace(backup, target)
+        elif prior[key] is not None:
+            if current_identity != prior[key]:
+                raise ValueError(f"prior stable {key} cannot be recovered safely")
+        elif current_identity is not None:
+            if current_identity != candidate[key]:
+                raise ValueError(f"interrupted stable {key} does not match the promoted candidate")
+            target.unlink()
+
+
+def rollback_promotion(paths: dict[str, Path], marker: dict[str, Any]) -> None:
+    _rollback_interrupted_promotion(paths, marker)
+
+
+def _promotion_artifacts(marker: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    promotion = marker.get("promotion")
+    if not isinstance(promotion, dict) or set(promotion) != {"priorStable", "candidateStable"}:
+        raise ValueError("promotion journal has invalid artifact state")
+    prior, candidate = promotion["priorStable"], promotion["candidateStable"]
+    for label, identities, allow_missing in (
+        ("priorStable", prior, True), ("candidateStable", candidate, False)
+    ):
+        if not isinstance(identities, dict) or set(identities) != {"output", "done"}:
+            raise ValueError(f"promotion journal has invalid {label} state")
+        for key, identity in identities.items():
+            if identity is None and allow_missing:
+                continue
+            if (
+                not isinstance(identity, dict)
+                or set(identity) != {"size", "sha256"}
+                or isinstance(identity.get("size"), bool)
+                or not isinstance(identity.get("size"), int)
+                or identity["size"] < 0
+                or not isinstance(identity.get("sha256"), str)
+                or len(identity["sha256"]) != 64
+            ):
+                raise ValueError(f"promotion journal has invalid {label}.{key} identity")
+    return prior, candidate
+
+
+def artifact_identity(path: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
+            digest.update(chunk)
+    return {"size": size, "sha256": digest.hexdigest()}
 
 
 def _validate_prepared_fixture(fixture: dict[str, Any], case: OracleCase, artifact_paths: dict[str, Path]) -> None:

@@ -7,6 +7,7 @@ from .case import (
     ValidationIssue,
     load_case,
 )
+from .batch import run_batch
 from .prepare import prepare_case
 from .record import record_case
 
@@ -16,6 +17,7 @@ __all__ = [
     "OracleCase",
     "ValidationIssue",
     "load_case",
+    "run_batch",
     "prepare_case",
     "record_case",
 ]

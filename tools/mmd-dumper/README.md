@@ -117,6 +117,16 @@ pnpm -C MMDDumper oracle-from-vmd -- `
   --out-dir out\oracle-from-vmd-smoke
 ```
 
+## M0 Node Backend Characterization
+
+リポジトリ内の PMX/VMD だけで、body-only、body+camera、body+property-IK の3ケースを PMM 生成まで dry-run できます。manifest 基準の出力先は追跡対象外のルート `.ai/mmd-dumper/m0` です。
+
+```powershell
+pnpm oracle-batch -- --manifest manifests/m0.json --dry-run true
+```
+
+この経路は MMD を起動せず、`scene.pmm` と `fixture.json` を生成します。property-IK の VMD property frame は、現行 Node backend が未対応 channel として `droppedUnsupportedChannels.propertyFrames` に記録します。
+
 ## Existing Fixture
 
 既存の `fixture.json` をそのまま MMD で開いて dump する場合だけ `record` を使います。

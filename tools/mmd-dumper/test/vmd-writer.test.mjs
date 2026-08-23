@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { inspectVmd } from "../src/vmd-inventory.mjs";
 import { createSyntheticVmd } from "../src/vmd-writer.mjs";
 
 test("creates a minimal VMD with one bone and one morph frame", () => {
@@ -61,6 +62,30 @@ test("creates a VMD with multiple named bones", () => {
   assert.equal(bytes.readFloatLE(73), 1);
   assert.equal(bytes.readUInt32LE(69 + 111), 60);
   assert.equal(bytes.readFloatLE(73 + 111), 7);
+});
+
+test("roundtrips model-display IK property frames", () => {
+  const bytes = createSyntheticVmd({
+    modelName: "ik_fixture",
+    propertyFrames: [
+      {
+        frame: 30,
+        visible: 1,
+        iks: [{ name: "ik_controller", enabled: 0 }],
+      },
+    ],
+  });
+
+  const inventory = inspectVmd(bytes, { limit: Number.MAX_SAFE_INTEGER });
+  assert.equal(inventory.counts.propertyFrames, 1);
+  assert.deepEqual(inventory.propertyFrames, [
+    {
+      frame: 30,
+      visible: 1,
+      ikCount: 1,
+      iks: [{ name: "ik_controller", enabled: 0 }],
+    },
+  ]);
 });
 
 test("rejects text that does not fit fixed VMD fields", () => {

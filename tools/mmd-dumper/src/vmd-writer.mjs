@@ -14,12 +14,14 @@ export async function writeSyntheticVmd(file, options = {}) {
     boneFrames: normalizeBoneFrames(options).length,
     morphFrames: options.morphName ? 1 : 0,
     cameraFrames: normalizeCameraFrames(options).length,
+    propertyFrames: normalizePropertyFrames(options).length,
   };
 }
 
 export function createSyntheticVmd(options = {}) {
   const boneFrames = normalizeBoneFrames(options);
   const cameraFrames = normalizeCameraFrames(options);
+  const propertyFrames = normalizePropertyFrames(options);
   const chunks = [
     fixedText(vmdHeaderText, 30),
     fixedText(options.modelName ?? "MMDDumper", 20),
@@ -46,7 +48,10 @@ export function createSyntheticVmd(options = {}) {
   }
   chunks.push(uint32le(0)); // light frames
   chunks.push(uint32le(0)); // self-shadow frames
-  chunks.push(uint32le(0)); // model display / IK frames
+  chunks.push(uint32le(propertyFrames.length));
+  for (const frame of propertyFrames) {
+    chunks.push(createPropertyFrame(frame));
+  }
   return Buffer.concat(chunks);
 }
 
@@ -84,6 +89,17 @@ function normalizeCameraFrames(options) {
   }));
 }
 
+function normalizePropertyFrames(options) {
+  return (options.propertyFrames ?? []).map((frame) => ({
+    frame: frame.frame,
+    visible: frame.visible ?? 1,
+    iks: (frame.iks ?? []).map((ik) => ({
+      name: ik.name,
+      enabled: ik.enabled ? 1 : 0,
+    })),
+  }));
+}
+
 function createBoneFrame(options) {
   return Buffer.concat([
     fixedText(options.name, 15),
@@ -116,6 +132,15 @@ function createCameraFrame(options) {
     Buffer.from(options.interpolation),
     uint32le(options.fov),
     Buffer.from([options.perspective & 0xff]),
+  ]);
+}
+
+function createPropertyFrame(options) {
+  return Buffer.concat([
+    uint32le(options.frame),
+    Buffer.from([options.visible & 0xff]),
+    uint32le(options.iks.length),
+    ...options.iks.flatMap((ik) => [fixedText(ik.name, 20), Buffer.from([ik.enabled & 0xff])]),
   ]);
 }
 

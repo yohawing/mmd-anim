@@ -61,6 +61,7 @@ import { readVmdInventory } from "./vmd-inventory.mjs";
 import { compareVmdToPmmMotion } from "./vmd-pmm-compare.mjs";
 import { writeSyntheticVmd } from "./vmd-writer.mjs";
 import { verifyFixtureCoverage } from "./coverage.mjs";
+import { stageMmdCompatiblePmx } from "./pmx-mmd-compat.mjs";
 
 const [, , command, ...rawArgs] = process.argv;
 const args = rawArgs[0] === "--" ? rawArgs.slice(1) : rawArgs;
@@ -108,6 +109,9 @@ try {
       break;
     case "create-pmm-from-pmx-vmd":
       await createPmmFromPmxVmdCommand(args);
+      break;
+    case "stage-pmx":
+      await stagePmxCommand(args);
       break;
     case "inspect-pmx":
       await inspectModelCommand(args);
@@ -507,6 +511,15 @@ async function createPmmFromPmxVmdCommand(args) {
     cameraFov: optionalNumber(options, "camera-fov"),
   });
   console.log(JSON.stringify(report, null, 2));
+}
+
+async function stagePmxCommand(args) {
+  const options = parseFlags(args);
+  const result = await stageMmdCompatiblePmx(requireFlag(options, "input"), requireFlag(options, "output"));
+  if (result.encoding === "not-pmx") {
+    throw new Error(`stage-pmx requires a .pmx input, got ${result.input}.`);
+  }
+  writeJson({ ok: true, ...result });
 }
 
 function compactOracleFromVmdResult(result) {
@@ -1842,6 +1855,7 @@ function usage() {
   node src/cli.mjs static-render --manifest <static-render.json> [--case <name[,name]>] [--out-dir <dir>] [--dry-run true] [--image-format png|bmp] [--output-width 1024] [--output-height 768] [--crop-content true]
   node src/cli.mjs create-base-pmm-from-pmx --pmx <model.pmx> --out <base.pmm>
   node src/cli.mjs create-pmm-from-pmx-vmd --pmx <model.pmx> --vmd <motion.vmd> [--camera-vmd <camera.vmd>] --out <scene.pmm> [--missing-names skip|strict]
+  node src/cli.mjs stage-pmx --input <model.pmx> --output <model.mmd-utf16.pmx>
   node src/cli.mjs inspect-model <model.pmx|model.pmd> [--limit <count>]
   node src/cli.mjs inspect-pmx <model.pmx|model.pmd> [--limit <count>]
   node src/cli.mjs inspect-pmm <scene.pmm>

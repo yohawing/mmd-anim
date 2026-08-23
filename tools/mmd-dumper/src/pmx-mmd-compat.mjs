@@ -11,6 +11,7 @@ export async function stageMmdCompatiblePmx(input, output) {
     return { input, output: input, converted: false, encoding: "not-pmx" };
   }
   const bytes = await readFile(input);
+  validatePmxHeader(bytes);
   const encoding = bytes[9];
   if (encoding === 0) {
     return { input, output: input, converted: false, encoding: "utf-16le" };
@@ -21,6 +22,16 @@ export async function stageMmdCompatiblePmx(input, output) {
   const converted = convertPmxUtf8ToUtf16(bytes);
   await writeFile(output, converted);
   return { input, output, converted: true, encoding: "utf-8" };
+}
+
+function validatePmxHeader(bytes) {
+  if (bytes.byteLength < 9 || bytes.toString("ascii", 0, 4) !== "PMX ") {
+    throw new Error("Invalid PMX header.");
+  }
+  const headerSize = bytes[8];
+  if (headerSize < 8 || bytes.byteLength < 9 + headerSize) {
+    throw new Error(`Invalid PMX header size: ${headerSize}.`);
+  }
 }
 
 export function convertPmxUtf8ToUtf16(bytes) {

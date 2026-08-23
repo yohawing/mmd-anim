@@ -4,6 +4,8 @@ import { readOracleJsonl } from "./jsonl.mjs";
 export async function verifyFixtureCoverage(options) {
   const fixture = await readFixture(options.fixture);
   const records = await readOracleJsonl(options.actual ?? fixture.output);
+  const requireBones = options.requireBones ?? fixture.dump?.bones !== false;
+  const requireMorphs = options.requireMorphs ?? fixture.dump?.morphs !== false;
   if (fixture.playback && options.frames === undefined) {
     return verifyOraclePlaybackCoverage({
       records,
@@ -17,8 +19,8 @@ export async function verifyFixtureCoverage(options) {
     records,
     frames: options.frames ?? fixture.frames,
     frameEpsilon: options.frameEpsilon ?? 0.01,
-    requireBones: options.requireBones ?? true,
-    requireMorphs: options.requireMorphs ?? true,
+    requireBones,
+    requireMorphs,
     requireCamera: options.requireCamera ?? Boolean(fixture.dump?.camera && fixture.dump?.bones === false && fixture.dump?.morphs === false),
   });
 }
@@ -82,11 +84,12 @@ export function verifyOracleCoverage(options) {
         }
       : undefined;
     const hasCamera = !options.requireCamera || Boolean(cameraSummary?.available && cameraSummary?.current);
+    const requiresModels = options.requireBones === true || options.requireMorphs === true;
     return {
       target,
       matchedFrame: nearest?.frame,
       frameDiff: nearest ? Math.abs(nearest.frame - target) : null,
-      ok: hasFrame && hasCamera && (options.requireCamera || (hasModels && hasBones && hasMorphs)),
+      ok: hasFrame && hasCamera && (!requiresModels || (hasModels && hasBones && hasMorphs)),
       models: modelSummaries,
       camera: cameraSummary,
     };

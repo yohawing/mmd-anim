@@ -43,6 +43,20 @@ test("accepts camera-only target frames without runtime model channels", () => {
   assert.equal(report.targets[0].camera.current, true);
 });
 
+test("requires model and camera channels together when both are requested", () => {
+  const report = verifyOracleCoverage({
+    frames: [0],
+    records: [cameraRecord(0)],
+    requireBones: true,
+    requireMorphs: true,
+    requireCamera: true,
+  });
+
+  assert.equal(report.ok, false);
+  assert.equal(report.targets[0].camera.current, true);
+  assert.deepEqual(report.targets[0].models, []);
+});
+
 test("rejects camera-only target frames without current camera state", () => {
   const report = verifyOracleCoverage({
     frames: [0],

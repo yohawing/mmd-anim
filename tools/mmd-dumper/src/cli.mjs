@@ -302,8 +302,9 @@ async function fakeRecordCommand(args) {
 async function recordCommand(args) {
   const options = parseFlags(args);
   const fixturePath = requireFlag(options, "fixture");
+  const acceptDialog = parseBooleanFlag(options, "accept-dialog", false);
   const fixture = await readFixture(fixturePath);
-  const records = await recordWithMmd(fixture, { fixturePath, trigger: options.trigger });
+  const records = await recordWithMmd(fixture, { fixturePath, trigger: options.trigger, acceptDialog });
   console.log(JSON.stringify({ ok: true, output: fixture.output, records: records.length }, null, 2));
 }
 
@@ -1355,12 +1356,14 @@ async function patchPmmMotionRecordsCommand(args) {
 
 async function verifyCoverageCommand(args) {
   const options = parseFlags(args);
+  const requireCamera = parseBooleanFlag(options, "require-camera", undefined);
   const report = await verifyFixtureCoverage({
     fixture: requireFlag(options, "fixture"),
     actual: options.actual,
     frameEpsilon: optionalNumber(options, "frame-epsilon"),
-    requireBones: options["require-bones"] !== "false",
-    requireMorphs: options["require-morphs"] !== "false",
+    requireBones: parseBooleanFlag(options, "require-bones", undefined),
+    requireMorphs: parseBooleanFlag(options, "require-morphs", undefined),
+    requireCamera,
   });
   console.log(JSON.stringify(report, null, 2));
   if (!report.ok) {
@@ -1384,6 +1387,20 @@ function parseFlags(args) {
     i += 1;
   }
   return options;
+}
+
+function parseBooleanFlag(options, key, defaultValue) {
+  const value = options[key];
+  if (value === undefined) {
+    return defaultValue;
+  }
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  throw new Error(`--${key} must be true or false`);
 }
 
 function requireFlag(options, key) {

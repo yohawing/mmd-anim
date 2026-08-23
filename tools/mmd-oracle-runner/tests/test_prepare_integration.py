@@ -47,8 +47,8 @@ def test_real_m0_node_cases_match_baseline(tmp_path: Path):
 
 @pytest.mark.integration
 def test_real_rust_body_only_prepare(tmp_path: Path):
-    if shutil.which("cargo") is None or shutil.which("node") is None:
-        pytest.skip("Cargo and Node are required")
+    if shutil.which("cargo") is None or shutil.which("node") is None or not (REPO_ROOT / "tools" / "mmd-dumper" / "node_modules" / "iconv-lite").exists():
+        pytest.skip("Cargo and the Node backend dependencies are required")
     result = prepare_case(load_case(write_case(tmp_path, backend="rust-build-pmm")), repo_root=REPO_ROOT)
 
     assert result["ok"] is False and result["phase"] == "artifacts"

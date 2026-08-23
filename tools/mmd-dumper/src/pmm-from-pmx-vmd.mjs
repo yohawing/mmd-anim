@@ -187,7 +187,8 @@ export function createBasePmmFromPmxInventory(options) {
   writer.int32(0);
   writer.int32(0);
   writer.int32(0);
-  writer.byte(0); // expansion state count
+  writer.byte(modelStructure.fixedTracks); // expansion state count mirrors fixed-track count
+  writer.bytes(Buffer.alloc(modelStructure.fixedTracks)); // collapsed expansion state for each fixed track
   writer.int32(0); // vertical scroll
   writer.int32(0); // last frame
 

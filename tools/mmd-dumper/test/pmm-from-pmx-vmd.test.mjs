@@ -71,6 +71,12 @@ test("roundtrips generated PMM model structure lists and states", () => {
   const model = document.models[0];
 
   assert.equal(model.numFixedTracks, 3);
+  const expansionStateCountOffset = model.lastFrameIndexOffset - 4 - model.numFixedTracks - 1;
+  assert.equal(bytes[expansionStateCountOffset], model.numFixedTracks);
+  assert.deepEqual(
+    [...bytes.subarray(expansionStateCountOffset + 1, expansionStateCountOffset + 1 + model.numFixedTracks)],
+    [0, 0, 0],
+  );
   assert.deepEqual(model.constraintBoneIndices, [2]);
   assert.deepEqual(model.outsideParentSubjectBoneIndices, [-1, 0, 2]);
   assert.deepEqual(model.initialModelKeyframe.constraintStates, [true]);
@@ -82,6 +88,29 @@ test("roundtrips generated PMM model structure lists and states", () => {
   assert.equal(model.sections.morphStatesOffset - model.sections.boneStatesOffset, 3 * 31);
   assert.equal(model.sections.constraintStatesOffset - model.sections.morphStatesOffset, 4);
   assert.equal(model.sections.outsideParentStatesOffset - model.sections.constraintStatesOffset, 1);
+});
+
+test("writes twelve collapsed expansion states for a twelve-track PMM model", () => {
+  const fixedTracks = 12;
+  const bytes = createBasePmmFromPmxInventory({
+    pmx: "F:\\Develop\\MMDDev\\data\\pmx\\Tda.pmx",
+    inventory: {
+      modelName: "Tda-like model",
+      fixedTracks,
+      bones: [{ name: "センター" }],
+      morphs: [],
+    },
+  });
+  const model = parsePmmDocumentKeyframes(bytes).models[0];
+
+  assert.equal(model.numFixedTracks, fixedTracks);
+  const expansionStateCountOffset = model.lastFrameIndexOffset - 4 - model.numFixedTracks - 1;
+  assert.equal(bytes[expansionStateCountOffset], fixedTracks);
+  assert.deepEqual(
+    [...bytes.subarray(expansionStateCountOffset + 1, expansionStateCountOffset + 1 + fixedTracks)],
+    new Array(fixedTracks).fill(0),
+  );
+  assert.equal(model.sections.initialBoneKeyframesOffset, model.lastFrameIndexOffset + 4);
 });
 
 test("writes a PMM directly from PMX and VMD inputs", async () => {

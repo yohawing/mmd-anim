@@ -9,7 +9,10 @@ from typing import Any
 from . import artifacts
 from .case import OracleCase
 
-_RECORD_ARTIFACT_KEYS = ("output", "done", "result", "outputTemp", "doneTemp", "resultTemp", "backupOutput", "backupDone")
+TEMPORARY_ARTIFACT_KEYS = ("outputTemp", "doneTemp", "proxyLogTemp")
+_RECORD_ARTIFACT_KEYS = (
+    "output", "done", "result", *TEMPORARY_ARTIFACT_KEYS, "attempt", "resultTemp", "backupOutput", "backupDone"
+)
 
 
 def paths(run_dir: Path) -> dict[str, Path]:
@@ -21,6 +24,8 @@ def paths(run_dir: Path) -> dict[str, Path]:
         "result": run_dir / "record-result.json",
         "outputTemp": run_dir / ".oracle.actual.jsonl.tmp",
         "doneTemp": run_dir / ".oracle.actual.jsonl.done.tmp",
+        "proxyLogTemp": run_dir / ".oracle.actual.jsonl.tmp.proxy.log",
+        "attempt": run_dir / ".record-attempt.json",
         "resultTemp": run_dir / ".record-result.json.tmp",
         "backupOutput": run_dir / ".record-backup-output.tmp",
         "backupDone": run_dir / ".record-backup-done.tmp",
@@ -74,7 +79,9 @@ def recover_interrupted_record_artifacts(paths: dict[str, Path], case: OracleCas
     if result_temp.exists():
         if not result_temp.is_file():
             raise ValueError("interrupted record result must be a regular file")
-        _load_record_marker(result_temp, case, paths, input_inventory)
+        temporary_marker = _load_record_marker(result_temp, case, paths, input_inventory)
+        if str(result_temp.resolve()) not in _owned_paths(temporary_marker, "record-result.json"):
+            raise ValueError("interrupted record-result.json does not own its temporary file")
         if result_path.exists():
             _load_record_marker(result_path, case, paths, input_inventory)
         os.replace(result_temp, result_path)
@@ -87,9 +94,11 @@ def recover_interrupted_record_artifacts(paths: dict[str, Path], case: OracleCas
     owned = _owned_paths(marker, "record-result.json")
     completed = marker.get("ok") is True and marker.get("recorded") is True and marker.get("phase") == "complete"
     if completed and all(str(backup.resolve()) in owned for backup, _ in existing_backups):
-        for backup, _ in existing_backups:
-            backup.unlink()
-        return
+        stable_valid, _ = valid_done(paths["done"], paths["output"])
+        if stable_valid:
+            for backup, _ in existing_backups:
+                backup.unlink()
+            return
     for backup, target in existing_backups:
         if not backup.is_file():
             raise ValueError(f"interrupted record backup must be a regular file: {backup}")
@@ -97,6 +106,8 @@ def recover_interrupted_record_artifacts(paths: dict[str, Path], case: OracleCas
             raise ValueError(f"record-result.json does not own interrupted backup target: {target}")
     for backup, target in existing_backups:
         os.replace(backup, target)
+    if completed and not valid_done(paths["done"], paths["output"])[0]:
+        raise ValueError("record promotion recovery did not restore a valid stable dump")
 
 
 def validate_existing_record_artifacts(paths: dict[str, Path], case: OracleCase, input_inventory: dict[str, Any]) -> set[str]:
@@ -106,14 +117,70 @@ def validate_existing_record_artifacts(paths: dict[str, Path], case: OracleCase,
         return set()
     if any(not path.is_file() for path in existing):
         raise ValueError("existing record artifacts must be regular files")
-    marker_path = paths["result"]
-    if not marker_path.is_file():
+    owned: set[str] = set()
+    attempt_owned: set[str] = set()
+    marker_path, attempt_path = paths["result"], paths["attempt"]
+    if marker_path.is_file():
+        marker = _load_record_marker(marker_path, case, paths, input_inventory)
+        owned.update(_owned_paths(marker, "record-result.json"))
+    if attempt_path.is_file():
+        attempt_owned = _load_attempt_marker(attempt_path, case, paths, input_inventory)
+        owned.update(attempt_owned)
+    if not owned:
         raise ValueError("existing record artifacts require record-result.json")
-    marker = _load_record_marker(marker_path, case, paths, input_inventory)
-    owned = _owned_paths(marker, "record-result.json")
+    existing_temporary = {str(paths[key].resolve()) for key in TEMPORARY_ARTIFACT_KEYS if paths[key].exists()}
+    if existing_temporary and not existing_temporary.issubset(attempt_owned):
+        raise ValueError("existing temporary record artifacts require a valid record attempt marker")
     if any(str(path.resolve()) not in owned for path in existing):
         raise ValueError("record-result.json does not own every existing record artifact")
     return owned
+
+
+def write_attempt_marker(
+    paths: dict[str, Path],
+    case: OracleCase,
+    input_inventory: dict[str, Any],
+    mmd_executable: dict[str, Any],
+) -> set[str]:
+    marker = paths["attempt"]
+    artifacts.reject_reparse(marker, *(paths[key] for key in TEMPORARY_ARTIFACT_KEYS))
+    owned = {str(marker.resolve()), *(str(paths[key].resolve()) for key in TEMPORARY_ARTIFACT_KEYS)}
+    payload = {
+        "schemaVersion": 1,
+        "phase": "record-attempt",
+        "caseFile": str(case.source_path),
+        "artifactName": paths["result"].parent.name,
+        "inputInventory": input_inventory,
+        "frames": list(case.frames),
+        "mmdExecutable": mmd_executable,
+        "ownedArtifacts": sorted(owned),
+    }
+    created = False
+    try:
+        with marker.open("x", encoding="utf-8") as stream:
+            created = True
+            json.dump(payload, stream, ensure_ascii=True, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException as error:
+        if created:
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                raise OSError(f"cannot remove partial record attempt marker after write failure: {cleanup_error}") from error
+        raise
+    return owned
+
+
+def remove_attempt_marker(paths: dict[str, Path], owned_paths: set[str]) -> None:
+    marker = paths["attempt"]
+    if not marker.exists():
+        return
+    artifacts.reject_reparse(marker)
+    if not marker.is_file() or str(marker.resolve()) not in owned_paths:
+        raise OSError("record attempt marker is not owned by this run")
+    marker.unlink()
 
 
 def validate_mmd_exe(value: str | Path) -> Path:
@@ -143,8 +210,8 @@ def write_temp_fixture(
     output: Path,
     done: Path,
 ) -> Path:
-    artifacts.reject_reparse(run_dir, output, done)
     expected = paths(run_dir)
+    artifacts.reject_reparse(run_dir, output, done, expected["proxyLogTemp"])
     if output.resolve() != expected["outputTemp"].resolve() or done.resolve() != expected["doneTemp"].resolve():
         raise ValueError("temporary record output paths must remain in the prepared artifact directory")
     fd, raw_path = tempfile.mkstemp(prefix=".record-fixture-", suffix=".json", dir=run_dir)
@@ -168,7 +235,7 @@ def write_temp_fixture(
 
 
 def remove_temporary_artifacts(paths: dict[str, Path], owned_paths: set[str]) -> None:
-    for key in ("outputTemp", "doneTemp"):
+    for key in TEMPORARY_ARTIFACT_KEYS:
         path = paths[key]
         if path.exists():
             artifacts.reject_reparse(path)
@@ -210,6 +277,20 @@ def promote_record(paths: dict[str, Path]) -> None:
         raise
 
 
+def rollback_unpersisted_record(paths: dict[str, Path]) -> None:
+    pairs = ((paths["backupOutput"], paths["output"]), (paths["backupDone"], paths["done"]))
+    artifacts.reject_reparse(*(path for pair in pairs for path in pair))
+    for backup, target in pairs:
+        if backup.exists():
+            if not backup.is_file():
+                raise OSError(f"record promotion backup is not a file: {backup}")
+            os.replace(backup, target)
+        elif target.exists():
+            if not target.is_file():
+                raise OSError(f"unpersisted record artifact is not a file: {target}")
+            target.unlink()
+
+
 def rewrite_done_output(done: Path, output: Path) -> None:
     artifacts.reject_reparse(done, output)
     payload = read_json_object(done, "done marker")
@@ -221,7 +302,7 @@ def rewrite_done_output(done: Path, output: Path) -> None:
         os.fsync(stream.fileno())
 
 
-def valid_done(done: Path, output: Path) -> tuple[bool, str | None]:
+def valid_done(done: Path, output: Path, *, validate_records: bool = True) -> tuple[bool, str | None]:
     """Validate the done marker and JSONL framing; the caller owns oracle schema validation."""
     try:
         artifacts.reject_reparse(done, output)
@@ -248,9 +329,10 @@ def valid_done(done: Path, output: Path) -> tuple[bool, str | None]:
             for line_number, line in enumerate(stream, start=1):
                 if not line.strip():
                     continue
-                record = json.loads(line)
-                if not isinstance(record, dict):
-                    return False, f"dump JSONL line {line_number} must be a JSON object"
+                if validate_records:
+                    record = json.loads(line)
+                    if not isinstance(record, dict):
+                        return False, f"dump JSONL line {line_number} must be a JSON object"
                 actual_records += 1
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         return False, f"cannot read dump JSONL records: {error}"
@@ -273,7 +355,15 @@ def persist_result(result: dict[str, Any], paths: dict[str, Path]) -> None:
     created = False
     try:
         artifacts.reject_reparse(path.parent, *paths.values())
-        result["ownedArtifacts"] = [str(paths[key]) for key in _RECORD_ARTIFACT_KEYS if artifacts.exists(paths[key]) or key == "result"]
+        missing_recovery_targets = {
+            "output": artifacts.exists(paths["backupOutput"]),
+            "done": artifacts.exists(paths["backupDone"]),
+        }
+        result["ownedArtifacts"] = [
+            str(paths[key])
+            for key in _RECORD_ARTIFACT_KEYS
+            if artifacts.exists(paths[key]) or key in ("result", "resultTemp") or missing_recovery_targets.get(key, False)
+        ]
         result["artifacts"]["result"]["exists"] = True
         with temporary.open("x", encoding="utf-8") as stream:
             created = True
@@ -314,6 +404,22 @@ def _load_record_marker(path: Path, case: OracleCase, paths: dict[str, Path], in
         raise ValueError("record-result.json frames are stale")
     _owned_paths(marker, "record-result.json")
     return marker
+
+
+def _load_attempt_marker(path: Path, case: OracleCase, paths: dict[str, Path], input_inventory: dict[str, Any]) -> set[str]:
+    marker = read_json_object(path, "record attempt marker")
+    expected_owned = {str(path.resolve()), *(str(paths[key].resolve()) for key in TEMPORARY_ARTIFACT_KEYS)}
+    if (
+        marker.get("schemaVersion") != 1
+        or marker.get("phase") != "record-attempt"
+        or marker.get("caseFile") != str(case.source_path)
+        or marker.get("artifactName") != paths["result"].parent.name
+        or marker.get("inputInventory") != input_inventory
+        or marker.get("frames") != list(case.frames)
+        or _owned_paths(marker, "record attempt marker") != expected_owned
+    ):
+        raise ValueError("record attempt marker does not match the current case")
+    return expected_owned
 
 
 def _owned_paths(marker: dict[str, Any], label: str) -> set[str]:

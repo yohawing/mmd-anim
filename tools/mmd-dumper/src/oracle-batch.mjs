@@ -92,6 +92,7 @@ async function runOneCase(testCase, options) {
     name: testCase.name,
     pmx: testCase.pmx,
     vmd: testCase.vmd,
+    sourceCounts: { bodyVmd: result.sourceCounts },
     templatePmm: testCase.templatePmm,
     targetSlot: testCase.targetSlot,
     project: result.project,
@@ -167,6 +168,10 @@ async function runOneTemplateFreeCase(testCase, options) {
     stagedPmx,
     vmd: testCase.vmd,
     cameraVmd: testCase.cameraVmd,
+    sourceCounts: {
+      bodyVmd: vmd.counts,
+      ...(cameraVmd ? { cameraVmd: cameraVmd.counts } : {}),
+    },
     templatePmm: null,
     targetSlot: 0,
     project,

@@ -150,6 +150,9 @@ test("prepares an oracle batch from PMX/VMD case inputs without launching MMD", 
   assert.equal(result.ok, true);
   assert.equal(result.cases, 1);
   assert.equal(result.results[0].name, "tda-transform");
+  assert.deepEqual(Object.keys(result.results[0].sourceCounts.bodyVmd), [
+    "boneFrames", "morphFrames", "cameraFrames", "lightFrames", "selfShadowFrames", "propertyFrames",
+  ]);
   assert.equal(result.results[0].patch.counts.mismatches, 0);
   assert.equal(existsSync(result.results[0].project), true);
   assert.equal(existsSync(result.results[0].fixturePath), true);
@@ -190,6 +193,16 @@ test("prepares an oracle batch from PMX/VMD inputs without a template PMM", asyn
   assert.equal(result.results[0].mode, "pmx-vmd-generated-pmm");
   assert.equal(result.results[0].templatePmm, null);
   assert.equal(result.results[0].patch.counts.mismatches, 0);
+  assert.deepEqual(result.results[0].sourceCounts, {
+    bodyVmd: {
+      boneFrames: 1,
+      morphFrames: 1,
+      cameraFrames: 0,
+      lightFrames: 0,
+      selfShadowFrames: 0,
+      propertyFrames: 0,
+    },
+  });
   assert.deepEqual(result.results[0].filter.skippedCounts, { boneFrames: 0, morphFrames: 0 });
   const fixture = JSON.parse(await readFile(result.results[0].fixturePath, "utf8"));
   assert.equal(fixture.mmdExe, resolve(packageRoot, "MikuMikuDance_v932x64", "MikuMikuDance.exe"));
@@ -245,6 +258,24 @@ test("prepares a template-free camera dump batch with camera VMD and camera-mode
 
   assert.equal(result.ok, true);
   assert.match(result.results[0].cameraVmd, /camera\.vmd$/);
+  assert.deepEqual(result.results[0].sourceCounts, {
+    bodyVmd: {
+      boneFrames: 0,
+      morphFrames: 0,
+      cameraFrames: 0,
+      lightFrames: 0,
+      selfShadowFrames: 0,
+      propertyFrames: 0,
+    },
+    cameraVmd: {
+      boneFrames: 0,
+      morphFrames: 0,
+      cameraFrames: 2,
+      lightFrames: 0,
+      selfShadowFrames: 0,
+      propertyFrames: 0,
+    },
+  });
   const fixture = JSON.parse(await readFile(result.results[0].fixturePath, "utf8"));
   assert.deepEqual(fixture.dump, {
     bones: false,

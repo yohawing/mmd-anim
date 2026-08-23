@@ -49,6 +49,7 @@ export async function prepareOracleFromVmd(options) {
     mode: "oracle-from-vmd-prepare",
     templatePmm,
     targetVmd,
+    sourceCounts: vmd.counts,
     targetSlot: options.targetSlot ?? 0,
     project,
     fixturePath,

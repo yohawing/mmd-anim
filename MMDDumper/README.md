@@ -12,6 +12,8 @@ pnpm --dir MMDDumper install --frozen-lockfile
 
 native DLL をビルドする場合は Visual Studio の C++ ツール、CMake、MMDPlugin SDK の `MMDExport.lib` と `mmd_plugin.h` が必要です。入力資産は `MMDDumper` の外部に置き、manifest または fixture から絶対パス／相対パスで指定します。
 
+外部 MMD／PMM／PMX／VMD に依存するローカル fixture はコミットしません。`MMDDumper/fixtures/` は原則 ignore され、リポジトリに残すのは自己完結した `fixtures/m0/` の characterization fixture だけです。
+
 ## 基本操作
 
 PMX から MMD で開ける最小 PMM を作成します。

@@ -16,6 +16,12 @@
 *.dll
 *.lib
 
+# Fixture manifests that point at local MMD/data assets stay out of the repo.
+# Keep only the repository-local M0 characterization fixture below.
+/fixtures/*
+!/fixtures/m0/
+!/fixtures/m0/**
+
 /dist/
 /coverage/
 /node_modules/

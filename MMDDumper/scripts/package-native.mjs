@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 
@@ -27,11 +27,6 @@ const artifacts = [
     required: false,
   },
   {
-    name: "README.md",
-    source: resolve(root, "native", "README.md"),
-    required: true,
-  },
-  {
     name: "oracle-v1.schema.json",
     source: resolve(root, "schema", "oracle-v1.schema.json"),
     required: true,
@@ -55,7 +50,7 @@ for (const artifact of artifacts) {
 }
 
 const exampleDumpPath = resolve(root, "fixtures", "sample-basic", "oracle.actual.jsonl").replaceAll("\\", "\\\\");
-const installText = `# MMD Oracle Dumper local package
+const installText = `# MMDDumper native package
 
 Preferred MMDPlugin install:
 
@@ -80,7 +75,10 @@ $env:MMD_ORACLE_DUMP_ON_MMDPLUGIN = "1"
 This package is a local oracle recorder prototype. It is not a generic injector and does not install anything globally.
 `;
 
-await writeFile(resolve(outDir, "INSTALL.md"), installText, "utf8");
+const packageReadme = resolve(outDir, "README.md");
+await rm(resolve(outDir, "INSTALL.md"), { force: true });
+await writeFile(packageReadme, installText, "utf8");
+copied.push({ name: "README.md", source: packageReadme, destination: packageReadme });
 
 const schema = JSON.parse(await readFile(resolve(root, "schema", "oracle-v1.schema.json"), "utf8"));
 const manifest = {

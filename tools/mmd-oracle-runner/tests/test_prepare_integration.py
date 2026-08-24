@@ -13,7 +13,7 @@ from prepare_test_support import M0_BASELINE, REPO_ROOT, write_case
 
 @pytest.mark.integration
 def test_real_m0_node_cases_match_baseline(tmp_path: Path):
-    if shutil.which("node") is None or not (REPO_ROOT / "tools" / "mmd-dumper" / "node_modules" / "iconv-lite").exists():
+    if shutil.which("node") is None or not (REPO_ROOT / "MMDDumper" / "node_modules" / "iconv-lite").exists():
         pytest.skip("Node backend dependencies are not installed")
     for name, kwargs in (
         ("body-only", {}),
@@ -47,7 +47,7 @@ def test_real_m0_node_cases_match_baseline(tmp_path: Path):
 
 @pytest.mark.integration
 def test_real_rust_body_only_prepare(tmp_path: Path):
-    if shutil.which("cargo") is None or shutil.which("node") is None or not (REPO_ROOT / "tools" / "mmd-dumper" / "node_modules" / "iconv-lite").exists():
+    if shutil.which("cargo") is None or shutil.which("node") is None or not (REPO_ROOT / "MMDDumper" / "node_modules" / "iconv-lite").exists():
         pytest.skip("Cargo and the Node backend dependencies are required")
     result = prepare_case(load_case(write_case(tmp_path, backend="rust-build-pmm")), repo_root=REPO_ROOT)
 

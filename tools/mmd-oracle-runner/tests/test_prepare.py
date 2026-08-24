@@ -44,7 +44,7 @@ def test_fake_node_prepare_writes_stable_result_and_never_records(tmp_path: Path
     command, cwd = runner.calls[1]
     assert command[0] == "node" and "--dry-run" in command and "true" in command
     assert "record" not in command
-    assert cwd == REPO_ROOT / "tools" / "mmd-dumper"
+    assert cwd == REPO_ROOT / "MMDDumper"
 
 
 def test_property_frames_without_opt_in_fail_closed_after_node_preflight(tmp_path: Path):

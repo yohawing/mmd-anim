@@ -38,7 +38,7 @@ from .record_artifacts import (
     write_temp_fixture as _write_temp_fixture,
 )
 
-_NODE_ROOT = Path("tools") / "mmd-dumper"
+_NODE_ROOT = Path("MMDDumper")
 _NODE_CLI = _NODE_ROOT / "src" / "cli.mjs"
 _DIAGNOSTIC_LIMIT = 4096
 _TIMEOUT_MARKER = "Timed out waiting for"

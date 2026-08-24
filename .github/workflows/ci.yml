@@ -11,6 +11,31 @@ permissions:
   contents: read
 
 jobs:
+  mmddumper:
+    name: MMDDumper Node tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.3.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: MMDDumper/pnpm-lock.yaml
+
+      - name: Install MMDDumper dependencies
+        run: pnpm --dir MMDDumper install --frozen-lockfile
+
+      - name: Test MMDDumper
+        run: pnpm --dir MMDDumper test
+
   checks:
     name: Workspace checks
     runs-on: ubuntu-latest

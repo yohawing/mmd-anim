@@ -104,7 +104,7 @@ def prepare_case(case: OracleCase, *, runner: CommandRunner | None = None, repo_
 
 
 def _prepare_node(case: OracleCase, result: dict[str, Any], runner: CommandRunner, repo_root: Path, work_root: Path, work_dir: Path, artifact_name: str, model_path: Path) -> bool:
-    node_root = repo_root / "tools" / "mmd-dumper"
+    node_root = repo_root / "MMDDumper"
     manifest_path = work_dir / ".node-oracle-manifest.json"
     with manifest_path.open("x", encoding="utf-8") as stream:
         stream.write(json.dumps(_node_manifest(case, artifact_name, model_path), ensure_ascii=True, indent=2) + "\n")
@@ -196,7 +196,7 @@ def _prepare_node(case: OracleCase, result: dict[str, Any], runner: CommandRunne
 
 
 def _stage_pmx(case: OracleCase, result: dict[str, Any], runner: CommandRunner, repo_root: Path, staged_path: Path, final_path: Path) -> Path | None:
-    node_root = repo_root / "tools" / "mmd-dumper"
+    node_root = repo_root / "MMDDumper"
     outcome = runner.run(("node", str(node_root / "src" / "cli.mjs"), "stage-pmx", "--input", str(case.pmx), "--output", str(staged_path)), node_root)
     _set_backend_diagnostics(result, outcome, "pmxStaging")
     if outcome.exit_code != 0:
@@ -404,7 +404,7 @@ def _artifact_name(name: str) -> str:
 def _write_fixture(case: OracleCase, fixture_path: Path, scene_path: Path, output: Path, repo_root: Path) -> None:
     fixture = {
         "name": case.name, "mmdVersion": "9.32-x64",
-        "mmdExe": str(repo_root / "tools" / "mmd-dumper" / "MikuMikuDance_v932x64" / "MikuMikuDance.exe"),
+        "mmdExe": str(repo_root / "MMDDumper" / "MikuMikuDance_v932x64" / "MikuMikuDance.exe"),
         "project": str(scene_path), "frames": list(case.frames), "output": str(output), "done": str(output) + ".done",
         "timeoutMs": 60000, "dump": {"bones": True, "morphs": True, "camera": case.camera_vmd is not None, "cameraKeyframes": True, "sceneParameters": False, "rigidBodies": False},
     }

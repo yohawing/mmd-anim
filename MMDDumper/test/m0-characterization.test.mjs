@@ -11,7 +11,7 @@ import { readVmdInventory } from "../src/vmd-inventory.mjs";
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const manifestPath = resolve(packageRoot, "manifests", "m0.json");
 const baselinePath = resolve(packageRoot, "fixtures", "m0", "expected-baseline.json");
-const repositoryRoot = resolve(packageRoot, "..", "..");
+const repositoryRoot = resolve(packageRoot, "..");
 
 test("M0 characterizes the three Node backend dry-run cases", async () => {
   const manifest = await readOracleBatchManifest(manifestPath);

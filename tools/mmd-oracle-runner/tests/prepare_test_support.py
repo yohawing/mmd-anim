@@ -6,7 +6,7 @@ from pathlib import Path
 from mmd_oracle_runner.prepare import CommandResult
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-M0_FIXTURE_ROOT = REPO_ROOT / "tools" / "mmd-dumper" / "fixtures" / "m0"
+M0_FIXTURE_ROOT = REPO_ROOT / "MMDDumper" / "fixtures" / "m0"
 M0_BASELINE = json.loads((M0_FIXTURE_ROOT / "expected-baseline.json").read_text(encoding="utf-8"))
 
 

@@ -33,7 +33,7 @@ from .record_artifacts import (
     rollback_promotion as _rollback_promotion,
     valid_done as _valid_done,
     validate_existing_record_artifacts as _validate_existing_record_artifacts,
-    validate_mmd_exe as _validate_mmd_exe,
+    resolve_mmd_exe as _resolve_mmd_exe,
     validate_record_path_separation as _validate_record_path_separation,
     write_attempt_marker as _write_attempt_marker,
     write_temp_fixture as _write_temp_fixture,
@@ -49,7 +49,7 @@ _PHASES = ("launchGuard", "process", "timeout", "dialog", "done", "schema", "cov
 
 def record_case(
     case: OracleCase,
-    mmd_exe: str | Path,
+    mmd_exe: str | Path | None = None,
     *,
     runner: CommandRunner | None = None,
     repo_root: Path | None = None,
@@ -100,7 +100,7 @@ def record_case(
         if not result["errors"]:
             try:
                 prepared = _load_prepared_artifacts(case, paths, result["inputInventory"])
-                mmd_path = _validate_mmd_exe(mmd_exe)
+                mmd_path = _resolve_mmd_exe(mmd_exe)
                 _validate_record_path_separation(paths, result["inputInventory"], mmd_path)
                 result["mmdExecutable"] = _file_identity(mmd_path)
                 _recover_interrupted_record_artifacts(paths, case, result["inputInventory"])

@@ -5,7 +5,7 @@ import json
 import os
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from . import artifacts
 from .case import OracleCase
@@ -209,6 +209,15 @@ def validate_mmd_exe(value: str | Path) -> Path:
     if not path.is_file():
         raise ValueError("mmd_exe must point to an existing file")
     return path.resolve()
+
+
+def resolve_mmd_exe(value: str | Path | None, *, environment: Mapping[str, str] | None = None) -> Path:
+    """Resolve an explicit executable path or the configured process environment."""
+    variables = os.environ if environment is None else environment
+    candidate = value if value is not None else variables.get("MMD_DUMPER_MMD_EXE")
+    if not isinstance(candidate, (str, Path)) or not str(candidate).strip():
+        raise ValueError("mmd_exe is required; pass --mmd-exe or set MMD_DUMPER_MMD_EXE")
+    return validate_mmd_exe(candidate)
 
 
 def validate_record_path_separation(paths: dict[str, Path], input_inventory: dict[str, Any], mmd_exe: Path) -> None:

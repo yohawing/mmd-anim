@@ -1,34 +1,42 @@
 # MMDDumper
 
-`MMDDumper`は、MikuMikuDance 9.32 x64で評価したボーンとモーフの状態をJSONLとして保存する、リポジトリ内のネイティブダンパーです。PMXとbody VMDからPMMを生成し、指定したフレームをMMDで再生して記録できます。実行時にNode.js、npm、pnpmは必要ありません。
+`MMDDumper` is a repository-local native dumper that records bone and morph states evaluated by MikuMikuDance 9.32 x64 as JSONL. It builds a PMM scene from a PMX model and a body VMD motion, then records selected frames while MMD plays the scene. Node.js, npm, and pnpm are not required at runtime.
 
-## 前提条件
+## Prerequisites
 
-準備だけならRustとPython 3.10が必要です。ネイティブバイナリのビルドには、対象環境のCMakeとC++コンパイラも必要です。
+Preparation requires Rust and Python 3.10. Building the native binaries also requires CMake and a C++ compiler for the target environment.
 
-MMDを起動する記録処理は、Windowsのデスクトップセッションで実行します。MMD本体、PMX、VMDなどのアセットはリポジトリへ追加せず、ケースファイルから絶対パスで指定します。
+Recording starts MMD in an interactive Windows desktop session. Do not add MMD, PMX, VMD, or other external assets to the repository. Reference them with absolute paths in the case file or environment configuration.
 
-## ネイティブバイナリをビルドする
+Configure the MMD executable once for the local machine:
 
-リポジトリのルートで次を実行します。
+```powershell
+$env:MMD_DUMPER_MMD_EXE = (Resolve-Path .\MikuMikuDance.exe).Path
+```
+
+The `--mmd-exe` option remains available as a one-off override. The `MMD_DUMPER_MMD_EXE` environment variable is never committed to the repository.
+
+## Build the native binaries
+
+Run these commands from the repository root.
 
 ```powershell
 python MMDDumper/scripts/native_smoke.py
 python MMDDumper/scripts/package_native.py
 ```
 
-ビルドとパッケージの出力先は`MMDDumper/out/`です。このディレクトリはGitの管理対象外です。
+Build and package outputs are written to `MMDDumper/out/`. This directory is excluded from Git.
 
-`MMDDumper/lib/mmd/MMDExport.lib`がある場合は、MMD向けダンパーDLLもビルドされます。SDKのライブラリやMMD本体は配布物に含まれません。
+When `MMDDumper/lib/mmd/MMDExport.lib` is available, the MMD-facing dumper DLL is built as well. SDK libraries and the MMD executable are not included in the package.
 
-## ケースを作成する
+## Create a case
 
-ケースは、入力アセット、評価フレーム、出力先をまとめたJSONファイルです。次の例は、現在のディレクトリにある`model.pmx`と`motion.vmd`からケースを作成します。別の場所にあるアセットを使う場合は、`Resolve-Path`の引数を置き換えます。
+A case JSON file defines the input assets, evaluation frames, and output directory. The following example creates a case from `model.pmx` and `motion.vmd` in the current directory. Replace the `Resolve-Path` arguments when the assets are stored elsewhere.
 
 ```powershell
 $Pmx = (Resolve-Path .\model.pmx).Path
 $BodyVmd = (Resolve-Path .\motion.vmd).Path
-$OutputRoot = (Join-Path $PWD 'mmd-dumper-output')
+$OutputRoot = Join-Path $PWD 'mmd-dumper-output'
 
 @{
   schemaVersion = 1
@@ -45,11 +53,11 @@ $OutputRoot = (Join-Path $PWD 'mmd-dumper-output')
 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath .\case.json -Encoding utf8
 ```
 
-`frames`には重複しない0以上のフレーム番号を指定します。`outputRoot`は既存のファイルではなく、ケースごとの出力ディレクトリを指定してください。
+`frames` must contain unique, non-negative frame numbers. `outputRoot` must identify a case output directory rather than an existing file.
 
-## PMMを準備する
+## Prepare the PMM scene
 
-Python runnerが入力を検証し、PMXをMMD互換のUTF-16LEテキストへ必要に応じて変換してから、`mmd-anim-cli build-pmm`を呼び出します。PMMのバイナリ生成は`mmd-anim-format`のRust実装が担当し、MMDは起動しません。
+The Python runner validates the inputs, converts PMX text to MMD-compatible UTF-16LE when necessary, and invokes `mmd-anim-cli build-pmm`. The Rust implementation in `mmd-anim-format` writes the PMM binary; MMD is not launched during preparation.
 
 ```powershell
 $CasePath = (Resolve-Path .\case.json).Path
@@ -58,44 +66,43 @@ uv run --project tools/mmd-oracle-runner mmd-oracle-runner validate --case $Case
 uv run --project tools/mmd-oracle-runner mmd-oracle-runner prepare --case $CasePath
 ```
 
-成功すると、`outputRoot/<ケース名>/`に`scene.pmm`、`fixture.json`、`prepare-result.json`が作成されます。PMMには、MMDがモデルを再読込するためのPMX参照パスが保存されます。
+On success, `outputRoot/<case-name>/` contains `scene.pmm`, `fixture.json`, and `prepare-result.json`. The PMM stores a PMX reference path so MMD can reload the model.
 
-現在の`python-rust`バックエンドが扱うのは、1モデルのbody VMDに含まれるボーンとモーフです。カメラ、ライト、セルフシャドウ、プロパティ、複数モデル、アクセサリを含むケースは準備時に拒否します。
+The current `python-rust` backend supports bone and morph tracks from a single model's body VMD. Cases containing camera, light, self-shadow, property, multi-model, or accessory tracks are rejected during preparation. Camera VMD parsing and comparison exist in lower-level `mmd-anim` diagnostics, but end-to-end camera-VMD PMM preparation and MMD recording are not part of this workflow.
 
-## MMDで記録する
+## Record through MMD
 
-記録は二重の明示的オプトインです。ケースの`recordOptIn`を`true`にし、起動直前だけ環境変数を設定します。
+Recording requires two explicit opt-ins: set `recordOptIn` to `true` in the case and set the launch guard immediately before starting the command.
 
 ```powershell
 $CasePath = (Resolve-Path .\case.json).Path
-$MmdExe = (Resolve-Path .\MikuMikuDance.exe).Path
 
 $env:MMD_DUMPER_ALLOW_MMD_LAUNCH = '1'
 try {
-  uv run --project tools/mmd-oracle-runner mmd-oracle-runner record `
-    --case $CasePath `
-    --mmd-exe $MmdExe
+  uv run --project tools/mmd-oracle-runner mmd-oracle-runner record --case $CasePath
 } finally {
   Remove-Item Env:MMD_DUMPER_ALLOW_MMD_LAUNCH -ErrorAction SilentlyContinue
 }
 ```
 
-記録中はMMDを起動し、指定フレームへ進めます。終了時にはMMDプロセスを停止し、使用したネイティブDLLを復元します。成功したJSONLは`outputRoot/<ケース名>/oracle.actual.jsonl`へ原子的に昇格され、`oracle.actual.jsonl.done`と`record-result.json`で検証結果を確認できます。記録に失敗した場合は、前回の成功結果を上書きせず、診断用の`record-failure.zip`を残します。
+The runner starts MMD, advances to the requested frames, stops the process, and restores the native DLLs it installed. A successful JSONL dump is atomically promoted to `outputRoot/<case-name>/oracle.actual.jsonl`. The accompanying `oracle.actual.jsonl.done` and `record-result.json` files contain the validation results. A failed recording keeps the previous successful result and leaves a diagnostic `record-failure.zip`.
 
-## テスト
+Use `--mmd-exe <absolute-path>` when a command must use a different executable than `MMD_DUMPER_MMD_EXE`.
 
-MMDを起動しないテストは、リポジトリのルートで実行できます。
+## Run tests
+
+Tests that do not start MMD can be run from the repository root.
 
 ```powershell
 python -m pytest tools/mmd-oracle-runner -q
 cargo test -p mmd-anim-cli
 ```
 
-ネイティブビルドを変更した場合は、`native_smoke.py`と`package_native.py`も実行して生成物を確認します。
+When changing the native build, also run `native_smoke.py` and `package_native.py` and inspect the generated package.
 
-## 制約と安全策
+## Scope and safety
 
-- MMD本体、モデル、モーション、SDKライブラリはリポジトリに含めません。`MMDDumper/out/`とローカルアセットはGit ignore対象です。
-- MMDの起動は`MMD_DUMPER_ALLOW_MMD_LAUNCH=1`と`recordOptIn: true`の両方が必要です。
-- 出力先はケースの`outputRoot`配下に限定され、入力アセットやMMD本体を上書きしないよう検証します。
-- これはMMDで記録した状態を保存するダンパーです。実機モーションとの自動Parity判定や物理演算の正しさを保証する機能は含みません。
+- MMD, models, motions, and SDK libraries are not committed. `MMDDumper/out/` and local assets are ignored by Git.
+- MMD launch requires both `MMD_DUMPER_ALLOW_MMD_LAUNCH=1` and `recordOptIn: true`.
+- Output paths are constrained to the case's `outputRoot`; input assets and the MMD executable are protected from overwrite.
+- This tool records MMD state. It does not provide an automatic real-device motion parity verdict or guarantee physics correctness.

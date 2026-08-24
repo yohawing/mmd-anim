@@ -79,12 +79,18 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--case", required=True, help="absolute case JSON path")
     record = commands.add_parser("record", help="record one prepared case through MMD")
     record.add_argument("--case", required=True, help="absolute case JSON path")
-    record.add_argument("--mmd-exe", required=True, help="absolute MikuMikuDance executable path")
+    record.add_argument(
+        "--mmd-exe",
+        help="absolute MikuMikuDance executable path (defaults to MMD_DUMPER_MMD_EXE)",
+    )
     prepare_batch = commands.add_parser("prepare-batch", help="prepare multiple cases without launching MMD")
     prepare_batch.add_argument("--case", action="append", required=True, help="case JSON path (repeatable)")
     record_batch = commands.add_parser("record-batch", help="record multiple prepared cases through MMD")
     record_batch.add_argument("--case", action="append", required=True, help="case JSON path (repeatable)")
-    record_batch.add_argument("--mmd-exe", required=True, help="absolute MikuMikuDance executable path")
+    record_batch.add_argument(
+        "--mmd-exe",
+        help="absolute MikuMikuDance executable path (defaults to MMD_DUMPER_MMD_EXE)",
+    )
     return parser
 
 

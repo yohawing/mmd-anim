@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from mmd_oracle_runner.cli import main
+from mmd_oracle_runner.record_artifacts import resolve_mmd_exe
 from prepare_test_support import write_case
 
 
@@ -22,6 +23,19 @@ def test_record_cli_forwards_explicit_mmd_executable(tmp_path: Path, monkeypatch
     assert captured["case"].source_path == case_path.resolve()
     assert captured["executable"] == str(mmd_exe)
     assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_resolve_mmd_exe_uses_environment_default_and_explicit_override(tmp_path: Path):
+    configured = tmp_path / "configured" / "MikuMikuDance.exe"
+    override = tmp_path / "override" / "MikuMikuDance.exe"
+    configured.parent.mkdir()
+    override.parent.mkdir()
+    configured.write_bytes(b"configured")
+    override.write_bytes(b"override")
+    environment = {"MMD_DUMPER_MMD_EXE": str(configured)}
+
+    assert resolve_mmd_exe(None, environment=environment) == configured.resolve()
+    assert resolve_mmd_exe(override, environment=environment) == override.resolve()
 
 
 def test_record_cli_returns_one_for_non_pass_result(tmp_path: Path, monkeypatch, capsys):

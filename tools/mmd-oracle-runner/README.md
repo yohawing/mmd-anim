@@ -1,56 +1,23 @@
 # mmd-oracle-runner
 
-Python 3.10 orchestration for validating, preparing, and recording MMD oracle
-cases. Backend selection is explicit and never falls back to another generator.
+Python 3.10 のオーケストレーターです。PMX/VMD の入力検証、MMD 用 PMX ステージング、Rust の PMM 生成、録画 JSONL の検証を一つのローカル環境で行います。Node.js、npm、pnpm、外部の GoldenOracle データには依存しません。
 
 ```powershell
-cd tools/mmd-oracle-runner
-uv run pytest
-uv run mmd-oracle-runner validate --case C:\absolute\case.json
-uv run mmd-oracle-runner prepare --case C:\absolute\case.json
-uv run mmd-oracle-runner prepare-batch --case C:\absolute\body.json --case C:\absolute\camera.json
+uv run --project tools/mmd-oracle-runner pytest
+uv run --project tools/mmd-oracle-runner mmd-oracle-runner validate --case C:/absolute/case.json
+uv run --project tools/mmd-oracle-runner mmd-oracle-runner prepare --case C:/absolute/case.json
 ```
 
-The case file requires absolute paths for the PMX, body VMD, and output root.
-`name` is a display label; artifacts use a contained, Windows-safe derived name.
-`node-mmddumper` accepts an optional camera VMD and verifies generated PMM body
-and camera keyframes before recording. `rust-build-pmm` is body-only and reports
-its direct PMM/VMD comparison as `not-verified`. `multi-model` and `accessory`
-remain unsupported. `property-ik` requires an explicit `node-mmddumper` feature
-opt-in and any dropped property frames remain visible in the result.
+ケースの `generatorBackend` は `python-rust` のみを受け付けます。Rust の `mmd-anim-cli build-pmm` が PMX/VMD を読み込み、Python が生成物と所有権マーカーを管理します。現在の準備バックエンドはボーン・モーフの body VMD に限定されます。カメラ、プロパティ、複数モデルは準備時に fail-closed になります。
 
-Minimal case:
-
-```json
-{
-  "schemaVersion": 1,
-  "name": "body-only",
-  "input": {
-    "pmx": "C:/absolute/model.pmx",
-    "bodyVmd": "C:/absolute/body.vmd"
-  },
-  "frames": [0, 15, 30],
-  "outputRoot": "C:/absolute/output",
-  "generatorBackend": "node-mmddumper",
-  "recordOptIn": false,
-  "dialogOptIn": false
-}
-```
-
-`prepare` never launches MMD. It writes `scene.pmm`, `fixture.json`, and
-`prepare-result.json` under `<outputRoot>/<artifactName>/`. To record, first set
-`recordOptIn` to `true`, then supply the separate process-level launch gate:
+録画は準備済みケースに対して明示的なオプトインが必要です。
 
 ```powershell
 $env:MMD_DUMPER_ALLOW_MMD_LAUNCH = "1"
-uv run mmd-oracle-runner record --case C:\absolute\case.json --mmd-exe C:\absolute\MikuMikuDance.exe
-uv run mmd-oracle-runner record-batch --case C:\absolute\body.json --case C:\absolute\camera.json --mmd-exe C:\absolute\MikuMikuDance.exe
+uv run --project tools/mmd-oracle-runner mmd-oracle-runner record `
+  --case C:/absolute/case.json `
+  --mmd-exe C:/absolute/MikuMikuDance.exe
 Remove-Item Env:MMD_DUMPER_ALLOW_MMD_LAUNCH
 ```
 
-Model-structure dialog automation is also fail-closed and requires
-`dialogOptIn: true` in that case. Record output is schema- and frame-coverage
-checked before atomically replacing the prior stable output. Failures keep the
-prior stable output and write owned diagnostics to `record-failure.zip`; a later
-success does not erase that failure evidence. Batch commands process every case,
-emit one JSON summary, and exit `1` when any case fails.
+録画では、ネイティブ DLL の一時配置、MMD プロセスの終了、DLL の復元を Python が管理します。出力は JSONL スキーマとケース指定フレームを検証してから安定ファイルへ原子的に昇格します。MMD 本体や DLL がない環境では `prepare` と Rust/Python のテストだけを実行できます。

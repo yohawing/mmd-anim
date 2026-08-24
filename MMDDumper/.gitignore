@@ -16,16 +16,15 @@
 *.dll
 *.lib
 
-# Fixture manifests that point at local MMD/data assets stay out of the repo.
-# Keep only the repository-local M0 characterization fixture below.
+# Fixture manifests and binary assets stay out of the repository.
 /fixtures/*
-!/fixtures/m0/
-!/fixtures/m0/**
 
 /dist/
 /coverage/
-/node_modules/
 /out/
+/node_modules/
+/__pycache__/
+*.py[cod]
 /lib/**/*.dll
 /lib/**/*.lib
 /lib/**/*.pdb

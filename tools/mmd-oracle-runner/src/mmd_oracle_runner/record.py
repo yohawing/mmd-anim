@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -38,11 +39,11 @@ from .record_artifacts import (
     write_temp_fixture as _write_temp_fixture,
 )
 
-_NODE_ROOT = Path("MMDDumper")
-_NODE_CLI = _NODE_ROOT / "src" / "cli.mjs"
+_MMDDUMPER_ROOT = Path("MMDDumper")
+_PYTHON_CLI = _MMDDUMPER_ROOT / "scripts" / "oracle_cli.py"
 _DIAGNOSTIC_LIMIT = 4096
 _TIMEOUT_MARKER = "Timed out waiting for"
-_RESTORE_MARKERS = ("mmd-smoke:restore-error", "mmd-smoke:restore-missing-backup")
+_RESTORE_MARKERS = ("mmd-python:restore-error", "mmd-smoke:restore-error", "mmd-smoke:restore-missing-backup")
 _PHASES = ("launchGuard", "process", "timeout", "dialog", "done", "schema", "coverage")
 
 
@@ -53,7 +54,7 @@ def record_case(
     runner: CommandRunner | None = None,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
-    # The Node runner owns its deadline, MMD shutdown, and DLL restore in one finally block.
+    # The Python host runner owns its deadline, MMD shutdown, and DLL restore in one finally block.
     # Killing it from an outer Python timeout can strand the temporary plugin installation.
     runner = runner or SubprocessRunner(timeout_seconds=None)
     repo_root = (repo_root or _default_repo_root()).resolve()
@@ -116,15 +117,15 @@ def record_case(
         attempt_owned = _write_attempt_marker(paths, case, result["inputInventory"], result["mmdExecutable"])
         temp_fixture = _write_temp_fixture(run_dir, fixture, mmd_path, output=paths["outputTemp"], done=paths["doneTemp"])
 
-        node_cwd = repo_root / _NODE_ROOT
-        record_command = ["node", str(repo_root / _NODE_CLI), "record", "--fixture", str(temp_fixture)]
+        backend_cwd = repo_root / _MMDDUMPER_ROOT
+        record_command = [sys.executable, str(repo_root / _PYTHON_CLI), "record", "--fixture", str(temp_fixture)]
         if case.dialog_opt_in:
             record_command.extend(("--accept-dialog", "true"))
             result["phases"]["dialog"] = {"status": "pass", "optIn": True}
         else:
             result["phases"]["dialog"] = {"status": "not_run", "optIn": False}
         record_attempted = True
-        outcome = runner.run(record_command, node_cwd)
+        outcome = runner.run(record_command, backend_cwd)
         _set_command(result, "record", outcome)
         stderr = _text(outcome.stderr)
         timeout = outcome.exit_code == 124 or _TIMEOUT_MARKER in stderr
@@ -139,7 +140,7 @@ def record_case(
         if outcome.exit_code != 0:
             _fail(result, "process", f"record command exited with {outcome.exit_code}")
 
-        temporary_valid = _evaluate_dump(result, paths["outputTemp"], paths["doneTemp"], case, temp_fixture, node_cwd, runner, allow_coverage=process_ok)
+        temporary_valid = _evaluate_dump(result, paths["outputTemp"], paths["doneTemp"], case, temp_fixture, backend_cwd, runner, allow_coverage=process_ok)
         if process_ok and temporary_valid and _subgates_pass(result):
             try:
                 result["promotion"] = _promotion_state(paths)
@@ -211,7 +212,7 @@ def record_case(
     return result
 
 
-def _evaluate_dump(result: dict[str, Any], output: Path, done: Path, case: OracleCase, fixture: Path, node_cwd: Path, runner: CommandRunner, *, allow_coverage: bool) -> bool:
+def _evaluate_dump(result: dict[str, Any], output: Path, done: Path, case: OracleCase, fixture: Path, backend_cwd: Path, runner: CommandRunner, *, allow_coverage: bool) -> bool:
     # Keep the done gate limited to marker/framing/count checks. The coverage
     # command also validates every JSONL record, so a successful record needs
     # only one full parse. A failed process with an output still gets the
@@ -226,7 +227,7 @@ def _evaluate_dump(result: dict[str, Any], output: Path, done: Path, case: Oracl
         return done_valid
 
     if not allow_coverage:
-        validation = runner.run(["node", str(node_cwd / "src" / "cli.mjs"), "validate", str(output)], node_cwd)
+        validation = runner.run([sys.executable, str(backend_cwd / "scripts" / "oracle_cli.py"), "validate", str(output)], backend_cwd)
         _set_command(result, "validate", validation)
         schema_report = _json_stdout(validation.stdout)
         schema_ok = validation.exit_code == 0 and isinstance(schema_report, dict) and schema_report.get("ok") is True
@@ -236,10 +237,10 @@ def _evaluate_dump(result: dict[str, Any], output: Path, done: Path, case: Oracl
         result["phases"]["coverage"] = {"status": "not_run"}
         return done_valid
 
-    coverage_command = ["node", str(node_cwd / "src" / "cli.mjs"), "verify-coverage", "--fixture", str(fixture), "--actual", str(output)]
+    coverage_command = [sys.executable, str(backend_cwd / "scripts" / "oracle_cli.py"), "verify-coverage", "--fixture", str(fixture), "--actual", str(output)]
     if case.camera_vmd is not None:
         coverage_command.extend(("--require-camera", "true"))
-    coverage = runner.run(coverage_command, node_cwd)
+    coverage = runner.run(coverage_command, backend_cwd)
     _set_command(result, "coverage", coverage)
     coverage_report = _json_stdout(coverage.stdout)
     schema_ok = isinstance(coverage_report, dict) and isinstance(coverage_report.get("ok"), bool)
@@ -268,7 +269,7 @@ def _base_result(case: OracleCase, repo_root: Path, paths: dict[str, Path], arti
         "inputInventory": {}, "ownedArtifacts": [],
         "phases": {key: {"status": "not_run"} for key in _PHASES},
         "artifacts": {key: {"path": str(path), "exists": artifacts.exists(path)} for key, path in paths.items()},
-        "commands": {}, "backend": {"cwd": str(repo_root / _NODE_ROOT)}, "errors": [],
+        "commands": {}, "backend": {"cwd": str(repo_root / _MMDDUMPER_ROOT)}, "errors": [],
     }
 
 

@@ -7,10 +7,9 @@ from typing import Any, Literal, Mapping
 
 from .artifacts import reject_reparse
 
-GeneratorBackend = Literal["node-mmddumper", "rust-build-pmm"]
-_GENERATOR_BACKENDS = frozenset(("node-mmddumper", "rust-build-pmm"))
+GeneratorBackend = Literal["python-rust"]
+_GENERATOR_BACKENDS = frozenset(("python-rust",))
 _UNSUPPORTED_FEATURES = frozenset(("multi-model", "accessory"))
-_NODE_OPT_IN_FEATURES = frozenset(("property-ik",))
 
 
 @dataclass(frozen=True)
@@ -123,25 +122,13 @@ def _validate_payload(payload: Any, source_path: Path) -> OracleCase:
     dialog_opt_in = _required_bool(payload, "dialogOptIn", issues)
     requested_features = _requested_features(payload.get("requestedFeatures"), issues)
 
-    if backend == "rust-build-pmm" and camera_vmd is not None:
-        issues.append(
-            ValidationIssue(
-                "input.cameraVmd",
-                "capability unsupported for generatorBackend rust-build-pmm",
-            )
-        )
     for feature in requested_features:
         if feature in _UNSUPPORTED_FEATURES:
             issues.append(ValidationIssue("requestedFeatures", f"unsupported capability: {feature}"))
-        elif feature in _NODE_OPT_IN_FEATURES and backend == "rust-build-pmm":
-            issues.append(
-                ValidationIssue(
-                    "requestedFeatures",
-                    "capability unsupported for generatorBackend rust-build-pmm: property-ik",
-                )
-            )
-        elif feature not in _NODE_OPT_IN_FEATURES:
+        elif feature != "property-ik":
             issues.append(ValidationIssue("requestedFeatures", f"unknown or unsupported capability: {feature}"))
+        else:
+            issues.append(ValidationIssue("requestedFeatures", "property-ik is not supported by the Python/Rust backend yet"))
 
     if issues:
         raise CaseValidationError(issues)
@@ -250,7 +237,7 @@ def _backend(value: Any, issues: list[ValidationIssue]) -> GeneratorBackend | No
         issues.append(
             ValidationIssue(
                 "generatorBackend",
-                "must be one of node-mmddumper or rust-build-pmm",
+                "must be python-rust",
             )
         )
         return None

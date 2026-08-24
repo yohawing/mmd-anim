@@ -43,6 +43,8 @@ viewer/
 .venv-fbx/
 *.fbx
 scripts/
+!/MMDDumper/scripts/
+!/MMDDumper/scripts/*.py
 crates/mmd-anim-ffi/csharp-smoke/
 crates/mmd-anim-ffi/scripts/smoke-csharp.ps1
 crates/mmd-anim-format/fixtures/pmm/PROVENANCE.md

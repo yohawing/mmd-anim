@@ -2732,7 +2732,12 @@ fn write_pmm_scene(
     for _ in 0..4 {
         push_i32(&mut out, -1);
     }
-    out.push(0);
+    // PMM stores one expansion-state byte for each fixed display track.  MMD
+    // indexes this block after accepting the model-structure confirmation, so
+    // the count must agree with the fixed-track count even when every flag is
+    // false (the default state).
+    out.push(model_structure.fixed_tracks);
+    out.resize(out.len() + usize::from(model_structure.fixed_tracks), 0);
     push_i32(&mut out, 0);
     push_i32(&mut out, max_frame as i32);
 
@@ -5805,6 +5810,30 @@ mod tests {
         );
     }
 
+    fn assert_fixed_track_expansion_state(parsed: &PmmParsedManifest, expected_fixed_tracks: u8) {
+        let model = &parsed
+            .document_summary
+            .as_ref()
+            .expect("exported PMM must contain document summary")
+            .models[0];
+        let initial_bones_offset = model.sections.initial_bone_keyframes_offset;
+        let expansion_count_offset = initial_bones_offset
+            .checked_sub(9 + usize::from(expected_fixed_tracks))
+            .expect("initial bone section must follow expansion state");
+        assert_eq!(
+            parsed.source_bytes[expansion_count_offset], expected_fixed_tracks,
+            "fixed-track expansion count must match the model header"
+        );
+        let expansion_flags_start = expansion_count_offset + 1;
+        let expansion_flags_end = expansion_flags_start + usize::from(expected_fixed_tracks);
+        assert!(
+            parsed.source_bytes[expansion_flags_start..expansion_flags_end]
+                .iter()
+                .all(|flag| *flag == 0),
+            "exported fixed-track expansion flags must start disabled"
+        );
+    }
+
     #[test]
     fn exports_pmm_scene_header_timeline_fps_and_camera_fov() {
         let model =
@@ -5864,6 +5893,31 @@ mod tests {
             PmmDocumentKeyframeSummary::Camera { fov, .. } => assert_eq!(*fov, 42),
             other => panic!("unexpected camera keyframe summary: {other:?}"),
         }
+
+        assert_fixed_track_expansion_state(&reparsed, 2);
+    }
+
+    #[test]
+    fn exports_pmm_scene_without_fixed_tracks_has_no_expansion_flags() {
+        let model = crate::pmx::parse_pmx_model(include_bytes!(
+            "../fixtures/pmx/model_descriptor_parity.pmx"
+        ))
+        .unwrap();
+        let motion =
+            crate::vmd::parse_vmd_animation(include_bytes!("../fixtures/vmd/simple_camera.vmd"))
+                .unwrap();
+        let structure = pmm_export_model_structure_from_pmx(&model);
+        assert_eq!(structure.fixed_tracks, 0);
+
+        let report = export_pmm_scene_from_pmx_vmd(
+            &model,
+            &motion,
+            "UserFile/Model/model_descriptor_parity.pmx",
+            &PmmSceneExportOptions::default(),
+        );
+        let reparsed = parse_pmm_manifest(&report.bytes).unwrap();
+
+        assert_fixed_track_expansion_state(&reparsed, 0);
     }
 
     fn append_pmm_model_slot(data: &mut Vec<u8>, name: &[u8], english_name: &[u8], path: &[u8]) {

@@ -38,11 +38,11 @@ def test_prepare_rejects_camera_before_rust_build(tmp_path: Path):
     assert runner.calls == []
 
 
-def test_prepare_rejects_skipped_frames(tmp_path: Path):
+def test_prepare_reports_skipped_frames_without_rejecting_the_pair(tmp_path: Path):
     case = load_case(write_case(tmp_path))
     result = prepare_case(case, runner=FakeRunner(mode="skipped"), repo_root=REPO_ROOT)
-    assert result["ok"] is False
-    assert any("skipped" in error["message"] for error in result["errors"])
+    assert result["ok"] is True
+    assert result["skippedCounts"] == {"boneFrames": 1, "morphFrames": 0}
 
 
 def test_prepare_backend_failure_is_reported(tmp_path: Path):

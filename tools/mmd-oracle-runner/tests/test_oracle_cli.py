@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "MMDDumper" / "scripts"))
+import oracle_cli
 from oracle_cli import main
 
 
@@ -34,3 +38,44 @@ def test_invalid_jsonl_fails_closed(tmp_path: Path, capsys):
     actual.write_text("{}\n", encoding="utf-8")
     assert main(["validate", str(actual)]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+def test_drive_frames_starts_playback_and_waits_for_requested_frames(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    keys: list[tuple[int, int]] = []
+    records = [{"frame": frame} for frame in (0, 15, 30)]
+    monkeypatch.setattr(oracle_cli, "_wait_for_records", lambda *_args: records[:1])
+    monkeypatch.setattr(oracle_cli, "_read_records", lambda _path: records)
+    monkeypatch.setattr(oracle_cli, "_send_key", lambda pid, key: keys.append((pid, key)))
+
+    child = type("Child", (), {"pid": 42, "poll": lambda self: None})()
+    result = oracle_cli._drive_frames(child, [0, 15, 30], tmp_path / "oracle.jsonl", 10)
+
+    assert result == records
+    assert keys == [(42, 0x50)]
+
+
+def test_stop_child_waits_after_forced_kill():
+    class Child:
+        def __init__(self):
+            self.calls: list[str] = []
+            self.killed = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.calls.append("terminate")
+
+        def wait(self, timeout: float):
+            self.calls.append("wait")
+            if not self.killed:
+                raise subprocess.TimeoutExpired("MikuMikuDance.exe", timeout)
+
+        def kill(self):
+            self.calls.append("kill")
+            self.killed = True
+
+    child = Child()
+    oracle_cli._stop_child(child)
+
+    assert child.calls == ["terminate", "wait", "kill", "wait"]

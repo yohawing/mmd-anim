@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from ctypes import wintypes
 import json
 import os
 import shutil
@@ -35,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "record":
-            return _record(Path(args.fixture))
+            return _record(Path(args.fixture), args.accept_dialog.lower() == "true")
         if args.command == "validate":
             report = _validate_path(Path(args.actual))
         else:
@@ -50,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-def _record(fixture_path: Path) -> int:
+def _record(fixture_path: Path, accept_dialog: bool) -> int:
     if os.environ.get("MMD_DUMPER_ALLOW_MMD_LAUNCH") != "1":
         raise ValueError("Refusing to launch MMD. Set MMD_DUMPER_ALLOW_MMD_LAUNCH=1 for this local run.")
     fixture = _read_object(fixture_path)
@@ -66,6 +67,7 @@ def _record(fixture_path: Path) -> int:
     install = _install_native(package_root, exe.parent, trigger)
     child: subprocess.Popen[bytes] | None = None
     try:
+        timeout_ms = int(fixture.get("timeoutMs", 60000))
         environment = os.environ.copy()
         environment.update({
             "MMD_ORACLE_DUMP_PATH": str(output),
@@ -74,22 +76,37 @@ def _record(fixture_path: Path) -> int:
             "MMD_ORACLE_DUMP_ON_PROXY_LOAD": "1",
             "MMD_ORACLE_DUMP_ON_D3D9": "1",
             "MMD_ORACLE_DUMP_ON_MMDPLUGIN": "1",
+            "MMD_ORACLE_DUMP_FRAMES": ",".join(str(int(frame)) for frame in fixture.get("frames", [])),
+            "MMD_ORACLE_D3D9_SAMPLER_MS": str(timeout_ms),
+            "MMD_ORACLE_D3D9_SAMPLER_INTERVAL_MS": "50",
         })
         child = subprocess.Popen([str(exe), str(project)], cwd=exe.parent, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        timeout = int(fixture.get("timeoutMs", 60000)) / 1000
-        records = _drive_frames(child.pid, [int(frame) for frame in fixture.get("frames", [])], output, timeout)
-        child.terminate()
-        try:
-            child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            child.kill(); child.wait(timeout=5)
+        timeout = timeout_ms / 1000
+        deadline = time.monotonic() + timeout
+        _wait_for_mmd_ready(child, accept_dialog, deadline)
+        time.sleep(min(3.0, max(0.0, deadline - time.monotonic())))
+        records = _drive_frames(child, [int(frame) for frame in fixture.get("frames", [])], output, deadline - time.monotonic())
+        _stop_child(child)
         done.write_text(json.dumps({"ok": True, "mode": "python-mmd", "records": len(records), "output": str(output)}) + "\n", encoding="utf-8")
         _print({"ok": True, "records": len(records), "output": str(output), "done": str(done)})
         return 0
     finally:
-        if child is not None and child.poll() is None:
-            child.kill()
-        _restore_native(install)
+        try:
+            if child is not None:
+                _stop_child(child)
+        finally:
+            _restore_native(install)
+
+
+def _stop_child(child: subprocess.Popen[bytes]) -> None:
+    if child.poll() is not None:
+        return
+    child.terminate()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait(timeout=5)
 
 
 def _install_native(package_root: Path, mmd_root: Path, trigger: str) -> list[tuple[Path, Path | None]]:
@@ -142,46 +159,113 @@ def _wait_for_records(path: Path, timeout: float, minimum: int) -> list[dict[str
     raise TimeoutError(f"timed out waiting for {minimum} oracle records: {path}")
 
 
-def _drive_frames(pid: int, frames: list[int], output: Path, timeout: float) -> list[dict[str, Any]]:
-    """Advance MMD with WM_KEY messages and wait for each requested dump."""
+def _drive_frames(child: subprocess.Popen[bytes], frames: list[int], output: Path, timeout: float) -> list[dict[str, Any]]:
+    """Start MMD playback and wait until every requested frame is dumped."""
     if not frames:
         raise ValueError("fixture.frames must contain at least one frame")
     deadline = time.monotonic() + timeout
-    records = _wait_for_records(output, min(timeout, 10.0), 1)
-    current = frames[0]
-    for index, target in enumerate(frames[1:], 1):
-        for _ in range(max(0, target - current)):
-            _post_right_key(pid)
-            time.sleep(0.01)
-        current = target
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(f"timed out waiting for frame {target}: {output}")
-        records = _wait_for_records(output, remaining, index + 1)
-    return records
+    _wait_for_records(output, min(timeout, 10.0), 1)
+    _send_key(child.pid, 0x50)  # P: Play/Stop
+    actual: set[int] = set()
+    while time.monotonic() < deadline:
+        try:
+            records = _read_records(output)
+        except ValueError:
+            records = []
+        actual = {int(round(float(record["frame"]))) for record in records}
+        if all(frame in actual for frame in frames):
+            return records
+        if child.poll() is not None or (os.name == "nt" and not _visible_windows(child.pid)):
+            raise ValueError(f"MMD exited before all requested frames were dumped: missing {[frame for frame in frames if frame not in actual]}")
+        time.sleep(0.1)
+    missing = [frame for frame in frames if frame not in actual]
+    raise TimeoutError(f"timed out waiting for oracle frames {missing}: {output}")
 
 
-def _post_right_key(pid: int) -> None:
+def _wait_for_mmd_ready(child: subprocess.Popen[bytes], accept_dialog: bool, deadline: float) -> None:
     if os.name != "nt":
         return
+    saw_window = False
+    while time.monotonic() < deadline:
+        windows = _visible_windows(child.pid)
+        if windows:
+            saw_window = True
+        elif saw_window or child.poll() is not None:
+            raise ValueError("MMD exited before its main window became ready")
+        dialogs = [window for window in windows if window[1] == "#32770"]
+        if dialogs:
+            if not accept_dialog:
+                raise ValueError(f"MMD requires a dialog; rerun with --accept-dialog true: {dialogs[0][2]}")
+            if not any(_accept_model_structure_dialog(hwnd) for hwnd, _, _ in dialogs):
+                raise ValueError(f"MMD showed an unsupported dialog: {dialogs[0][2]}")
+        elif any(class_name == "Polygon Movie Maker" for _, class_name, _ in windows):
+            return
+        time.sleep(0.1)
+    raise TimeoutError("timed out waiting for the MMD main window")
+
+
+def _visible_windows(pid: int) -> list[tuple[int, str, str]]:
     user32 = ctypes.windll.user32
-    hwnd = ctypes.c_void_p()
+    windows: list[tuple[int, str, str]] = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     def callback(candidate, _lparam):
         process_id = ctypes.c_ulong()
         user32.GetWindowThreadProcessId(candidate, ctypes.byref(process_id))
         if process_id.value == pid and user32.IsWindowVisible(candidate):
-            hwnd.value = candidate
-            return False
+            windows.append((int(candidate), _window_string(user32.GetClassNameW, candidate), _window_string(user32.GetWindowTextW, candidate)))
         return True
 
     user32.EnumWindows(callback, 0)
-    if not hwnd.value:
+    return windows
+
+
+def _accept_model_structure_dialog(dialog: int) -> bool:
+    user32 = ctypes.windll.user32
+    accepted = False
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def callback(candidate, _lparam):
+        nonlocal accepted
+        title = _window_string(user32.GetWindowTextW, candidate)
+        if title.startswith("このモデルにpmmファイルのモデル情報を適応させて続行"):
+            user32.PostMessageW(candidate, 0x00F5, 0, 0)
+            accepted = True
+            return False
+        return True
+
+    user32.EnumChildWindows(dialog, callback, 0)
+    return accepted
+
+
+def _window_string(getter, hwnd: int) -> str:
+    value = ctypes.create_unicode_buffer(512)
+    getter(hwnd, value, len(value))
+    return value.value
+
+
+def _send_key(pid: int, virtual_key: int) -> None:
+    if os.name != "nt":
         return
+    user32 = ctypes.windll.user32
+    main_windows = [hwnd for hwnd, class_name, _ in _visible_windows(pid) if class_name == "Polygon Movie Maker"]
+    if not main_windows:
+        raise ValueError("MMD main window is not visible")
+    hwnd = main_windows[0]
+    user32.ShowWindowAsync(hwnd, 9)
     user32.SetForegroundWindow(hwnd)
-    user32.PostMessageW(hwnd, 0x0100, 0x27, 0)
-    user32.PostMessageW(hwnd, 0x0101, 0x27, 0)
+    rect = wintypes.RECT()
+    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        user32.SetCursorPos((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+        user32.mouse_event(0x0002, 0, 0, 0, 0)
+        user32.mouse_event(0x0004, 0, 0, 0, 0)
+    time.sleep(0.1)
+    scan = user32.MapVirtualKeyW(virtual_key, 0)
+    user32.keybd_event(virtual_key, scan, 0, 0)
+    time.sleep(0.02)
+    user32.keybd_event(virtual_key, scan, 0x0002, 0)
+    user32.PostMessageW(hwnd, 0x0100, virtual_key, 1 | (scan << 16))
+    user32.PostMessageW(hwnd, 0x0101, virtual_key, 1 | (scan << 16) | (1 << 30) | (1 << 31))
 
 
 def _coverage(fixture_path: Path, actual_path: Path, require_camera: bool) -> dict[str, Any]:

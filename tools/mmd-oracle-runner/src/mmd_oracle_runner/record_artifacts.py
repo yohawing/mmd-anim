@@ -353,6 +353,18 @@ def retain_failure_artifacts(paths: dict[str, Path], owned_paths: set[str]) -> N
         raise
 
 
+def discard_failure_artifacts(paths: dict[str, Path], owned_paths: set[str]) -> None:
+    """Remove an owned failure bundle without touching raw record temporaries."""
+
+    bundle = paths["failureBundle"]
+    if not bundle.exists():
+        return
+    artifacts.reject_reparse(bundle)
+    if not bundle.is_file() or str(bundle.resolve()) not in owned_paths:
+        raise OSError(f"existing record failure artifact is not owned by this run: {bundle}")
+    bundle.unlink()
+
+
 def promote_record(paths: dict[str, Path], journal: dict[str, Any]) -> None:
     output, done = paths["output"], paths["done"]
     temp_output, temp_done = paths["outputTemp"], paths["doneTemp"]

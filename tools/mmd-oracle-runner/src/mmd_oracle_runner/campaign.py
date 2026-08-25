@@ -128,6 +128,9 @@ def load_campaign_config(path: Path) -> CampaignConfig:
         raise CampaignValidationError("manifest", "cases must be a non-empty array")
     default_frames = _frames(payload.get("frames", [0, 15, 30, 60, 120]), "frames")
     default_output_root = _output_directory(payload.get("outputRoot", str(manifest.parent / "runs-v1")), "outputRoot")
+    default_dialog_opt_in = payload.get("dialogOptIn", False)
+    if not isinstance(default_dialog_opt_in, bool):
+        raise CampaignValidationError("manifest", "dialogOptIn must be a boolean")
     cases: list[CampaignCase] = []
     seen: set[str] = set()
     for index, raw_case in enumerate(raw_cases):
@@ -149,10 +152,13 @@ def load_campaign_config(path: Path) -> CampaignConfig:
         features = tuple(_strings(raw_case.get("features", []), f"cases[{index}].features", allow_empty=True))
         categories = tuple(_strings(raw_case.get("categories", []), f"cases[{index}].categories", allow_empty=True))
         requested = tuple(_strings(raw_case.get("requestedFeatures", []), f"cases[{index}].requestedFeatures", allow_empty=True))
+        dialog_opt_in = raw_case.get("dialogOptIn", default_dialog_opt_in)
+        if not isinstance(dialog_opt_in, bool):
+            raise CampaignValidationError("manifest", f"cases[{index}].dialogOptIn must be a boolean")
         oracle_case = OracleCase(
             schema_version=1, name=case_id, pmx=pmx, body_vmd=body_vmd, camera_vmd=camera_vmd,
             frames=frames, output_root=output_root, generator_backend="python-rust", record_opt_in=True,
-            dialog_opt_in=False, requested_features=requested, source_path=manifest,
+            dialog_opt_in=dialog_opt_in, requested_features=requested, source_path=manifest,
         )
         cases.append(CampaignCase(manifest, case_id, features, categories, oracle_case))
     discovery = payload.get("discovery", {})

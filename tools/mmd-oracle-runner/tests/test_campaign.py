@@ -78,6 +78,17 @@ def test_manifest_accepts_shared_frames_output_and_nested_asset_paths(tmp_path: 
     assert config.cases[0].features == ()
 
 
+def test_manifest_applies_dialog_opt_in_default(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["dialogOptIn"] = True
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_campaign_config(manifest.resolve())
+
+    assert config.cases[0].oracle_case.dialog_opt_in is True
+
+
 def test_campaign_writes_snapshot_and_resumes_clean_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     manifest = _manifest(tmp_path)
     snapshot = tmp_path / "snapshot.json"

@@ -13,7 +13,6 @@ from .campaign_artifacts import cleanup_completed_case_run, cleanup_prepared_cas
 from .prepare import prepare_case
 from .record import record_case
 from .report import ReportValidationError, generate_report, load_snapshot, write_report
-from .selection import SelectionError, freeze_selection, load_selection, materialize_selection, verify_selection
 
 __all__ = [
     "CaseValidationError",
@@ -34,11 +33,6 @@ __all__ = [
     "generate_report",
     "load_snapshot",
     "write_report",
-    "SelectionError",
-    "freeze_selection",
-    "load_selection",
-    "verify_selection",
-    "materialize_selection",
 ]
 
 __version__ = "0.1.0"

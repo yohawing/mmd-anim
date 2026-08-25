@@ -11,7 +11,6 @@ from .case import CaseValidationError, load_case
 from .prepare import prepare_case
 from .record import record_case
 from .report import ReportValidationError, write_report
-from .selection import SelectionError, freeze_selection, materialize_selection, verify_selection
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,48 +57,6 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(error, dict) and error.get("kind") == "campaign":
             return 2
         return 1
-    if args.command == "freeze-selection":
-        try:
-            selection = freeze_selection(
-                Path(args.pmx_root),
-                Path(args.vmd_root),
-                Path(args.output),
-                count=args.count,
-                seed=args.seed,
-                frames=tuple(args.frame or (0, 15, 30, 60, 120)),
-            )
-        except SelectionError as error:
-            _print_json({"ok": False, "command": args.command, "error": error.as_dict()}, stream=sys.stderr)
-            return 2
-        _print_json(
-            {
-                "ok": True,
-                "command": args.command,
-                "output": str(Path(args.output).resolve()),
-                "selected": selection["discovery"]["selected"],
-                "selectionHash": selection["selectionHash"],
-            }
-        )
-        return 0
-    if args.command == "verify-selection":
-        try:
-            result = verify_selection(Path(args.selection))
-        except SelectionError as error:
-            _print_json({"ok": False, "command": args.command, "error": error.as_dict()}, stream=sys.stderr)
-            return 2
-        result["command"] = args.command
-        _print_json(result)
-        return 0
-    if args.command == "materialize-selection":
-        try:
-            result = materialize_selection(Path(args.selection), Path(args.template), Path(args.output_dir))
-        except SelectionError as error:
-            _print_json({"ok": False, "command": args.command, "error": error.as_dict()}, stream=sys.stderr)
-            return 2
-        result["command"] = args.command
-        _print_json(result)
-        return 0
-
     case_path = Path(args.case)
     try:
         case = load_case(case_path)
@@ -166,25 +123,6 @@ def _build_parser() -> argparse.ArgumentParser:
     campaign.add_argument("--snapshot", required=True, help="absolute compact snapshot JSON output path")
     campaign.add_argument("--state", help="absolute local campaign state JSON path")
     campaign.add_argument("--mmd-exe", help="absolute MikuMikuDance executable path")
-    selection = commands.add_parser("freeze-selection", help="freeze a deterministic local PMX/VMD selection")
-    selection.add_argument("--pmx-root", required=True, help="absolute PMX library directory")
-    selection.add_argument("--vmd-root", required=True, help="absolute VMD library directory")
-    selection.add_argument("--output", required=True, help="new local selection JSON path")
-    selection.add_argument("--count", required=True, type=int, help="number of fixed PMX/VMD pairs")
-    selection.add_argument("--seed", required=True, help="stable deterministic selection seed")
-    selection.add_argument(
-        "--frame",
-        action="append",
-        type=int,
-        default=None,
-        help="sample frame (repeatable; defaults to 0,15,30,60,120)",
-    )
-    verify_selection_parser = commands.add_parser("verify-selection", help="verify every frozen asset hash")
-    verify_selection_parser.add_argument("--selection", required=True, help="absolute frozen selection JSON path")
-    materialize = commands.add_parser("materialize-selection", help="create local cases and campaign config")
-    materialize.add_argument("--selection", required=True, help="absolute frozen selection JSON path")
-    materialize.add_argument("--template", required=True, help="absolute local campaign template JSON path")
-    materialize.add_argument("--output-dir", required=True, help="new local materialized campaign directory")
     return parser
 
 

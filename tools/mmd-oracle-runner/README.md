@@ -46,16 +46,11 @@ uv run --project tools/mmd-oracle-runner mmd-oracle-runner quality-report `
   --output QUALITY_REPORT.md
 ```
 
-The snapshot schema is version `1` and contains `run`, `funnel`, `thresholds`,
-`metrics`, `failures`, `features`, `categories`, `worstCases`, and
-`rawArtifacts`. Metric distributions require `p50`, `p95`, `p99`, and `max`.
-Each distribution must be ordered p50 <= p95 <= p99 <= max, and the threshold
-and metric name sets must match exactly.
-The funnel is reported as discovered -> selected -> prepared -> recorded ->
-compared -> passed. `rawArtifacts.retained` must be `false`, and the generated
-report explicitly states that raw PMM, JSONL, and log artifacts are not
-retained. Snapshot paths and any per-frame/per-bone data stay local and are
-never copied into the Markdown report.
+The snapshot is a version-`1` aggregate object. The report loader checks the
+required aggregate fields and basic value types, then formats the same input
+deterministically. It does not expose snapshot paths or per-frame/per-bone
+data in Markdown. The campaign policy is to keep PMM, JSONL, and log artifacts
+local; only the generated Markdown is tracked.
 
 For campaign callers, `record_case(..., retain_failure_artifacts=False)` keeps
 the existing record behavior but does not create or retain
@@ -83,42 +78,16 @@ durable local state, and owned cleanup. The campaign does not launch MMD during
 validation tests; production recording still requires the existing
 `MMD_DUMPER_ALLOW_MMD_LAUNCH=1` guard and `recordOptIn: true`.
 
-### Frozen local asset selection
+### Fixed local asset manifest
 
-Real asset paths stay in an ignored or external JSON file. `freeze-selection`
-walks the PMX and VMD library without parsing every asset, rejects invalid
-magic, camera-only VMDs with no body bone frames, oversized files, and reparse
-points, then orders eligible paths by a seeded SHA-256 rank. Only the selected
-files are content-hashed. Existing selections are never overwritten.
-
-```powershell
-uv run --project tools/mmd-oracle-runner mmd-oracle-runner freeze-selection `
-  --pmx-root F:/MMD/pmx `
-  --vmd-root F:/MMD/vmd `
-  --output F:/local/motion-quality/assets-v1.json `
-  --count 128 `
-  --seed mmd-anim-motion-quality-2026-v1
-
-uv run --project tools/mmd-oracle-runner mmd-oracle-runner verify-selection `
-  --selection F:/local/motion-quality/assets-v1.json
-```
-
-`materialize-selection` re-verifies every selected PMX/VMD hash and creates
-one case JSON per pair plus a campaign config. Its local template contains
-exactly `schemaVersion`, `run`, `compare`, and an absolute `outputRoot`.
-The destination directory must not already exist.
-
-```powershell
-uv run --project tools/mmd-oracle-runner mmd-oracle-runner materialize-selection `
-  --selection F:/local/motion-quality/assets-v1.json `
-  --template F:/local/motion-quality/campaign-template.json `
-  --output-dir F:/local/motion-quality/campaign-v1
-```
-
-The materialized campaign binds `selectionFile` and `selectionHash`; campaign
-loading rejects missing, tampered, reordered, or differently tagged cases.
-The final Markdown publishes the frozen selection hash without exposing local
-asset paths.
+Keep one ignored or external JSON manifest as the selection authority. It
+directly lists each `caseId`, `pmx`, `bodyVmd`, and optional per-case metadata;
+asset values may be strings or `{ "path": ... }` objects with an optional
+fixed `sha256`. Top-level `frames` and `outputRoot` are shared defaults. The
+optional `run`, `discovered`, and `compare.thresholds` entries override
+maintainer defaults. There is no repository command for discovering, randomly
+selecting, or materializing assets. The campaign hashes the manifest for state
+drift and verifies asset content where the fixed list supplies `sha256`.
 
 ```powershell
 uv run --project tools/mmd-oracle-runner mmd-oracle-runner campaign `
@@ -128,18 +97,14 @@ uv run --project tools/mmd-oracle-runner mmd-oracle-runner campaign `
   --mmd-exe C:/path/to/MikuMikuDance.exe
 ```
 
-The config is a strict version-1 JSON object with `selectionFile`,
-`selectionHash`, `run`, `discovered`, `compare`, and `cases`. The run versions
-are self-reported config labels;
-campaign execution requires a clean repository checkout and records the
-repository HEAD SHA in compact state. The HEAD is rechecked before each case,
-before accepting each case result, and immediately before final snapshot
-generation. `compare.thresholds` must contain exactly
+The manifest is a pragmatic version-1 object with `run`, `discovered`,
+`compare`, and direct `cases`. The run versions are self-reported config
+labels; campaign execution requires a clean repository checkout and records
+the repository HEAD SHA in compact state. `compare.thresholds` contains
 `translationMaxError`, `translationRmsError`, `rotationMaxAngleRad`,
 `rotationRmsAngleRad`, and `maxAbsError`; the latter also supplies the numeric
 manifest epsilon. Metric quantiles use deterministic nearest-rank selection
-over per-case values. Compact local state is durably written before each
-cleanup attempt; the final snapshot is written after all cases are processed
-and cleaned. Keep both local artifacts outside tracked inputs when possible.
-Only the generated repository-root `QUALITY_REPORT.md` is intended for Git
-tracking.
+over per-case values. A partially completed case is conservatively cleaned and
+rerun on the next invocation. Keep the manifest, state, snapshot, and raw
+artifacts outside tracked inputs; only the generated repository-root
+`QUALITY_REPORT.md` is intended for Git tracking.

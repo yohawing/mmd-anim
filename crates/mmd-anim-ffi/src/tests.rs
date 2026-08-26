@@ -6399,7 +6399,7 @@ fn vpd_json_header_declarations_match_rust_exports() {
     let _: VpdJsonFn = mmd_runtime_export_vpd_pose_json;
     let _: VpdJsonFn = mmd_runtime_parse_vpd_pose_json;
 
-    let header = include_str!("../include/mmd_runtime.h");
+    let header = include_str!("../include/mmd_runtime.h").replace("\r\n", "\n");
     assert!(header.contains(
         "mmd_runtime_ffi_byte_buffer_t mmd_runtime_export_vpd_pose_json(\n    const uint8_t* json,\n    size_t         json_len);"
     ));

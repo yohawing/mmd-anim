@@ -13,7 +13,8 @@ from . import artifacts
 from .case import OracleCase
 from .pmx import PmxError, stage_mmd_compatible_pmx
 
-_RUST_UNSUPPORTED_CHANNELS = ("cameras", "lights", "selfShadows", "properties")
+_RUST_CHANNEL_NAMES = ("cameras", "lights", "selfShadows", "properties")
+_RUST_UNSUPPORTED_CHANNELS = ("cameras", "lights", "selfShadows")
 _WINDOWS_RESERVED = frozenset(("CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))))
 
 
@@ -141,6 +142,12 @@ def _prepare_rust(case: OracleCase, result: dict[str, Any], runner: CommandRunne
     if unsupported:
         _fail(result, "preflight", "Rust PMM backend does not support VMD channels: " + ", ".join(unsupported))
         return False
+    property_count = counts["properties"]
+    if property_count:
+        result["droppedUnsupportedChannels"] = {"propertyFrames": property_count}
+        result["classifications"]["propertyFrames"] = "dropped"
+    else:
+        result["classifications"]["propertyFrames"] = "not-applicable"
 
     build_command = ("cargo", "run", "-q", "-p", "mmd-anim-cli", "--", "build-pmm", str(model_path), str(case.body_vmd), str(scene_path), "--json")
     outcome = runner.run(build_command, repo_root)
@@ -163,7 +170,6 @@ def _prepare_rust(case: OracleCase, result: dict[str, Any], runner: CommandRunne
     patched_scene_path = scene_path.with_name("scene.frame-range.pmm")
     if not _patch_scene_frame_range(case, result, runner, repo_root, scene_path, patched_scene_path):
         return False
-    result["classifications"]["propertyFrames"] = "not-applicable"
     return True
 
 
@@ -251,7 +257,7 @@ def _rust_counts(stdout: str) -> dict[str, int]:
     match = re.search(r"boneFrames=(\d+) morphFrames=(\d+) cameraFrames=(\d+) lightFrames=(\d+) selfShadowFrames=(\d+) propertyFrames=(\d+)", stdout)
     if match is None:
         raise ValueError("Rust inspect did not return compact VMD counts")
-    names = ("bones", "morphs", *_RUST_UNSUPPORTED_CHANNELS)
+    names = ("bones", "morphs", *_RUST_CHANNEL_NAMES)
     return dict(zip(names, (int(value) for value in match.groups()), strict=True))
 
 

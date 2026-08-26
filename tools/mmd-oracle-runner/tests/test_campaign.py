@@ -39,9 +39,52 @@ def _manifest(tmp_path: Path, *, case_count: int = 1) -> Path:
     return manifest
 
 
-def _compare_result(case_id: str, *, mismatch: int = 0) -> CommandResult:
-    payload = {"perCase": [{"name": case_id, "status": "ok" if mismatch == 0 else "mismatch", "mismatchCount": mismatch, "comparedFrames": 2, "comparedBones": 1, **{metric: 0.01 for metric in campaign_module._METRIC_NAMES}}]}
+def _compare_result(case_id: str, *, mismatch: int = 0, no_targets: bool = False) -> CommandResult:
+    payload = {"perCase": [{"name": case_id, "status": "ok" if mismatch == 0 else "mismatch", "mismatchCount": mismatch, "comparedFrames": 0 if no_targets else 2, "comparedBones": 0 if no_targets else 1, **{metric: 0.01 for metric in campaign_module._METRIC_NAMES}}]}
     return CommandResult(("verify",), Path.cwd(), 0, json.dumps(payload), "")
+
+
+def _prepared(case: object, keyframes: dict[str, int]) -> dict[str, object]:
+    run_dir = case.output_root / case.name
+    run_dir.mkdir(exist_ok=True)
+    (run_dir / "model.mmd-utf16.pmx").write_bytes(b"model")
+    return {"ok": True, "phase": "complete", "comparison": {"generatorReport": {"keyframes": keyframes}}}
+
+
+def _recorded(case: object) -> dict[str, object]:
+    run_dir = case.output_root / case.name
+    (run_dir / "oracle.actual.jsonl").write_text("{}\n", encoding="utf-8")
+    return {"ok": True, "recorded": True}
+
+
+def _run_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, keyframes: object, expectation: str | None = None, case_count: int = 1, compare_result: CommandResult | None = None) -> tuple[dict[str, object], dict[str, object], list[str], list[str]]:
+    manifest = _manifest(tmp_path, case_count=case_count)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    if expectation is not None:
+        payload["cases"][0]["expectation"] = expectation
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    snapshot = tmp_path / "snapshot.json"
+    monkeypatch.setattr(campaign_module, "_probe_repository", lambda _: {"commitSha": "a" * 40, "repositoryState": "clean"})
+    config = load_campaign_config(manifest.resolve())
+    record_calls: list[str] = []
+    compare_calls: list[str] = []
+
+    def prepare(case: object) -> dict[str, object]:
+        selected = keyframes(case.name) if callable(keyframes) else keyframes
+        return _prepared(case, selected)
+
+    def record(case: object, *_: object) -> dict[str, object]:
+        record_calls.append(case.name)
+        return _recorded(case)
+
+    def compare(*_: object) -> CommandResult:
+        compare_calls.append("compare")
+        return compare_result or _compare_result(config.cases[-1].case_id)
+
+    cleanup = lambda run_dir: {"ok": True, "removedRunDir": True, "deleted": []}
+    result = run_campaign(manifest, snapshot, prepare_action=prepare, record_action=record, compare_action=compare, cleanup_action=cleanup, prepare_cleanup_action=cleanup, repo_root=tmp_path)
+    saved = json.loads(snapshot.read_text(encoding="utf-8"))
+    return result, saved, record_calls, compare_calls
 
 
 def test_manifest_loads_direct_cases_and_hashes_content(tmp_path: Path) -> None:
@@ -58,6 +101,15 @@ def test_duplicate_case_ids_are_rejected(tmp_path: Path) -> None:
     payload["cases"][1]["caseId"] = payload["cases"][0]["caseId"]
     manifest.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(campaign_module.CampaignValidationError, match="duplicate caseId"):
+        load_campaign_config(manifest.resolve())
+
+
+def test_unknown_expectation_is_rejected(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["cases"][0]["expectation"] = "maybe-motion"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(campaign_module.CampaignValidationError, match="expectation"):
         load_campaign_config(manifest.resolve())
 
 
@@ -146,6 +198,51 @@ def test_campaign_records_compare_failure_without_raw_retention(tmp_path: Path, 
         "caseId": "case-0",
         "model": "model-0.pmx",
         "motion": "motion-0.vmd",
+        "expectation": "numeric-parity",
         "result": "threshold-fail",
         "failures": ["threshold"],
     }
+
+
+def test_no_compatible_motion_requires_zero_written_keyframes_and_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result, saved, record_calls, compare_calls = _run_case(
+        tmp_path, monkeypatch, expectation="no-compatible-motion",
+        keyframes={"bone": 0, "frame0Bones": 0, "morph": 0, "frame0Morphs": 0},
+    )
+    assert result["ok"] is True
+    assert record_calls == ["case-0"] and compare_calls == []
+    assert saved["funnel"]["compared"] == saved["funnel"]["passed"] == 0
+    assert saved["cases"][0]["result"] == "applicability-pass"
+
+
+@pytest.mark.parametrize(
+    ("keyframes", "failure"),
+    [({"bone": 1, "frame0Bones": 0, "morph": 0, "frame0Morphs": 0}, "unexpected-motion-applied"), ({"bone": 0}, "applicability-evidence")],
+)
+def test_no_compatible_motion_rejects_nonzero_or_malformed_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keyframes: dict[str, int], failure: str) -> None:
+    result, saved, record_calls, compare_calls = _run_case(tmp_path, monkeypatch, expectation="no-compatible-motion", keyframes=keyframes)
+    assert record_calls == [] and compare_calls == []
+    assert saved["cases"][0]["result"] == "applicability-fail"
+    assert saved["cases"][0]["failures"] == [failure]
+
+
+def test_numeric_no_targets_remains_a_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result, saved, record_calls, compare_calls = _run_case(
+        tmp_path, monkeypatch, keyframes={"bone": 1, "frame0Bones": 0, "morph": 0, "frame0Morphs": 0},
+        compare_result=_compare_result("case-0", no_targets=True),
+    )
+    assert record_calls == ["case-0"] and compare_calls == ["compare"]
+    assert saved["cases"][0]["result"] == "compare-fail"
+    assert saved["cases"][0]["failures"] == ["compare-no-targets"]
+
+
+def test_mixed_numeric_and_applicability_cases_are_separated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result, saved, _, compare_calls = _run_case(
+        tmp_path, monkeypatch, case_count=2,
+        expectation="no-compatible-motion",
+        keyframes=lambda name: {"bone": 0, "frame0Bones": 0, "morph": 0, "frame0Morphs": 0} if name == "case-0" else {"bone": 1, "frame0Bones": 0, "morph": 0, "frame0Morphs": 0},
+        compare_result=_compare_result("case-1"),
+    )
+    assert compare_calls == ["compare"]
+    assert saved["funnel"]["compared"] == saved["funnel"]["passed"] == 1
+    assert [case["result"] for case in saved["cases"]] == ["applicability-pass", "pass"]

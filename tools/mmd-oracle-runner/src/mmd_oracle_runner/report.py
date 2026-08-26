@@ -11,6 +11,7 @@ from typing import Any
 
 REPORT_SCHEMA_VERSION = 1
 _FUNNEL_FIELDS = ("discovered", "selected", "prepared", "recorded", "compared", "passed")
+_EXPECTATIONS = ("numeric-parity", "no-compatible-motion")
 _METRIC_NAMES = ("translationMaxError", "translationRmsError", "rotationMaxAngleRad", "rotationRmsAngleRad", "maxAbsError")
 _DISTRIBUTION_FIELDS = ("p50", "p95", "p99", "max")
 _FAILURE_MEANINGS = {
@@ -20,11 +21,15 @@ _FAILURE_MEANINGS = {
     "compare-no-targets": "The model and motion had no comparable target tracks.",
     "compare-execution": "The numeric comparison could not be completed.",
     "threshold": "At least one numeric metric exceeded its threshold.",
+    "applicability-evidence": "The generated PMM did not provide valid applied-motion keyframe counts.",
+    "unexpected-motion-applied": "The generated PMM contains motion keyframes for an incompatible pair.",
 }
 _OUTCOME_LABELS = {
     "pass": "Pass",
     "threshold-fail": "Over threshold",
     "compare-fail": "Not comparable",
+    "applicability-pass": "Applicability confirmed",
+    "applicability-fail": "Applicability failed",
     "record-fail": "Recording failed",
     "prepare-fail": "Preparation failed",
     "not-run": "Not run",
@@ -85,6 +90,19 @@ def generate_report(snapshot: dict[str, Any]) -> str:
         "| Compared | The oracle samples and `mmd-anim` output had comparable fields. |",
         "| Passed | Every reported metric stayed within the current thresholds. |",
     ))
+    cohorts = _cohort_counts(snapshot)
+    lines.extend((
+        "", "## Cohort summary", "",
+        "| Cohort | Selected | Compared | Passed | Confirmed | Failed |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        f"| Numeric parity | {cohorts['numeric-parity']['selected']} | {cohorts['numeric-parity']['compared']} | {cohorts['numeric-parity']['passed']} | — | — |",
+        f"| Applicability | {cohorts['no-compatible-motion']['selected']} | — | — | {cohorts['no-compatible-motion']['confirmed']} | {cohorts['no-compatible-motion']['failed']} |",
+    ))
+    if cohorts["no-compatible-motion"]["confirmed"]:
+        lines.extend((
+            "", "Applicability pass means:", "",
+            "No compatible bone or morph keyframes were written to the generated PMM, and MMD recorded the scene successfully.",
+        ))
     lines.extend(("", "## Parity thresholds", "", "| Metric | Threshold |", "| --- | ---: |"))
     lines.extend(f"| {_cell(metric)} | {_number(snapshot['thresholds'][metric])} |" for metric in _METRIC_NAMES)
     lines.extend(("", "## Metric distributions", ""))
@@ -113,11 +131,13 @@ def generate_report(snapshot: dict[str, Any]) -> str:
     else:
         lines.append("No worst cases were reported.")
     if cases:
-        lines.extend(("", "## Asset pair results", "", "Asset labels are relative to the local PMX and VMD library roots; machine-specific absolute paths are omitted.", "", f"<details><summary>Show all {len(cases)} asset pairs</summary>", "", "| Case | Model | Motion | Outcome | Classifications |", "| --- | --- | --- | --- | --- |"))
+        lines.extend(("", "## Asset pair results", "", "Asset labels are relative to the local PMX and VMD library roots; machine-specific absolute paths are omitted.", "", f"<details><summary>Show all {len(cases)} asset pairs</summary>", "", "| Case | Model | Motion | Expectation | Applied motion keyframes | Outcome | Classifications |", "| --- | --- | --- | --- | ---: | --- | --- |"))
         for case in cases:
             failures = ", ".join(case["failures"]) or "—"
             outcome = _OUTCOME_LABELS.get(case["result"], case["result"])
-            lines.append(f"| {_cell(case['caseId'])} | {_cell(case['model'])} | {_cell(case['motion'])} | {_cell(outcome)} | {_cell(failures)} |")
+            expectation = case.get("expectation", "numeric-parity")
+            applied = case.get("appliedMotionKeyframes", "—")
+            lines.append(f"| {_cell(case['caseId'])} | {_cell(case['model'])} | {_cell(case['motion'])} | {_cell(expectation)} | {_cell(applied)} | {_cell(outcome)} | {_cell(failures)} |")
         lines.extend(("", "</details>"))
     lines.extend(("", "## Raw artifact retention", "", "Raw PMM, JSONL, and log artifacts are not retained by this quality-report workflow.", f"Snapshot retention flag: `{str(snapshot['rawArtifacts']['retained']).lower()}`.", ""))
     return "\n".join(lines)
@@ -181,6 +201,45 @@ def _validate_snapshot(snapshot: object) -> None:
     for index, case in enumerate(snapshot.get("cases", [])):
         if not isinstance(case, dict) or any(not isinstance(case.get(field), str) or not case[field] for field in ("caseId", "model", "motion", "result")) or not isinstance(case.get("failures"), list) or any(not isinstance(value, str) for value in case["failures"]):
             raise ReportValidationError(((f"cases[{index}]", "has invalid asset pair data"),))
+        expectation = case.get("expectation", "numeric-parity")
+        if expectation not in _EXPECTATIONS:
+            raise ReportValidationError(((f"cases[{index}].expectation", "must be numeric-parity or no-compatible-motion"),))
+        applied = case.get("appliedMotionKeyframes")
+        if applied is not None and not _count(applied):
+            raise ReportValidationError(((f"cases[{index}].appliedMotionKeyframes", "must be a non-negative integer"),))
+        if expectation == "no-compatible-motion" and case["result"] == "applicability-pass":
+            if applied != 0:
+                raise ReportValidationError(((f"cases[{index}].appliedMotionKeyframes", "must be 0 for applicability-pass"),))
+            if case["failures"]:
+                raise ReportValidationError(((f"cases[{index}].failures", "must be empty for applicability-pass"),))
+
+
+def _cohort_counts(snapshot: dict[str, Any]) -> dict[str, dict[str, int]]:
+    cases = snapshot.get("cases")
+    if not cases:
+        funnel = snapshot["funnel"]
+        return {
+            "numeric-parity": {"selected": funnel["selected"], "compared": funnel["compared"], "passed": funnel["passed"]},
+            "no-compatible-motion": {"selected": 0, "confirmed": 0, "failed": 0},
+        }
+
+    result = {
+        "numeric-parity": {"selected": 0, "compared": 0, "passed": 0},
+        "no-compatible-motion": {"selected": 0, "confirmed": 0, "failed": 0},
+    }
+    for case in cases:
+        expectation = case.get("expectation", "numeric-parity")
+        if expectation == "no-compatible-motion":
+            cohort = result[expectation]
+            cohort["selected"] += 1
+            cohort["confirmed"] += int(case["result"] == "applicability-pass")
+            cohort["failed"] += int(case["result"] != "applicability-pass")
+        else:
+            cohort = result["numeric-parity"]
+            cohort["selected"] += 1
+            cohort["compared"] += int(case["result"] in ("pass", "threshold-fail"))
+            cohort["passed"] += int(case["result"] == "pass")
+    return result
 
 
 def _append_summary_table(lines: list[str], title: str, summaries: dict[str, Any]) -> None:

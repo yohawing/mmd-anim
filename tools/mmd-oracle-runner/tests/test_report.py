@@ -33,6 +33,48 @@ def test_report_is_deterministic_and_lists_asset_pairs_without_absolute_paths() 
     assert "Raw PMM, JSONL, and log artifacts are not retained" in report
 
 
+def test_report_separates_numeric_and_applicability_cohorts() -> None:
+    snapshot = _snapshot()
+    snapshot["funnel"] = {"discovered": 2, "selected": 2, "prepared": 2, "recorded": 2, "compared": 1, "passed": 1}
+    snapshot["cases"] = [
+        snapshot["cases"][0],
+        {
+            "caseId": "chaos-0",
+            "model": "props/prop.pmx",
+            "motion": "motions/character.vmd",
+            "expectation": "no-compatible-motion",
+            "appliedMotionKeyframes": 0,
+            "result": "applicability-pass",
+            "failures": [],
+        },
+    ]
+
+    report = generate_report(snapshot)
+
+    assert "| Numeric parity | 1 | 1 | 1 | — | — |" in report
+    assert "| Applicability | 1 | — | — | 1 | 0 |" in report
+    assert "No compatible bone or morph keyframes were written to the generated PMM, and MMD recorded the scene successfully." in report
+    assert "Applicability confirmed" in report
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("appliedMotionKeyframes", None), ("appliedMotionKeyframes", 1), ("failures", ["unexpected-motion-applied"])],
+)
+def test_applicability_pass_requires_zero_keyframes_and_no_failures(field: str, value: object) -> None:
+    snapshot = _snapshot()
+    snapshot["cases"] = [{
+        **snapshot["cases"][0],
+        "expectation": "no-compatible-motion",
+        "appliedMotionKeyframes": 0,
+        "result": "applicability-pass",
+        "failures": [],
+        field: value,
+    }]
+    with pytest.raises(ReportValidationError, match=f"cases\\[0\\]\\.{field}"):
+        generate_report(snapshot)
+
+
 def test_dirty_snapshot_is_rejected(tmp_path: Path) -> None:
     snapshot = _snapshot()
     snapshot["run"] = dict(snapshot["run"], repositoryState="dirty")

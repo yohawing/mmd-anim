@@ -24,6 +24,8 @@ from .record import record_case
 
 CAMPAIGN_SCHEMA_VERSION = 1
 _METRIC_NAMES = ("translationMaxError", "translationRmsError", "rotationMaxAngleRad", "rotationRmsAngleRad", "maxAbsError")
+_EXPECTATIONS = ("numeric-parity", "no-compatible-motion")
+_APPLIED_KEYFRAME_FIELDS = ("bone", "frame0Bones", "morph", "frame0Morphs")
 _RUN_FIELDS = ("mmdVersion", "dumperVersion", "timestamp", "samplingPolicy")
 _CASE_FIELDS = ("caseId", "pmx", "bodyVmd")
 _DEFAULT_RUN = {
@@ -61,6 +63,7 @@ class CampaignCase:
     motion_label: str
     features: tuple[str, ...]
     categories: tuple[str, ...]
+    expectation: str
     oracle_case: OracleCase
 
     @property
@@ -153,6 +156,9 @@ def load_campaign_config(path: Path) -> CampaignConfig:
         output_root = _output_directory(raw_case.get("outputRoot", str(default_output_root)), f"cases[{index}].outputRoot")
         features = tuple(_strings(raw_case.get("features", []), f"cases[{index}].features", allow_empty=True))
         categories = tuple(_strings(raw_case.get("categories", []), f"cases[{index}].categories", allow_empty=True))
+        expectation = raw_case.get("expectation", "numeric-parity")
+        if expectation not in _EXPECTATIONS:
+            raise CampaignValidationError("manifest", f"cases[{index}].expectation must be one of: {', '.join(_EXPECTATIONS)}")
         requested = tuple(_strings(raw_case.get("requestedFeatures", []), f"cases[{index}].requestedFeatures", allow_empty=True))
         dialog_opt_in = raw_case.get("dialogOptIn", default_dialog_opt_in)
         if not isinstance(dialog_opt_in, bool):
@@ -169,6 +175,7 @@ def load_campaign_config(path: Path) -> CampaignConfig:
             _asset_label(raw_case["bodyVmd"], body_vmd),
             features,
             categories,
+            expectation,
             oracle_case,
         ))
     discovery = payload.get("discovery", {})
@@ -245,20 +252,46 @@ def run_campaign(
             _persist_state(state_file, state)
             continue
 
-        try:
-            recorded = record_fn(case, mmd_exe)
-        except Exception as error:  # noqa: BLE001 - preserve bounded case result
-            recorded = {"ok": False, "recorded": False, "error": str(error)}
+        applied_motion_keyframes = _extract_applied_motion_keyframes(prepared)
+        entry["appliedMotionKeyframes"] = applied_motion_keyframes
+        pre_record_failures: list[str] = []
+        should_record = True
+        if campaign_case.expectation == "no-compatible-motion":
+            if applied_motion_keyframes is None:
+                pre_record_failures.append("applicability-evidence")
+                should_record = False
+                entry["applicabilityStatus"] = "failed"
+            elif applied_motion_keyframes != 0:
+                pre_record_failures.append("unexpected-motion-applied")
+                should_record = False
+                entry["applicabilityStatus"] = "failed"
+            else:
+                entry["applicabilityStatus"] = "pending-record"
+
+        recorded: dict[str, Any] = {"ok": False, "recorded": False}
+        if should_record:
+            try:
+                recorded = record_fn(case, mmd_exe)
+            except Exception as error:  # noqa: BLE001 - preserve bounded case result
+                recorded = {"ok": False, "recorded": False, "error": str(error)}
         if not isinstance(recorded, dict):
             recorded = {"ok": False, "recorded": False}
         entry["recorded"] = recorded.get("ok") is True and recorded.get("recorded") is True
         mmd_hash, hash_error = _mmd_executable_hash(recorded) if entry["recorded"] else (None, None)
         entry["mmdExecutableSha256"] = mmd_hash
-        failures: list[str] = [] if entry["recorded"] else ["record"]
+        failures: list[str] = list(pre_record_failures)
+        if should_record and not entry["recorded"]:
+            failures.append("record")
         if hash_error:
             failures.append(hash_error)
         outcome = CompareOutcome(False, False, {}, tuple(failures))
-        if entry["recorded"] and hash_error is None:
+        if campaign_case.expectation == "no-compatible-motion":
+            if entry["recorded"] and hash_error is None:
+                entry["applicabilityStatus"] = "confirmed"
+                outcome = CompareOutcome(False, False, {}, ())
+            else:
+                entry["applicabilityStatus"] = "failed"
+        elif entry["recorded"] and hash_error is None:
             try:
                 with tempfile.TemporaryDirectory(prefix=f".{case_id}-compare-") as temporary:
                     manifest = Path(temporary) / "manifest.json"
@@ -289,7 +322,16 @@ def run_campaign(
         return _stop(event, "snapshot", str(error), state, state_file)
     event["snapshotWritten"] = True
     event["summary"] = aggregate["funnel"]
-    event["ok"] = aggregate["funnel"]["compared"] > 0 and aggregate["funnel"]["passed"] == aggregate["funnel"]["compared"] and not aggregate["failures"]
+    numeric_cases = sum(case.expectation == "numeric-parity" for case in config.cases)
+    applicability_cases = sum(case.expectation == "no-compatible-motion" for case in config.cases)
+    applicability_confirmed = sum(
+        entry.get("applicabilityStatus") == "confirmed"
+        for entry in state["cases"].values()
+        if entry.get("expectation") == "no-compatible-motion"
+    )
+    numeric_ok = aggregate["funnel"]["compared"] == numeric_cases and aggregate["funnel"]["passed"] == numeric_cases
+    applicability_ok = applicability_confirmed == applicability_cases
+    event["ok"] = numeric_ok and applicability_ok and not aggregate["failures"]
     if not event["ok"]:
         event["error"] = {"code": "zero-comparable" if aggregate["funnel"]["compared"] == 0 else "quality-failures", "message": "campaign completed with quality failures"}
     return event
@@ -415,7 +457,7 @@ def _load_state(path: Path, config: CampaignConfig, input_hashes: dict[str, str]
 
 
 def _entry(case: CampaignCase, input_hash: str, run_dir: Path) -> dict[str, Any]:
-    return {"caseId": case.case_id, "inputHash": input_hash, "features": list(case.features), "categories": list(case.categories), "runDir": str(run_dir.resolve()), "status": "running", "prepared": False, "recorded": False, "compared": False, "passed": False, "metrics": {}, "failures": [], "cleanup": "not-attempted", "mmdExecutableSha256": None}
+    return {"caseId": case.case_id, "inputHash": input_hash, "features": list(case.features), "categories": list(case.categories), "expectation": case.expectation, "runDir": str(run_dir.resolve()), "status": "running", "prepared": False, "recorded": False, "compared": False, "passed": False, "metrics": {}, "failures": [], "cleanup": "not-attempted", "mmdExecutableSha256": None, "appliedMotionKeyframes": None, "applicabilityStatus": "not-applicable"}
 
 
 def _run_dir(case: CampaignCase, oracle_case: OracleCase) -> Path:
@@ -493,6 +535,21 @@ def _parse_compare_result(result: CommandResult, case_id: str, thresholds: dict[
     return CompareOutcome(compared, compared and not failures, metrics if compared else {}, tuple(failures))
 
 
+def _extract_applied_motion_keyframes(prepared: dict[str, Any]) -> int | None:
+    comparison = prepared.get("comparison")
+    generator_report = comparison.get("generatorReport") if isinstance(comparison, dict) else None
+    keyframes = generator_report.get("keyframes") if isinstance(generator_report, dict) else None
+    if not isinstance(keyframes, dict):
+        return None
+    counts: list[int] = []
+    for field in _APPLIED_KEYFRAME_FIELDS:
+        value = keyframes.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        counts.append(value)
+    return sum(counts)
+
+
 def _mmd_executable_hash(recorded: dict[str, Any]) -> tuple[str | None, str | None]:
     identity = recorded.get("mmdExecutable")
     value = identity.get("sha256") if isinstance(identity, dict) else None
@@ -536,19 +593,29 @@ def _build_snapshot(config: CampaignConfig, state: dict[str, Any], provenance: d
     case_results = []
     for case in config.cases:
         entry = entry_by_id.get(case.case_id, {})
-        case_results.append({
+        case_result = {
             "caseId": case.case_id,
             "model": case.model_label,
             "motion": case.motion_label,
+            "expectation": case.expectation,
             "result": _case_result(entry),
             "failures": list(entry.get("failures", [])),
-        })
+        }
+        applied_motion_keyframes = entry.get("appliedMotionKeyframes")
+        if isinstance(applied_motion_keyframes, int) and not isinstance(applied_motion_keyframes, bool) and applied_motion_keyframes >= 0:
+            case_result["appliedMotionKeyframes"] = applied_motion_keyframes
+        case_results.append(case_result)
     return {"schemaVersion": 1, "run": {**config.run, "commitSha": provenance["commitSha"], "repositoryState": provenance["repositoryState"], "mmdVersionSource": "config-self-reported", "dumperVersionSource": "config-self-reported", "manifestHash": config.config_hash, "mmdExecutableSha256": observed}, "funnel": funnel, "thresholds": dict(config.thresholds), "metrics": metrics, "failures": failures, "features": features, "categories": categories, "cases": case_results, "worstCases": worst[:20], "rawArtifacts": {"retained": False}}
 
 
 def _case_result(entry: dict[str, Any]) -> str:
     if not entry:
         return "not-run"
+    if entry.get("expectation") == "no-compatible-motion":
+        if entry.get("applicabilityStatus") == "confirmed":
+            return "applicability-pass"
+        if entry.get("status") == "complete":
+            return "applicability-fail"
     if entry.get("passed") is True:
         return "pass"
     if entry.get("compared") is True:

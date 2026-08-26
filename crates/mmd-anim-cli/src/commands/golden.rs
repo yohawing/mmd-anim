@@ -996,7 +996,7 @@ pub(crate) fn golden_ik_compare(
         let mut case_diagnostics: Vec<GoldenRootMotionDiagnostic> = Vec::new();
 
         for oracle_frame in &dump.frames {
-            let sample_frame = oracle_frame.frame as f32 + sample_frame_offset;
+            let sample_frame = oracle_frame.sample_frame + sample_frame_offset;
             runtime.evaluate_clip_frame(&clip, sample_frame);
 
             let model0 = match oracle_frame.models.first() {

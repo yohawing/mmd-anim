@@ -23,8 +23,12 @@ class FakeRunner:
         if self.mode == "timeout":
             return CommandResult(command, cwd, 124, "", "command timed out")
         if "inspect" in command:
-            camera = 1 if self.mode == "unsupported" else 0
-            text = f"VMD parser: boneFrames=5 morphFrames=0 cameraFrames={camera} lightFrames=0 selfShadowFrames=0 propertyFrames=0"
+            channel = {"unsupported": "camera", "camera": "camera", "light": "light", "shadow": "selfShadow", "property": "property"}.get(self.mode)
+            camera = 1 if channel == "camera" else 0
+            light = 1 if channel == "light" else 0
+            shadow = 1 if channel == "selfShadow" else 0
+            properties = 3 if channel == "property" else 0
+            text = f"VMD parser: boneFrames=5 morphFrames=0 cameraFrames={camera} lightFrames={light} selfShadowFrames={shadow} propertyFrames={properties}"
             return CommandResult(command, cwd, 0, text, "")
         scene = Path(command[command.index("build-pmm") + 3])
         scene.parent.mkdir(parents=True, exist_ok=True)

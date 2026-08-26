@@ -17,7 +17,6 @@ namespace {
 
 std::mutex g_dumpMutex;
 double g_lastDumpedFrame = std::numeric_limits<double>::quiet_NaN();
-double g_pendingFrame = std::numeric_limits<double>::quiet_NaN();
 bool g_sawNonZeroFrame = false;
 int g_lastDumpedRoundedFrame = -1;
 std::once_flag g_dumpFramesOnce;
@@ -165,14 +164,6 @@ bool shouldSkipInitialFrameZero(double frame) {
   return GetEnvironmentVariableA("MMD_ORACLE_SKIP_INITIAL_FRAME_ZERO", nullptr, 0) != 0;
 }
 
-bool hasStablePendingFrame(double frame) {
-  if (!std::isfinite(g_pendingFrame) || std::abs(frame - g_pendingFrame) >= 0.0001) {
-    g_pendingFrame = frame;
-    return false;
-  }
-  return true;
-}
-
 } // namespace
 
 extern "C" __declspec(dllexport) int MmdOracleDumpOnce() {
@@ -198,15 +189,11 @@ extern "C" __declspec(dllexport) int MmdOracleDumpFrameChanged() {
     if (!shouldDumpRequestedFrame(frame)) {
       return 0;
     }
-    if (!hasStablePendingFrame(frame)) {
-      return 0;
-    }
     if (!dumpSingleSnapshot(frame, shouldRequireModelSnapshot())) {
       return 1;
     }
     g_lastDumpedFrame = frame;
     g_lastDumpedRoundedFrame = roundedFrame;
-    g_pendingFrame = std::numeric_limits<double>::quiet_NaN();
     return 0;
   } catch (...) {
     return 2;

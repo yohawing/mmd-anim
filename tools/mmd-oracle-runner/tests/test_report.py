@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from mmd_oracle_runner.report import ReportValidationError, generate_report, load_snapshot, write_report
+
+
+def _snapshot() -> dict[str, object]:
+    metrics = {name: {"p50": 0.0, "p95": 0.001, "p99": 0.002, "max": 0.003} for name in ("translationMaxError", "translationRmsError", "rotationMaxAngleRad", "rotationRmsAngleRad", "maxAbsError")}
+    return {
+        "schemaVersion": 1,
+        "run": {"commitSha": "a" * 40, "repositoryState": "clean", "mmdVersion": "9.32-x64", "mmdVersionSource": "config", "dumperVersion": "test", "dumperVersionSource": "config", "timestamp": "2026-08-25T00:00:00Z", "samplingPolicy": "fixed-local-v1", "manifestHash": "c" * 64, "mmdExecutableSha256": "not-observed"},
+        "funnel": {field: 1 for field in ("discovered", "selected", "prepared", "recorded", "compared", "passed")},
+        "thresholds": {name: 0.1 for name in metrics}, "metrics": metrics, "failures": {},
+        "features": {"bone": {"selected": 1, "compared": 1, "passed": 1}}, "categories": {},
+        "cases": [{"caseId": "case-0", "model": "models/model.pmx", "motion": "motions/motion.vmd", "result": "pass", "failures": []}],
+        "worstCases": [{"caseId": "case-0", "category": "bone", "metric": "maxAbsError", "value": 0.003, "result": "pass"}],
+        "rawArtifacts": {"retained": False},
+    }
+
+
+def test_report_is_deterministic_and_lists_asset_pairs_without_absolute_paths() -> None:
+    snapshot = _snapshot()
+    assert generate_report(snapshot) == generate_report(json.loads(json.dumps(snapshot, sort_keys=True)))
+    report = generate_report(snapshot)
+    assert "case-0" in report
+    assert "models/model.pmx" in report
+    assert "motions/motion.vmd" in report
+    assert "absolute asset paths" in report
+    assert "Raw PMM, JSONL, and log artifacts are not retained" in report
+
+
+def test_report_separates_numeric_and_applicability_cohorts() -> None:
+    snapshot = _snapshot()
+    snapshot["funnel"] = {"discovered": 2, "selected": 2, "prepared": 2, "recorded": 2, "compared": 1, "passed": 1}
+    snapshot["cases"] = [
+        snapshot["cases"][0],
+        {
+            "caseId": "chaos-0",
+            "model": "props/prop.pmx",
+            "motion": "motions/character.vmd",
+            "expectation": "no-compatible-motion",
+            "appliedMotionKeyframes": 0,
+            "result": "applicability-pass",
+            "failures": [],
+        },
+    ]
+
+    report = generate_report(snapshot)
+
+    assert "| Numeric parity | 1 | 1 | 1 | — | — |" in report
+    assert "| Applicability | 1 | — | — | 1 | 0 |" in report
+    assert "No compatible bone or morph keyframes were written to the generated PMM, and MMD recorded the scene successfully." in report
+    assert "Applicability confirmed" in report
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("appliedMotionKeyframes", None), ("appliedMotionKeyframes", 1), ("failures", ["unexpected-motion-applied"])],
+)
+def test_applicability_pass_requires_zero_keyframes_and_no_failures(field: str, value: object) -> None:
+    snapshot = _snapshot()
+    snapshot["cases"] = [{
+        **snapshot["cases"][0],
+        "expectation": "no-compatible-motion",
+        "appliedMotionKeyframes": 0,
+        "result": "applicability-pass",
+        "failures": [],
+        field: value,
+    }]
+    with pytest.raises(ReportValidationError, match=f"cases\\[0\\]\\.{field}"):
+        generate_report(snapshot)
+
+
+def test_dirty_snapshot_is_rejected(tmp_path: Path) -> None:
+    snapshot = _snapshot()
+    snapshot["run"] = dict(snapshot["run"], repositoryState="dirty")
+    with pytest.raises(ReportValidationError, match="must be clean"):
+        generate_report(snapshot)
+    path = tmp_path / "snapshot.json"
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+    with pytest.raises(ReportValidationError):
+        load_snapshot(path)
+
+
+def test_version_one_snapshot_without_asset_pairs_remains_supported() -> None:
+    snapshot = _snapshot()
+    snapshot.pop("cases")
+    report = generate_report(snapshot)
+    assert "case-0" in report
+    assert "## Asset pair results" not in report
+
+
+def test_non_numeric_threshold_is_rejected() -> None:
+    snapshot = _snapshot()
+    snapshot["thresholds"] = dict(snapshot["thresholds"], maxAbsError="invalid")
+    with pytest.raises(ReportValidationError, match="thresholds.maxAbsError"):
+        generate_report(snapshot)
+
+
+def test_write_report_uses_requested_output(tmp_path: Path) -> None:
+    snapshot_path = tmp_path / "snapshot.json"
+    output_path = tmp_path / "quality.md"
+    snapshot_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    write_report(snapshot_path, output_path)
+    assert output_path.read_text(encoding="utf-8").startswith("# Motion Golden Oracle Quality Report")

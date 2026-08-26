@@ -139,7 +139,11 @@ impl MmdDumperOracleDump {
                 .as_ref()
                 .is_none_or(|target_frames| target_frames.contains(&frame))
             {
-                frames.push(MmdDumperOracleFrame::from_raw(frame, record.models)?);
+                frames.push(MmdDumperOracleFrame::from_raw(
+                    frame,
+                    record.frame,
+                    record.models,
+                )?);
             }
         }
 
@@ -222,6 +226,7 @@ impl MmdDumperOracleDump {
 
                 frames.push(MmdDumperOracleFrame {
                     frame: frame_number,
+                    sample_frame: frame.frame,
                     models: vec![MmdDumperOracleModel {
                         index: 0,
                         name: case.name.clone(),
@@ -282,6 +287,7 @@ pub struct MmdDumperOracleSource {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MmdDumperOracleFrame {
     pub frame: i32,
+    pub(crate) sample_frame: f32,
     pub models: Vec<MmdDumperOracleModel>,
     pub rigid_bodies: Vec<MmdDumperOracleRigidBody>,
 }
@@ -289,6 +295,7 @@ pub struct MmdDumperOracleFrame {
 impl MmdDumperOracleFrame {
     fn from_raw(
         frame: i32,
+        sample_frame: f32,
         models: Vec<RawOracleModel>,
     ) -> Result<Self, MmdDumperOracleParseError> {
         let mut parsed_models = Vec::with_capacity(models.len());
@@ -297,6 +304,7 @@ impl MmdDumperOracleFrame {
         }
         Ok(Self {
             frame,
+            sample_frame,
             models: parsed_models,
             rigid_bodies: Vec::new(),
         })
@@ -609,6 +617,17 @@ mod tests {
     }
 
     #[test]
+    fn preserves_fractional_jsonl_sample_timestamp_in_logical_frame_bucket() {
+        let jsonl = r#"{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"1.0.0"},"frame":30.39,"models":[]}"#;
+
+        let dump = MmdDumperOracleDump::from_jsonl_str(jsonl, Some(&[30])).unwrap();
+
+        assert_eq!(dump.frames.len(), 1);
+        assert_eq!(dump.frames[0].frame, 30);
+        assert_eq!(dump.frames[0].sample_frame, 30.39);
+    }
+
+    #[test]
     fn parses_unity_runtime_verification_json_and_converts_row_major_matrices() {
         let json = r#"{
             "schemaVersion": 1,
@@ -619,7 +638,7 @@ mod tests {
                     "pmxPath": "model.pmx",
                     "sampledFrames": [
                         {
-                            "frame": 60,
+                            "frame": 60.39,
                             "matrixLayout": "row-major",
                             "bones": [
                                 {
@@ -644,6 +663,8 @@ mod tests {
 
         assert_eq!(dump.source.dumper_version, "unity-runtime-verification");
         assert_eq!(dump.frames.len(), 1);
+        assert_eq!(dump.frames[0].frame, 60);
+        assert_eq!(dump.frames[0].sample_frame, 60.39);
         let bone = &dump.frames[0].models[0].bones[0];
         assert_eq!(bone.index, 3);
         assert_eq!(bone.name, "スカート");

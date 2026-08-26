@@ -63,16 +63,12 @@ impl RuntimeInstance {
             self.update_world_matrices_after_ik_link_change(ik_index);
 
             let mut broke_early = false;
-            // The current local pose is the rollback floor. A constrained IK
-            // candidate can be worse than the authored FK pose, so the first
-            // full link pass must not become the best pose merely because it
-            // is the first finite distance observed.
             let mut final_distance = {
                 let eff = translation(self.pose.world_matrices()[target_bone.as_usize()]);
                 let ik = translation(self.pose.world_matrices()[ik_bone.as_usize()]);
                 (eff - ik).length()
             };
-            let mut best_distance = final_distance;
+            let mut best_distance = f32::MAX;
             for _iteration in 0..iteration_count {
                 let eff_pos = translation(self.pose.world_matrices()[target_bone.as_usize()]);
                 let ik_pos = translation(self.pose.world_matrices()[ik_bone.as_usize()]);

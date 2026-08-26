@@ -6,9 +6,11 @@ import sys
 from pathlib import Path
 
 from .batch import run_batch
+from .campaign import run_campaign
 from .case import CaseValidationError, load_case
 from .prepare import prepare_case
 from .record import record_case
+from .report import ReportValidationError, write_report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -34,7 +36,27 @@ def main(argv: list[str] | None = None) -> int:
         summary["command"] = args.command
         _print_json(summary)
         return 0 if summary["ok"] else 1
-
+    if args.command == "quality-report":
+        try:
+            write_report(Path(args.snapshot), Path(args.output))
+        except ReportValidationError as error:
+            _print_json(
+                {"ok": False, "command": args.command, "error": error.as_dict()},
+                stream=sys.stderr,
+            )
+            return 2
+        _print_json({"ok": True, "command": args.command, "output": str(Path(args.output).resolve())})
+        return 0
+    if args.command == "campaign":
+        result = run_campaign(Path(args.config), Path(args.snapshot), args.state, args.mmd_exe)
+        result["command"] = args.command
+        _print_json(result)
+        if result.get("ok") is True:
+            return 0
+        error = result.get("error")
+        if isinstance(error, dict) and error.get("kind") == "campaign":
+            return 2
+        return 1
     case_path = Path(args.case)
     try:
         case = load_case(case_path)
@@ -91,6 +113,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--mmd-exe",
         help="absolute MikuMikuDance executable path (defaults to MMD_DUMPER_MMD_EXE)",
     )
+    quality_report = commands.add_parser(
+        "quality-report", help="generate deterministic Markdown from one quality snapshot"
+    )
+    quality_report.add_argument("--snapshot", required=True, help="compact quality snapshot JSON path")
+    quality_report.add_argument("--output", required=True, help="Markdown report output path")
+    campaign = commands.add_parser("campaign", help="run a sequential local motion quality campaign")
+    campaign.add_argument("--config", required=True, help="absolute campaign config JSON path")
+    campaign.add_argument("--snapshot", required=True, help="absolute compact snapshot JSON output path")
+    campaign.add_argument("--state", help="absolute local campaign state JSON path")
+    campaign.add_argument("--mmd-exe", help="absolute MikuMikuDance executable path")
     return parser
 
 

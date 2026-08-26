@@ -264,3 +264,62 @@ def test_foreign_failure_artifact_is_preserved_and_blocks_launch(tmp_path: Path,
     assert rejected["phase"] == "preflight"
     assert runner.calls == []
     assert record_paths["failureBundle"].read_text(encoding="utf-8") == "foreign evidence\n"
+
+
+def test_failure_retention_can_be_disabled_without_raw_duplicates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    case, exe, fixture = _prepared_case(tmp_path)
+    monkeypatch.setenv("MMD_DUMPER_ALLOW_MMD_LAUNCH", "1")
+    record_paths = paths(fixture.parent)
+
+    failed = record_case(
+        case,
+        exe,
+        runner=FakeRecordRunner(mode="process-schema-fail"),
+        repo_root=REPO_ROOT,
+        retain_failure_artifacts=False,
+    )
+
+    assert failed["ok"] is False
+    assert not record_paths["failureBundle"].exists()
+    assert all(not record_paths[key].exists() for key in TEMPORARY_ARTIFACT_KEYS)
+    assert record_paths["attempt"].is_file()
+
+
+def test_disabled_failure_retention_removes_only_prior_owned_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    case, exe, fixture = _prepared_case(tmp_path)
+    monkeypatch.setenv("MMD_DUMPER_ALLOW_MMD_LAUNCH", "1")
+    record_paths = paths(fixture.parent)
+    assert record_case(
+        case, exe, runner=FakeRecordRunner(mode="process-schema-fail"), repo_root=REPO_ROOT
+    )["ok"] is False
+    assert record_paths["failureBundle"].is_file()
+
+    failed = record_case(
+        case,
+        exe,
+        runner=FakeRecordRunner(mode="process-fail"),
+        repo_root=REPO_ROOT,
+        retain_failure_artifacts=False,
+    )
+
+    assert failed["ok"] is False
+    assert not record_paths["failureBundle"].exists()
+
+
+def test_disabled_failure_retention_preserves_foreign_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    case, exe, fixture = _prepared_case(tmp_path)
+    monkeypatch.setenv("MMD_DUMPER_ALLOW_MMD_LAUNCH", "1")
+    record_paths = paths(fixture.parent)
+    record_paths["failureBundle"].write_text("foreign evidence\n", encoding="utf-8")
+
+    rejected = record_case(
+        case,
+        exe,
+        runner=FakeRecordRunner(),
+        repo_root=REPO_ROOT,
+        retain_failure_artifacts=False,
+    )
+
+    assert rejected["ok"] is False
+    assert rejected["phase"] == "preflight"
+    assert record_paths["failureBundle"].read_text(encoding="utf-8") == "foreign evidence\n"

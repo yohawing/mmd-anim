@@ -27,6 +27,7 @@ from .record_artifacts import (
     promote_record as _promote_record,
     recover_interrupted_record_artifacts as _recover_interrupted_record_artifacts,
     refresh as _refresh_artifacts,
+    discard_failure_artifacts as _discard_failure_artifacts,
     remove_attempt_marker as _remove_attempt_marker,
     remove_temporary_artifacts as _remove_temporary_artifacts,
     retain_failure_artifacts as _retain_failure_artifacts,
@@ -53,6 +54,7 @@ def record_case(
     *,
     runner: CommandRunner | None = None,
     repo_root: Path | None = None,
+    retain_failure_artifacts: bool = True,
 ) -> dict[str, Any]:
     # The Python host runner owns its deadline, MMD shutdown, and DLL restore in one finally block.
     # Killing it from an outer Python timeout can strand the temporary plugin installation.
@@ -168,7 +170,12 @@ def record_case(
         _fail(result, "preflight", str(error))
     finally:
         preserve_temporaries = False
-        if record_attempted and not result["recorded"]:
+        if not retain_failure_artifacts and (record_attempted or existing_owned):
+            try:
+                _discard_failure_artifacts(paths, existing_owned | temporary_owned)
+            except OSError as error:
+                _fail(result, "artifacts", f"cannot discard record failure artifacts: {error}")
+        elif record_attempted and not result["recorded"]:
             try:
                 _retain_failure_artifacts(paths, existing_owned | temporary_owned)
             except OSError as error:

@@ -58,7 +58,6 @@ class CampaignValidationError(ValueError):
 
 @dataclass(frozen=True)
 class CampaignCase:
-    case_file: Path
     case_id: str
     model_label: str
     motion_label: str
@@ -170,7 +169,6 @@ def load_campaign_config(path: Path) -> CampaignConfig:
             dialog_opt_in=dialog_opt_in, requested_features=requested, source_path=manifest,
         )
         cases.append(CampaignCase(
-            manifest,
             case_id,
             _asset_label(raw_case["pmx"], pmx),
             _asset_label(raw_case["bodyVmd"], body_vmd),

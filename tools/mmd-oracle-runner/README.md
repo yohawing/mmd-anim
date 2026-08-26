@@ -22,7 +22,7 @@ uv run --project tools/mmd-oracle-runner mmd-oracle-runner validate --case C:/ab
 uv run --project tools/mmd-oracle-runner mmd-oracle-runner prepare --case C:/absolute/case.json
 ```
 
-Cases accept only `generatorBackend: "python-rust"`. Rust `mmd-anim-cli build-pmm` reads the PMX/VMD inputs and the Python runner manages generated artifacts and ownership markers. The current preparation backend is limited to body VMD bone and morph tracks. Camera, property, and multi-model preparation fails closed.
+Cases accept only `generatorBackend: "python-rust"`. Rust `mmd-anim-cli build-pmm` reads the PMX/VMD inputs and the Python runner manages generated artifacts and ownership markers. The current preparation backend applies body VMD bone and morph tracks, reports and drops property frames, and fails closed for camera and multi-model preparation.
 
 Recording requires a prepared case with `recordOptIn: true` and the launch guard enabled:
 

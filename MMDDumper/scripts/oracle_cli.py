@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from ctypes import wintypes
 import json
 import os
 import shutil
@@ -251,9 +252,18 @@ def _send_key(pid: int, virtual_key: int) -> None:
     if not main_windows:
         raise ValueError("MMD main window is not visible")
     hwnd = main_windows[0]
+    user32.ShowWindowAsync(hwnd, 9)
+    user32.SetForegroundWindow(hwnd)
+    rect = wintypes.RECT()
+    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        user32.SetCursorPos((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+        user32.mouse_event(0x0002, 0, 0, 0, 0)
+        user32.mouse_event(0x0004, 0, 0, 0, 0)
+    time.sleep(0.1)
     scan = user32.MapVirtualKeyW(virtual_key, 0)
-    user32.PostMessageW(hwnd, 0x0100, virtual_key, 1 | (scan << 16))
-    user32.PostMessageW(hwnd, 0x0101, virtual_key, 1 | (scan << 16) | (1 << 30) | (1 << 31))
+    user32.keybd_event(virtual_key, scan, 0, 0)
+    time.sleep(0.02)
+    user32.keybd_event(virtual_key, scan, 0x0002, 0)
 
 
 def _coverage(fixture_path: Path, actual_path: Path, require_camera: bool) -> dict[str, Any]:

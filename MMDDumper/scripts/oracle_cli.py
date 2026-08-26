@@ -264,8 +264,6 @@ def _send_key(pid: int, virtual_key: int) -> None:
     user32.keybd_event(virtual_key, scan, 0, 0)
     time.sleep(0.02)
     user32.keybd_event(virtual_key, scan, 0x0002, 0)
-    user32.PostMessageW(hwnd, 0x0100, virtual_key, 1 | (scan << 16))
-    user32.PostMessageW(hwnd, 0x0101, virtual_key, 1 | (scan << 16) | (1 << 30) | (1 << 31))
 
 
 def _coverage(fixture_path: Path, actual_path: Path, require_camera: bool) -> dict[str, Any]:

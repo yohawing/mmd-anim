@@ -57,6 +57,8 @@ class CampaignValidationError(ValueError):
 class CampaignCase:
     case_file: Path
     case_id: str
+    model_label: str
+    motion_label: str
     features: tuple[str, ...]
     categories: tuple[str, ...]
     oracle_case: OracleCase
@@ -160,7 +162,15 @@ def load_campaign_config(path: Path) -> CampaignConfig:
             frames=frames, output_root=output_root, generator_backend="python-rust", record_opt_in=True,
             dialog_opt_in=dialog_opt_in, requested_features=requested, source_path=manifest,
         )
-        cases.append(CampaignCase(manifest, case_id, features, categories, oracle_case))
+        cases.append(CampaignCase(
+            manifest,
+            case_id,
+            _asset_label(raw_case["pmx"], pmx),
+            _asset_label(raw_case["bodyVmd"], body_vmd),
+            features,
+            categories,
+            oracle_case,
+        ))
     discovery = payload.get("discovery", {})
     discovered_default = discovery.get("selected", len(cases)) if isinstance(discovery, dict) else len(cases)
     discovered = payload.get("discovered", discovered_default)
@@ -324,6 +334,14 @@ def _existing_file(value: object, label: str) -> Path:
         if _sha256_file(path) != expected_hash.lower():
             raise CampaignValidationError("manifest", f"{label} content hash does not match the fixed manifest")
     return path
+
+
+def _asset_label(value: object, path: Path) -> str:
+    if isinstance(value, dict):
+        relative = value.get("relativePath")
+        if isinstance(relative, str) and relative.strip() and not Path(relative).is_absolute():
+            return relative.strip().replace("\\", "/")
+    return path.name
 
 
 def _output_directory(value: object, label: str) -> Path:
@@ -514,7 +532,32 @@ def _build_snapshot(config: CampaignConfig, state: dict[str, Any], provenance: d
         item.pop("_ratio", None)
     hashes = {entry.get("mmdExecutableSha256") for entry in entries if entry.get("mmdExecutableSha256")}
     observed = next(iter(hashes), "not-observed")
-    return {"schemaVersion": 1, "run": {**config.run, "commitSha": provenance["commitSha"], "repositoryState": provenance["repositoryState"], "mmdVersionSource": "config-self-reported", "dumperVersionSource": "config-self-reported", "manifestHash": config.config_hash, "mmdExecutableSha256": observed}, "funnel": funnel, "thresholds": dict(config.thresholds), "metrics": metrics, "failures": failures, "features": features, "categories": categories, "worstCases": worst[:20], "rawArtifacts": {"retained": False}}
+    entry_by_id = {entry["caseId"]: entry for entry in entries}
+    case_results = []
+    for case in config.cases:
+        entry = entry_by_id.get(case.case_id, {})
+        case_results.append({
+            "caseId": case.case_id,
+            "model": case.model_label,
+            "motion": case.motion_label,
+            "result": _case_result(entry),
+            "failures": list(entry.get("failures", [])),
+        })
+    return {"schemaVersion": 1, "run": {**config.run, "commitSha": provenance["commitSha"], "repositoryState": provenance["repositoryState"], "mmdVersionSource": "config-self-reported", "dumperVersionSource": "config-self-reported", "manifestHash": config.config_hash, "mmdExecutableSha256": observed}, "funnel": funnel, "thresholds": dict(config.thresholds), "metrics": metrics, "failures": failures, "features": features, "categories": categories, "cases": case_results, "worstCases": worst[:20], "rawArtifacts": {"retained": False}}
+
+
+def _case_result(entry: dict[str, Any]) -> str:
+    if not entry:
+        return "not-run"
+    if entry.get("passed") is True:
+        return "pass"
+    if entry.get("compared") is True:
+        return "threshold-fail"
+    if entry.get("recorded") is True:
+        return "compare-fail"
+    if entry.get("prepared") is True:
+        return "record-fail"
+    return "prepare-fail"
 
 
 def _tag_summaries(cases: tuple[CampaignCase, ...], entries: list[dict[str, Any]], field: str) -> dict[str, dict[str, int]]:

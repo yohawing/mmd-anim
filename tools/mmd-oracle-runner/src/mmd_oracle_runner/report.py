@@ -13,6 +13,22 @@ REPORT_SCHEMA_VERSION = 1
 _FUNNEL_FIELDS = ("discovered", "selected", "prepared", "recorded", "compared", "passed")
 _METRIC_NAMES = ("translationMaxError", "translationRmsError", "rotationMaxAngleRad", "rotationRmsAngleRad", "maxAbsError")
 _DISTRIBUTION_FIELDS = ("p50", "p95", "p99", "max")
+_FAILURE_MEANINGS = {
+    "prepare": "The PMM scene could not be prepared.",
+    "record": "MMD did not produce a usable recording.",
+    "compare-fields": "The recording contained no fields that could be compared.",
+    "compare-no-targets": "The model and motion had no comparable target tracks.",
+    "compare-execution": "The numeric comparison could not be completed.",
+    "threshold": "At least one numeric metric exceeded its threshold.",
+}
+_OUTCOME_LABELS = {
+    "pass": "Pass",
+    "threshold-fail": "Over threshold",
+    "compare-fail": "Not comparable",
+    "record-fail": "Recording failed",
+    "prepare-fail": "Preparation failed",
+    "not-run": "Not run",
+}
 
 
 class ReportValidationError(ValueError):
@@ -39,9 +55,19 @@ def generate_report(snapshot: dict[str, Any]) -> str:
     _validate_snapshot(snapshot)
     run = snapshot["run"]
     funnel = snapshot["funnel"]
+    cases = snapshot.get("cases", [])
+    pair_by_id = {case["caseId"]: case for case in cases}
+    introduction = "This report is generated from a compact quality snapshot."
+    if cases:
+        introduction += " It identifies each model/motion pair and its outcome, but does not include absolute asset paths, per-frame data, or per-bone dumps."
+    else:
+        introduction += " It does not include absolute asset paths, per-frame data, or per-bone dumps."
     lines = [
         "# Motion Golden Oracle Quality Report", "",
-        "This report is generated from a compact quality snapshot. It contains aggregate results only; per-frame and per-bone details are not included.", "",
+        introduction, "",
+        "## Result at a glance", "",
+        f"Of {funnel['selected']} selected asset pairs, {funnel['compared']} reached numeric comparison and {funnel['passed']} passed the current parity thresholds.", "",
+        "The counts form an execution funnel. A pair that stops at an earlier stage is still part of the campaign and is classified below.", "",
         "## Run and provenance", "", "| Field | Value |", "| --- | --- |",
         f"| Commit SHA | {_cell(run['commitSha'])} |", f"| Repository state | {_cell(run['repositoryState'])} |",
         f"| MMD version (self-reported) | {_cell(run['mmdVersion'])} |", f"| MMDDumper version (self-reported) | {_cell(run['dumperVersion'])} |",
@@ -51,6 +77,14 @@ def generate_report(snapshot: dict[str, Any]) -> str:
         "", "## Execution funnel", "", "| Stage | Cases |", "| --- | ---: |",
     ]
     lines.extend(f"| {field.capitalize()} | {funnel[field]} |" for field in _FUNNEL_FIELDS)
+    lines.extend((
+        "", "### How to read the funnel", "",
+        "| Stage | Meaning |", "| --- | --- |",
+        "| Prepared | A PMM scene was built for the pair. |",
+        "| Recorded | MMD played the scene and produced oracle samples. |",
+        "| Compared | The oracle samples and `mmd-anim` output had comparable fields. |",
+        "| Passed | Every reported metric stayed within the current thresholds. |",
+    ))
     lines.extend(("", "## Parity thresholds", "", "| Metric | Threshold |", "| --- | ---: |"))
     lines.extend(f"| {_cell(metric)} | {_number(snapshot['thresholds'][metric])} |" for metric in _METRIC_NAMES)
     lines.extend(("", "## Metric distributions", ""))
@@ -64,19 +98,27 @@ def generate_report(snapshot: dict[str, Any]) -> str:
         lines.append("No comparable cases were available; metric distributions are empty.")
     lines.extend(("", "## Failure classifications", ""))
     if snapshot["failures"]:
-        lines.extend(("| Classification | Cases |", "| --- | ---: |"))
-        lines.extend(f"| {_cell(name)} | {count} |" for name, count in sorted(snapshot["failures"].items()))
+        lines.extend(("| Classification | Cases | Meaning |", "| --- | ---: | --- |"))
+        lines.extend(f"| {_cell(name)} | {count} | {_cell(_FAILURE_MEANINGS.get(name, 'See the case outcome for this campaign-specific classification.'))} |" for name, count in sorted(snapshot["failures"].items()))
     else:
         lines.append("No failures were classified.")
     _append_summary_table(lines, "Feature summaries", snapshot["features"])
     _append_summary_table(lines, "Category summaries", snapshot["categories"])
     lines.extend(("", "## Worst cases", ""))
     if snapshot["worstCases"]:
-        lines.extend(("| Case | Category | Metric | Value | Result |", "| --- | --- | --- | ---: | --- |"))
+        lines.extend(("| Case | Model | Motion | Metric | Value | Result |", "| --- | --- | --- | --- | ---: | --- |"))
         for case in snapshot["worstCases"]:
-            lines.append(f"| {_cell(case['caseId'])} | {_cell(case['category'])} | {_cell(case['metric'])} | {_number(case['value'])} | {_cell(case['result'])} |")
+            pair = pair_by_id.get(case["caseId"], {})
+            lines.append(f"| {_cell(case['caseId'])} | {_cell(pair.get('model', '—'))} | {_cell(pair.get('motion', '—'))} | {_cell(case['metric'])} | {_number(case['value'])} | {_cell(case['result'])} |")
     else:
         lines.append("No worst cases were reported.")
+    if cases:
+        lines.extend(("", "## Asset pair results", "", "Asset labels are relative to the local PMX and VMD library roots; machine-specific absolute paths are omitted.", "", f"<details><summary>Show all {len(cases)} asset pairs</summary>", "", "| Case | Model | Motion | Outcome | Classifications |", "| --- | --- | --- | --- | --- |"))
+        for case in cases:
+            failures = ", ".join(case["failures"]) or "—"
+            outcome = _OUTCOME_LABELS.get(case["result"], case["result"])
+            lines.append(f"| {_cell(case['caseId'])} | {_cell(case['model'])} | {_cell(case['motion'])} | {_cell(outcome)} | {_cell(failures)} |")
+        lines.extend(("", "</details>"))
     lines.extend(("", "## Raw artifact retention", "", "Raw PMM, JSONL, and log artifacts are not retained by this quality-report workflow.", f"Snapshot retention flag: `{str(snapshot['rawArtifacts']['retained']).lower()}`.", ""))
     return "\n".join(lines)
 
@@ -129,13 +171,16 @@ def _validate_snapshot(snapshot: object) -> None:
     for metric in _METRIC_NAMES:
         if not _is_number(snapshot["thresholds"].get(metric)):
             raise ReportValidationError(((f"thresholds.{metric}", "must be finite and non-negative"),))
-    if not isinstance(snapshot["metrics"], dict) or not isinstance(snapshot["failures"], dict) or not isinstance(snapshot["features"], dict) or not isinstance(snapshot["categories"], dict) or not isinstance(snapshot["worstCases"], list):
+    if not isinstance(snapshot["metrics"], dict) or not isinstance(snapshot["failures"], dict) or not isinstance(snapshot["features"], dict) or not isinstance(snapshot["categories"], dict) or not isinstance(snapshot.get("cases", []), list) or not isinstance(snapshot["worstCases"], list):
         raise ReportValidationError((("snapshot", "aggregate fields have invalid types"),))
     for metric, distribution in snapshot["metrics"].items():
         if metric not in _METRIC_NAMES or not isinstance(distribution, dict) or any(not _is_number(distribution.get(field)) for field in _DISTRIBUTION_FIELDS):
             raise ReportValidationError(((f"metrics.{metric}", "has invalid distribution"),))
     if not isinstance(snapshot["rawArtifacts"], dict) or not isinstance(snapshot["rawArtifacts"].get("retained"), bool):
         raise ReportValidationError((("rawArtifacts.retained", "must be boolean"),))
+    for index, case in enumerate(snapshot.get("cases", [])):
+        if not isinstance(case, dict) or any(not isinstance(case.get(field), str) or not case[field] for field in ("caseId", "model", "motion", "result")) or not isinstance(case.get("failures"), list) or any(not isinstance(value, str) for value in case["failures"]):
+            raise ReportValidationError(((f"cases[{index}]", "has invalid asset pair data"),))
 
 
 def _append_summary_table(lines: list[str], title: str, summaries: dict[str, Any]) -> None:

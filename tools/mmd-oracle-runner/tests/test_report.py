@@ -16,17 +16,20 @@ def _snapshot() -> dict[str, object]:
         "funnel": {field: 1 for field in ("discovered", "selected", "prepared", "recorded", "compared", "passed")},
         "thresholds": {name: 0.1 for name in metrics}, "metrics": metrics, "failures": {},
         "features": {"bone": {"selected": 1, "compared": 1, "passed": 1}}, "categories": {},
+        "cases": [{"caseId": "case-0", "model": "models/model.pmx", "motion": "motions/motion.vmd", "result": "pass", "failures": []}],
         "worstCases": [{"caseId": "case-0", "category": "bone", "metric": "maxAbsError", "value": 0.003, "result": "pass"}],
         "rawArtifacts": {"retained": False},
     }
 
 
-def test_report_is_deterministic_and_aggregate_only() -> None:
+def test_report_is_deterministic_and_lists_asset_pairs_without_absolute_paths() -> None:
     snapshot = _snapshot()
     assert generate_report(snapshot) == generate_report(json.loads(json.dumps(snapshot, sort_keys=True)))
     report = generate_report(snapshot)
     assert "case-0" in report
-    assert "per-frame and per-bone details" in report
+    assert "models/model.pmx" in report
+    assert "motions/motion.vmd" in report
+    assert "absolute asset paths" in report
     assert "Raw PMM, JSONL, and log artifacts are not retained" in report
 
 
@@ -39,6 +42,14 @@ def test_dirty_snapshot_is_rejected(tmp_path: Path) -> None:
     path.write_text(json.dumps(snapshot), encoding="utf-8")
     with pytest.raises(ReportValidationError):
         load_snapshot(path)
+
+
+def test_version_one_snapshot_without_asset_pairs_remains_supported() -> None:
+    snapshot = _snapshot()
+    snapshot.pop("cases")
+    report = generate_report(snapshot)
+    assert "case-0" in report
+    assert "## Asset pair results" not in report
 
 
 def test_non_numeric_threshold_is_rejected() -> None:

@@ -65,8 +65,8 @@ def test_manifest_accepts_shared_frames_output_and_nested_asset_paths(tmp_path: 
     manifest = _manifest(tmp_path)
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     case = payload["cases"][0]
-    case["pmx"] = {"path": case["pmx"]}
-    case["bodyVmd"] = {"path": case["bodyVmd"]}
+    case["pmx"] = {"path": case["pmx"], "relativePath": "models/model-0.pmx"}
+    case["bodyVmd"] = {"path": case["bodyVmd"], "relativePath": "motions/motion-0.vmd"}
     payload["frames"] = case.pop("frames")
     payload["outputRoot"] = case.pop("outputRoot")
     case.pop("features")
@@ -76,6 +76,8 @@ def test_manifest_accepts_shared_frames_output_and_nested_asset_paths(tmp_path: 
     assert config.cases[0].frames == (0, 15)
     assert config.cases[0].oracle_case.output_root == Path(payload["outputRoot"]).resolve()
     assert config.cases[0].features == ()
+    assert config.cases[0].model_label == "models/model-0.pmx"
+    assert config.cases[0].motion_label == "motions/motion-0.vmd"
 
 
 def test_manifest_applies_dialog_opt_in_default(tmp_path: Path) -> None:
@@ -140,3 +142,10 @@ def test_campaign_records_compare_failure_without_raw_retention(tmp_path: Path, 
     assert result["snapshotWritten"] is True
     assert result["ok"] is False
     assert json.loads(snapshot.read_text(encoding="utf-8"))["funnel"]["compared"] == 1
+    assert json.loads(snapshot.read_text(encoding="utf-8"))["cases"][0] == {
+        "caseId": "case-0",
+        "model": "model-0.pmx",
+        "motion": "motion-0.vmd",
+        "result": "threshold-fail",
+        "failures": ["threshold"],
+    }

@@ -2065,7 +2065,8 @@ pub fn parse_pmm_manifest(data: &[u8]) -> Result<PmmParsedManifest, ImportError>
     let audio_assets = scene_assets_by_kind(&asset_references, "audio");
     let image_assets = scene_assets_by_kind(&asset_references, "image");
     let video_assets = scene_assets_by_kind(&asset_references, "video");
-    let timeline = timeline_from_project_settings(&project_settings);
+    let timeline =
+        timeline_from_project_settings(&project_settings, document_global_summary.as_ref());
     let asset_summary = asset_summary(&asset_references);
     let diagnostics = pmm_diagnostics(
         &asset_references,
@@ -2692,7 +2693,7 @@ fn write_pmm_scene(
     out.resize(30, 0);
     push_u32(&mut out, options.screen_width);
     push_u32(&mut out, options.screen_height);
-    push_u32(&mut out, max_frame);
+    push_u32(&mut out, 480); // timeline panel width, not the animation end frame
     push_f32(&mut out, options.frame_rate);
     out.extend_from_slice(&[0, 1, 1, 1, 1, 1, 1]);
     out.push(0);
@@ -3094,14 +3095,14 @@ fn write_pmm_global_tail(out: &mut Vec<u8>, max_frame: u32, camera_fov: f32) {
 
     push_i32(out, 0);
     push_i32(out, 0);
+    push_i32(out, 0);
+    push_i32(out, 0);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    push_i32(out, 0);
     push_i32(out, max_frame as i32);
-    push_i32(out, 0);
-    out.push(0);
-    out.push(0);
-    out.push(0);
-    out.push(0);
-    push_i32(out, 500);
-    push_i32(out, 0);
     out.push(0);
     push_empty_pmm_path(out);
     push_i32(out, 0);
@@ -3179,10 +3180,20 @@ fn push_pmm_sjis_string(out: &mut Vec<u8>, text: &str, original_bytes: Option<&[
     out.extend_from_slice(&encode_sjis(text));
 }
 
-fn timeline_from_project_settings(settings: &PmmProjectSettings) -> PmmTimeline {
-    let duration_seconds = settings
-        .timeline_frame_count
-        .zip(settings.frame_rate)
+fn timeline_from_project_settings(
+    settings: &PmmProjectSettings,
+    global: Option<&PmmDocumentGlobalSummary>,
+) -> PmmTimeline {
+    let (frame_count, frame_rate) = global
+        .map(|global| {
+            (
+                u32::try_from(global.settings.end_frame_index).ok(),
+                Some(global.settings.preferred_fps),
+            )
+        })
+        .unwrap_or((settings.timeline_frame_count, settings.frame_rate));
+    let duration_seconds = frame_count
+        .zip(frame_rate)
         .and_then(|(frame_count, frame_rate)| {
             if frame_rate > 0.0 {
                 Some(frame_count as f32 / frame_rate)
@@ -3191,10 +3202,10 @@ fn timeline_from_project_settings(settings: &PmmProjectSettings) -> PmmTimeline 
             }
         });
     PmmTimeline {
-        start_frame: settings.timeline_frame_count.map(|_| 0),
-        end_frame_exclusive: settings.timeline_frame_count,
-        frame_count: settings.timeline_frame_count,
-        frame_rate: settings.frame_rate,
+        start_frame: frame_count.map(|_| 0),
+        end_frame_exclusive: frame_count,
+        frame_count,
+        frame_rate,
         duration_seconds,
     }
 }
@@ -5886,14 +5897,19 @@ mod tests {
         assert_eq!(report.max_frame, 600);
         assert_eq!(reparsed.project_settings.screen_width, Some(800));
         assert_eq!(reparsed.project_settings.screen_height, Some(600));
-        assert_eq!(reparsed.project_settings.timeline_frame_count, Some(600));
+        assert_eq!(reparsed.project_settings.timeline_frame_count, Some(480));
         assert_eq!(reparsed.project_settings.frame_rate, Some(60.0));
+        assert_eq!(reparsed.timeline.frame_count, Some(600));
+        assert_eq!(reparsed.timeline.frame_rate, Some(60.0));
+        assert_eq!(reparsed.timeline.duration_seconds, Some(10.0));
         let global = reparsed.document_global_summary.as_ref().unwrap();
         match global.camera.initial_keyframe.as_ref().unwrap() {
             PmmDocumentKeyframeSummary::Camera { fov, .. } => assert_eq!(*fov, 42),
             other => panic!("unexpected camera keyframe summary: {other:?}"),
         }
-
+        assert_eq!(global.settings.horizontal_scroll_thumb, 0);
+        assert_eq!(global.settings.begin_frame_index, 0);
+        assert_eq!(global.settings.end_frame_index, 600);
         assert_fixed_track_expansion_state(&reparsed, 2);
     }
 

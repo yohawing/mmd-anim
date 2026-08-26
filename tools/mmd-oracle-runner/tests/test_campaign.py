@@ -171,6 +171,66 @@ def test_campaign_writes_snapshot_and_resumes_clean_state(tmp_path: Path, monkey
     assert resumed["casesProcessed"] == 0
 
 
+def test_campaign_resumes_after_interrupt_before_prepare_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest = _manifest(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    state = tmp_path / "state.json"
+    monkeypatch.setattr(campaign_module, "_probe_repository", lambda _: {"commitSha": "a" * 40, "repositoryState": "clean"})
+    case = load_campaign_config(manifest.resolve()).cases[0].oracle_case
+    run_dir = case.output_root / case.name
+
+    def interrupt(_: object) -> dict[str, object]:
+        run_dir.mkdir()
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_campaign(manifest, snapshot, state, prepare_action=interrupt, repo_root=tmp_path)
+
+    def prepare(_: object) -> dict[str, object]:
+        assert not run_dir.exists()
+        return _prepared(case, {"bone": 1, "frame0Bones": 0, "morph": 0, "frame0Morphs": 0})
+
+    cleanup = lambda _: {"ok": True, "removedRunDir": True, "deleted": []}
+    result = run_campaign(
+        manifest, snapshot, state,
+        prepare_action=prepare,
+        record_action=lambda current, *_: _recorded(current),
+        compare_action=lambda *_: _compare_result(case.name),
+        cleanup_action=cleanup,
+        prepare_cleanup_action=cleanup,
+        repo_root=tmp_path,
+    )
+    assert result["ok"] is True
+
+
+def test_campaign_rejects_mixed_mmd_executable_hashes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest = _manifest(tmp_path, case_count=2)
+    snapshot = tmp_path / "snapshot.json"
+    monkeypatch.setattr(campaign_module, "_probe_repository", lambda _: {"commitSha": "a" * 40, "repositoryState": "clean"})
+
+    def prepare(case: object) -> dict[str, object]:
+        return _prepared(case, {"bone": 1, "frame0Bones": 0, "morph": 0, "frame0Morphs": 0})
+
+    def record(case: object, *_: object) -> dict[str, object]:
+        result = _recorded(case)
+        result["mmdExecutable"] = {"sha256": ("a" if case.name == "case-0" else "b") * 64}
+        return result
+
+    cleanup = lambda _: {"ok": True, "removedRunDir": True, "deleted": []}
+    result = run_campaign(
+        manifest, snapshot,
+        prepare_action=prepare,
+        record_action=record,
+        compare_action=lambda path, *_: _compare_result(json.loads(path.read_text(encoding="utf-8"))["cases"][0]["name"]),
+        cleanup_action=cleanup,
+        prepare_cleanup_action=cleanup,
+        repo_root=tmp_path,
+    )
+    assert result["snapshotWritten"] is False
+    assert result["error"]["code"] == "mmd-executable"
+    assert not snapshot.exists()
+
+
 def test_campaign_records_compare_failure_without_raw_retention(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     manifest = _manifest(tmp_path)
     snapshot = tmp_path / "snapshot.json"

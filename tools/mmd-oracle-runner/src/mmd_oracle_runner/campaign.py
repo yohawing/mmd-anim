@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from . import artifacts
 from .campaign_artifacts import cleanup_completed_case_run, cleanup_prepared_case_run
 from .case import OracleCase
 from .prepare import CommandResult, _artifact_name, _default_repo_root, prepare_case
@@ -222,18 +223,18 @@ def run_campaign(
 
     for campaign_case in config.cases:
         case_id = campaign_case.case_id
+        case = campaign_case.oracle_case
+        run_dir = _run_dir(campaign_case, case)
         old = state["cases"].get(case_id)
         if old is not None and old.get("cleanup") == "cleaned" and old.get("status") == "complete":
             continue
         if old is not None:
-            if not _resume_cleanup(old, cleanup_fn, prepared_cleanup_fn):
+            if not _resume_cleanup(old, run_dir, cleanup_fn, prepared_cleanup_fn):
                 return _stop(event, "cleanup", f"cannot safely resume {case_id}", state, state_file)
             state["cases"].pop(case_id, None)
             _persist_state(state_file, state)
 
         event["casesProcessed"] += 1
-        case = campaign_case.oracle_case
-        run_dir = _run_dir(campaign_case, case)
         entry = _entry(campaign_case, input_hashes[case_id], run_dir)
         state["cases"][case_id] = entry
         _persist_state(state_file, state)
@@ -464,13 +465,26 @@ def _run_dir(case: CampaignCase, oracle_case: OracleCase) -> Path:
     return oracle_case.output_root / _artifact_name(case.case_id)
 
 
-def _resume_cleanup(entry: dict[str, Any], cleanup_fn: CleanupAction, prepared_cleanup_fn: CleanupAction) -> bool:
+def _resume_cleanup(entry: dict[str, Any], expected_run_dir: Path, cleanup_fn: CleanupAction, prepared_cleanup_fn: CleanupAction) -> bool:
     raw_dir = entry.get("runDir")
     if not isinstance(raw_dir, str):
         return False
-    run_dir = Path(raw_dir).resolve()
+    requested_run_dir = Path(raw_dir)
+    try:
+        artifacts.reject_reparse(requested_run_dir)
+    except OSError:
+        return False
+    run_dir = requested_run_dir.resolve()
+    if run_dir != expected_run_dir.resolve():
+        return False
     if not run_dir.exists():
         return True
+    try:
+        if run_dir.is_dir() and not any(run_dir.iterdir()):
+            run_dir.rmdir()
+            return True
+    except OSError:
+        return False
     fn = cleanup_fn if (run_dir / "record-result.json").is_file() else prepared_cleanup_fn
     return _safe_cleanup(fn, run_dir).get("ok") is True
 
@@ -588,6 +602,8 @@ def _build_snapshot(config: CampaignConfig, state: dict[str, Any], provenance: d
     for item in worst:
         item.pop("_ratio", None)
     hashes = {entry.get("mmdExecutableSha256") for entry in entries if entry.get("mmdExecutableSha256")}
+    if len(hashes) > 1:
+        raise CampaignValidationError("mmd-executable", "campaign recorded more than one MMD executable SHA-256")
     observed = next(iter(hashes), "not-observed")
     entry_by_id = {entry["caseId"]: entry for entry in entries}
     case_results = []

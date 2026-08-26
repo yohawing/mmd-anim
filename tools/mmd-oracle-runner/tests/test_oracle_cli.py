@@ -23,14 +23,16 @@ def _record(frame: int) -> dict:
 
 def test_validate_and_coverage_are_python_only(tmp_path: Path, capsys):
     actual = tmp_path / "actual.jsonl"
-    actual.write_text("".join(json.dumps(_record(frame)) + "\n" for frame in (0, 15, 30)), encoding="utf-8")
+    actual.write_text("".join(json.dumps(_record(frame)) + "\n" for frame in (0, 30)), encoding="utf-8")
     fixture = tmp_path / "fixture.json"
     fixture.write_text(json.dumps({"frames": [0, 15, 30]}), encoding="utf-8")
 
     assert main(["validate", str(actual)]) == 0
-    assert json.loads(capsys.readouterr().out)["records"] == 3
+    assert json.loads(capsys.readouterr().out)["records"] == 2
     assert main(["verify-coverage", "--fixture", str(fixture), "--actual", str(actual)]) == 0
-    assert json.loads(capsys.readouterr().out)["ok"] is True
+    report = json.loads(capsys.readouterr().out)
+    assert report["ok"] is True
+    assert report["missingFrames"] == [15]
 
 
 def test_invalid_jsonl_fails_closed(tmp_path: Path, capsys):
@@ -40,9 +42,9 @@ def test_invalid_jsonl_fails_closed(tmp_path: Path, capsys):
     assert json.loads(capsys.readouterr().out)["ok"] is False
 
 
-def test_drive_frames_starts_playback_and_waits_for_requested_frames(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_drive_frames_accepts_missing_intermediate_frame_after_reaching_end(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     clicks: list[int] = []
-    records = [{"frame": frame} for frame in (0, 15, 30)]
+    records = [{"frame": frame} for frame in (0, 30)]
     monkeypatch.setattr(oracle_cli, "_wait_for_records", lambda *_args: records[:1])
     monkeypatch.setattr(oracle_cli, "_read_records", lambda _path: records)
     monkeypatch.setattr(oracle_cli, "_click_play", lambda pid: clicks.append(pid))

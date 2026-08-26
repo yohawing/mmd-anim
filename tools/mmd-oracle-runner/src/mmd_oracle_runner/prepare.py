@@ -160,7 +160,42 @@ def _prepare_rust(case: OracleCase, result: dict[str, Any], runner: CommandRunne
         "reason": "PMM contains tracks whose names match the model; unmatched VMD names are reported in skippedCounts",
         "generatorReport": {key: report[key] for key in ("status", "command", "mode", "counts", "keyframes") if key in report},
     }
+    patched_scene_path = scene_path.with_name("scene.frame-range.pmm")
+    if not _patch_scene_frame_range(case, result, runner, repo_root, scene_path, patched_scene_path):
+        return False
     result["classifications"]["propertyFrames"] = "not-applicable"
+    return True
+
+
+def _patch_scene_frame_range(
+    case: OracleCase,
+    result: dict[str, Any],
+    runner: CommandRunner,
+    repo_root: Path,
+    scene_path: Path,
+    patched_scene_path: Path,
+) -> bool:
+    """Make the generated scene playable through the largest requested sample frame."""
+    end_frame = max(case.frames)
+    patch_command = (
+        "cargo", "run", "-q", "-p", "mmd-anim-cli", "--", "patch", str(scene_path),
+        "--frame-range", str(patched_scene_path), "--begin-frame", "0", "--end-frame", str(end_frame),
+        "--begin-frame-enabled", "true", "--end-frame-enabled", "true",
+    )
+    outcome = runner.run(patch_command, repo_root)
+    _set_backend_diagnostics(result, outcome, "frameRangePatch")
+    if outcome.exit_code != 0:
+        _fail(result, "generator", f"Rust PMM frame-range patch exited with {outcome.exit_code}")
+        return False
+    if not patched_scene_path.is_file():
+        _fail(result, "generator", "Rust PMM frame-range patch did not write an output scene")
+        return False
+    try:
+        patched_scene_path.replace(scene_path)
+    except OSError as error:
+        _fail(result, "artifacts", f"cannot install patched PMM scene: {error}")
+        return False
+    result["comparison"]["sceneFrameRange"] = {"beginFrame": 0, "endFrame": end_frame, "enabled": True}
     return True
 
 

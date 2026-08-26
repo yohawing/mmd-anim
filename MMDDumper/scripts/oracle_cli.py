@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-from ctypes import wintypes
 import json
 import os
 import shutil
@@ -165,7 +164,7 @@ def _drive_frames(child: subprocess.Popen[bytes], frames: list[int], output: Pat
         raise ValueError("fixture.frames must contain at least one frame")
     deadline = time.monotonic() + timeout
     _wait_for_records(output, min(timeout, 10.0), 1)
-    _send_key(child.pid, 0x50)  # P: Play/Stop
+    _click_play(child.pid)
     actual: set[int] = set()
     while time.monotonic() < deadline:
         try:
@@ -244,7 +243,7 @@ def _window_string(getter, hwnd: int) -> str:
     return value.value
 
 
-def _send_key(pid: int, virtual_key: int) -> None:
+def _click_play(pid: int) -> None:
     if os.name != "nt":
         return
     user32 = ctypes.windll.user32
@@ -252,18 +251,11 @@ def _send_key(pid: int, virtual_key: int) -> None:
     if not main_windows:
         raise ValueError("MMD main window is not visible")
     hwnd = main_windows[0]
-    user32.ShowWindowAsync(hwnd, 9)
-    user32.SetForegroundWindow(hwnd)
-    rect = wintypes.RECT()
-    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-        user32.SetCursorPos((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
-        user32.mouse_event(0x0002, 0, 0, 0, 0)
-        user32.mouse_event(0x0004, 0, 0, 0, 0)
-    time.sleep(0.1)
-    scan = user32.MapVirtualKeyW(virtual_key, 0)
-    user32.keybd_event(virtual_key, scan, 0, 0)
-    time.sleep(0.02)
-    user32.keybd_event(virtual_key, scan, 0x0002, 0)
+    user32.GetDlgItem.restype = ctypes.c_void_p
+    play_button = user32.GetDlgItem(hwnd, 408)
+    if not play_button:
+        raise ValueError("MMD Play button is not available")
+    user32.SendMessageW(play_button, 0x00F5, 0, 0)  # BM_CLICK
 
 
 def _coverage(fixture_path: Path, actual_path: Path, require_camera: bool) -> dict[str, Any]:

@@ -41,17 +41,17 @@ def test_invalid_jsonl_fails_closed(tmp_path: Path, capsys):
 
 
 def test_drive_frames_starts_playback_and_waits_for_requested_frames(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    keys: list[tuple[int, int]] = []
+    clicks: list[int] = []
     records = [{"frame": frame} for frame in (0, 15, 30)]
     monkeypatch.setattr(oracle_cli, "_wait_for_records", lambda *_args: records[:1])
     monkeypatch.setattr(oracle_cli, "_read_records", lambda _path: records)
-    monkeypatch.setattr(oracle_cli, "_send_key", lambda pid, key: keys.append((pid, key)))
+    monkeypatch.setattr(oracle_cli, "_click_play", lambda pid: clicks.append(pid))
 
     child = type("Child", (), {"pid": 42, "poll": lambda self: None})()
     result = oracle_cli._drive_frames(child, [0, 15, 30], tmp_path / "oracle.jsonl", 10)
 
     assert result == records
-    assert keys == [(42, 0x50)]
+    assert clicks == [42]
 
 
 def test_stop_child_waits_after_forced_kill():

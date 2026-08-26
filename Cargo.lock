@@ -399,6 +399,7 @@ dependencies = [
 name = "mmd-anim-ffi"
 version = "0.4.2"
 dependencies = [
+ "encoding_rs",
  "glam",
  "mmd-anim-format",
  "mmd-anim-physics-bullet",

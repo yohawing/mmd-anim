@@ -16,6 +16,7 @@ name = "mmd_runtime_ffi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+encoding_rs.workspace = true
 glam.workspace = true
 mmd-anim-runtime.workspace = true
 mmd-anim-format = { path = "../mmd-anim-format", version = "0.4.2", features = ["fbx"] }

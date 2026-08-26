@@ -759,6 +759,24 @@ mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_vmd_json(
     const uint8_t* data,
     size_t         len);
 
+/* Converts a camelCase VpdParsedPose UTF-8 JSON DTO to Shift-JIS VPD bytes.
+   The input is borrowed only for the call. Invalid input, malformed JSON, or
+   text that cannot be represented in Shift-JIS returns an empty buffer and
+   sets the thread-local last error. The caller owns a non-empty returned
+   buffer and must free it with mmd_runtime_byte_buffer_free. */
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_export_vpd_pose_json(
+    const uint8_t* json,
+    size_t         json_len);
+
+/* Converts Shift-JIS VPD bytes to a UTF-8 VpdParsedPose JSON DTO. The input is
+   borrowed only for the call. Invalid input, malformed VPD, or invalid
+   Shift-JIS returns an empty buffer and sets the thread-local last error. The
+   caller owns a non-empty returned buffer and must free it with
+   mmd_runtime_byte_buffer_free. */
+mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_vpd_pose_json(
+    const uint8_t* data,
+    size_t         len);
+
 /* Opt-in shared VMD context. The constructor parses the bytes once and owns
    all retained channels. Clips made from it own independent compiled tracks
    and remain valid after the context is freed. */

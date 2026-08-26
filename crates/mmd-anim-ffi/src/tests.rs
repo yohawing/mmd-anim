@@ -6242,6 +6242,172 @@ fn vmd_json_rejects_null_empty_invalid() {
     assert_eq!(invalid.len, 0);
 }
 
+fn vpd_json_fixture() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "modelFile": "model.pmx",
+        "boneCount": 2,
+        "bones": [
+            {
+                "name": "左腕",
+                "translation": [1.1234564, 2.0, -3.25],
+                "rotation": [0.1, 0.2, 0.3, 0.9238794]
+            },
+            {
+                "name": "右腕",
+                "translation": [-4.5, 5.25, 6.0],
+                "rotation": [0.0, 0.0, 0.0, 1.0]
+            }
+        ]
+    }))
+    .unwrap()
+}
+
+fn assert_f32_slice_near(actual: &[f32], expected: &[f32], epsilon: f32) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (actual - expected).abs() <= epsilon,
+            "value {index}: actual={actual}, expected={expected}, epsilon={epsilon}"
+        );
+    }
+}
+
+fn assert_vpd_pose_matches_fixture(pose: &mmd_anim_format::VpdParsedPose) {
+    assert_eq!(pose.model_file, "model.pmx");
+    assert_eq!(pose.bone_count, 2);
+    assert_eq!(
+        pose.bones
+            .iter()
+            .map(|bone| bone.name.as_str())
+            .collect::<Vec<_>>(),
+        ["左腕", "右腕"]
+    );
+    assert_f32_slice_near(&pose.bones[0].translation, &[1.1234564, 2.0, -3.25], 1.0e-6);
+    assert_f32_slice_near(&pose.bones[0].rotation, &[0.1, 0.2, 0.3, 0.9238794], 1.0e-6);
+}
+
+#[test]
+fn vpd_json_ffi_exports_and_parses_owned_roundtrip_buffers() {
+    let source_json = vpd_json_fixture();
+    let vpd_buffer =
+        unsafe { mmd_runtime_export_vpd_pose_json(source_json.as_ptr(), source_json.len()) };
+    assert!(!vpd_buffer.data.is_null());
+    assert!(vpd_buffer.len > 0);
+    let vpd = ffi_buffer_to_vec(vpd_buffer);
+    assert!(vpd.starts_with(b"Vocaloid Pose Data file"));
+
+    let parsed_by_codec = mmd_anim_format::parse_vpd_pose(&vpd).unwrap();
+    assert_vpd_pose_matches_fixture(&parsed_by_codec);
+
+    let json_buffer = unsafe { mmd_runtime_parse_vpd_pose_json(vpd.as_ptr(), vpd.len()) };
+    assert!(!json_buffer.data.is_null());
+    assert!(json_buffer.len > 0);
+    let parsed_json = ffi_buffer_to_vec(json_buffer);
+    let reparsed: mmd_anim_format::VpdParsedPose = serde_json::from_slice(&parsed_json).unwrap();
+    assert_vpd_pose_matches_fixture(&reparsed);
+}
+
+#[test]
+fn vpd_json_ffi_fails_closed_and_sets_last_error() {
+    let dummy = 0u8;
+    for buffer in [
+        unsafe { mmd_runtime_export_vpd_pose_json(ptr::null(), 1) },
+        unsafe { mmd_runtime_export_vpd_pose_json(&dummy, 0) },
+        unsafe { mmd_runtime_parse_vpd_pose_json(ptr::null(), 1) },
+        unsafe { mmd_runtime_parse_vpd_pose_json(&dummy, 0) },
+    ] {
+        assert_empty_ffi_buffer(buffer, "null or empty VPD JSON FFI input");
+        assert_eq!(
+            last_error_cstr().unwrap().to_bytes(),
+            FFI_ERR_INVALID_INPUT.as_bytes()
+        );
+    }
+
+    let malformed_json = br#"{"modelFile":"model.pmx""#;
+    let buffer =
+        unsafe { mmd_runtime_export_vpd_pose_json(malformed_json.as_ptr(), malformed_json.len()) };
+    assert_empty_ffi_buffer(buffer, "malformed VPD JSON");
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_JSON_DECODE_FAILED.as_bytes()
+    );
+
+    let unencodable = serde_json::to_vec(&serde_json::json!({
+        "modelFile": "model.pmx",
+        "boneCount": 1,
+        "bones": [{
+            "name": "腕😀",
+            "translation": [0.0, 0.0, 0.0],
+            "rotation": [0.0, 0.0, 0.0, 1.0]
+        }]
+    }))
+    .unwrap();
+    let buffer =
+        unsafe { mmd_runtime_export_vpd_pose_json(unencodable.as_ptr(), unencodable.len()) };
+    assert_empty_ffi_buffer(buffer, "unencodable VPD JSON text");
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VPD_EXPORT_FAILED.as_bytes()
+    );
+
+    let lossy_model_file = serde_json::to_vec(&serde_json::json!({
+        "modelFile": "folder//model.pmx",
+        "boneCount": 0,
+        "bones": []
+    }))
+    .unwrap();
+    let buffer = unsafe {
+        mmd_runtime_export_vpd_pose_json(lossy_model_file.as_ptr(), lossy_model_file.len())
+    };
+    assert_empty_ffi_buffer(buffer, "lossy VPD grammar characters");
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VPD_EXPORT_FAILED.as_bytes()
+    );
+
+    let invalid_magic = b"not a VPD";
+    let buffer =
+        unsafe { mmd_runtime_parse_vpd_pose_json(invalid_magic.as_ptr(), invalid_magic.len()) };
+    assert_empty_ffi_buffer(buffer, "invalid VPD magic");
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VPD_PARSE_FAILED.as_bytes()
+    );
+
+    let truncated = b"Vocaloid Pose Data file\r\n";
+    let buffer = unsafe { mmd_runtime_parse_vpd_pose_json(truncated.as_ptr(), truncated.len()) };
+    assert_empty_ffi_buffer(buffer, "truncated VPD");
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VPD_PARSE_FAILED.as_bytes()
+    );
+
+    let invalid_shift_jis = b"Vocaloid Pose Data file\r\n\r\nmodel\x81;\r\n0;\r\n";
+    let buffer = unsafe {
+        mmd_runtime_parse_vpd_pose_json(invalid_shift_jis.as_ptr(), invalid_shift_jis.len())
+    };
+    assert_empty_ffi_buffer(buffer, "invalid Shift-JIS VPD");
+    assert_eq!(
+        last_error_cstr().unwrap().to_bytes(),
+        FFI_ERR_VPD_PARSE_FAILED.as_bytes()
+    );
+}
+
+#[test]
+fn vpd_json_header_declarations_match_rust_exports() {
+    type VpdJsonFn = unsafe extern "C" fn(*const u8, usize) -> MmdRuntimeFfiByteBuffer;
+    let _: VpdJsonFn = mmd_runtime_export_vpd_pose_json;
+    let _: VpdJsonFn = mmd_runtime_parse_vpd_pose_json;
+
+    let header = include_str!("../include/mmd_runtime.h");
+    assert!(header.contains(
+        "mmd_runtime_ffi_byte_buffer_t mmd_runtime_export_vpd_pose_json(\n    const uint8_t* json,\n    size_t         json_len);"
+    ));
+    assert!(header.contains(
+        "mmd_runtime_ffi_byte_buffer_t mmd_runtime_parse_vpd_pose_json(\n    const uint8_t* data,\n    size_t         len);"
+    ));
+}
+
 #[test]
 fn vmd_json_serializes_camera_fixture() {
     let bytes: &[u8] = include_bytes!("../../mmd-anim-format/fixtures/vmd/simple_camera.vmd");

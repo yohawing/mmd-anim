@@ -1031,12 +1031,15 @@ const RIG_BONE_FIXED_AXIS: u32 = 1;
 const FFI_PANIC_ERROR_MESSAGE: &str = "internal panic in mmd-anim-ffi";
 const FFI_ERR_INVALID_INPUT: &str = "invalid input";
 const FFI_ERR_VMD_PARSE_FAILED: &str = "vmd parse failed";
+const FFI_ERR_VPD_PARSE_FAILED: &str = "vpd parse failed";
 const FFI_ERR_PMX_PARSE_FAILED: &str = "pmx parse failed";
 const FFI_ERR_PMX_IMPORT_FAILED: &str = "pmx import failed";
 const FFI_ERR_VMD_IMPORT_FAILED: &str = "vmd import failed";
 const FFI_ERR_CLIP_CREATE_FAILED: &str = "clip create failed";
 const FFI_ERR_PMX_EXPORT_FAILED: &str = "pmx export failed";
 const FFI_ERR_VMD_EXPORT_FAILED: &str = "vmd export failed";
+const FFI_ERR_VPD_EXPORT_FAILED: &str = "vpd export failed";
+const FFI_ERR_JSON_DECODE_FAILED: &str = "json decode failed";
 const FFI_ERR_JSON_ENCODE_FAILED: &str = "json encode failed";
 const FFI_ERR_WORKER_PANIC: &str = "worker panic";
 
@@ -1567,6 +1570,113 @@ pub unsafe extern "C" fn mmd_runtime_parse_vmd_json(
             Ok(parsed) => parsed,
             Err(_) => return empty_byte_buffer_failure(FFI_ERR_VMD_PARSE_FAILED),
         };
+
+        match serde_json::to_vec(&parsed) {
+            Ok(json) => byte_buffer_from_vec(json),
+            Err(_) => empty_byte_buffer_failure(FFI_ERR_JSON_ENCODE_FAILED),
+        }
+    })
+}
+
+fn is_valid_shift_jis(bytes: &[u8]) -> bool {
+    let (_, _, had_errors) = encoding_rs::SHIFT_JIS.decode(bytes);
+    !had_errors
+}
+
+fn is_shift_jis_encodable(text: &str) -> bool {
+    let (_, _, had_errors) = encoding_rs::SHIFT_JIS.encode(text);
+    !had_errors
+}
+
+fn vpd_export_preserves_pose(source: &mmd_anim_format::VpdParsedPose, exported: &[u8]) -> bool {
+    let Ok(reparsed) = mmd_anim_format::parse_vpd_pose(exported) else {
+        return false;
+    };
+    source.model_file == reparsed.model_file
+        && source.bone_count == reparsed.bone_count
+        && source.bones.iter().zip(&reparsed.bones).all(|(a, b)| {
+            a.name == b.name
+                && a.translation
+                    .iter()
+                    .zip(b.translation)
+                    .all(|(a, b)| (a - b).abs() <= 1.0e-6)
+                && a.rotation
+                    .iter()
+                    .zip(b.rotation)
+                    .all(|(a, b)| (a - b).abs() <= 1.0e-6)
+        })
+}
+
+/// Exports a camelCase `VpdParsedPose` JSON DTO as Shift-JIS VPD bytes.
+///
+/// The input is borrowed only for this call. The returned buffer is owned by
+/// the caller and must be freed with `mmd_runtime_byte_buffer_free`.
+///
+/// # Safety
+///
+/// `json` must point to `json_len` readable bytes when `json_len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_export_vpd_pose_json(
+    json: *const u8,
+    json_len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        if json.is_null() || json_len == 0 {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
+
+        let json = unsafe { slice::from_raw_parts(json, json_len) };
+        let pose: mmd_anim_format::VpdParsedPose = match serde_json::from_slice(json) {
+            Ok(pose) => pose,
+            Err(_) => return empty_byte_buffer_failure(FFI_ERR_JSON_DECODE_FAILED),
+        };
+        if pose.bone_count != pose.bones.len()
+            || !is_shift_jis_encodable(&pose.model_file)
+            || pose
+                .bones
+                .iter()
+                .any(|bone| !is_shift_jis_encodable(&bone.name))
+        {
+            return empty_byte_buffer_failure(FFI_ERR_VPD_EXPORT_FAILED);
+        }
+
+        let exported = mmd_anim_format::export_vpd_pose(&pose);
+        if !vpd_export_preserves_pose(&pose, &exported) {
+            return empty_byte_buffer_failure(FFI_ERR_VPD_EXPORT_FAILED);
+        }
+        byte_buffer_from_vec(exported)
+    })
+}
+
+/// Parses Shift-JIS VPD bytes and returns UTF-8 `VpdParsedPose` JSON.
+///
+/// The input is borrowed only for this call. The returned buffer is owned by
+/// the caller and must be freed with `mmd_runtime_byte_buffer_free`.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes when `len` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_parse_vpd_pose_json(
+    data: *const u8,
+    len: usize,
+) -> MmdRuntimeFfiByteBuffer {
+    ffi_guard(empty_byte_buffer(), || {
+        if data.is_null() || len == 0 {
+            return empty_byte_buffer_failure(FFI_ERR_INVALID_INPUT);
+        }
+
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        if !is_valid_shift_jis(bytes) {
+            return empty_byte_buffer_failure(FFI_ERR_VPD_PARSE_FAILED);
+        }
+        let parsed = match mmd_anim_format::parse_vpd_pose(bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => return empty_byte_buffer_failure(FFI_ERR_VPD_PARSE_FAILED),
+        };
+        if !parsed.diagnostics.is_empty() {
+            return empty_byte_buffer_failure(FFI_ERR_VPD_PARSE_FAILED);
+        }
 
         match serde_json::to_vec(&parsed) {
             Ok(json) => byte_buffer_from_vec(json),

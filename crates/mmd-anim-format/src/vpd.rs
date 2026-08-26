@@ -41,15 +41,24 @@ pub fn parse_vpd_pose(data: &[u8]) -> Result<VpdParsedPose, ImportError> {
     }
     let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
     let _header = lines.next();
-    let model_file = strip_comment(lines.next().unwrap_or(""))
-        .trim_end_matches(';')
-        .trim()
-        .to_owned();
-    let count_line = lines.next().unwrap_or("0;");
-    let declared_count = count_line
+    let model_file = strip_comment(lines.next().ok_or(ImportError::UnsupportedFormat {
+        format: "VPD",
+        detail: "missing model file",
+    })?)
+    .trim_end_matches(';')
+    .trim()
+    .to_owned();
+    let count_line = lines.next().ok_or(ImportError::UnsupportedFormat {
+        format: "VPD",
+        detail: "missing bone count",
+    })?;
+    let declared_count = strip_comment(count_line)
         .trim_end_matches(';')
         .parse::<usize>()
-        .unwrap_or(0);
+        .map_err(|_| ImportError::UnsupportedFormat {
+            format: "VPD",
+            detail: "invalid bone count",
+        })?;
     let mut bones = Vec::new();
     while let Some(line) = lines.next() {
         if let Some(rest) = line.strip_prefix("Bone") {
@@ -59,13 +68,38 @@ pub fn parse_vpd_pose(data: &[u8]) -> Result<VpdParsedPose, ImportError> {
                 .map(|name| name.trim().to_owned())
                 .filter(|name| !name.is_empty())
             else {
-                continue;
+                return Err(ImportError::UnsupportedFormat {
+                    format: "VPD",
+                    detail: "invalid bone name",
+                });
             };
-            let translation = lines.next().map(parse_f32_tuple3).unwrap_or([0.0; 3]);
-            let rotation = lines
-                .next()
-                .map(parse_f32_tuple4)
-                .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+            let translation =
+                parse_f32_tuple3(lines.next().ok_or(ImportError::UnsupportedFormat {
+                    format: "VPD",
+                    detail: "missing bone translation",
+                })?)
+                .ok_or(ImportError::UnsupportedFormat {
+                    format: "VPD",
+                    detail: "invalid bone translation",
+                })?;
+            let rotation =
+                lines
+                    .next()
+                    .and_then(parse_f32_tuple4)
+                    .ok_or(ImportError::UnsupportedFormat {
+                        format: "VPD",
+                        detail: "invalid bone rotation",
+                    })?;
+            let closing = lines.next().ok_or(ImportError::UnsupportedFormat {
+                format: "VPD",
+                detail: "missing bone terminator",
+            })?;
+            if strip_comment(closing) != "}" {
+                return Err(ImportError::UnsupportedFormat {
+                    format: "VPD",
+                    detail: "invalid bone terminator",
+                });
+            }
             bones.push(VpdBonePose {
                 name,
                 translation,
@@ -79,7 +113,7 @@ pub fn parse_vpd_pose(data: &[u8]) -> Result<VpdParsedPose, ImportError> {
         model_file,
         bone_count: parsed_bone_count,
         bones,
-        diagnostics: if declared_count != 0 && declared_count != parsed_bone_count {
+        diagnostics: if declared_count != parsed_bone_count {
             vec![VpdDiagnostic {
                 level: "warning",
                 code: "VPD_DECLARED_COUNT_MISMATCH",
@@ -114,30 +148,24 @@ pub fn export_vpd_pose(pose: &VpdParsedPose) -> Vec<u8> {
     encode_sjis(&text)
 }
 
-fn parse_f32_tuple3(line: &str) -> [f32; 3] {
-    let values = parse_numbers(line);
-    [
-        values.first().copied().unwrap_or(0.0),
-        values.get(1).copied().unwrap_or(0.0),
-        values.get(2).copied().unwrap_or(0.0),
-    ]
+fn parse_f32_tuple3(line: &str) -> Option<[f32; 3]> {
+    parse_numbers(line).and_then(|values| values.try_into().ok())
 }
 
-fn parse_f32_tuple4(line: &str) -> [f32; 4] {
-    let values = parse_numbers(line);
-    [
-        values.first().copied().unwrap_or(0.0),
-        values.get(1).copied().unwrap_or(0.0),
-        values.get(2).copied().unwrap_or(0.0),
-        values.get(3).copied().unwrap_or(1.0),
-    ]
+fn parse_f32_tuple4(line: &str) -> Option<[f32; 4]> {
+    parse_numbers(line).and_then(|values| values.try_into().ok())
 }
 
-fn parse_numbers(line: &str) -> Vec<f32> {
+fn parse_numbers(line: &str) -> Option<Vec<f32>> {
     strip_comment(line)
         .trim_matches(|c: char| c == ';' || c == '{' || c == '}')
         .split(',')
-        .filter_map(|part| part.trim().parse::<f32>().ok())
+        .map(|part| {
+            part.trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|value| value.is_finite())
+        })
         .collect()
 }
 
@@ -189,5 +217,19 @@ mod tests {
             keys,
             vec!["boneCount", "bones", "diagnostics", "format", "modelFile"]
         );
+    }
+
+    #[test]
+    fn rejects_truncated_or_malformed_bone_records() {
+        for source in [
+            "Vocaloid Pose Data file\r\n",
+            "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n",
+            "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\n",
+            "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\n0,0,0;\r\n0,0,0,1;\r\n",
+            "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\ninvalid;\r\n0,0,0,1;\r\n}\r\n",
+            "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\nNaN,0,0;\r\n0,0,0,1;\r\n}\r\n",
+        ] {
+            assert!(parse_vpd_pose(&encode_sjis(source)).is_err(), "{source:?}");
+        }
     }
 }

@@ -589,6 +589,17 @@ VMD_FROM_PARTS_FUNCTIONS = {
     ),
 }
 
+VPD_JSON_FUNCTIONS = {
+    "mmd_runtime_export_vpd_pose_json": (
+        "ffi_byte_buffer",
+        [("json", "const_u8_ptr"), ("json_len", "usize")],
+    ),
+    "mmd_runtime_parse_vpd_pose_json": (
+        "ffi_byte_buffer",
+        [("data", "const_u8_ptr"), ("len", "usize")],
+    ),
+}
+
 
 def rust_exported_symbols(text: str) -> set[str]:
     lines = text.splitlines()
@@ -860,41 +871,22 @@ def check_abi_shapes(rust_text: str, header_text: str) -> list[str]:
             errors.append(
                 f"struct {rust_name}/{c_alias}: Rust={rust_fields}, header={c_fields}, expected={expected}"
             )
-    for name, expected in GENERIC_FUNCTIONS.items():
-        rust_shape = rust_function_shape(rust_text, name)
-        c_shape = c_function_shape(header_text, name)
-        if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
-            errors.append(
-                f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
-            )
-    for name, expected in CLIP_TRACK_FUNCTIONS.items():
-        rust_shape = rust_function_shape(rust_text, name)
-        c_shape = c_function_shape(header_text, name)
-        if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
-            errors.append(
-                f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
-            )
-    for name, expected in VMD_SHARED_CONTEXT_FUNCTIONS.items():
-        rust_shape = rust_function_shape(rust_text, name)
-        c_shape = c_function_shape(header_text, name)
-        if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
-            errors.append(
-                f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
-            )
-    for name, expected in PHYSICS_PARAM_FUNCTIONS.items():
-        rust_shape = rust_function_shape(rust_text, name)
-        c_shape = c_function_shape(header_text, name)
-        if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
-            errors.append(
-                f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
-            )
-    for name, expected in VMD_FROM_PARTS_FUNCTIONS.items():
-        rust_shape = rust_function_shape(rust_text, name)
-        c_shape = c_function_shape(header_text, name)
-        if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
-            errors.append(
-                f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
-            )
+    function_groups = (
+        GENERIC_FUNCTIONS,
+        CLIP_TRACK_FUNCTIONS,
+        VMD_SHARED_CONTEXT_FUNCTIONS,
+        PHYSICS_PARAM_FUNCTIONS,
+        VMD_FROM_PARTS_FUNCTIONS,
+        VPD_JSON_FUNCTIONS,
+    )
+    for functions in function_groups:
+        for name, expected in functions.items():
+            rust_shape = rust_function_shape(rust_text, name)
+            c_shape = c_function_shape(header_text, name)
+            if rust_shape != expected or c_shape != expected or rust_shape != c_shape:
+                errors.append(
+                    f"function {name}: Rust={rust_shape}, header={c_shape}, expected={expected}"
+                )
     return errors
 
 

@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yohawing.dev/schemas/mmd-oracle-dumper/oracle-v1.schema.json",
+  "title": "MMD Oracle Dump v1",
+  "type": "object",
+  "required": ["schemaVersion", "source", "frame", "models"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "source": {
+      "type": "object",
+      "required": ["mmdVersion", "dumperVersion"],
+      "additionalProperties": false,
+      "properties": {
+        "mmdVersion": { "type": "string", "minLength": 1 },
+        "dumperVersion": { "type": "string", "minLength": 1 },
+        "project": { "type": "string" }
+      }
+    },
+    "frame": { "type": "number" },
+    "camera": { "$ref": "#/$defs/camera" },
+    "sceneParameters": { "$ref": "#/$defs/sceneParameters" },
+    "models": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/model" }
+    }
+  },
+  "$defs": {
+    "matrix4": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": { "type": "number" }
+    },
+    "vec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "type": "number" }
+    },
+    "interpolationChannel": {
+      "type": "object",
+      "required": ["x1", "y1", "x2", "y2"],
+      "additionalProperties": false,
+      "properties": {
+        "x1": { "type": "integer" },
+        "y1": { "type": "integer" },
+        "x2": { "type": "integer" },
+        "y2": { "type": "integer" }
+      }
+    },
+    "cameraInterpolation": {
+      "type": "object",
+      "required": ["x", "y", "z", "rotation", "distance", "fov"],
+      "additionalProperties": false,
+      "properties": {
+        "x": { "$ref": "#/$defs/interpolationChannel" },
+        "y": { "$ref": "#/$defs/interpolationChannel" },
+        "z": { "$ref": "#/$defs/interpolationChannel" },
+        "rotation": { "$ref": "#/$defs/interpolationChannel" },
+        "distance": { "$ref": "#/$defs/interpolationChannel" },
+        "fov": { "$ref": "#/$defs/interpolationChannel" }
+      }
+    },
+    "cameraKeyframe": {
+      "type": "object",
+      "required": [
+        "index",
+        "frame",
+        "previousKeyframeIndex",
+        "nextKeyframeIndex",
+        "distance",
+        "position",
+        "rotation",
+        "fov",
+        "perspective",
+        "selected",
+        "followModelIndex",
+        "followBoneIndex",
+        "interpolation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "frame": { "type": "integer", "minimum": 0 },
+        "previousKeyframeIndex": { "type": "integer" },
+        "nextKeyframeIndex": { "type": "integer" },
+        "distance": { "type": "number" },
+        "position": { "$ref": "#/$defs/vec3" },
+        "rotation": { "$ref": "#/$defs/vec3" },
+        "fov": { "type": "integer" },
+        "perspective": { "type": "boolean" },
+        "selected": { "type": "boolean" },
+        "followModelIndex": { "type": "integer" },
+        "followBoneIndex": { "type": "integer" },
+        "interpolation": { "$ref": "#/$defs/cameraInterpolation" }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "required": ["available"],
+      "additionalProperties": false,
+      "properties": {
+        "available": { "type": "boolean" },
+        "current": {
+          "type": "object",
+          "required": ["distance", "position", "rotation"],
+          "additionalProperties": false,
+          "properties": {
+            "distance": { "type": "number" },
+            "position": { "$ref": "#/$defs/vec3" },
+            "rotation": { "$ref": "#/$defs/vec3" }
+          }
+        },
+        "keyframes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/cameraKeyframe" }
+        }
+      }
+    },
+    "sceneParameters": {
+      "type": "object",
+      "required": ["available"],
+      "additionalProperties": false,
+      "properties": {
+        "available": { "type": "boolean" },
+        "outputWidth": { "type": "integer", "minimum": 0 },
+        "outputHeight": { "type": "integer", "minimum": 0 },
+        "pmmPath": { "type": "string" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["index", "name", "filename", "visible", "bones", "morphs"],
+      "additionalProperties": false,
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string" },
+        "filename": { "type": "string" },
+        "visible": { "type": "boolean" },
+        "bones": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["index", "name", "worldMatrix"],
+            "additionalProperties": false,
+            "properties": {
+              "index": { "type": "integer", "minimum": 0 },
+              "name": { "type": "string" },
+              "worldMatrix": { "$ref": "#/$defs/matrix4" }
+            }
+          }
+        },
+        "morphs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["index", "name", "weight"],
+            "additionalProperties": false,
+            "properties": {
+              "index": { "type": "integer", "minimum": 0 },
+              "name": { "type": "string" },
+              "weight": { "type": "number" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

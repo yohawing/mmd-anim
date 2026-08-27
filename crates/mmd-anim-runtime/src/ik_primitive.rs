@@ -120,14 +120,11 @@ impl IkChainSolver {
         self.apply_link_rotations();
         self.update_world_matrices(input);
 
-        // The input local pose is the rollback floor. A constrained IK
-        // candidate can be worse than the authored pose, so it must not become
-        // the best pose merely because it is the first finite distance seen.
         let mut final_distance = {
             let eff_pos = translation(self.world_matrices[self.definition.target_slot]);
             (eff_pos - input.goal_position).length()
         };
-        let mut best_distance = final_distance;
+        let mut best_distance = f32::MAX;
         let mut executed_iterations = 0u32;
         let mut link_steps = 0u32;
 

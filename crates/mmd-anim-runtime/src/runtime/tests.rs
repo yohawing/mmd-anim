@@ -411,13 +411,9 @@ fn solves_one_link_ik_toward_controller_bone() {
 }
 
 #[test]
-fn ik_rollback_preserves_better_fk_pose_than_limited_candidate() {
-    // The authored FK pose is intentionally outside the narrow IK angle box.
-    // Its effector is already almost at the controller, so clamping it toward
-    // the IK limits would be a worse candidate and must be rolled back.
+fn ik_accepts_first_constrained_candidate_even_when_farther_than_authored_fk() {
     let base_rotation = Quat::from_rotation_z(1.0);
     let target_position = base_rotation.mul_vec3a(Vec3A::X) + Vec3A::new(0.01, 0.0, 0.0);
-    let angle_limit = IkAngleLimit::new(Vec3A::splat(-0.1), Vec3A::splat(0.1));
     let model = Arc::new(
         ModelArena::new_with_ik(
             vec![
@@ -428,37 +424,30 @@ fn ik_rollback_preserves_better_fk_pose_than_limited_candidate() {
             vec![IkSolverInit {
                 ik_bone: BoneIndex(2),
                 target_bone: BoneIndex(1),
-                links: vec![IkLinkInit::new(BoneIndex(0)).with_angle_limit(angle_limit)],
+                links: vec![
+                    IkLinkInit::new(BoneIndex(0))
+                        .with_angle_limit(IkAngleLimit::new(Vec3A::splat(-0.1), Vec3A::splat(0.1))),
+                ],
                 iteration_count: 1,
                 limit_angle: 0.0,
             }],
         )
         .unwrap(),
     );
-
-    let mut baseline = RuntimeInstance::new(Arc::clone(&model));
-    baseline
+    let mut runtime = RuntimeInstance::new(model);
+    runtime
         .pose_mut()
         .set_local_rotation(BoneIndex(0), base_rotation);
-    baseline.evaluate_current_pose_without_ik();
-    let baseline_distance = (translation(baseline.world_matrices()[1])
-        - translation(baseline.world_matrices()[2]))
-    .length();
+    runtime.evaluate_current_pose();
 
-    let mut solved = RuntimeInstance::new(model);
-    solved
-        .pose_mut()
-        .set_local_rotation(BoneIndex(0), base_rotation);
-    solved.evaluate_current_pose();
-    let solved_distance = (translation(solved.world_matrices()[1])
-        - translation(solved.world_matrices()[2]))
+    let solved_distance = (translation(runtime.world_matrices()[1])
+        - translation(runtime.world_matrices()[2]))
     .length();
-
     assert!(
-        solved_distance <= baseline_distance + 1.0e-5,
-        "IK must not replace a better FK pose: baseline={baseline_distance} solved={solved_distance}"
+        solved_distance > 0.01 + 1.0e-5,
+        "the constrained first candidate must be retained even when farther than authored FK: distance={solved_distance}"
     );
-    assert_eq!(solved.ik_runtime_stats()[0].rollback_breaks, 1);
+    assert_eq!(runtime.ik_runtime_stats()[0].rollback_breaks, 0);
 }
 
 #[test]

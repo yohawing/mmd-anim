@@ -81,7 +81,7 @@ Format support overview. "Loading" means parsing a file into structured data.
 
 ```toml
 [dependencies]
-mmd-anim = "0.4.2"
+mmd-anim = "0.4.3"
 ```
 
 ## Native Hosts (C ABI)
@@ -97,6 +97,12 @@ light, self-shadow, and property/IK sections. The function performs no file
 I/O and returns an owned VMD 0002 byte buffer; release it with
 `mmd_runtime_byte_buffer_free`. High-density key values are not expanded into
 the metadata JSON.
+
+For VPD pose interchange, `mmd_runtime_export_vpd_pose_json` converts a
+camelCase JSON pose DTO to Shift-JIS VPD bytes, and
+`mmd_runtime_parse_vpd_pose_json` converts VPD bytes back to UTF-8 JSON. Both
+functions return Rust-owned buffers that must be released with
+`mmd_runtime_byte_buffer_free`.
 
 ```c
 // 1. Create a model from PMX bytes

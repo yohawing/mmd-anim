@@ -1082,7 +1082,7 @@ fn compare_motion_numeric_case(
     );
 
     for oracle_frame in &dump.frames {
-        let eval_frame = oracle_frame.frame as f32 + eval_frame_offset;
+        let eval_frame = oracle_frame.sample_frame + eval_frame_offset;
         if let Some(physics_evaluator) = physics_evaluator.as_mut() {
             physics_evaluator.evaluate_to_frame(&mut runtime, &clip, eval_frame)?;
         } else {

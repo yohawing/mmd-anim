@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.4.3 - 2026-08-27
+
+Added native VPD pose interchange, corrected generated PMM scene data,
+stabilized extreme PMX rigid-body masses, and added a repository-local MMD
+quality measurement workflow.
+
+### Added
+
+- Added `mmd_runtime_export_vpd_pose_json` and
+  `mmd_runtime_parse_vpd_pose_json` to convert between a camelCase JSON pose
+  DTO and Shift-JIS VPD bytes through the native C ABI.
+- Added the repository-local MMDDumper source and Python oracle runner for
+  opt-in MMD recording, comparison, and deterministic aggregate Markdown
+  reporting.
+
+### Fixed
+
+- Corrected generated PMM fixed-track expansion state and timeline fields so
+  single-model PMX/VMD scenes load and play through the sampled frame range in
+  MMD.
+- Restored MMD-compatible IK behavior by retaining the first finite constrained
+  candidate instead of treating the authored FK pose as the rollback floor.
+- Tightened VPD parsing so truncated records, malformed tuples, invalid counts,
+  invalid Shift-JIS, and lossy text export fail closed.
+- Preserved fractional oracle sample timestamps while grouping comparisons by
+  their logical integer frame.
+- Clamped PMX-compatible dynamic and dynamic-bone effective Bullet masses to
+  `1e6` in the shared PMX/typed-descriptor world builder while preserving the
+  source descriptors, and exposed source/effective mass diagnostics for every
+  adjustment.
+
+### Known limitations
+
+- MMD recording is a Windows GUI opt-in. The current preparation backend
+  supports one model with body VMD bone and morph tracks; other scene channels
+  remain fail-closed.
+- The tracked aggregate quality report is a diagnostic baseline, not a claim
+  that arbitrary model and motion pairs meet the numeric parity thresholds.
+- The C ABI, WASM wrapper, PMM document conversion, and Python binding remain
+  experimental and may change before 1.0.
+
 ## 0.4.2 - 2026-08-21
 
 Added native VMD export from typed Bone/Morph SoA data for Maya and other

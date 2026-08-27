@@ -1,0 +1,37 @@
+/MikuMikuDance_v932x64/
+
+# MMD scene/model/motion/binary assets are local fixtures only.
+*.pmm
+*.pmd
+*.pmx
+*.vmd
+*.vpd
+*.vac
+*.x
+*.bmp
+*.tga
+*.sph
+*.spa
+*.exe
+*.dll
+*.lib
+
+# Fixture manifests and binary assets stay out of the repository.
+/fixtures/*
+
+/dist/
+/coverage/
+/out/
+/node_modules/
+/__pycache__/
+*.py[cod]
+/lib/**/*.dll
+/lib/**/*.lib
+/lib/**/*.pdb
+/lib/mmd/MMDExport.h
+/lib/mmdplugin/mmd_plugin.h
+*.log
+*.tmp
+/fixtures/**/oracle.actual.jsonl
+/fixtures/**/oracle.actual.jsonl.done
+/fixtures/**/oracle.actual.jsonl.proxy.log

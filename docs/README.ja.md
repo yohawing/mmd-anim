@@ -74,7 +74,7 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 
 ```toml
 [dependencies]
-mmd-anim = "0.4.2"
+mmd-anim = "0.4.3"
 ```
 
 ## ネイティブ (C ABI) から使う
@@ -89,6 +89,11 @@ Bone/Morph SoA 配列と、名前および低密度のカメラ・ライト・�
 Property/IK セクションを含む JSON メタデータを渡せます。ファイル I/O は行わず、
 所有権を移した VMD 0002 バイト列を返します。返却バッファは
 `mmd_runtime_byte_buffer_free` で解放してください。高密度のキー値は JSON に展開しません。
+
+VPDポーズの受け渡しには、camelCaseのJSONポーズDTOをShift-JISのVPDバイト列へ変換する
+`mmd_runtime_export_vpd_pose_json`と、VPDバイト列をUTF-8のJSONへ戻す
+`mmd_runtime_parse_vpd_pose_json`を利用できます。どちらの返却バッファも
+`mmd_runtime_byte_buffer_free`で解放してください。
 
 ```c
 // 1. PMX のバイト列からモデルを作成

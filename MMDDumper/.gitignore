@@ -29,6 +29,7 @@
 /lib/**/*.lib
 /lib/**/*.pdb
 /lib/mmd/MMDExport.h
+/lib/mmdplugin/mmd_plugin.h
 *.log
 *.tmp
 /fixtures/**/oracle.actual.jsonl

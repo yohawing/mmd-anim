@@ -21,12 +21,29 @@ pub enum PmxBulletBuildError {
     Bullet(#[from] BulletError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PmxBulletMassAdjustment {
+    pub rigidbody_index: usize,
+    pub source_mass: f32,
+    pub effective_mass: f32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PmxBulletBuildReport {
     pub rigidbodies_added: usize,
     pub joints_added: usize,
     pub joints_skipped_invalid_body: usize,
     pub joints_skipped_unsupported_type: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PmxBulletBuildDiagnostics {
+    pub mass_adjustments: Vec<PmxBulletMassAdjustment>,
+}
+
+pub struct PmxBulletBuildResult {
+    pub world: PmxBulletWorld,
+    pub diagnostics: PmxBulletBuildDiagnostics,
 }
 
 pub struct PmxBulletWorld {
@@ -198,6 +215,13 @@ pub struct PhysicsJointDescriptor {
 pub fn build_bullet_world_from_pmx(
     model: &PmxParsedModel,
 ) -> Result<PmxBulletWorld, PmxBulletBuildError> {
+    Ok(build_bullet_world_from_pmx_with_diagnostics(model)?.world)
+}
+
+#[cfg(feature = "pmx-format")]
+pub fn build_bullet_world_from_pmx_with_diagnostics(
+    model: &PmxParsedModel,
+) -> Result<PmxBulletBuildResult, PmxBulletBuildError> {
     let rigidbodies = model
         .rigid_bodies
         .iter()
@@ -209,20 +233,38 @@ pub fn build_bullet_world_from_pmx(
         .iter()
         .map(joint_descriptor_from_pmx)
         .collect::<Vec<_>>();
-    build_bullet_world_from_descriptors(&rigidbodies, &joints)
+    build_bullet_world_from_descriptors_with_diagnostics(&rigidbodies, &joints)
 }
 
 pub fn build_bullet_world_from_descriptors(
     rigidbodies: &[PhysicsRigidBodyDescriptor],
     joints: &[PhysicsJointDescriptor],
 ) -> Result<PmxBulletWorld, PmxBulletBuildError> {
+    Ok(build_bullet_world_from_descriptors_with_diagnostics(rigidbodies, joints)?.world)
+}
+
+pub fn build_bullet_world_from_descriptors_with_diagnostics(
+    rigidbodies: &[PhysicsRigidBodyDescriptor],
+    joints: &[PhysicsJointDescriptor],
+) -> Result<PmxBulletBuildResult, PmxBulletBuildError> {
     let mut world = BulletWorld::new()?;
     let mut rigidbody_handles = Vec::with_capacity(rigidbodies.len());
     let mut rigidbody_bindings = Vec::with_capacity(rigidbodies.len());
     let mut report = PmxBulletBuildReport::default();
+    let mut diagnostics = PmxBulletBuildDiagnostics::default();
 
-    for descriptor in rigidbodies {
-        let handle = world.add_rigidbody(descriptor.rigidbody)?;
+    for (rigidbody_index, descriptor) in rigidbodies.iter().enumerate() {
+        let mut rigidbody = descriptor.rigidbody;
+        let source_mass = rigidbody.mass;
+        rigidbody.mass = effective_bullet_mass(descriptor.binding.mode, source_mass);
+        if rigidbody.mass != source_mass {
+            diagnostics.mass_adjustments.push(PmxBulletMassAdjustment {
+                rigidbody_index,
+                source_mass,
+                effective_mass: rigidbody.mass,
+            });
+        }
+        let handle = world.add_rigidbody(rigidbody)?;
         rigidbody_handles.push(handle);
         rigidbody_bindings.push(descriptor.binding);
         report.rigidbodies_added += 1;
@@ -239,12 +281,31 @@ pub fn build_bullet_world_from_descriptors(
         }
     }
 
-    Ok(PmxBulletWorld {
-        world,
-        rigidbody_handles,
-        rigidbody_bindings,
-        report,
+    Ok(PmxBulletBuildResult {
+        world: PmxBulletWorld {
+            world,
+            rigidbody_handles,
+            rigidbody_bindings,
+            report,
+        },
+        diagnostics,
     })
+}
+
+// 1e6 is the highest tested cap that keeps the PMX chain finite and constrained.
+const PROVEN_MAX_BULLET_MASS: f32 = 1.0e6;
+
+fn effective_bullet_mass(mode: PmxRigidBodyMode, source_mass: f32) -> f32 {
+    if matches!(mode, PmxRigidBodyMode::Static) {
+        0.0
+    } else {
+        // Match native btMax(mass, 0): non-positive and NaN values become zero.
+        if source_mass > 0.0 {
+            source_mass.min(PROVEN_MAX_BULLET_MASS)
+        } else {
+            0.0
+        }
+    }
 }
 
 #[cfg(feature = "pmx-format")]
@@ -501,6 +562,183 @@ mod descriptor_tests {
         assert_eq!(built.rigidbody_bindings[1].mode, PmxRigidBodyMode::Dynamic);
         assert_eq!(built.world.rigidbody_count().unwrap(), 2);
     }
+
+    #[test]
+    fn effective_mass_rule_clamps_dynamic_modes_and_preserves_sources() {
+        let descriptor = |mass, mode| PhysicsRigidBodyDescriptor {
+            rigidbody: RigidBodyDesc::dynamic_sphere(0.5, [0.0, 8.0, 0.0], mass),
+            binding: PmxRigidBodyBinding {
+                bone_index: Some(0),
+                mode,
+                body_from_bone: Transform::IDENTITY,
+                bone_from_body: Transform::IDENTITY,
+            },
+        };
+        let source = vec![
+            descriptor(7.0, PmxRigidBodyMode::Static),
+            descriptor(2.0e6, PmxRigidBodyMode::Dynamic),
+            descriptor(3.0e6, PmxRigidBodyMode::DynamicBone),
+            descriptor(1.0, PmxRigidBodyMode::Dynamic),
+        ];
+        let source_snapshot = source.clone();
+
+        let built = build_bullet_world_from_descriptors_with_diagnostics(&source, &[]).unwrap();
+        assert_eq!(source, source_snapshot);
+        assert_eq!(
+            built.world.rigidbody_bindings,
+            source
+                .iter()
+                .map(|descriptor| descriptor.binding)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            built.diagnostics.mass_adjustments,
+            vec![
+                PmxBulletMassAdjustment {
+                    rigidbody_index: 0,
+                    source_mass: 7.0,
+                    effective_mass: 0.0,
+                },
+                PmxBulletMassAdjustment {
+                    rigidbody_index: 1,
+                    source_mass: 2.0e6,
+                    effective_mass: 1.0e6,
+                },
+                PmxBulletMassAdjustment {
+                    rigidbody_index: 2,
+                    source_mass: 3.0e6,
+                    effective_mass: 1.0e6,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn effective_mass_matches_native_lower_bound_for_non_finite_inputs() {
+        let descriptor = |mass| PhysicsRigidBodyDescriptor {
+            rigidbody: RigidBodyDesc::dynamic_sphere(0.5, [0.0, 8.0, 0.0], mass),
+            binding: PmxRigidBodyBinding {
+                bone_index: Some(0),
+                mode: PmxRigidBodyMode::Dynamic,
+                body_from_bone: Transform::IDENTITY,
+                bone_from_body: Transform::IDENTITY,
+            },
+        };
+        let source = [
+            descriptor(-1.0),
+            descriptor(f32::NAN),
+            descriptor(f32::INFINITY),
+        ];
+        let built = build_bullet_world_from_descriptors_with_diagnostics(&source, &[]).unwrap();
+        let adjustments = &built.diagnostics.mass_adjustments;
+        assert_eq!(adjustments.len(), 3);
+        assert_eq!(adjustments[0].source_mass, -1.0);
+        assert_eq!(adjustments[0].effective_mass, 0.0);
+        assert!(adjustments[1].source_mass.is_nan());
+        assert_eq!(adjustments[1].effective_mass, 0.0);
+        assert_eq!(adjustments[2].source_mass, f32::INFINITY);
+        assert_eq!(adjustments[2].effective_mass, 1.0e6);
+    }
+
+    #[test]
+    fn effective_mass_world_reset_replays_same_input() {
+        let body = |position, mass, mode| PhysicsRigidBodyDescriptor {
+            rigidbody: RigidBodyDesc::dynamic_sphere(0.5, position, mass),
+            binding: PmxRigidBodyBinding {
+                bone_index: Some(0),
+                mode,
+                body_from_bone: Transform::IDENTITY,
+                bone_from_body: Transform::IDENTITY,
+            },
+        };
+        let rigidbodies = vec![
+            body([0.0, 10.0, 0.0], 0.0, PmxRigidBodyMode::Static),
+            body([0.0, 8.0, 0.0], 2.0e6, PmxRigidBodyMode::Dynamic),
+            body([0.0, 6.0, 0.0], 3.0e6, PmxRigidBodyMode::DynamicBone),
+        ];
+        let joint = |rigidbody_a, rigidbody_b, position| PhysicsJointDescriptor {
+            kind: PhysicsJointKind::Generic6DofSpring,
+            rigidbody_a,
+            rigidbody_b,
+            position,
+            rotation_euler: [0.0; 3],
+            translation_lower_limit: [0.0; 3],
+            translation_upper_limit: [0.0; 3],
+            rotation_lower_limit: [-std::f32::consts::PI; 3],
+            rotation_upper_limit: [std::f32::consts::PI; 3],
+            spring_translation_factor: [0.0; 3],
+            spring_rotation_factor: [0.0; 3],
+        };
+        let joints = vec![joint(0, 1, [0.0, 9.0, 0.0]), joint(1, 2, [0.0, 7.0, 0.0])];
+        let mut built = build_bullet_world_from_descriptors(&rigidbodies, &joints).unwrap();
+        assert_eq!(built.world.constraint_count().unwrap(), 2);
+
+        let drive = |built: &mut PmxBulletWorld| {
+            built
+                .world
+                .set_rigidbody_transform(
+                    built.rigidbody_handles[0],
+                    Transform::from_translation([3.0, 10.0, 0.0]),
+                )
+                .unwrap();
+            built.world.settle_to_current().unwrap();
+            for _ in 0..60 {
+                built
+                    .world
+                    .step_with_fixed_substep(1.0 / 60.0, 1, 1.0 / 60.0)
+                    .unwrap();
+            }
+            [
+                built
+                    .world
+                    .rigidbody_transform(built.rigidbody_handles[0])
+                    .unwrap()
+                    .position,
+                built
+                    .world
+                    .rigidbody_transform(built.rigidbody_handles[1])
+                    .unwrap()
+                    .position,
+                built
+                    .world
+                    .rigidbody_transform(built.rigidbody_handles[2])
+                    .unwrap()
+                    .position,
+            ]
+        };
+
+        let first = drive(&mut built);
+        built.world.reset().unwrap();
+        let replay = drive(&mut built);
+        for state in [&first, &replay] {
+            for (position, expected) in
+                state
+                    .iter()
+                    .zip([[3.0, 10.0, 0.0], [3.0, 8.0, 0.0], [3.0, 6.0, 0.0]])
+            {
+                assert!(position.iter().all(|component| component.is_finite()));
+                let error = position
+                    .iter()
+                    .zip(expected)
+                    .map(|(actual, expected)| (actual - expected).powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+                assert!(error < 2.0, "chain escaped its moved anchor: {position:?}");
+            }
+        }
+        for (left, right) in first[1].iter().zip(replay[1].iter()) {
+            assert!(
+                (left - right).abs() < 1.0e-4,
+                "root replay drift: {first:?} vs {replay:?}"
+            );
+        }
+        for (left, right) in first[2].iter().zip(replay[2].iter()) {
+            assert!(
+                (left - right).abs() < 1.0e-4,
+                "tip replay drift: {first:?} vs {replay:?}"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, feature = "pmx-format"))]
@@ -645,7 +883,7 @@ mod tests {
                     "shape": "sphere",
                     "size": [0.5, 0.0, 0.0],
                     "position": [0.0, 8.0, 0.0],
-                    "mass": 1.0,
+                    "mass": 2000000.0,
                     "mode": "dynamic"
                 }
             ],
@@ -661,7 +899,7 @@ mod tests {
         }))
         .unwrap();
         let model = crate::test_support::build_test_pmx_model(descriptor);
-        let from_pmx = build_bullet_world_from_pmx(&model).unwrap();
+        let from_pmx = build_bullet_world_from_pmx_with_diagnostics(&model).unwrap();
         let rigidbodies = model
             .rigid_bodies
             .iter()
@@ -673,15 +911,26 @@ mod tests {
             .iter()
             .map(joint_descriptor_from_pmx)
             .collect::<Vec<_>>();
-        let from_descriptors = build_bullet_world_from_descriptors(&rigidbodies, &joints).unwrap();
+        let from_descriptors =
+            build_bullet_world_from_descriptors_with_diagnostics(&rigidbodies, &joints).unwrap();
 
-        assert_eq!(from_descriptors.report, from_pmx.report);
+        assert_eq!(from_descriptors.world.report, from_pmx.world.report);
+        assert_eq!(from_descriptors.diagnostics, from_pmx.diagnostics);
         assert_eq!(
-            from_descriptors.rigidbody_bindings,
-            from_pmx.rigidbody_bindings
+            from_descriptors.world.rigidbody_bindings,
+            from_pmx.world.rigidbody_bindings
         );
-        assert_eq!(from_descriptors.rigidbody_handles.len(), 2);
-        assert_eq!(from_descriptors.world.rigidbody_count().unwrap(), 2);
+        assert_eq!(from_descriptors.world.rigidbody_handles.len(), 2);
+        assert_eq!(from_descriptors.world.world.rigidbody_count().unwrap(), 2);
+        assert_eq!(rigidbodies[1].rigidbody.mass, 2000000.0);
+        assert_eq!(
+            from_pmx.diagnostics.mass_adjustments,
+            vec![PmxBulletMassAdjustment {
+                rigidbody_index: 1,
+                source_mass: 2000000.0,
+                effective_mass: 1000000.0,
+            }]
+        );
     }
 
     #[test]

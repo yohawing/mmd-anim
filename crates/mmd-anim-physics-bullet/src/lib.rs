@@ -20,12 +20,14 @@ pub use native::{
     BulletError, BulletWorld, ConstraintHandle, ContactPoint, RigidBodyDesc, RigidBodyHandle,
     RigidBodyShape, SixDofSpringJointDesc, Transform,
 };
-#[cfg(all(feature = "native", feature = "pmx-format"))]
-pub use pmx::build_bullet_world_from_pmx;
 #[cfg(feature = "native")]
 pub use pmx::{
-    PhysicsJointDescriptor, PhysicsJointKind, PhysicsRigidBodyDescriptor, PmxBulletBuildReport,
+    PhysicsJointDescriptor, PhysicsJointKind, PhysicsRigidBodyDescriptor,
+    PmxBulletBuildDiagnostics, PmxBulletBuildReport, PmxBulletBuildResult, PmxBulletMassAdjustment,
     PmxBulletWorld, PmxRigidBodyBinding, PmxRigidBodyMode, build_bullet_world_from_descriptors,
+    build_bullet_world_from_descriptors_with_diagnostics,
 };
+#[cfg(all(feature = "native", feature = "pmx-format"))]
+pub use pmx::{build_bullet_world_from_pmx, build_bullet_world_from_pmx_with_diagnostics};
 #[cfg(all(feature = "native", feature = "runtime"))]
 pub use runtime::RuntimePhysicsBridgeExt;

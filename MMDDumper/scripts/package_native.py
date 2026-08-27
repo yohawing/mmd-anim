@@ -12,10 +12,10 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     out_dir = root / "out" / "mmd-oracle-dumper-package"
     artifacts = (
-        ("mmd_oracle_dumper.dll", root / "out" / "native-dll-smoke" / "mmd_oracle_dumper.dll", True),
-        ("MSIMG32.dll", root / "out" / "native-proxy-smoke" / "MSIMG32.dll", True),
-        ("d3d9.dll", root / "out" / "native-d3d9-smoke" / "d3d9.dll", False),
-        ("Plugin/mmd_oracle_plugin.dll", root / "out" / "native-mmdplugin-smoke" / "mmd_oracle_plugin.dll", False),
+        ("mmd_oracle_dumper.dll", _built_artifact(root, "native-dll-smoke", "mmd_oracle_dumper.dll"), True),
+        ("MSIMG32.dll", _built_artifact(root, "native-proxy-smoke", "MSIMG32.dll"), True),
+        ("d3d9.dll", _built_artifact(root, "native-d3d9-smoke", "d3d9.dll"), False),
+        ("Plugin/mmd_oracle_plugin.dll", _built_artifact(root, "native-mmdplugin-smoke", "mmd_oracle_plugin.dll"), False),
         ("oracle-v1.schema.json", root / "schema" / "oracle-v1.schema.json", True),
     )
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -50,6 +50,12 @@ def main() -> int:
     (out_dir / "package-manifest.json").write_text(json.dumps(manifest, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"ok": True, "outDir": str(out_dir), "files": [item["name"] for item in copied]}, ensure_ascii=True, indent=2))
     return 0
+
+
+def _built_artifact(root: Path, build: str, name: str) -> Path:
+    directory = root / "out" / build
+    candidates = (directory / name, directory / "Release" / name)
+    return next((path for path in candidates if path.is_file()), candidates[0])
 
 
 if __name__ == "__main__":

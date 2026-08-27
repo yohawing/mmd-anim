@@ -27,21 +27,21 @@ def main() -> int:
     writer = out / "native-smoke"
     _configure_build(root, writer, "mmd_oracle_jsonl_writer_test", "-DMMD_ORACLE_BUILD_DLL=OFF", "-DMMD_ORACLE_BUILD_MSIMG32_PROXY=OFF")
     _run(("ctest", "--test-dir", str(writer), "--output-on-failure", "-C", "Release"), root)
-    _require_any(writer / "mmd_oracle_jsonl_writer_test.exe", writer / "mmd_oracle_jsonl_writer_test")
+    _require_built(writer, "mmd_oracle_jsonl_writer_test.exe", "mmd_oracle_jsonl_writer_test")
 
     mmd_export = root / "lib" / "mmd" / "MMDExport.lib"
     dll_built = False
     if mmd_export.is_file():
         dll = out / "native-dll-smoke"
         _configure_build(root, dll, "mmd_oracle_dumper", "-DMMD_ORACLE_BUILD_DLL=ON", "-DMMD_ORACLE_BUILD_MSIMG32_PROXY=OFF", f"-DMMD_EXPORT_LIB={mmd_export}")
-        _require(dll / "mmd_oracle_dumper.dll")
+        _require_built(dll, "mmd_oracle_dumper.dll")
         dll_built = True
     proxy = out / "native-proxy-smoke"
     _configure_build(root, proxy, "msimg32", "-DMMD_ORACLE_BUILD_DLL=OFF", "-DMMD_ORACLE_BUILD_MSIMG32_PROXY=ON")
-    _require(proxy / "MSIMG32.dll")
+    _require_built(proxy, "MSIMG32.dll")
     d3d9 = out / "native-d3d9-smoke"
     _configure_build(root, d3d9, "d3d9", "-DMMD_ORACLE_BUILD_DLL=OFF", "-DMMD_ORACLE_BUILD_D3D9_PROXY=ON")
-    _require(d3d9 / "d3d9.dll")
+    _require_built(d3d9, "d3d9.dll")
     print(f'{{"ok": true, "dllBuilt": {str(dll_built).lower()}, "writer": "{writer}"}}')
     return 0
 
@@ -67,12 +67,8 @@ def _run(command: tuple[str, ...], cwd: Path) -> None:
         raise SystemExit(completed.returncode)
 
 
-def _require(path: Path) -> None:
-    if not path.is_file():
-        raise FileNotFoundError(f"expected native artifact was not created: {path}")
-
-
-def _require_any(*paths: Path) -> None:
+def _require_built(build: Path, *names: str) -> None:
+    paths = tuple(directory / name for directory in (build, build / "Release") for name in names)
     if not any(path.is_file() for path in paths):
         raise FileNotFoundError("expected native artifact was not created: " + ", ".join(str(path) for path in paths))
 

@@ -27,8 +27,12 @@ Cases accept only `generatorBackend: "python-rust"`. Rust `mmd-anim-cli build-pm
 Recording requires a prepared case with `recordOptIn: true` and the launch guard enabled:
 
 ```powershell
-uv run --project tools/mmd-oracle-runner mmd-oracle-runner record --case C:/absolute/case.json
-Remove-Item Env:MMD_DUMPER_ALLOW_MMD_LAUNCH
+$env:MMD_DUMPER_ALLOW_MMD_LAUNCH = '1'
+try {
+  uv run --project tools/mmd-oracle-runner mmd-oracle-runner record --case C:/absolute/case.json
+} finally {
+  Remove-Item Env:MMD_DUMPER_ALLOW_MMD_LAUNCH -ErrorAction SilentlyContinue
+}
 ```
 
 The Python runner manages temporary native DLL installation, MMD process shutdown, and DLL restoration. It validates the JSONL schema and requested-frame coverage before atomically promoting the stable output. Environments without MMD or the native DLLs can still run `validate`, `prepare`, and the Rust/Python test suite.

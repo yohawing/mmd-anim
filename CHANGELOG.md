@@ -2,8 +2,9 @@
 
 ## 0.4.3 - 2026-08-27
 
-Added native VPD pose interchange, corrected generated PMM scene data, and
-added a repository-local MMD quality measurement workflow.
+Added native VPD pose interchange, corrected generated PMM scene data,
+stabilized extreme PMX rigid-body masses, and added a repository-local MMD
+quality measurement workflow.
 
 ### Added
 
@@ -25,6 +26,10 @@ added a repository-local MMD quality measurement workflow.
   invalid Shift-JIS, and lossy text export fail closed.
 - Preserved fractional oracle sample timestamps while grouping comparisons by
   their logical integer frame.
+- Clamped PMX-compatible dynamic and dynamic-bone effective Bullet masses to
+  `1e6` in the shared PMX/typed-descriptor world builder while preserving the
+  source descriptors, and exposed source/effective mass diagnostics for every
+  adjustment.
 
 ### Known limitations
 

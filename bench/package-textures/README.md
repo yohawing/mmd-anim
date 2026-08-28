@@ -3,7 +3,8 @@
 This is a maintainer-only measurement harness. It does not define the production
 `.mmdpack` format or freeze a V1 codec decision.
 
-`run-campaign.ps1` reads a fixed local manifest, invokes a configured Basis
+`run-campaign.ps1` first runs the pinned Three.js `2d_uastc.ktx2` known-good
+control, then reads a fixed local manifest and invokes a configured Basis
 Universal v2.50 executable for Candidate A (raw UASTC probe payload) and
 Candidate B (KTX2 UASTC with internal Zstandard), and loads a configured
 Three.js Basis transcoder in Node for the WASM lane. Tool paths and manifest
@@ -17,6 +18,8 @@ that a pinned-transcoder compatibility rejection is retained as an explicit
 blocked Phase 0 result.
 
 Raw JSON and Markdown are replaced atomically per file on the same volume. The
-two published files are not a transactional pair, so a failure or input drift
-between replacements can leave different run IDs in the two files; each run
-records a unique run ID to make that state explicit.
+published raw JSON, decision Markdown, and WASM control Markdown are three
+separate publications, not a transactional set, so a failure or input drift
+between replacements can leave different run IDs in the files; each run records
+a unique run ID to make that state explicit. A failed known-good control stops
+the campaign before candidate measurement/publication.

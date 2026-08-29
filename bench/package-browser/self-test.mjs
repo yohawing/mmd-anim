@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { publishReport, validateReport, validateWebGPUReport, validateZenWebGL2Report, validationConstants } from './lib.mjs';
+import { publishReport, validateFirefoxWebGL2Report, validateReport, validateWebGPUReport, validateZenWebGL2Report, validationConstants } from './lib.mjs';
 
 const hex = character => character.repeat(64);
 const timing = () => ({ samples_ms: [1, 2, 3, 4, 5], p50_ms: 3, p95_ms: 5 });
@@ -64,12 +64,19 @@ function zenReport(run = 'zen-webgl2-test') {
   };
   return value;
 }
+function firefoxReport(run = 'firefox-webgl2-test') {
+  const value = zenReport(run);
+  value.environment.execution_surface = 'official_firefox';
+  return value;
+}
 const context = { runId: 'source-run', provenance, cases: expectedCases };
 const canonical = validateReport(report(), context);
 const webgpuContext = { ...context, executionSurface: 'external_chrome_extension' };
 const canonicalWebGPU = validateWebGPUReport(webgpuReport(), webgpuContext);
 const zenContext = { ...context, executionSurface: 'zen_browser' };
 const canonicalZen = validateZenWebGL2Report(zenReport(), zenContext);
+const firefoxContext = { ...context, executionSurface: 'official_firefox' };
+const canonicalFirefox = validateFirefoxWebGL2Report(firefoxReport(), firefoxContext);
 const secret = report();
 secret.secret_key = 'must-not-publish';
 assert.throws(() => validateReport(secret, context), /canonical/);
@@ -99,6 +106,9 @@ assert.throws(() => validateZenWebGL2Report(zenWrongUa, zenContext), /environmen
 const zenWrongSurface = zenReport();
 zenWrongSurface.environment.execution_surface = 'official_firefox';
 assert.throws(() => validateZenWebGL2Report(zenWrongSurface, zenContext), /execution surface invalid/);
+const firefoxWrongSurface = firefoxReport();
+firefoxWrongSurface.environment.execution_surface = 'zen_browser';
+assert.throws(() => validateFirefoxWebGL2Report(firefoxWrongSurface, firefoxContext), /execution surface invalid/);
 
 const temp = await mkdtemp(join(tmpdir(), 'mmdpack-browser-test-'));
 const documentPath = join(temp, 'decision.md');
@@ -124,6 +134,12 @@ const zenPublished = await readFile(zenDocumentPath, 'utf8');
 assert.match(zenPublished, /Zen Browser\/Firefox-engine/);
 assert.match(zenPublished, /not official Firefox authority/);
 assert.match(zenPublished, /Execution surface: zen_browser/);
+const firefoxTemp = await mkdtemp(join(tmpdir(), 'mmdpack-firefox-test-'));
+const firefoxDocumentPath = join(firefoxTemp, 'decision.md');
+await publishReport(canonicalFirefox, { outputRoot: join(firefoxTemp, 'raw'), documentPath: firefoxDocumentPath, variant: 'firefox-webgl2' });
+const firefoxPublished = await readFile(firefoxDocumentPath, 'utf8');
+assert.match(firefoxPublished, /official Firefox\/WebGL2/);
+assert.match(firefoxPublished, /Execution surface: official_firefox/);
 
 for (const path of ['bench/package-browser/lib.mjs', 'bench/package-browser/server.mjs', 'bench/package-browser/self-test.mjs', 'bench/package-browser/web/probe.js', 'bench/package-browser/web/probe-webgpu.js']) {
   await new Promise((resolve, reject) => {
@@ -157,6 +173,9 @@ try {
   const zenHtml = await (await fetch(`${url}zen`)).text();
   assert.match(zenHtml, /Zen Browser WebGL2 diagnostic/);
   assert.match(zenHtml, /probe\.js/);
+  const firefoxHtml = await (await fetch(`${url}firefox`)).text();
+  assert.match(firefoxHtml, /official Firefox WebGL2 probe/);
+  assert.match(firefoxHtml, /probe\.js/);
   assert.equal((await fetch(`${url}three/.git/config`)).status, 404);
   assert.equal((await fetch(`${url}three/build/three.webgpu.js`)).status, 200);
   assert.equal((await fetch(`${url}api/config`)).status, 200);
@@ -166,6 +185,8 @@ try {
   assert.equal(invalidWebGPU.status, 403);
   const invalidZen = await fetch(`${url}api/zen/webgl2/report`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"schema":1}' });
   assert.equal(invalidZen.status, 403);
+  const invalidFirefox = await fetch(`${url}api/firefox/webgl2/report`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"schema":1}' });
+  assert.equal(invalidFirefox.status, 403);
   let slowRequest;
   const slowStatus = new Promise((resolve, reject) => {
     slowRequest = httpRequest(`${url}api/report`, { method: 'POST', headers: { 'content-type': 'application/json' } }, response => {

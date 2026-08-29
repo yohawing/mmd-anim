@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { publishReport, validateReport, validationConstants } from './lib.mjs';
+import { publishReport, validateReport, validateWebGPUReport, validationConstants } from './lib.mjs';
 
 const hex = character => character.repeat(64);
 const timing = () => ({ samples_ms: [1, 2, 3, 4, 5], p50_ms: 3, p95_ms: 5 });
@@ -45,8 +45,21 @@ function report(run = 'chrome-test') {
     })),
   };
 }
+function webgpuReport(run = 'chrome-webgpu-test') {
+  const value = report(run);
+  value.environment = {
+    ua: value.environment.ua, execution_surface: 'external_chrome_extension', cross_origin_isolated: true, secure_context: true, webgpu: true,
+    adapter_info: { vendor: 'Test Vendor', architecture: 'Test Architecture', device: 'Test GPU', description: 'Test Adapter', is_fallback_adapter: false },
+    adapter_features: ['texture-compression-bc'], device_features: ['texture-compression-bc'],
+    limits: { maxTextureDimension2D: 8192, maxTextureArrayLayers: 256, maxBindGroups: 4, maxBufferSize: 268435456 },
+    gpu_classification: 'hardware', performance_blocked: false, directional_memory: 'unavailable', unavailable_metrics: validationConstants.UNAVAILABLE,
+  };
+  return value;
+}
 const context = { runId: 'source-run', provenance, cases: expectedCases };
 const canonical = validateReport(report(), context);
+const webgpuContext = { ...context, executionSurface: 'external_chrome_extension' };
+const canonicalWebGPU = validateWebGPUReport(webgpuReport(), webgpuContext);
 const secret = report();
 secret.secret_key = 'must-not-publish';
 assert.throws(() => validateReport(secret, context), /canonical/);
@@ -59,6 +72,17 @@ assert.throws(() => validateReport(badPairedTiming, context), /finite/);
 const forgedPairedTiming = report();
 forgedPairedTiming.cases[0].paired_overhead = { samples_ms: [1, 1, 1, 1, 1], p50_ms: 1, p95_ms: 1 };
 assert.throws(() => validateReport(forgedPairedTiming, context), /paired_overhead mismatch/);
+const webgpuWrongSurface = webgpuReport();
+webgpuWrongSurface.environment.webgl2 = true;
+assert.throws(() => validateWebGPUReport(webgpuWrongSurface, context), /canonical/);
+const missingCompression = webgpuReport();
+missingCompression.environment.adapter_features = [];
+missingCompression.environment.device_features = [];
+assert.throws(() => validateWebGPUReport(missingCompression, webgpuContext), /compression feature missing/);
+const rgbaFallback = webgpuReport();
+rgbaFallback.cases[0].baseline.format = 1023;
+rgbaFallback.cases[0].encrypted.format = 1023;
+assert.throws(() => validateWebGPUReport(rgbaFallback, webgpuContext), /RGBA fallback/);
 
 const temp = await mkdtemp(join(tmpdir(), 'mmdpack-browser-test-'));
 const documentPath = join(temp, 'decision.md');
@@ -66,10 +90,19 @@ await writeFile(documentPath, 'old publication');
 await publishReport(canonical, { outputRoot: join(temp, 'raw'), documentPath });
 const published = await readFile(documentPath, 'utf8');
 assert.match(published, /chrome-test/);
+assert.doesNotMatch(published, /Execution surface:/);
 await assert.rejects(publishReport(canonical, { outputRoot: join(temp, 'raw'), documentPath }), /already exists/);
 assert.equal(await readFile(documentPath, 'utf8'), published);
+const webgpuTemp = await mkdtemp(join(tmpdir(), 'mmdpack-webgpu-test-'));
+const webgpuDocumentPath = join(webgpuTemp, 'decision.md');
+await publishReport(canonicalWebGPU, { outputRoot: join(webgpuTemp, 'raw'), documentPath: webgpuDocumentPath, variant: 'webgpu' });
+const webgpuPublished = await readFile(webgpuDocumentPath, 'utf8');
+assert.match(webgpuPublished, /Chrome\/WebGPU/);
+assert.match(webgpuPublished, /Execution surface: external_chrome_extension \(server-authorized\)/);
+await assert.rejects(publishReport(canonicalWebGPU, { outputRoot: join(webgpuTemp, 'raw'), documentPath: webgpuDocumentPath, variant: 'webgpu' }), /already exists/);
+assert.equal(await readFile(webgpuDocumentPath, 'utf8'), webgpuPublished);
 
-for (const path of ['bench/package-browser/lib.mjs', 'bench/package-browser/server.mjs', 'bench/package-browser/self-test.mjs', 'bench/package-browser/web/probe.js']) {
+for (const path of ['bench/package-browser/lib.mjs', 'bench/package-browser/server.mjs', 'bench/package-browser/self-test.mjs', 'bench/package-browser/web/probe.js', 'bench/package-browser/web/probe-webgpu.js']) {
   await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--check', path]);
     child.on('exit', code => code ? reject(Error(`${path}: syntax exit ${code}`)) : resolve());
@@ -94,10 +127,17 @@ try {
   assert.match(html, /id="status"/);
   assert.match(html, /type="importmap"/);
   assert.match(html, /type="module"/);
+  const webgpuHtml = await (await fetch(`${url}webgpu`)).text();
+  assert.match(webgpuHtml, /Chrome WebGPU/);
+  assert.match(webgpuHtml, /three\.webgpu\.js/);
+  assert.match(webgpuHtml, /probe-webgpu\.js/);
   assert.equal((await fetch(`${url}three/.git/config`)).status, 404);
+  assert.equal((await fetch(`${url}three/build/three.webgpu.js`)).status, 200);
   assert.equal((await fetch(`${url}api/config`)).status, 200);
   const invalid = await fetch(`${url}api/report`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"schema":1}' });
   assert.equal(invalid.status, 400);
+  const invalidWebGPU = await fetch(`${url}api/webgpu/report`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"schema":1}' });
+  assert.equal(invalidWebGPU.status, 403);
   let slowRequest;
   const slowStatus = new Promise((resolve, reject) => {
     slowRequest = httpRequest(`${url}api/report`, { method: 'POST', headers: { 'content-type': 'application/json' } }, response => {

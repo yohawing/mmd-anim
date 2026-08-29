@@ -7,6 +7,7 @@ const SLUG = /^(?!\.{1,2}$)[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const STAGES = ['fetch_ms', 'metadata_decode_ms', 'decrypt_ms', 'transcode_ms', 'upload_render_finish_ms', 'entry_gpu_complete_ms'];
 const UNAVAILABLE = ['true_peak_js_heap', 'basis_wasm_linear_memory', 'physical_copy_count', 'gpu_resident_memory', 'compositor_presentation_latency'];
 const CLEAR_PIXELS_SHA256 = '2a717e567f5f6bde3a3e7959a7b114873c0e12c2cf9c6829c2e05a5823d7efca';
+const THREE_RGBA_FORMAT = 1023;
 
 function fail(message) { throw new Error(message); }
 function object(value, label) { if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`${label} must be an object`); return value; }
@@ -61,21 +62,41 @@ function validateLane(value, expectedHash, expected, encrypted, label) {
   if (value.observed_bytes.measured_input_total !== value.input_bytes * 5 || value.observed_bytes.measured_output_total !== expected.bytes * 5) fail(`${label}.observed_bytes mismatch`);
 }
 
-export function validateReport(report, context) {
+function validateVariantReport(report, context, variant) {
   exactKeys(report, ['schema', 'run_id', 'browser_run_id', 'provenance', 'environment', 'setup', 'cases'], 'report');
   if (report.schema !== 1 || report.run_id !== context.runId || !SLUG.test(report.browser_run_id)) fail('report identity invalid');
   exactKeys(report.provenance, ['control_sha256', 'revision', 'latest_sha256', 'inputs_digest', 'three_digest', 'harness_digest'], 'provenance');
   if (JSON.stringify(report.provenance) !== JSON.stringify(context.provenance)) fail('provenance mismatch');
-  const envKeys = ['ua', 'cross_origin_isolated', 'secure_context', 'webgl2', 'vendor', 'renderer', 'gpu_classification', 'performance_blocked', 'extensions', 'directional_memory', 'unavailable_metrics'];
+  const envKeys = variant === 'webgpu'
+    ? ['ua', 'execution_surface', 'cross_origin_isolated', 'secure_context', 'webgpu', 'adapter_info', 'adapter_features', 'device_features', 'limits', 'gpu_classification', 'performance_blocked', 'directional_memory', 'unavailable_metrics']
+    : ['ua', 'cross_origin_isolated', 'secure_context', 'webgl2', 'vendor', 'renderer', 'gpu_classification', 'performance_blocked', 'extensions', 'directional_memory', 'unavailable_metrics'];
   exactKeys(report.environment, envKeys, 'environment');
   boundedText(report.environment.ua, 'environment.ua');
-  if (!/Chrome\/\d+/.test(report.environment.ua) || report.environment.cross_origin_isolated !== true || report.environment.secure_context !== true || report.environment.webgl2 !== true) fail('Chrome/WebGL2 environment invalid');
-  boundedText(report.environment.vendor, 'environment.vendor');
-  boundedText(report.environment.renderer, 'environment.renderer');
+  if (!/Chrome\/\d+/.test(report.environment.ua) || report.environment.cross_origin_isolated !== true || report.environment.secure_context !== true) fail(`Chrome/${variant} environment invalid`);
+  if (variant === 'webgpu') {
+    if (report.environment.execution_surface !== context.executionSurface || report.environment.execution_surface !== 'external_chrome_extension') fail('WebGPU execution surface is not authoritative external Chrome');
+    exactKeys(report.environment.adapter_info, ['vendor', 'architecture', 'device', 'description', 'is_fallback_adapter'], 'environment.adapter_info');
+    for (const key of ['vendor', 'architecture', 'device', 'description']) boundedText(report.environment.adapter_info[key], `environment.adapter_info.${key}`);
+    if (typeof report.environment.adapter_info.is_fallback_adapter !== 'boolean') fail('environment.adapter_info.is_fallback_adapter invalid');
+    if (report.environment.webgpu !== true || !Array.isArray(report.environment.adapter_features) || !Array.isArray(report.environment.device_features)) fail('Chrome/WebGPU environment invalid');
+    if (report.environment.adapter_features.length > 128 || report.environment.device_features.length > 128) fail('WebGPU features invalid');
+    for (const [index, feature] of report.environment.adapter_features.entries()) boundedText(feature, `environment.adapter_features[${index}]`, 128);
+    for (const [index, feature] of report.environment.device_features.entries()) boundedText(feature, `environment.device_features[${index}]`, 128);
+    const compressionFeatures = ['texture-compression-bc', 'texture-compression-astc', 'texture-compression-etc2'];
+    if (!compressionFeatures.some(feature => report.environment.device_features.includes(feature) && report.environment.adapter_features.includes(feature))) fail('WebGPU compression feature missing');
+    exactKeys(report.environment.limits, ['maxTextureDimension2D', 'maxTextureArrayLayers', 'maxBindGroups', 'maxBufferSize'], 'environment.limits');
+    for (const key of ['maxTextureDimension2D', 'maxTextureArrayLayers', 'maxBindGroups', 'maxBufferSize']) positiveInteger(report.environment.limits[key], `environment.limits.${key}`);
+  } else {
+    if (report.environment.webgl2 !== true) fail('Chrome/WebGL2 environment invalid');
+    boundedText(report.environment.vendor, 'environment.vendor');
+    boundedText(report.environment.renderer, 'environment.renderer');
+  }
   if (!['hardware', 'software', 'unknown'].includes(report.environment.gpu_classification)) fail('GPU classification invalid');
   if (report.environment.performance_blocked !== (report.environment.gpu_classification !== 'hardware')) fail('performance blocked classification mismatch');
-  if (!Array.isArray(report.environment.extensions) || report.environment.extensions.length > 256) fail('extensions invalid');
-  for (const [index, extension] of report.environment.extensions.entries()) boundedText(extension, `environment.extensions[${index}]`, 128);
+  if (variant !== 'webgpu') {
+    if (!Array.isArray(report.environment.extensions) || report.environment.extensions.length > 256) fail('extensions invalid');
+    for (const [index, extension] of report.environment.extensions.entries()) boundedText(extension, `environment.extensions[${index}]`, 128);
+  }
   if (JSON.stringify(report.environment.unavailable_metrics) !== JSON.stringify(UNAVAILABLE)) fail('unavailable metrics drift');
   if (report.environment.directional_memory !== 'unavailable') {
     exactKeys(report.environment.directional_memory, ['js_heap_size_limit', 'total_js_heap_size', 'used_js_heap_size', 'authority'], 'directional_memory');
@@ -99,6 +120,7 @@ export function validateReport(report, context) {
     if (Object.values(item.equality).some(value => value !== true)) fail(`${label} equality failed`);
     validateLane(item.baseline, expected.sha256, expected, false, `${label}.baseline`);
     validateLane(item.encrypted, expected.sha256, expected, true, `${label}.encrypted`);
+    if (variant === 'webgpu' && (item.baseline.format === THREE_RGBA_FORMAT || item.encrypted.format === THREE_RGBA_FORMAT)) fail(`${label} WebGPU texture used RGBA fallback`);
     validateSignedTiming(item.paired_overhead, `${label}.paired_overhead`);
     const paired = item.encrypted.timing.entry_gpu_complete_ms.samples_ms.map((value, sample) => value - item.baseline.timing.entry_gpu_complete_ms.samples_ms[sample]);
     const pairedSorted = [...paired].sort((a, b) => a - b);
@@ -108,6 +130,9 @@ export function validateReport(report, context) {
   if (seen.size !== context.cases.size) fail('case coverage mismatch');
   return JSON.parse(JSON.stringify(report));
 }
+
+export function validateReport(report, context) { return validateVariantReport(report, context, 'webgl2'); }
+export function validateWebGPUReport(report, context) { return validateVariantReport(report, context, 'webgpu'); }
 
 export function renderMarkdown(report) {
   const blocked = report.environment.performance_blocked;
@@ -138,7 +163,37 @@ export function renderMarkdown(report) {
   return lines.join('\n');
 }
 
-export async function publishReport(report, { outputRoot, documentPath }) {
+export function renderWebGPUMarkdown(report) {
+  const blocked = report.environment.performance_blocked;
+  const lines = [
+    '# MMDPACK browser WebGPU decision', '',
+    `- Status: fixed ten-case Chrome/WebGPU texture-entry functionality passed; performance is ${blocked ? `blocked because GPU classification is ${report.environment.gpu_classification}` : 'directional on the observed hardware GPU'}.`,
+    '- Scope: plaintext or AES-256-GCM encrypted Candidate B KTX2 entry through Web Crypto, the pinned official Three.js KTX2Loader, WebGPURenderer using the requested device, textured-quad draw into a 16x16 RenderTarget, `queue.onSubmittedWorkDone()`, and asynchronous RenderTarget readback. This is not full-MMD first render or compositor presentation evidence.',
+    `- Browser: ${report.environment.ua}`,
+    `- Execution surface: ${report.environment.execution_surface} (server-authorized).`,
+    `- Adapter: ${report.environment.adapter_info.vendor}; ${report.environment.adapter_info.architecture}; ${report.environment.adapter_info.device}; classification: ${report.environment.gpu_classification}.`,
+    `- Three.js revision label: ${report.provenance.revision}; control SHA-256: ${report.provenance.control_sha256}.`,
+    '- Key policy: Web Crypto `extractable: false`, decrypt-only. Raw key bytes were zeroed after import and were not serialized.',
+    '- Timing: one warmup and five measured repetitions per lane, with baseline/encrypted order alternated for every repetition. Paired overhead is encrypted minus plaintext within the same repetition; all p50/p95 values are directional.',
+    '- Memory/copy limit: the Chrome heap value is a directional snapshot, not a peak. True peak JS heap, Basis WASM live/capacity, physical copy count, GPU memory, and compositor presentation latency are unavailable.',
+    '- Not run: Firefox, Safari, macOS, WebGL2, `.mmdpack` Header/Manifest, PMX/VMD parse, and full-MMD rendering.', '',
+    `Run: ${report.browser_run_id} (local raw artifact is intentionally ignored).`, '',
+    '| Case | Baseline GPU-complete p50/p95 ms | Encrypted p50/p95 ms | Paired overhead p50/p95 ms | AES decrypt p50/p95 ms | Transcode p50/p95 ms |',
+    '| --- | ---: | ---: | ---: | ---: | ---: |',
+  ];
+  for (const item of report.cases) {
+    const base = item.baseline.timing.entry_gpu_complete_ms;
+    const enc = item.encrypted.timing.entry_gpu_complete_ms;
+    const overhead = item.paired_overhead;
+    const decrypt = item.encrypted.timing.decrypt_ms;
+    const transcode = item.encrypted.timing.transcode_ms;
+    lines.push(`| ${item.id} | ${base.p50_ms.toFixed(3)} / ${base.p95_ms.toFixed(3)} | ${enc.p50_ms.toFixed(3)} / ${enc.p95_ms.toFixed(3)} | ${overhead.p50_ms.toFixed(3)} / ${overhead.p95_ms.toFixed(3)} | ${decrypt.p50_ms.toFixed(3)} / ${decrypt.p95_ms.toFixed(3)} | ${transcode.p50_ms.toFixed(3)} / ${transcode.p95_ms.toFixed(3)} |`);
+  }
+  lines.push('', '- All cases passed wrong-key, wrong-AAD, one-byte tamper, and tag truncation rejection.', '- The official KTX2Loader does not promise public per-mip payload bytes for every selected GPU target. Where unavailable, mip SHA-256 is `null`; plaintext hash, non-empty mip metadata, texture format/type/color space, and non-clear RenderTarget readback are the bounded substitute.', '');
+  return lines.join('\n');
+}
+
+export async function publishReport(report, { outputRoot, documentPath, variant = 'webgl2' }) {
   if (!SLUG.test(report.browser_run_id)) fail('unsafe browser run id');
   const runsRoot = join(outputRoot, 'runs');
   const finalRun = join(runsRoot, report.browser_run_id);
@@ -151,7 +206,7 @@ export async function publishReport(report, { outputRoot, documentPath }) {
   await mkdir(runTemp, { recursive: false });
   try {
     await writeFile(join(runTemp, 'report.json'), `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx' });
-    await writeFile(docTemp, renderMarkdown(report), { flag: 'wx' });
+    await writeFile(docTemp, variant === 'webgpu' ? renderWebGPUMarkdown(report) : renderMarkdown(report), { flag: 'wx' });
     await rename(runTemp, finalRun);
     try {
       await rename(docTemp, documentPath);

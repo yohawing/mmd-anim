@@ -3,7 +3,7 @@ import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { publishReport, validateReport } from './lib.mjs';
+import { publishReport, validateReport, validateWebGPUReport } from './lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const harnessRoot = join(root, 'bench/package-browser');
@@ -12,6 +12,9 @@ const threeRoot = resolve(root, '..', 'references/three.js');
 const latestPath = join(root, '.ai/mmdpack/textures/latest.json');
 const outputRoot = join(root, '.ai/mmdpack/browser');
 const documentPath = join(root, 'docs/mmdpack-browser-webgl2-decision.md');
+const webgpuDocumentPath = join(root, 'docs/mmdpack-browser-webgpu-decision.md');
+const webgpuExecutionSurface = process.env.MMDPACK_BROWSER_AUTHORITY === 'external_chrome_extension'
+  ? 'external_chrome_extension' : 'diagnostic';
 const SLUG = /^(?!\.{1,2}$)[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const pins = {
   control: '21b6912cae1f074ae3eda1b751f43c36eafc7eb83f3af71f85bba2ccbafce125',
@@ -22,6 +25,7 @@ const pins = {
 const threeHashes = new Map([
   ['build/three.module.js', 'be571b5b87ebb742aa7a5317482c1ae568f28c8723c749860a583e5eaa702e25'],
   ['build/three.core.js', '28f286e4d242d45309f018544e471c6a912afd2015e9eb0d62ee1c4b723fb70e'],
+  ['build/three.webgpu.js', '6c0a95ed368d5b97638665a19612bcf60d898dd4b208f406d72e58dad8dad811'],
   ['examples/jsm/loaders/KTX2Loader.js', '109773ed42979b66bdbfc82a1f4eacd61747015957aee91e721b0505365a61dd'],
   ['examples/jsm/utils/WorkerPool.js', '989ce70b268e2848626f48a43b9934d4f764aa92cb2d64bc4f6ce8c602449f3b'],
   ['examples/jsm/libs/ktx-parse.module.js', '48756a80f10fb5c00dbfd56de9c8e213b5fc22cb5edb29f4ccd7aeaaaee05f5f'],
@@ -34,6 +38,7 @@ const threeHashes = new Map([
 const threeRoutes = new Map([
   ['/three/build/three.module.js', 'build/three.module.js'],
   ['/three/build/three.core.js', 'build/three.core.js'],
+  ['/three/build/three.webgpu.js', 'build/three.webgpu.js'],
   ['/three/examples/jsm/loaders/KTX2Loader.js', 'examples/jsm/loaders/KTX2Loader.js'],
   ['/three/examples/jsm/utils/WorkerPool.js', 'examples/jsm/utils/WorkerPool.js'],
   ['/three/examples/jsm/libs/ktx-parse.module.js', 'examples/jsm/libs/ktx-parse.module.js'],
@@ -43,7 +48,7 @@ const threeRoutes = new Map([
   ['/three/examples/jsm/libs/basis/basis_transcoder.wasm', 'examples/jsm/libs/basis/basis_transcoder.wasm'],
   ['/three/examples/textures/ktx2/2d_uastc.ktx2', 'examples/textures/ktx2/2d_uastc.ktx2'],
 ]);
-const harnessFiles = ['README.md', 'lib.mjs', 'self-test.mjs', 'server.mjs', 'web/index.html', 'web/probe.js'];
+const harnessFiles = ['README.md', 'lib.mjs', 'self-test.mjs', 'server.mjs', 'web/index.html', 'web/probe.js', 'web/index-webgpu.html', 'web/probe-webgpu.js'];
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 function digestNamed(items) {
@@ -169,12 +174,21 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(200, headers('text/html; charset=utf-8'));
       return response.end(await readFile(join(webRoot, 'index.html')));
     }
+    if (request.method === 'GET' && url.pathname === '/webgpu') {
+      response.writeHead(200, headers('text/html; charset=utf-8'));
+      return response.end(await readFile(join(webRoot, 'index-webgpu.html')));
+    }
     if (request.method === 'GET' && url.pathname === '/probe.js') {
       response.writeHead(200, headers('text/javascript; charset=utf-8'));
       return response.end(await readFile(join(webRoot, 'probe.js')));
     }
+    if (request.method === 'GET' && url.pathname === '/probe-webgpu.js') {
+      response.writeHead(200, headers('text/javascript; charset=utf-8'));
+      return response.end(await readFile(join(webRoot, 'probe-webgpu.js')));
+    }
     if (request.method === 'GET' && url.pathname === '/api/config') return sendJson(response, {
       run_id: state.latest.run_id,
+      execution_surface: webgpuExecutionSurface,
       cases: [...state.entries.values()].map(item => ({ id: item.id, expected_sha256: item.sha256, size: item.bytes })),
       provenance: state.provenance,
     });
@@ -193,7 +207,9 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(200, headers(mime(url.pathname)));
       return response.end(state.served.get(url.pathname));
     }
-    if (request.method === 'POST' && url.pathname === '/api/report') {
+    if (request.method === 'POST' && (url.pathname === '/api/report' || url.pathname === '/api/webgpu/report')) {
+      const variant = url.pathname === '/api/webgpu/report' ? 'webgpu' : 'webgl2';
+      if (variant === 'webgpu' && webgpuExecutionSurface !== 'external_chrome_extension') return sendJson(response, { error: 'WebGPU publication requires external Chrome authority' }, 403);
       if (publishing) return sendJson(response, { error: 'publication already in progress' }, 409);
       publishing = true;
       try {
@@ -201,14 +217,20 @@ const server = http.createServer(async (request, response) => {
         if (candidate === null) return;
         let canonical;
         try {
-          canonical = validateReport(candidate, { runId: state.latest.run_id, provenance: state.provenance, cases: state.caseMap });
+          canonical = variant === 'webgpu'
+            ? validateWebGPUReport(candidate, { runId: state.latest.run_id, provenance: state.provenance, cases: state.caseMap, executionSurface: webgpuExecutionSurface })
+            : validateReport(candidate, { runId: state.latest.run_id, provenance: state.provenance, cases: state.caseMap });
           assertNoSecrets(canonical, state);
         } catch (error) {
           return sendJson(response, { error: error.message }, 400);
         }
         const current = await loadSources();
         if (JSON.stringify(current.provenance) !== JSON.stringify(state.provenance)) throw Error('source/tool/harness drift before publication');
-        await publishReport(canonical, { outputRoot, documentPath });
+        await publishReport(canonical, {
+          outputRoot: variant === 'webgpu' ? join(outputRoot, 'webgpu') : outputRoot,
+          documentPath: variant === 'webgpu' ? webgpuDocumentPath : documentPath,
+          variant,
+        });
         return sendJson(response, { ok: true });
       } finally {
         publishing = false;

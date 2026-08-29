@@ -3,7 +3,7 @@ import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { publishReport, validateFirefoxWebGL2Report, validateReport, validateWebGPUReport, validateZenWebGL2Report } from './lib.mjs';
+import { publishReport, validateFirefoxWebGL2Report, validateFirefoxWebGPUReport, validateReport, validateWebGPUReport, validateZenWebGL2Report } from './lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const harnessRoot = join(root, 'bench/package-browser');
@@ -15,6 +15,7 @@ const documentPath = join(root, 'docs/mmdpack-browser-webgl2-decision.md');
 const webgpuDocumentPath = join(root, 'docs/mmdpack-browser-webgpu-decision.md');
 const zenDocumentPath = join(root, 'docs/mmdpack-browser-zen-webgl2-diagnostic.md');
 const firefoxDocumentPath = join(root, 'docs/mmdpack-browser-firefox-webgl2-decision.md');
+const firefoxWebgpuDocumentPath = join(root, 'docs/mmdpack-browser-firefox-webgpu-decision.md');
 const webgpuExecutionSurface = process.env.MMDPACK_BROWSER_AUTHORITY === 'external_chrome_extension'
   ? 'external_chrome_extension' : 'diagnostic';
 const zenExecutionSurface = process.env.MMDPACK_BROWSER_AUTHORITY === 'zen_browser'
@@ -54,7 +55,7 @@ const threeRoutes = new Map([
   ['/three/examples/jsm/libs/basis/basis_transcoder.wasm', 'examples/jsm/libs/basis/basis_transcoder.wasm'],
   ['/three/examples/textures/ktx2/2d_uastc.ktx2', 'examples/textures/ktx2/2d_uastc.ktx2'],
 ]);
-const harnessFiles = ['README.md', 'lib.mjs', 'self-test.mjs', 'server.mjs', 'web/index.html', 'web/index-firefox.html', 'web/index-zen.html', 'web/probe.js', 'web/index-webgpu.html', 'web/probe-webgpu.js'];
+const harnessFiles = ['README.md', 'lib.mjs', 'self-test.mjs', 'server.mjs', 'web/index.html', 'web/index-firefox.html', 'web/index-firefox-webgpu.html', 'web/index-zen.html', 'web/probe.js', 'web/index-webgpu.html', 'web/probe-webgpu.js'];
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 function digestNamed(items) {
@@ -192,6 +193,10 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(200, headers('text/html; charset=utf-8'));
       return response.end(await readFile(join(webRoot, 'index-firefox.html')));
     }
+    if (request.method === 'GET' && url.pathname === '/firefox-webgpu') {
+      response.writeHead(200, headers('text/html; charset=utf-8'));
+      return response.end(await readFile(join(webRoot, 'index-firefox-webgpu.html')));
+    }
     if (request.method === 'GET' && url.pathname === '/probe.js') {
       response.writeHead(200, headers('text/javascript; charset=utf-8'));
       return response.end(await readFile(join(webRoot, 'probe.js')));
@@ -223,13 +228,15 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(200, headers(mime(url.pathname)));
       return response.end(state.served.get(url.pathname));
     }
-    if (request.method === 'POST' && (url.pathname === '/api/report' || url.pathname === '/api/webgpu/report' || url.pathname === '/api/zen/webgl2/report' || url.pathname === '/api/firefox/webgl2/report')) {
+    if (request.method === 'POST' && (url.pathname === '/api/report' || url.pathname === '/api/webgpu/report' || url.pathname === '/api/zen/webgl2/report' || url.pathname === '/api/firefox/webgl2/report' || url.pathname === '/api/firefox/webgpu/report')) {
       const variant = url.pathname === '/api/webgpu/report' ? 'webgpu'
         : url.pathname === '/api/zen/webgl2/report' ? 'zen-webgl2'
-          : url.pathname === '/api/firefox/webgl2/report' ? 'firefox-webgl2' : 'webgl2';
+          : url.pathname === '/api/firefox/webgl2/report' ? 'firefox-webgl2'
+            : url.pathname === '/api/firefox/webgpu/report' ? 'firefox-webgpu' : 'webgl2';
       if (variant === 'webgpu' && webgpuExecutionSurface !== 'external_chrome_extension') return sendJson(response, { error: 'WebGPU publication requires external Chrome authority' }, 403);
       if (variant === 'zen-webgl2' && zenExecutionSurface !== 'zen_browser') return sendJson(response, { error: 'Zen publication requires explicit Zen diagnostic authority' }, 403);
       if (variant === 'firefox-webgl2' && firefoxExecutionSurface !== 'official_firefox') return sendJson(response, { error: 'Firefox publication requires explicit official Firefox authority' }, 403);
+      if (variant === 'firefox-webgpu' && firefoxExecutionSurface !== 'official_firefox') return sendJson(response, { error: 'Firefox WebGPU publication requires explicit official Firefox authority' }, 403);
       if (publishing) return sendJson(response, { error: 'publication already in progress' }, 409);
       publishing = true;
       try {
@@ -243,6 +250,8 @@ const server = http.createServer(async (request, response) => {
               ? validateZenWebGL2Report(candidate, { runId: state.latest.run_id, provenance: state.provenance, cases: state.caseMap, executionSurface: zenExecutionSurface })
               : variant === 'firefox-webgl2'
                 ? validateFirefoxWebGL2Report(candidate, { runId: state.latest.run_id, provenance: state.provenance, cases: state.caseMap, executionSurface: firefoxExecutionSurface })
+                : variant === 'firefox-webgpu'
+                  ? validateFirefoxWebGPUReport(candidate, { runId: state.latest.run_id, provenance: state.provenance, cases: state.caseMap, executionSurface: firefoxExecutionSurface })
               : validateReport(candidate, { runId: state.latest.run_id, provenance: state.provenance, cases: state.caseMap });
           assertNoSecrets(canonical, state);
         } catch (error) {
@@ -251,8 +260,8 @@ const server = http.createServer(async (request, response) => {
         const current = await loadSources();
         if (JSON.stringify(current.provenance) !== JSON.stringify(state.provenance)) throw Error('source/tool/harness drift before publication');
         await publishReport(canonical, {
-          outputRoot: variant === 'webgpu' ? join(outputRoot, 'webgpu') : variant === 'zen-webgl2' ? join(outputRoot, 'zen-webgl2') : variant === 'firefox-webgl2' ? join(outputRoot, 'firefox-webgl2') : outputRoot,
-          documentPath: variant === 'webgpu' ? webgpuDocumentPath : variant === 'zen-webgl2' ? zenDocumentPath : variant === 'firefox-webgl2' ? firefoxDocumentPath : documentPath,
+          outputRoot: variant === 'webgpu' ? join(outputRoot, 'webgpu') : variant === 'zen-webgl2' ? join(outputRoot, 'zen-webgl2') : variant === 'firefox-webgl2' ? join(outputRoot, 'firefox-webgl2') : variant === 'firefox-webgpu' ? join(outputRoot, 'firefox-webgpu') : outputRoot,
+          documentPath: variant === 'webgpu' ? webgpuDocumentPath : variant === 'zen-webgl2' ? zenDocumentPath : variant === 'firefox-webgl2' ? firefoxDocumentPath : variant === 'firefox-webgpu' ? firefoxWebgpuDocumentPath : documentPath,
           variant,
         });
         return sendJson(response, { ok: true });

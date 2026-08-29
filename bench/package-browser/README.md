@@ -41,6 +41,8 @@ $env:MMDPACK_BROWSER_AUTHORITY = 'official_firefox'
 node bench/package-browser/server.mjs
 ```
 
+同じauthorityの `/firefox-webgpu` は公式Firefox WebGPU専用です。実adapter/device、GPU圧縮feature、WebGPU backendとrequested deviceの同一性を検証し、WebGL fallbackは許可しません。
+
 入力は `.ai/mmdpack/textures/latest.json` とそこから参照される固定10件です。サーバーはloopback専用で、明示的に許可したno-store routeだけを公開します。
 
 各レーンはwarmup 1回、計測5回です。順序効果を抑えるため平文先行と暗号化先行を交互にし、レーン別p50/p95に加えて同一反復内の暗号化Entryマイナス平文Entryも記録します。AES復号、KTX2変換、upload/render/backend別GPU完了は別stageです。検証用plaintext copy、SHA-256、readback hashは計測区間から除外し、全反復の内容同値を確認してからtimingを採用します。
@@ -53,10 +55,12 @@ WebGPUの計測区間はrender targetへの描画後、同じdeviceの`queue.onS
 - WebGPU判断文書: `docs/mmdpack-browser-webgpu-decision.md`（ローカルignored）
 - Zen診断文書: `docs/mmdpack-browser-zen-webgl2-diagnostic.md`（ローカルignored）
 - Firefox判断文書: `docs/mmdpack-browser-firefox-webgl2-decision.md`（ローカルignored）
+- Firefox WebGPU判断文書: `docs/mmdpack-browser-firefox-webgpu-decision.md`（ローカルignored）
 - raw result: `.ai/mmdpack/browser/runs/<browser-run-id>/report.json`（WebGL2、ローカルignored）
 - WebGPU raw result: `.ai/mmdpack/browser/webgpu/runs/<browser-run-id>/report.json`（ローカルignored）
 - Zen raw result: `.ai/mmdpack/browser/zen-webgl2/runs/<browser-run-id>/report.json`（ローカルignored）
 - Firefox raw result: `.ai/mmdpack/browser/firefox-webgl2/runs/<browser-run-id>/report.json`（ローカルignored）
+- Firefox WebGPU raw result: `.ai/mmdpack/browser/firefox-webgpu/runs/<browser-run-id>/report.json`（ローカルignored）
 
 鍵はWeb Cryptoへ `extractable: false` / decrypt-onlyでimportし、raw bytesは直後にbest-effortでゼロ化します。鍵、nonce、AAD、ciphertextは成果物へ保存しません。
 

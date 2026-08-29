@@ -284,7 +284,8 @@ async function measureCase(loader, descriptor, caseIndex, key, renderer, device)
   return { baseline, encrypted, paired_overhead: summarizeSigned(pairedOverhead), equality };
 }
 
-document.querySelector('#run').onclick = async () => {
+const runButton = document.querySelector('#run');
+runButton.onclick = async () => {
   let renderer;
   let loader;
   let device;
@@ -292,6 +293,7 @@ document.querySelector('#run').onclick = async () => {
     statusNode.textContent = 'Loading WebGPU configuration…';
     if (!crossOriginIsolated || !isSecureContext) throw Error('secure isolated context required');
     const config = await (await fetch('/api/config', { cache: 'no-store' })).json();
+    const officialFirefox = config.firefox_execution_surface === 'official_firefox';
     const keyResponse = await (await fetch('/api/key', { cache: 'no-store' })).json();
     let rawKey = decodeBase64(keyResponse.key);
     const keyImportStart = performance.now();
@@ -342,9 +344,9 @@ document.querySelector('#run').onclick = async () => {
       authority: 'directional_snapshot_not_peak',
     } : 'unavailable';
     const report = {
-      schema: 1, run_id: config.run_id, browser_run_id: `chrome-webgpu-${Date.now()}`, provenance: config.provenance,
+      schema: 1, run_id: config.run_id, browser_run_id: `${officialFirefox ? 'firefox-webgpu' : 'chrome-webgpu'}-${Date.now()}`, provenance: config.provenance,
       environment: {
-        ua: navigator.userAgent, execution_surface: config.execution_surface,
+        ua: navigator.userAgent, execution_surface: officialFirefox ? 'official_firefox' : config.execution_surface,
         cross_origin_isolated: crossOriginIsolated, secure_context: isSecureContext, webgpu: true,
         adapter_info: adapterInfoValue, adapter_features: featureList(adapter.features), device_features: featureList(device.features),
         limits: deviceLimits(device), gpu_classification: gpuClassification,
@@ -353,7 +355,8 @@ document.querySelector('#run').onclick = async () => {
       },
       setup: { key_import_ms: keyImportMs, control_warmup_ms: controlWarmupMs }, cases,
     };
-    const response = await fetch('/api/webgpu/report', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(report) });
+    const reportUrl = officialFirefox ? '/api/firefox/webgpu/report' : '/api/webgpu/report';
+    const response = await fetch(reportUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(report) });
     if (!response.ok) throw Error(await response.text());
     statusNode.textContent = `Published ${report.browser_run_id}: ${cases.length} cases`;
   } catch (error) {
@@ -364,3 +367,5 @@ document.querySelector('#run').onclick = async () => {
     if (device) device.destroy();
   }
 };
+
+if (new URLSearchParams(location.search).get('autorun') === '1') queueMicrotask(() => runButton.click());

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { publishReport, validateFirefoxWebGL2Report, validateReport, validateWebGPUReport, validateZenWebGL2Report, validationConstants } from './lib.mjs';
+import { publishReport, validateFirefoxWebGL2Report, validateFirefoxWebGPUReport, validateReport, validateWebGPUReport, validateZenWebGL2Report, validationConstants } from './lib.mjs';
 
 const hex = character => character.repeat(64);
 const timing = () => ({ samples_ms: [1, 2, 3, 4, 5], p50_ms: 3, p95_ms: 5 });
@@ -69,6 +69,12 @@ function firefoxReport(run = 'firefox-webgl2-test') {
   value.environment.execution_surface = 'official_firefox';
   return value;
 }
+function firefoxWebgpuReport(run = 'firefox-webgpu-test') {
+  const value = webgpuReport(run);
+  value.environment.ua = 'Mozilla/5.0 Firefox/154.0';
+  value.environment.execution_surface = 'official_firefox';
+  return value;
+}
 const context = { runId: 'source-run', provenance, cases: expectedCases };
 const canonical = validateReport(report(), context);
 const webgpuContext = { ...context, executionSurface: 'external_chrome_extension' };
@@ -77,6 +83,7 @@ const zenContext = { ...context, executionSurface: 'zen_browser' };
 const canonicalZen = validateZenWebGL2Report(zenReport(), zenContext);
 const firefoxContext = { ...context, executionSurface: 'official_firefox' };
 const canonicalFirefox = validateFirefoxWebGL2Report(firefoxReport(), firefoxContext);
+const canonicalFirefoxWebGPU = validateFirefoxWebGPUReport(firefoxWebgpuReport(), firefoxContext);
 const secret = report();
 secret.secret_key = 'must-not-publish';
 assert.throws(() => validateReport(secret, context), /canonical/);
@@ -109,6 +116,12 @@ assert.throws(() => validateZenWebGL2Report(zenWrongSurface, zenContext), /execu
 const firefoxWrongSurface = firefoxReport();
 firefoxWrongSurface.environment.execution_surface = 'zen_browser';
 assert.throws(() => validateFirefoxWebGL2Report(firefoxWrongSurface, firefoxContext), /execution surface invalid/);
+const firefoxWebgpuWrongSurface = firefoxWebgpuReport();
+firefoxWebgpuWrongSurface.environment.execution_surface = 'external_chrome_extension';
+assert.throws(() => validateFirefoxWebGPUReport(firefoxWebgpuWrongSurface, firefoxContext), /execution surface invalid/);
+const firefoxWebgpuWrongUa = firefoxWebgpuReport();
+firefoxWebgpuWrongUa.environment.ua = 'Mozilla/5.0 Chrome/152.0.0.0';
+assert.throws(() => validateFirefoxWebGPUReport(firefoxWebgpuWrongUa, firefoxContext), /environment invalid/);
 
 const temp = await mkdtemp(join(tmpdir(), 'mmdpack-browser-test-'));
 const documentPath = join(temp, 'decision.md');
@@ -140,6 +153,12 @@ await publishReport(canonicalFirefox, { outputRoot: join(firefoxTemp, 'raw'), do
 const firefoxPublished = await readFile(firefoxDocumentPath, 'utf8');
 assert.match(firefoxPublished, /official Firefox\/WebGL2/);
 assert.match(firefoxPublished, /Execution surface: official_firefox/);
+const firefoxWebgpuTemp = await mkdtemp(join(tmpdir(), 'mmdpack-firefox-webgpu-test-'));
+const firefoxWebgpuDocumentPath = join(firefoxWebgpuTemp, 'decision.md');
+await publishReport(canonicalFirefoxWebGPU, { outputRoot: join(firefoxWebgpuTemp, 'raw'), documentPath: firefoxWebgpuDocumentPath, variant: 'firefox-webgpu' });
+const firefoxWebgpuPublished = await readFile(firefoxWebgpuDocumentPath, 'utf8');
+assert.match(firefoxWebgpuPublished, /official Firefox\/WebGPU/);
+assert.match(firefoxWebgpuPublished, /Execution surface: official_firefox/);
 
 for (const path of ['bench/package-browser/lib.mjs', 'bench/package-browser/server.mjs', 'bench/package-browser/self-test.mjs', 'bench/package-browser/web/probe.js', 'bench/package-browser/web/probe-webgpu.js']) {
   await new Promise((resolve, reject) => {
@@ -176,6 +195,9 @@ try {
   const firefoxHtml = await (await fetch(`${url}firefox`)).text();
   assert.match(firefoxHtml, /official Firefox WebGL2 probe/);
   assert.match(firefoxHtml, /probe\.js/);
+  const firefoxWebgpuHtml = await (await fetch(`${url}firefox-webgpu`)).text();
+  assert.match(firefoxWebgpuHtml, /official Firefox WebGPU probe/);
+  assert.match(firefoxWebgpuHtml, /probe-webgpu\.js/);
   assert.equal((await fetch(`${url}three/.git/config`)).status, 404);
   assert.equal((await fetch(`${url}three/build/three.webgpu.js`)).status, 200);
   assert.equal((await fetch(`${url}api/config`)).status, 200);
@@ -187,6 +209,8 @@ try {
   assert.equal(invalidZen.status, 403);
   const invalidFirefox = await fetch(`${url}api/firefox/webgl2/report`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"schema":1}' });
   assert.equal(invalidFirefox.status, 403);
+  const invalidFirefoxWebGPU = await fetch(`${url}api/firefox/webgpu/report`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"schema":1}' });
+  assert.equal(invalidFirefoxWebGPU.status, 403);
   let slowRequest;
   const slowStatus = new Promise((resolve, reject) => {
     slowRequest = httpRequest(`${url}api/report`, { method: 'POST', headers: { 'content-type': 'application/json' } }, response => {

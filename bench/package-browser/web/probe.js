@@ -202,13 +202,15 @@ async function measureCase(loader, descriptor, caseIndex, key, renderer, gl) {
   return { baseline, encrypted, paired_overhead: summarizeSigned(pairedOverhead), equality };
 }
 
-document.querySelector('#run').onclick = async () => {
+const runButton = document.querySelector('#run');
+runButton.onclick = async () => {
   let renderer;
   let loader;
   try {
     statusNode.textContent = 'Loading configuration…';
     if (!crossOriginIsolated || !isSecureContext) throw Error('secure isolated context required');
     const config = await (await fetch('/api/config', { cache: 'no-store' })).json();
+    const zenDiagnostic = config.webgl2_execution_surface === 'zen_browser';
     const keyResponse = await (await fetch('/api/key', { cache: 'no-store' })).json();
     let rawKey = decodeBase64(keyResponse.key);
     const keyImportStart = performance.now();
@@ -259,8 +261,9 @@ document.querySelector('#run').onclick = async () => {
       authority: 'directional_snapshot_not_peak',
     } : 'unavailable';
     const report = {
-      schema: 1, run_id: config.run_id, browser_run_id: `chrome-${Date.now()}`, provenance: config.provenance,
+      schema: 1, run_id: config.run_id, browser_run_id: `${zenDiagnostic ? 'zen-webgl2' : 'chrome'}-${Date.now()}`, provenance: config.provenance,
       environment: {
+        ...(zenDiagnostic ? { execution_surface: 'zen_browser' } : {}),
         ua: navigator.userAgent, cross_origin_isolated: crossOriginIsolated, secure_context: isSecureContext, webgl2: true,
         vendor, renderer: gpuRenderer, gpu_classification: gpuClassification,
         performance_blocked: gpuClassification !== 'hardware', extensions: gl.getSupportedExtensions().sort(), directional_memory: memory,
@@ -268,7 +271,8 @@ document.querySelector('#run').onclick = async () => {
       },
       setup: { key_import_ms: keyImportMs, control_warmup_ms: controlWarmupMs }, cases,
     };
-    const response = await fetch('/api/report', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(report) });
+    const reportUrl = zenDiagnostic ? '/api/zen/webgl2/report' : '/api/report';
+    const response = await fetch(reportUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(report) });
     if (!response.ok) throw Error(await response.text());
     statusNode.textContent = `Published ${report.browser_run_id}: ${cases.length} cases`;
   } catch (error) {
@@ -278,3 +282,5 @@ document.querySelector('#run').onclick = async () => {
     renderer?.dispose();
   }
 };
+
+if (new URLSearchParams(location.search).get('autorun') === '1') queueMicrotask(() => runButton.click());

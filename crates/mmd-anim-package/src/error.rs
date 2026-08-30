@@ -33,6 +33,16 @@ pub enum MmdPackageError {
     EntryNotFound(u32),
     #[error("entry path {0:?} was not found")]
     PathNotFound(String),
+    #[error("model entry {0} has no modelBindings record")]
+    ModelBindingNotFound(u32),
+    #[error(
+        "texture binding index {texture_index} for model entry {model_entry_id} is outside the PMX texture table of {texture_table_len} entries"
+    )]
+    TextureIndexOutOfRange {
+        model_entry_id: u32,
+        texture_index: u32,
+        texture_table_len: usize,
+    },
     #[error("codec {0:?} is not supported by this reader")]
     UnsupportedCodec(String),
     #[error("invalid zstd-v1 payload: {0}")]

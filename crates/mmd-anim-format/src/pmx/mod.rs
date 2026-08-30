@@ -876,15 +876,30 @@ pub fn read_bones(
     Ok((legacy_bone_import(&bone_read), pos))
 }
 
-pub fn import_pmx_model(data: &[u8]) -> Result<PmxBoneImport, ImportError> {
+fn read_texture_section_start(data: &[u8]) -> Result<(PmxHeader, usize), ImportError> {
     let (header, pos) = read_header(data)?;
     let pos = skip_model_info(data, &header, pos)?;
     let pos = skip_vertices(data, &header, pos)?;
     let pos = skip_faces(data, header.vertex_index_size, pos)?;
+    Ok((header, pos))
+}
+
+pub fn import_pmx_model(data: &[u8]) -> Result<PmxBoneImport, ImportError> {
+    let (header, pos) = read_texture_section_start(data)?;
     let pos = skip_textures(data, header.encoding, pos)?;
     let pos = skip_materials(data, &header, pos)?;
     let (bones, _pos) = read_bones(data, &header, pos)?;
     Ok(bones)
+}
+
+/// Reads the PMX texture table without parsing the remainder of the model.
+///
+/// This deliberately stops after the texture paths. Callers that need
+/// materials or later sections should use the complete model parser instead.
+pub fn parse_pmx_texture_table(data: &[u8]) -> Result<Vec<String>, ImportError> {
+    let (header, pos) = read_texture_section_start(data)?;
+    let mut reader = Reader { data, pos };
+    read_parsed_textures(&mut reader, header.encoding)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4772,10 +4787,7 @@ pub struct PmxRuntimeImport {
 }
 
 pub fn import_pmx_runtime(data: &[u8]) -> Result<PmxRuntimeImport, ImportError> {
-    let (header, pos) = read_header(data)?;
-    let pos = skip_model_info(data, &header, pos)?;
-    let pos = skip_vertices(data, &header, pos)?;
-    let pos = skip_faces(data, header.vertex_index_size, pos)?;
+    let (header, pos) = read_texture_section_start(data)?;
     let pos = skip_textures(data, header.encoding, pos)?;
     let pos = skip_materials(data, &header, pos)?;
     let (bone_read, pos) = read_bones_with_local_axes(data, &header, pos)?;
@@ -5573,6 +5585,56 @@ mod tests {
         assert_eq!(header.bone_index_size, 4);
         assert_eq!(header.vertex_index_size, 4);
         assert!(pos > 0);
+    }
+
+    #[test]
+    fn parses_pmx_texture_table_without_reading_later_sections() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&2i32.to_le_bytes());
+        for texture in ["diffuse.png", "toon.spa"] {
+            let bytes = texture.as_bytes();
+            buf.extend_from_slice(&(bytes.len() as i32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        }
+
+        assert_eq!(
+            parse_pmx_texture_table(&buf).unwrap(),
+            vec!["diffuse.png", "toon.spa"]
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_pmx_texture_table() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&1i32.to_le_bytes());
+
+        assert!(matches!(
+            parse_pmx_texture_table(&buf),
+            Err(ImportError::UnexpectedEof(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_negative_pmx_texture_count() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&(-1i32).to_le_bytes());
+
+        assert_eq!(
+            parse_pmx_texture_table(&buf).unwrap_err(),
+            ImportError::SectionOverflow
+        );
     }
 
     #[test]

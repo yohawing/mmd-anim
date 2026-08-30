@@ -177,6 +177,7 @@ pub struct MmdPackage {
     key: Zeroizing<[u8; 32]>,
     header: MmdPackageHeader,
     manifest: MmdPackageManifest,
+    model_bindings: Vec<MmdModelBinding>,
     payload_base: usize,
     entries_by_id: HashMap<u32, usize>,
     entries_by_path: HashMap<String, usize>,
@@ -235,7 +236,7 @@ impl MmdPackage {
         validate_json_budgets(&manifest_value)?;
         let manifest = parse_manifest(&manifest_value, &limits)?;
         validate_layout(&manifest.entries, bytes.len(), manifest_end, &limits)?;
-        validate_defaults(&manifest_value, &manifest)?;
+        let model_bindings = validate_defaults(&manifest_value, &manifest)?;
         validate_entry_metadata(&manifest_value, &manifest)?;
 
         let entries_by_id = strict_json::index_by_id(&manifest.entries, |entry| entry.id);
@@ -251,6 +252,7 @@ impl MmdPackage {
             key: Zeroizing::new(key),
             header,
             manifest,
+            model_bindings,
             payload_base: manifest_end,
             entries_by_id,
             entries_by_path,
@@ -263,6 +265,37 @@ impl MmdPackage {
 
     pub fn manifest(&self) -> &MmdPackageManifest {
         &self.manifest
+    }
+
+    /// Checks the stored texture bindings against a PMX texture-table count.
+    ///
+    /// PMX texture indices are zero-based. This method only checks indices
+    /// that are explicitly bound; unbound PMX texture slots are permitted.
+    /// Built-in toon slots are not part of the PMX texture table and therefore
+    /// are intentionally not considered here.
+    pub fn validate_texture_bindings_against_table(
+        &self,
+        model_entry_id: u32,
+        texture_table_len: usize,
+    ) -> Result<()> {
+        let binding = self
+            .model_bindings
+            .iter()
+            .find(|binding| binding.model_entry_id == model_entry_id)
+            .ok_or(MmdPackageError::ModelBindingNotFound(model_entry_id))?;
+        for texture in &binding.texture_bindings {
+            let in_range = usize::try_from(texture.texture_index)
+                .map(|index| index < texture_table_len)
+                .unwrap_or(false);
+            if !in_range {
+                return Err(MmdPackageError::TextureIndexOutOfRange {
+                    model_entry_id,
+                    texture_index: texture.texture_index,
+                    texture_table_len,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Authenticates and decodes one entry by its stable ID.
@@ -908,7 +941,7 @@ fn validate_layout(
     Ok(())
 }
 
-fn validate_defaults(root: &Value, manifest: &MmdPackageManifest) -> Result<()> {
+fn validate_defaults(root: &Value, manifest: &MmdPackageManifest) -> Result<Vec<MmdModelBinding>> {
     let default_model = manifest
         .entries
         .iter()
@@ -954,6 +987,7 @@ fn validate_defaults(root: &Value, manifest: &MmdPackageManifest) -> Result<()> 
         .as_array()
         .ok_or_else(|| MmdPackageError::InvalidManifest("modelBindings must be an array".into()))?;
     let mut bound_models = HashSet::with_capacity(bindings.len());
+    let mut model_bindings = Vec::with_capacity(bindings.len());
     let mut matching = 0;
     for binding in bindings {
         let binding = binding.as_object().ok_or_else(|| {
@@ -978,12 +1012,16 @@ fn validate_defaults(root: &Value, manifest: &MmdPackageManifest) -> Result<()> 
         if model_id == manifest.default_model_entry_id {
             matching += 1;
         }
-        validate_texture_bindings(binding, manifest)?;
+        let texture_bindings = validate_texture_bindings(binding, manifest)?;
+        model_bindings.push(MmdModelBinding {
+            model_entry_id: model_id,
+            texture_bindings,
+        });
     }
     if matching != 1 {
         return invalid_manifest("defaultModelEntryId must have exactly one modelBindings entry");
     }
-    Ok(())
+    Ok(model_bindings)
 }
 
 fn manifest_entry_object(root: &Value, id: u32) -> Result<&Map<String, Value>> {
@@ -1003,13 +1041,14 @@ fn manifest_entry_object(root: &Value, id: u32) -> Result<&Map<String, Value>> {
 fn validate_texture_bindings(
     binding: &Map<String, Value>,
     manifest: &MmdPackageManifest,
-) -> Result<()> {
+) -> Result<Vec<MmdTextureBinding>> {
     let textures = field(strict_json::required(binding, "textureBindings"))?
         .as_array()
         .ok_or_else(|| {
             MmdPackageError::InvalidManifest("textureBindings must be an array".into())
         })?;
     let mut indices = HashSet::with_capacity(textures.len());
+    let mut parsed = Vec::with_capacity(textures.len());
     for texture in textures {
         let texture = texture.as_object().ok_or_else(|| {
             MmdPackageError::InvalidManifest("texture binding must be an object".into())
@@ -1034,8 +1073,12 @@ fn validate_texture_bindings(
                 "texture binding entry {entry_id} must have kind texture"
             ));
         }
+        parsed.push(MmdTextureBinding {
+            texture_index: index,
+            entry_id,
+        });
     }
-    Ok(())
+    Ok(parsed)
 }
 
 fn parse_kind(value: &str) -> Result<MmdPackageEntryKind> {

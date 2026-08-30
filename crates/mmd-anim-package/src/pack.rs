@@ -70,7 +70,8 @@ pub struct MmdPackagePackEntry {
     pub decoded: Vec<u8>,
     pub media_type: Option<String>,
     pub motion: Option<MmdPackageMotionMetadata>,
-    /// Draft codec-specific texture metadata. Shape validation belongs to the
+    /// Draft codec-specific texture metadata. Package-layer shape validation
+    /// applies to known UASTC/KTX2 profiles; payload semantics belong to the
     /// later texture-pipeline slice.
     pub texture: Option<Value>,
 }

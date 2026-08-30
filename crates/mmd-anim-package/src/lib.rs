@@ -32,6 +32,18 @@ pub const MMDPACK_HEADER_LEN: usize = 64;
 const GCM_TAG_LEN: u64 = 16;
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 const ENTRY_AAD_PREFIX: &[u8; 10] = b"MMDP-AAD-1";
+// Draft metadata budgets are intentionally private until the package format
+// and its public configuration contract are frozen.
+const MAX_MANIFEST_DEPTH: usize = 16;
+const MAX_MANIFEST_NODES: usize = 65_536;
+const MAX_MANIFEST_ARRAY_ITEMS: usize = 8_192;
+const MAX_MANIFEST_OBJECT_FIELDS: usize = 8_192;
+const MAX_METADATA_STRING_BYTES: usize = 64 * 1024;
+const MAX_LICENSES: usize = 4_096;
+const MAX_CREDITS: usize = 4_096;
+const MAX_LICENSE_REFS_PER_ENTRY: usize = 64;
+const MAX_TEXTURE_DIMENSION: u32 = 16_384;
+const MAX_TEXTURE_MIP_COUNT: usize = 32;
 
 /// Parsed fixed header for the current draft wire format.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -220,9 +232,11 @@ impl MmdPackage {
 
         let manifest_value = strict_json::parse(&manifest_plaintext)
             .map_err(|error| MmdPackageError::InvalidJson(error.to_string()))?;
+        validate_json_budgets(&manifest_value)?;
         let manifest = parse_manifest(&manifest_value, &limits)?;
         validate_layout(&manifest.entries, bytes.len(), manifest_end, &limits)?;
         validate_defaults(&manifest_value, &manifest)?;
+        validate_entry_metadata(&manifest_value, &manifest)?;
 
         let entries_by_id = strict_json::index_by_id(&manifest.entries, |entry| entry.id);
         let entries_by_path = manifest
@@ -417,6 +431,424 @@ fn parse_entry(value: &Value, limits: &MmdPackageLimits) -> Result<MmdPackageEnt
         cipher_size: field(strict_json::required_u64(object, "cipherSize"))?,
         decoded_size: field(strict_json::required_u64(object, "decodedSize"))?,
     })
+}
+
+fn validate_json_budgets(value: &Value) -> Result<()> {
+    let mut nodes = 0_usize;
+    validate_json_value(value, 0, &mut nodes)
+}
+
+fn validate_json_value(value: &Value, depth: usize, nodes: &mut usize) -> Result<()> {
+    check_limit("manifest depth", depth as u64, MAX_MANIFEST_DEPTH as u64)?;
+    *nodes = nodes
+        .checked_add(1)
+        .ok_or(MmdPackageError::IntegerOverflow("manifest node count"))?;
+    check_limit("manifest nodes", *nodes as u64, MAX_MANIFEST_NODES as u64)?;
+
+    match value {
+        Value::String(string) => check_limit(
+            "metadata string bytes",
+            string.len() as u64,
+            MAX_METADATA_STRING_BYTES as u64,
+        ),
+        Value::Array(values) => {
+            check_limit(
+                "manifest array items",
+                values.len() as u64,
+                MAX_MANIFEST_ARRAY_ITEMS as u64,
+            )?;
+            let child_depth = depth
+                .checked_add(1)
+                .ok_or(MmdPackageError::IntegerOverflow("manifest depth"))?;
+            for value in values {
+                validate_json_value(value, child_depth, nodes)?;
+            }
+            Ok(())
+        }
+        Value::Object(object) => {
+            check_limit(
+                "manifest object fields",
+                object.len() as u64,
+                MAX_MANIFEST_OBJECT_FIELDS as u64,
+            )?;
+            let child_depth = depth
+                .checked_add(1)
+                .ok_or(MmdPackageError::IntegerOverflow("manifest depth"))?;
+            for (key, value) in object {
+                check_limit(
+                    "metadata string bytes",
+                    key.len() as u64,
+                    MAX_METADATA_STRING_BYTES as u64,
+                )?;
+                validate_json_value(value, child_depth, nodes)?;
+            }
+            Ok(())
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+    }
+}
+
+fn validate_entry_metadata(root: &Value, manifest: &MmdPackageManifest) -> Result<()> {
+    let root_object = strict_json::object(root).expect("manifest root was checked");
+    let license_keys = validate_licenses(root_object)?;
+    validate_credits(root_object)?;
+
+    for entry in &manifest.entries {
+        let object = manifest_entry_object(root, entry.id)?;
+        match entry.kind {
+            MmdPackageEntryKind::Motion => {
+                let motion = object.get("motion").ok_or_else(|| {
+                    MmdPackageError::InvalidManifest(format!(
+                        "motion entry {} requires motion metadata",
+                        entry.id
+                    ))
+                })?;
+                validate_motion_metadata(motion, manifest)?;
+            }
+            _ if object.contains_key("motion") => {
+                return invalid_manifest(format!(
+                    "non-motion entry {} cannot contain motion metadata",
+                    entry.id
+                ));
+            }
+            _ => {}
+        }
+
+        if let Some(texture) = object.get("texture") {
+            if entry.kind != MmdPackageEntryKind::Texture {
+                return invalid_manifest(format!(
+                    "non-texture entry {} cannot contain texture metadata",
+                    entry.id
+                ));
+            }
+            validate_texture_metadata(texture, entry)?;
+        } else if entry.kind == MmdPackageEntryKind::Texture {
+            return invalid_manifest(format!(
+                "texture entry {} requires texture metadata",
+                entry.id
+            ));
+        }
+
+        let media_type = object.get("mediaType");
+        if let Some(media_type) = media_type {
+            let media_type = media_type.as_str().ok_or_else(|| {
+                MmdPackageError::InvalidManifest(format!(
+                    "mediaType for entry {} must be a string",
+                    entry.id
+                ))
+            })?;
+            if media_type.is_empty() {
+                return invalid_manifest(format!(
+                    "mediaType for entry {} must not be empty",
+                    entry.id
+                ));
+            }
+        }
+        if entry.kind == MmdPackageEntryKind::Audio && media_type.is_none() {
+            return invalid_manifest(format!("audio entry {} requires mediaType", entry.id));
+        }
+
+        validate_license_refs(object, entry.id, license_keys.as_ref())?;
+    }
+    Ok(())
+}
+
+fn validate_licenses(root: &Map<String, Value>) -> Result<Option<HashSet<String>>> {
+    let Some(value) = root.get("licenses") else {
+        return Ok(None);
+    };
+    let licenses = value
+        .as_object()
+        .ok_or_else(|| MmdPackageError::InvalidManifest("licenses must be an object".into()))?;
+    check_limit("license count", licenses.len() as u64, MAX_LICENSES as u64)?;
+    let mut keys = HashSet::with_capacity(licenses.len());
+    for (key, metadata) in licenses {
+        if key.is_empty() {
+            return invalid_manifest("license key must not be empty");
+        }
+        validate_license_metadata(metadata, key)?;
+        keys.insert(key.clone());
+    }
+    Ok(Some(keys))
+}
+
+fn validate_credits(root: &Map<String, Value>) -> Result<()> {
+    let Some(value) = root.get("credits") else {
+        return Ok(());
+    };
+    let credits = value
+        .as_array()
+        .ok_or_else(|| MmdPackageError::InvalidManifest("credits must be an array".into()))?;
+    check_limit("credit count", credits.len() as u64, MAX_CREDITS as u64)?;
+    for credit in credits {
+        validate_credit_metadata(credit)?;
+    }
+    Ok(())
+}
+
+fn validate_license_metadata(value: &Value, key: &str) -> Result<()> {
+    let object = value.as_object().ok_or_else(|| {
+        MmdPackageError::InvalidManifest(format!("license {key:?} must be an object"))
+    })?;
+    field(strict_json::required_str(object, "name"))?;
+    for field_name in ["url", "text", "attribution", "notes"] {
+        if let Some(value) = object.get(field_name) {
+            value.as_str().ok_or_else(|| {
+                MmdPackageError::InvalidManifest(format!(
+                    "license {key:?} field {field_name:?} must be a string"
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_credit_metadata(value: &Value) -> Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| MmdPackageError::InvalidManifest("credit entry must be an object".into()))?;
+    let subject = field(strict_json::required_str(object, "subject"))?;
+    if !matches!(
+        subject,
+        "model"
+            | "texture"
+            | "motion"
+            | "choreography"
+            | "stage"
+            | "accessory"
+            | "music-composition"
+            | "sound-recording"
+            | "performer"
+            | "other"
+    ) {
+        return invalid_manifest(format!("unsupported credit subject {subject:?}"));
+    }
+    field(strict_json::required_str(object, "name"))?;
+    for field_name in ["author", "url"] {
+        if let Some(value) = object.get(field_name) {
+            value.as_str().ok_or_else(|| {
+                MmdPackageError::InvalidManifest(format!(
+                    "credit field {field_name:?} must be a string"
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_license_refs(
+    object: &Map<String, Value>,
+    entry_id: u32,
+    license_keys: Option<&HashSet<String>>,
+) -> Result<()> {
+    let Some(value) = object.get("licenseRefs") else {
+        return Ok(());
+    };
+    let refs = value.as_array().ok_or_else(|| {
+        MmdPackageError::InvalidManifest(format!(
+            "licenseRefs for entry {entry_id} must be an array"
+        ))
+    })?;
+    check_limit(
+        "license references",
+        refs.len() as u64,
+        MAX_LICENSE_REFS_PER_ENTRY as u64,
+    )?;
+    let mut seen = HashSet::with_capacity(refs.len());
+    for value in refs {
+        let reference = value.as_str().ok_or_else(|| {
+            MmdPackageError::InvalidManifest(format!(
+                "licenseRefs for entry {entry_id} must contain strings"
+            ))
+        })?;
+        if !seen.insert(reference) {
+            return invalid_manifest(format!(
+                "duplicate license reference {reference:?} for entry {entry_id}"
+            ));
+        }
+        if !license_keys.is_some_and(|keys| keys.contains(reference)) {
+            return invalid_manifest(format!(
+                "license reference {reference:?} for entry {entry_id} is not declared"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_motion_metadata(value: &Value, manifest: &MmdPackageManifest) -> Result<()> {
+    let object = value.as_object().ok_or_else(|| {
+        MmdPackageError::InvalidManifest("motion metadata must be an object".into())
+    })?;
+    let role = field(strict_json::required_str(object, "role"))?;
+    if !matches!(role, "model" | "scene" | "mixed") {
+        return invalid_manifest(format!("unsupported motion role {role:?}"));
+    }
+    let target = field(strict_json::optional_u64(object, "targetModelEntryId"))?
+        .map(to_entry_id)
+        .transpose()?;
+    if role == "model" && target.is_none() {
+        return invalid_manifest("model motion metadata requires targetModelEntryId");
+    }
+    if let Some(target) = target {
+        let target_entry = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.id == target)
+            .ok_or_else(|| {
+                MmdPackageError::InvalidManifest(format!(
+                    "motion targetModelEntryId references missing entry {target}"
+                ))
+            })?;
+        if target_entry.kind != MmdPackageEntryKind::Model || target_entry.codec != "pmx" {
+            return invalid_manifest("motion targetModelEntryId must reference a model/pmx entry");
+        }
+    }
+    Ok(())
+}
+
+fn validate_texture_metadata(value: &Value, entry: &MmdPackageEntry) -> Result<()> {
+    let object = value.as_object().ok_or_else(|| {
+        MmdPackageError::InvalidManifest(format!(
+            "texture metadata for entry {} must be an object",
+            entry.id
+        ))
+    })?;
+    match entry.codec.as_str() {
+        "uastc-ldr-4x4-v1" => validate_raw_uastc_metadata(object, entry),
+        "ktx2-uastc-v1" => validate_ktx2_metadata(object),
+        _ => Ok(()),
+    }
+}
+
+fn validate_texture_summary(object: &Map<String, Value>) -> Result<(u32, u32, usize)> {
+    let width = texture_dimension(object, "width")?;
+    let height = texture_dimension(object, "height")?;
+    let mip_count = field(strict_json::required_u64(object, "mipCount"))?;
+    check_limit("texture mip count", mip_count, MAX_TEXTURE_MIP_COUNT as u64)?;
+    let mip_count = usize::try_from(mip_count)
+        .map_err(|_| MmdPackageError::IntegerOverflow("texture mip count"))?;
+    if mip_count == 0 {
+        return invalid_manifest("texture mipCount must be at least one");
+    }
+    texture_enum(object, "colorSpace", &["srgb", "linear"])?;
+    texture_enum(object, "usage", &["color", "normal", "data", "toon"])?;
+    texture_enum(object, "channelModel", &["r", "rg", "rgb", "rgba"])?;
+    let swizzle = field(strict_json::required_str(object, "swizzle"))?;
+    if swizzle.len() != 4
+        || !swizzle
+            .bytes()
+            .all(|byte| matches!(byte, b'r' | b'g' | b'b' | b'a' | b'0' | b'1'))
+    {
+        return invalid_manifest("texture swizzle must be exactly four r/g/b/a/0/1 characters");
+    }
+    texture_enum(object, "alphaMode", &["straight"])?;
+    texture_enum(object, "origin", &["top-left"])?;
+    Ok((width, height, mip_count))
+}
+
+fn validate_raw_uastc_metadata(object: &Map<String, Value>, entry: &MmdPackageEntry) -> Result<()> {
+    let (width, height, mip_count) = validate_texture_summary(object)?;
+    texture_enum(object, "blockOrder", &["row-major-top-left"])?;
+    let mips = field(strict_json::required(object, "mips"))?
+        .as_array()
+        .ok_or_else(|| MmdPackageError::InvalidManifest("texture mips must be an array".into()))?;
+    check_limit(
+        "texture mip count",
+        mips.len() as u64,
+        MAX_TEXTURE_MIP_COUNT as u64,
+    )?;
+    if mips.len() != mip_count {
+        return invalid_manifest(format!(
+            "texture mips length {} does not match mipCount {mip_count}",
+            mips.len()
+        ));
+    }
+
+    let mut expected_offset = 0_u64;
+    let mut previous_width = width;
+    let mut previous_height = height;
+    for (level, mip) in mips.iter().enumerate() {
+        let mip = mip.as_object().ok_or_else(|| {
+            MmdPackageError::InvalidManifest("texture mip must be an object".into())
+        })?;
+        let mip_width = texture_dimension(mip, "width")?;
+        let mip_height = texture_dimension(mip, "height")?;
+        let expected_width = if level == 0 {
+            width
+        } else {
+            (previous_width / 2).max(1)
+        };
+        let expected_height = if level == 0 {
+            height
+        } else {
+            (previous_height / 2).max(1)
+        };
+        if mip_width != expected_width || mip_height != expected_height {
+            return invalid_manifest(format!(
+                "texture mip {level} dimensions {mip_width}x{mip_height} do not match expected {expected_width}x{expected_height}"
+            ));
+        }
+        let blocks_width = (mip_width as u64).div_ceil(4);
+        let blocks_height = (mip_height as u64).div_ceil(4);
+        let expected_size = blocks_width
+            .checked_mul(blocks_height)
+            .and_then(|size| size.checked_mul(16))
+            .ok_or(MmdPackageError::IntegerOverflow("raw UASTC mip size"))?;
+        let offset = field(strict_json::required_u64(mip, "offset"))?;
+        let size = field(strict_json::required_u64(mip, "size"))?;
+        if offset != expected_offset {
+            return invalid_manifest(format!(
+                "texture mip {level} offset {offset} does not match contiguous offset {expected_offset}"
+            ));
+        }
+        if size != expected_size {
+            return invalid_manifest(format!(
+                "texture mip {level} size {size} does not match expected raw UASTC size {expected_size}"
+            ));
+        }
+        expected_offset = expected_offset
+            .checked_add(size)
+            .ok_or(MmdPackageError::IntegerOverflow("raw UASTC mip coverage"))?;
+        previous_width = mip_width;
+        previous_height = mip_height;
+    }
+    if expected_offset != entry.decoded_size {
+        return invalid_manifest(format!(
+            "raw UASTC mip coverage {expected_offset} does not match decodedSize {}",
+            entry.decoded_size
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ktx2_metadata(object: &Map<String, Value>) -> Result<()> {
+    // This is deliberately a summary-only check. KTX2 header/DFD matching is
+    // owned by the later texture pipeline and is not covered at package open.
+    validate_texture_summary(object).map(|_| ())
+}
+
+fn texture_dimension(object: &Map<String, Value>, field_name: &'static str) -> Result<u32> {
+    let value = field(strict_json::required_u64(object, field_name))?;
+    check_limit("texture dimension", value, MAX_TEXTURE_DIMENSION as u64)?;
+    let value =
+        u32::try_from(value).map_err(|_| MmdPackageError::IntegerOverflow("texture dimension"))?;
+    if value == 0 {
+        return invalid_manifest(format!("texture {field_name} must be at least one"));
+    }
+    Ok(value)
+}
+
+fn texture_enum(
+    object: &Map<String, Value>,
+    field_name: &'static str,
+    allowed: &[&str],
+) -> Result<()> {
+    let value = field(strict_json::required_str(object, field_name))?;
+    if allowed.contains(&value) {
+        Ok(())
+    } else {
+        invalid_manifest(format!("unsupported texture {field_name} {value:?}"))
+    }
 }
 
 fn validate_layout(

@@ -514,6 +514,7 @@ dependencies = [
  "clap_complete",
  "glam",
  "mmd-anim-format",
+ "mmd-anim-package",
  "mmd-anim-physics-bullet",
  "mmd-anim-runtime",
  "serde",

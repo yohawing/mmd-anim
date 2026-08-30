@@ -267,6 +267,13 @@ impl MmdPackage {
         &self.manifest
     }
 
+    /// Returns the optional binding record for a model entry.
+    pub fn model_binding(&self, model_entry_id: u32) -> Option<&MmdModelBinding> {
+        self.model_bindings
+            .iter()
+            .find(|binding| binding.model_entry_id == model_entry_id)
+    }
+
     /// Checks the stored texture bindings against a PMX texture-table count.
     ///
     /// PMX texture indices are zero-based. This method only checks indices
@@ -279,9 +286,7 @@ impl MmdPackage {
         texture_table_len: usize,
     ) -> Result<()> {
         let binding = self
-            .model_bindings
-            .iter()
-            .find(|binding| binding.model_entry_id == model_entry_id)
+            .model_binding(model_entry_id)
             .ok_or(MmdPackageError::ModelBindingNotFound(model_entry_id))?;
         for texture in &binding.texture_bindings {
             let in_range = usize::try_from(texture.texture_index)
@@ -319,20 +324,40 @@ impl MmdPackage {
     /// Authenticates and decodes every entry one at a time without retaining
     /// decoded payloads between entries.
     pub fn verify(&self, options: MmdPackageVerifyOptions) -> Result<MmdPackageVerifyReport> {
+        self.verify_with(options, |_, _| Ok::<(), MmdPackageError>(()))
+    }
+
+    /// Authenticates and decodes every entry once, invoking `visitor` with the
+    /// borrowed decoded payload before moving to the next entry. The visitor
+    /// must not retain the payload; this keeps verification allocation-bounded.
+    ///
+    /// Visitor errors and package errors share the caller-selected error type.
+    /// `E` must be constructible from [`MmdPackageError`].
+    pub fn verify_with<E, F>(
+        &self,
+        options: MmdPackageVerifyOptions,
+        mut visitor: F,
+    ) -> std::result::Result<MmdPackageVerifyReport, E>
+    where
+        E: From<MmdPackageError>,
+        F: FnMut(&MmdPackageEntry, &[u8]) -> std::result::Result<(), E>,
+    {
         let mut total_decoded_bytes = 0_u64;
         let mut unknown_codec_entry_ids = Vec::new();
         for (index, entry) in self.manifest.entries.iter().enumerate() {
             let known = is_known_codec(&entry.codec);
             if !known {
                 if options.strict_codecs {
-                    return Err(MmdPackageError::UnsupportedCodec(entry.codec.clone()));
+                    return Err(MmdPackageError::UnsupportedCodec(entry.codec.clone()).into());
                 }
                 unknown_codec_entry_ids.push(entry.id);
             }
-            let decoded = self.decode_index(index, false)?;
+            let decoded = self.decode_index(index, false).map_err(E::from)?;
             total_decoded_bytes = total_decoded_bytes
                 .checked_add(decoded.len() as u64)
-                .ok_or(MmdPackageError::IntegerOverflow("verified decoded bytes"))?;
+                .ok_or(MmdPackageError::IntegerOverflow("verified decoded bytes"))
+                .map_err(E::from)?;
+            visitor(entry, &decoded)?;
         }
         Ok(MmdPackageVerifyReport {
             entry_count: self.manifest.entries.len(),

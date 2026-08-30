@@ -27,6 +27,7 @@ clap_complete = "4"
 glam.workspace = true
 mmd-anim-runtime.workspace = true
 mmd-anim-format = { path = "../mmd-anim-format", version = "0.4.3", features = ["fbx"] }
+mmd-anim-package = { path = "../mmd-anim-package", version = "0.4.3" }
 mmd-anim-physics-bullet = { path = "../mmd-anim-physics-bullet", version = "0.4.3", features = ["native", "pmx-format", "runtime"], optional = true }
 serde.workspace = true
 serde_json.workspace = true

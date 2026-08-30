@@ -128,6 +128,23 @@ enum Commands {
         via_json: bool,
     },
 
+    /// Inspect and verify an encrypted MMDPACK package.
+    #[command(
+        name = "package",
+        long_about = "Read-only diagnostics for an experimental MMDPACK package.
+The header command reads only the fixed 64-byte prefix. Inspect authenticates
+the manifest without decoding entries. Verify authenticates and decodes each
+entry, then checks PMX texture bindings against each PMX texture table.",
+        after_help = "Examples:
+  mmd-anim package header scene.mmdpack
+  mmd-anim package inspect scene.mmdpack --key-file package.key
+  mmd-anim package verify scene.mmdpack --key-file package.key --strict-codecs"
+    )]
+    Package {
+        #[command(subcommand)]
+        command: commands::package::PackageCommand,
+    },
+
     /// Inspect PMX rig structure.
     #[command(
         long_about = "Inspect IK chains, grant/append transforms, and deform layer distribution.\nUse this for detailed rig analysis; for a quick file overview, use inspect instead.\n\nSupported formats: .pmx only",
@@ -505,6 +522,7 @@ fn main() -> ExitCode {
             json,
             via_json,
         }) => dispatch_roundtrip(&asset, json, via_json),
+        Some(Commands::Package { command }) => commands::package::dispatch(command),
         Some(Commands::Rig { model, json, bones }) => {
             commands::rig::rig_inspect(&model, json, bones)
         }

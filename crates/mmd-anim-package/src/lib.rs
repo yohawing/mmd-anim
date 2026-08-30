@@ -4,6 +4,7 @@
 //! a low-level native reader and must not be treated as a frozen V1 contract.
 
 mod error;
+mod pack;
 mod strict_json;
 
 use std::collections::{HashMap, HashSet};
@@ -18,6 +19,11 @@ use zeroize::Zeroizing;
 
 pub use error::MmdPackageError;
 use error::Result;
+pub use pack::{
+    MmdModelBinding, MmdPackageMotionMetadata, MmdPackageMotionRole, MmdPackagePackCompression,
+    MmdPackagePackEntry, MmdPackagePackError, MmdPackagePackInput, MmdPackagePacker,
+    MmdPackedPackage, MmdTextureBinding,
+};
 
 pub const MMDPACK_HEADER_LEN: usize = 64;
 const GCM_TAG_LEN: u64 = 16;

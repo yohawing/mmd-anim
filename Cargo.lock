@@ -552,6 +552,7 @@ name = "mmd-anim-package"
 version = "0.4.3"
 dependencies = [
  "aes-gcm",
+ "rand_core",
  "serde",
  "serde_json",
  "thiserror",

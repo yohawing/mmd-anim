@@ -158,6 +158,39 @@ fn verify_authenticates_entries_and_reports_totals() {
 }
 
 #[test]
+fn verify_with_visits_each_entry_once_with_borrowed_payload() {
+    let package = MmdPackagePacker::pack(
+        input(vec![
+            model(MmdPackagePackCompression::None, b"PMX".to_vec()),
+            MmdPackagePackEntry {
+                id: 2,
+                path: "binary/data.bin".into(),
+                kind: MmdPackageEntryKind::Binary,
+                codec: "opaque".into(),
+                compression: MmdPackagePackCompression::None,
+                decoded: vec![7; 4],
+                media_type: None,
+                motion: None,
+                texture: None,
+            },
+        ]),
+        MmdPackageLimits::default(),
+    )
+    .unwrap();
+    let package = reopen(&package);
+    let mut visited = Vec::new();
+    let report = package
+        .verify_with(MmdPackageVerifyOptions::default(), |entry, decoded| {
+            visited.push((entry.id, decoded.len()));
+            Ok::<(), MmdPackageError>(())
+        })
+        .unwrap();
+
+    assert_eq!(visited, vec![(1, 3), (2, 4)]);
+    assert_eq!(report.authenticated_entry_count, 2);
+}
+
+#[test]
 fn verify_allows_unknown_codec_unless_strict() {
     let packed = MmdPackagePacker::pack(
         input(vec![

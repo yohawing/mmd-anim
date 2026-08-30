@@ -4,6 +4,7 @@ use mmd_anim_package::{
     MmdModelBinding, MmdPackage, MmdPackageCompression, MmdPackageEntryKind, MmdPackageError,
     MmdPackageLimits, MmdPackageMotionMetadata, MmdPackageMotionRole, MmdPackagePackCompression,
     MmdPackagePackEntry, MmdPackagePackError, MmdPackagePackInput, MmdPackagePacker,
+    MmdPackageVerifyOptions,
 };
 
 fn model(compression: MmdPackagePackCompression, decoded: Vec<u8>) -> MmdPackagePackEntry {
@@ -127,6 +128,67 @@ fn auto_zstd_selects_only_smaller_output() {
 }
 
 #[test]
+fn verify_authenticates_entries_and_reports_totals() {
+    let metadata = b"metadata".to_vec();
+    let packed = MmdPackagePacker::pack(
+        input(vec![
+            model(MmdPackagePackCompression::ZstdV1, vec![4; 8192]),
+            MmdPackagePackEntry {
+                id: 2,
+                path: "meta/info.bin".into(),
+                kind: MmdPackageEntryKind::Binary,
+                codec: "opaque".into(),
+                compression: MmdPackagePackCompression::None,
+                decoded: metadata.clone(),
+                media_type: None,
+                motion: None,
+                texture: None,
+            },
+        ]),
+        MmdPackageLimits::default(),
+    )
+    .unwrap();
+    let report = reopen(&packed)
+        .verify(MmdPackageVerifyOptions::default())
+        .unwrap();
+    assert_eq!(report.entry_count, 2);
+    assert_eq!(report.authenticated_entry_count, 2);
+    assert_eq!(report.total_decoded_bytes, 8192 + metadata.len() as u64);
+    assert!(report.unknown_codec_entry_ids.is_empty());
+}
+
+#[test]
+fn verify_allows_unknown_codec_unless_strict() {
+    let packed = MmdPackagePacker::pack(
+        input(vec![
+            model(MmdPackagePackCompression::None, b"PMX".to_vec()),
+            MmdPackagePackEntry {
+                id: 2,
+                path: "binary/future.bin".into(),
+                kind: MmdPackageEntryKind::Binary,
+                codec: "future-codec-v2".into(),
+                compression: MmdPackagePackCompression::ZstdV1,
+                decoded: vec![9; 1024],
+                media_type: None,
+                motion: None,
+                texture: None,
+            },
+        ]),
+        MmdPackageLimits::default(),
+    )
+    .unwrap();
+    let package = reopen(&packed);
+    let report = package.verify(MmdPackageVerifyOptions::default()).unwrap();
+    assert_eq!(report.unknown_codec_entry_ids, vec![2]);
+    assert!(matches!(
+        package.verify(MmdPackageVerifyOptions {
+            strict_codecs: true
+        }),
+        Err(MmdPackageError::UnsupportedCodec(codec)) if codec == "future-codec-v2"
+    ));
+}
+
+#[test]
 fn rejects_invalid_input_and_limits() {
     let invalid = input(vec![MmdPackagePackEntry {
         path: "../model.pmx".into(),
@@ -176,7 +238,7 @@ fn generated_entry_tampering_is_rejected() {
     let package =
         MmdPackage::open_bytes(Arc::from(bytes), key, MmdPackageLimits::default()).unwrap();
     assert!(matches!(
-        package.read_entry(1),
+        package.verify(MmdPackageVerifyOptions::default()),
         Err(MmdPackageError::AuthenticationFailed("entry"))
     ));
 }

@@ -137,6 +137,25 @@ pub struct MmdPackageEntry {
     pub decoded_size: u64,
 }
 
+/// Controls package-layer verification. Codec payload semantics are handled by
+/// the later codec/runtime integration layers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MmdPackageVerifyOptions {
+    /// Reject manifest entries whose codec token is not known to this crate.
+    pub strict_codecs: bool,
+}
+
+/// Successful package-layer verification summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MmdPackageVerifyReport {
+    pub entry_count: usize,
+    pub authenticated_entry_count: usize,
+    pub total_decoded_bytes: u64,
+    /// Unknown codecs were still authenticated and decompressed when strict
+    /// codec checking was disabled.
+    pub unknown_codec_entry_ids: Vec<u32>,
+}
+
 /// Authenticated package with lazy, per-entry decoding.
 pub struct MmdPackage {
     bytes: Arc<[u8]>,
@@ -235,7 +254,7 @@ impl MmdPackage {
             .entries_by_id
             .get(&id)
             .ok_or(MmdPackageError::EntryNotFound(id))?;
-        self.read_index(index)
+        self.decode_index(index, true)
     }
 
     /// Authenticates and decodes one entry by its exact, case-sensitive path.
@@ -244,12 +263,38 @@ impl MmdPackage {
             .entries_by_path
             .get(path)
             .ok_or_else(|| MmdPackageError::PathNotFound(path.to_owned()))?;
-        self.read_index(index)
+        self.decode_index(index, true)
     }
 
-    fn read_index(&self, index: usize) -> Result<Vec<u8>> {
+    /// Authenticates and decodes every entry one at a time without retaining
+    /// decoded payloads between entries.
+    pub fn verify(&self, options: MmdPackageVerifyOptions) -> Result<MmdPackageVerifyReport> {
+        let mut total_decoded_bytes = 0_u64;
+        let mut unknown_codec_entry_ids = Vec::new();
+        for (index, entry) in self.manifest.entries.iter().enumerate() {
+            let known = is_known_codec(&entry.codec);
+            if !known {
+                if options.strict_codecs {
+                    return Err(MmdPackageError::UnsupportedCodec(entry.codec.clone()));
+                }
+                unknown_codec_entry_ids.push(entry.id);
+            }
+            let decoded = self.decode_index(index, false)?;
+            total_decoded_bytes = total_decoded_bytes
+                .checked_add(decoded.len() as u64)
+                .ok_or(MmdPackageError::IntegerOverflow("verified decoded bytes"))?;
+        }
+        Ok(MmdPackageVerifyReport {
+            entry_count: self.manifest.entries.len(),
+            authenticated_entry_count: self.manifest.entries.len(),
+            total_decoded_bytes,
+            unknown_codec_entry_ids,
+        })
+    }
+
+    fn decode_index(&self, index: usize, require_known_codec: bool) -> Result<Vec<u8>> {
         let entry = &self.manifest.entries[index];
-        if !is_known_codec(&entry.codec) {
+        if require_known_codec && !is_known_codec(&entry.codec) {
             return Err(MmdPackageError::UnsupportedCodec(entry.codec.clone()));
         }
 

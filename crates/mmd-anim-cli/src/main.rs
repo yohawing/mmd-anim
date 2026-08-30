@@ -131,14 +131,18 @@ enum Commands {
     /// Inspect and verify an encrypted MMDPACK package.
     #[command(
         name = "package",
-        long_about = "Read-only diagnostics for an experimental MMDPACK package.
-The header command reads only the fixed 64-byte prefix. Inspect authenticates
-the manifest without decoding entries. Verify authenticates and decodes each
-entry, then checks PMX texture bindings against each PMX texture table.",
+        long_about = "Inspect, verify, pack, and unpack an experimental MMDPACK package.
+Header reads only the fixed 64-byte prefix. Inspect authenticates the manifest
+without decoding entries. Verify authenticates and decodes each entry, then
+checks PMX texture bindings against each PMX texture table. Pack stages
+codec-ready payloads. Unpack restores decoded codec payloads without texture
+conversion.",
         after_help = "Examples:
   mmd-anim package header scene.mmdpack
   mmd-anim package inspect scene.mmdpack --key-file package.key
-  mmd-anim package verify scene.mmdpack --key-file package.key --strict-codecs"
+  mmd-anim package verify scene.mmdpack --key-file package.key --strict-codecs
+  mmd-anim package pack assets --config assets/mmdpack.json -o scene.mmdpack --key-out scene.key
+  mmd-anim package unpack scene.mmdpack -o unpacked --key-file scene.key"
     )]
     Package {
         #[command(subcommand)]

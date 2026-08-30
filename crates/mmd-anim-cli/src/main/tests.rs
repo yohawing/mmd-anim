@@ -41,7 +41,10 @@ fn package_commands_are_nested_and_do_not_collide_with_verify() {
         .get_subcommands()
         .map(|command| command.get_name().to_owned())
         .collect();
-    assert_eq!(nested, vec!["header", "inspect", "verify"]);
+    assert_eq!(
+        nested,
+        vec!["header", "inspect", "verify", "pack", "unpack"]
+    );
 
     let cli = Cli::try_parse_from([
         "mmd-anim",

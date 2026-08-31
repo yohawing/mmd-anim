@@ -61,7 +61,7 @@ const threeRoutes = new Map([
   ['/three/examples/jsm/libs/basis/basis_transcoder.wasm', 'examples/jsm/libs/basis/basis_transcoder.wasm'],
   ['/three/examples/textures/ktx2/2d_uastc.ktx2', 'examples/textures/ktx2/2d_uastc.ktx2'],
 ]);
-const harnessFiles = ['README.md', 'lib.mjs', 'self-test.mjs', 'server.mjs', 'web/index.html', 'web/index-firefox.html', 'web/index-firefox-webgpu.html', 'web/index-zen.html', 'web/probe.js', 'web/index-webgpu.html', 'web/probe-webgpu.js'];
+const harnessFiles = ['README.md', 'lib.mjs', 'self-test.mjs', 'server.mjs', 'web/index.html', 'web/index-firefox.html', 'web/index-firefox-webgpu.html', 'web/index-zen.html', 'web/probe.js', 'web/index-webgpu.html', 'web/probe-webgpu.js', 'web/probe-common.js'];
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 function digestNamed(items) {
@@ -210,6 +210,10 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/probe-webgpu.js') {
       response.writeHead(200, headers('text/javascript; charset=utf-8'));
       return response.end(await readFile(join(webRoot, 'probe-webgpu.js')));
+    }
+    if (request.method === 'GET' && url.pathname === '/probe-common.js') {
+      response.writeHead(200, headers('text/javascript; charset=utf-8'));
+      return response.end(await readFile(join(webRoot, 'probe-common.js')));
     }
     if (request.method === 'GET' && url.pathname === '/api/config') return sendJson(response, {
       run_id: state.latest.run_id,

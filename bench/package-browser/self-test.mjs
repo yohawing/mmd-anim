@@ -160,7 +160,7 @@ const firefoxWebgpuPublished = await readFile(firefoxWebgpuDocumentPath, 'utf8')
 assert.match(firefoxWebgpuPublished, /official Firefox\/WebGPU/);
 assert.match(firefoxWebgpuPublished, /Execution surface: official_firefox/);
 
-for (const path of ['bench/package-browser/lib.mjs', 'bench/package-browser/server.mjs', 'bench/package-browser/self-test.mjs', 'bench/package-browser/web/probe.js', 'bench/package-browser/web/probe-webgpu.js']) {
+for (const path of ['bench/package-browser/lib.mjs', 'bench/package-browser/server.mjs', 'bench/package-browser/self-test.mjs', 'bench/package-browser/web/probe.js', 'bench/package-browser/web/probe-webgpu.js', 'bench/package-browser/web/probe-common.js']) {
   await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--check', path]);
     child.on('exit', code => code ? reject(Error(`${path}: syntax exit ${code}`)) : resolve());
@@ -244,6 +244,7 @@ try {
   assert.match(firefoxWebgpuHtml, /probe-webgpu\.js/);
   assert.equal((await fetch(`${url}three/.git/config`)).status, 404);
   assert.equal((await fetch(`${url}three/build/three.webgpu.js`)).status, 200);
+  assert.equal((await fetch(`${url}probe-common.js`)).status, 200);
   assert.equal((await fetch(`${url}api/config`)).status, 200);
   const invalid = await fetch(`${url}api/report`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"schema":1}' });
   assert.equal(invalid.status, 400);

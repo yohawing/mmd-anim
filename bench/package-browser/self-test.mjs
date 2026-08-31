@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -168,17 +168,61 @@ for (const path of ['bench/package-browser/lib.mjs', 'bench/package-browser/serv
 }
 
 const existingDoc = await readFile('docs/mmdpack-browser-webgl2-decision.md').catch(() => null);
-const server = spawn(process.execPath, ['bench/package-browser/server.mjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
-const url = await new Promise((resolve, reject) => {
-  let output = '';
-  const timeout = setTimeout(() => reject(Error('server startup timeout')), 15_000);
-  server.stdout.on('data', chunk => {
-    output += chunk;
-    const match = output.match(/http:\/\/127\.0\.0\.1:\d+\//);
-    if (match) { clearTimeout(timeout); resolve(match[0]); }
+const serverFixtureRoot = await mkdtemp(join(tmpdir(), 'mmdpack-browser-server-'));
+const serverFixtureCases = [];
+for (const expected of expectedCases.values()) {
+  const bytes = Buffer.from(`self-test-${expected.id}`);
+  const caseRoot = join(serverFixtureRoot, 'textures', 'runs', 'self-test', expected.id);
+  await mkdir(caseRoot, { recursive: true });
+  await writeFile(join(caseRoot, 'candidate-b.ktx2'), bytes);
+  serverFixtureCases.push({
+    id: expected.id,
+    candidate_b: { ktx2_bytes: bytes.length, ktx2_sha256: createHash('sha256').update(bytes).digest('hex') },
+    native_b: { mip_dimensions: [[1, 1]] },
   });
-  server.on('exit', code => reject(Error(`server exited ${code}`)));
+}
+await writeFile(join(serverFixtureRoot, 'latest.json'), JSON.stringify({
+  run_id: 'self-test',
+  native: { cases: serverFixtureCases },
+}));
+for (const relativePath of [
+  'build/three.module.js',
+  'build/three.core.js',
+  'build/three.webgpu.js',
+  'examples/jsm/loaders/KTX2Loader.js',
+  'examples/jsm/utils/WorkerPool.js',
+  'examples/jsm/libs/ktx-parse.module.js',
+  'examples/jsm/libs/zstddec.module.js',
+  'examples/jsm/math/ColorSpaces.js',
+  'examples/jsm/libs/basis/basis_transcoder.js',
+  'examples/jsm/libs/basis/basis_transcoder.wasm',
+  'examples/textures/ktx2/2d_uastc.ktx2',
+]) {
+  const filePath = join(serverFixtureRoot, 'three', relativePath);
+  await mkdir(join(filePath, '..'), { recursive: true });
+  await writeFile(filePath, Buffer.from(`self-test-${relativePath}`));
+}
+const server = spawn(process.execPath, ['bench/package-browser/server.mjs'], {
+  env: { ...process.env, MMDPACK_BROWSER_AUTHORITY: 'diagnostic', MMDPACK_BROWSER_SELF_TEST: '1', MMDPACK_BROWSER_SELF_TEST_ROOT: serverFixtureRoot },
+  stdio: ['ignore', 'pipe', 'pipe'],
 });
+let url;
+try {
+  url = await new Promise((resolve, reject) => {
+    let output = '';
+    const timeout = setTimeout(() => reject(Error('server startup timeout')), 15_000);
+    server.stdout.on('data', chunk => {
+      output += chunk;
+      const match = output.match(/http:\/\/127\.0\.0\.1:\d+\//);
+      if (match) { clearTimeout(timeout); resolve(match[0]); }
+    });
+    server.on('exit', code => reject(Error(`server exited ${code}`)));
+  });
+} catch (error) {
+  server.kill();
+  await rm(serverFixtureRoot, { recursive: true, force: true });
+  throw error;
+}
 try {
   const html = await (await fetch(url)).text();
   assert.match(html, /id="run"/);
@@ -227,6 +271,7 @@ try {
   assert.deepEqual(await readFile('docs/mmdpack-browser-webgl2-decision.md').catch(() => null), existingDoc);
 } finally {
   server.kill();
+  await rm(serverFixtureRoot, { recursive: true, force: true });
 }
 
 console.log('package-browser self-test: validation, atomic publication, whitelist, and invalid-result preservation passed');

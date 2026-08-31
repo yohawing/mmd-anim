@@ -40,6 +40,11 @@ const PMX_SKINNING_MODE_BDEF4: &str = "bdef4";
 const PMX_SKINNING_MODE_SDEF: &str = "sdef";
 const PMX_SKINNING_MODE_QDEF: &str = "qdef";
 
+// Keep texture-table preallocation bounded even when the PMX input has enough
+// bytes to satisfy the minimum record-size check. A million entries is well
+// above normal MMD asset sizes while capping the String-slot allocation.
+const MAX_PMX_TEXTURE_COUNT: usize = 1_000_000;
+
 fn decode_utf16le_lossy(bytes: &[u8]) -> String {
     let end = bytes.len().saturating_sub(bytes.len() % 2);
     let units = bytes[..end]
@@ -3320,6 +3325,19 @@ fn read_section_count_with_min_record(
     Ok(count)
 }
 
+fn read_section_count_with_max_and_min_record(
+    r: &mut Reader<'_>,
+    max_count: usize,
+    min_record_size: usize,
+) -> Result<usize, ImportError> {
+    let count = read_section_count(r)?;
+    if count > max_count {
+        return Err(ImportError::SectionOverflow);
+    }
+    r.require_record_bytes(count, min_record_size)?;
+    Ok(count)
+}
+
 fn read_parsed_geometry(
     r: &mut Reader<'_>,
     header: &PmxHeader,
@@ -3937,7 +3955,7 @@ fn read_parsed_textures(
     r: &mut Reader<'_>,
     encoding: TextEncoding,
 ) -> Result<Vec<String>, ImportError> {
-    let count = read_section_count_with_min_record(r, 4)?;
+    let count = read_section_count_with_max_and_min_record(r, MAX_PMX_TEXTURE_COUNT, 4)?;
     let mut textures = Vec::with_capacity(count);
     for _ in 0..count {
         textures.push(r.read_string(encoding)?);
@@ -5630,6 +5648,26 @@ mod tests {
         buf.extend_from_slice(&build_empty_vertex_section());
         buf.extend_from_slice(&build_empty_face_section());
         buf.extend_from_slice(&(-1i32).to_le_bytes());
+
+        assert_eq!(
+            parse_pmx_texture_table(&buf).unwrap_err(),
+            ImportError::SectionOverflow
+        );
+    }
+
+    #[test]
+    fn rejects_pmx_texture_count_before_allocating_texture_table() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        let count = MAX_PMX_TEXTURE_COUNT + 1;
+        buf.extend_from_slice(&(count as i32).to_le_bytes());
+        // Each empty UTF-8 string is still a complete four-byte PMX record.
+        // Without the explicit count limit, the parser would accept this input
+        // and allocate one String slot per attacker-controlled record.
+        buf.resize(buf.len() + count * 4, 0);
 
         assert_eq!(
             parse_pmx_texture_table(&buf).unwrap_err(),

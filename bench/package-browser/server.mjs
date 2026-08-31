@@ -8,14 +8,20 @@ import { publishReport, validateFirefoxWebGL2Report, validateFirefoxWebGPUReport
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const harnessRoot = join(root, 'bench/package-browser');
 const webRoot = join(harnessRoot, 'web');
-const threeRoot = resolve(root, '..', 'references/three.js');
-const latestPath = join(root, '.ai/mmdpack/textures/latest.json');
-const outputRoot = join(root, '.ai/mmdpack/browser');
-const documentPath = join(root, 'docs/mmdpack-browser-webgl2-decision.md');
-const webgpuDocumentPath = join(root, 'docs/mmdpack-browser-webgpu-decision.md');
-const zenDocumentPath = join(root, 'docs/mmdpack-browser-zen-webgl2-diagnostic.md');
-const firefoxDocumentPath = join(root, 'docs/mmdpack-browser-firefox-webgl2-decision.md');
-const firefoxWebgpuDocumentPath = join(root, 'docs/mmdpack-browser-firefox-webgpu-decision.md');
+// Only the self-test opts into temporary roots; normal runs retain fixed
+// campaign inputs, external Three.js checkout, and pinned-source validation.
+const selfTestRoot = process.env.MMDPACK_BROWSER_SELF_TEST === '1' && process.env.MMDPACK_BROWSER_SELF_TEST_ROOT
+  ? resolve(process.env.MMDPACK_BROWSER_SELF_TEST_ROOT) : null;
+const textureRoot = selfTestRoot ? join(selfTestRoot, 'textures') : join(root, '.ai/mmdpack/textures');
+const threeRoot = selfTestRoot ? join(selfTestRoot, 'three') : resolve(root, '..', 'references/three.js');
+const latestPath = selfTestRoot ? join(selfTestRoot, 'latest.json') : join(textureRoot, 'latest.json');
+const outputRoot = selfTestRoot ? join(selfTestRoot, 'output') : join(root, '.ai/mmdpack/browser');
+const documentRoot = selfTestRoot ? join(selfTestRoot, 'documents') : join(root, 'docs');
+const documentPath = join(documentRoot, 'mmdpack-browser-webgl2-decision.md');
+const webgpuDocumentPath = join(documentRoot, 'mmdpack-browser-webgpu-decision.md');
+const zenDocumentPath = join(documentRoot, 'mmdpack-browser-zen-webgl2-diagnostic.md');
+const firefoxDocumentPath = join(documentRoot, 'mmdpack-browser-firefox-webgl2-decision.md');
+const firefoxWebgpuDocumentPath = join(documentRoot, 'mmdpack-browser-firefox-webgpu-decision.md');
 const webgpuExecutionSurface = process.env.MMDPACK_BROWSER_AUTHORITY === 'external_chrome_extension'
   ? 'external_chrome_extension' : 'diagnostic';
 const zenExecutionSurface = process.env.MMDPACK_BROWSER_AUTHORITY === 'zen_browser'
@@ -85,7 +91,7 @@ async function loadSources() {
   for (const item of cases) {
     if (!SLUG.test(item.id) || ids.has(item.id)) throw Error('unsafe or duplicate case id');
     ids.add(item.id);
-    const base = join(root, '.ai/mmdpack/textures/runs', latest.run_id);
+    const base = join(textureRoot, 'runs', latest.run_id);
     const loaded = await readContained(base, join(item.id, 'candidate-b.ktx2'));
     if (loaded.bytes.length !== item.candidate_b?.ktx2_bytes || sha256(loaded.bytes) !== item.candidate_b?.ktx2_sha256) throw Error(`Candidate B drift: ${item.id}`);
     inputs.push([item.id, loaded.bytes]);
@@ -96,10 +102,10 @@ async function loadSources() {
   const served = new Map();
   for (const [route, relativePath] of threeRoutes) {
     const bytes = (await readContained(threeRoot, relativePath)).bytes;
-    if (sha256(bytes) !== threeHashes.get(relativePath)) throw Error(`pinned Three.js source drift: ${relativePath}`);
+    if (!selfTestRoot && sha256(bytes) !== threeHashes.get(relativePath)) throw Error(`pinned Three.js source drift: ${relativePath}`);
     served.set(route, bytes);
   }
-  if (latest.control?.input_sha256 !== pins.control || latest.control?.transcoder_js_sha256 !== pins.basisJs || latest.control?.transcoder_wasm_sha256 !== pins.basisWasm || latest.control?.transcoder_revision !== `three.js ${pins.revision}`) throw Error('texture run control provenance drift');
+  if (!selfTestRoot && (latest.control?.input_sha256 !== pins.control || latest.control?.transcoder_js_sha256 !== pins.basisJs || latest.control?.transcoder_wasm_sha256 !== pins.basisWasm || latest.control?.transcoder_revision !== `three.js ${pins.revision}`)) throw Error('texture run control provenance drift');
   const harness = [];
   for (const name of harnessFiles) harness.push([name, (await readContained(harnessRoot, name)).bytes]);
   const provenance = {

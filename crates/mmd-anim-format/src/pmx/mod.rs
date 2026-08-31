@@ -144,6 +144,14 @@ impl<'a> ByteReader<'a> {
         }
     }
 
+    fn skip_string(&mut self) -> Result<(), ImportError> {
+        let len = self.read_i32_le()?;
+        if len > 0 {
+            self.skip(len as usize)?;
+        }
+        Ok(())
+    }
+
     fn read_string_owned(
         &mut self,
         encoding: TextEncoding,
@@ -897,14 +905,15 @@ pub fn import_pmx_model(data: &[u8]) -> Result<PmxBoneImport, ImportError> {
     Ok(bones)
 }
 
-/// Reads the PMX texture table without parsing the remainder of the model.
-///
-/// This deliberately stops after the texture paths. Callers that need
-/// materials or later sections should use the complete model parser instead.
-pub fn parse_pmx_texture_table(data: &[u8]) -> Result<Vec<String>, ImportError> {
-    let (header, pos) = read_texture_section_start(data)?;
+/// Counts PMX texture records without retaining their paths.
+pub fn count_pmx_textures(data: &[u8]) -> Result<usize, ImportError> {
+    let (_, pos) = read_texture_section_start(data)?;
     let mut reader = Reader { data, pos };
-    read_parsed_textures(&mut reader, header.encoding)
+    let count = read_section_count_with_max_and_min_record(&mut reader, MAX_PMX_TEXTURE_COUNT, 4)?;
+    for _ in 0..count {
+        reader.skip_string()?;
+    }
+    Ok(count)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5606,7 +5615,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_pmx_texture_table_without_reading_later_sections() {
+    fn counts_pmx_texture_table_without_reading_later_sections() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
         buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
@@ -5619,10 +5628,7 @@ mod tests {
             buf.extend_from_slice(bytes);
         }
 
-        assert_eq!(
-            parse_pmx_texture_table(&buf).unwrap(),
-            vec!["diffuse.png", "toon.spa"]
-        );
+        assert_eq!(count_pmx_textures(&buf).unwrap(), 2);
     }
 
     #[test]
@@ -5635,7 +5641,7 @@ mod tests {
         buf.extend_from_slice(&1i32.to_le_bytes());
 
         assert!(matches!(
-            parse_pmx_texture_table(&buf),
+            count_pmx_textures(&buf),
             Err(ImportError::UnexpectedEof(_))
         ));
     }
@@ -5650,7 +5656,7 @@ mod tests {
         buf.extend_from_slice(&(-1i32).to_le_bytes());
 
         assert_eq!(
-            parse_pmx_texture_table(&buf).unwrap_err(),
+            count_pmx_textures(&buf).unwrap_err(),
             ImportError::SectionOverflow
         );
     }
@@ -5670,7 +5676,7 @@ mod tests {
         buf.resize(buf.len() + count * 4, 0);
 
         assert_eq!(
-            parse_pmx_texture_table(&buf).unwrap_err(),
+            count_pmx_textures(&buf).unwrap_err(),
             ImportError::SectionOverflow
         );
     }

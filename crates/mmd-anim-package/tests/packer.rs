@@ -152,7 +152,6 @@ fn verify_authenticates_entries_and_reports_totals() {
         .verify(MmdPackageVerifyOptions::default())
         .unwrap();
     assert_eq!(report.entry_count, 2);
-    assert_eq!(report.authenticated_entry_count, 2);
     assert_eq!(report.total_decoded_bytes, 8192 + metadata.len() as u64);
     assert!(report.unknown_codec_entry_ids.is_empty());
 }
@@ -179,7 +178,7 @@ fn verify_with_visits_each_entry_once_with_borrowed_payload() {
     .unwrap();
     let package = reopen(&package);
     let mut visited = Vec::new();
-    let report = package
+    package
         .verify_with(MmdPackageVerifyOptions::default(), |entry, decoded| {
             visited.push((entry.id, decoded.len()));
             Ok::<(), MmdPackageError>(())
@@ -187,7 +186,6 @@ fn verify_with_visits_each_entry_once_with_borrowed_payload() {
         .unwrap();
 
     assert_eq!(visited, vec![(1, 3), (2, 4)]);
-    assert_eq!(report.authenticated_entry_count, 2);
 }
 
 #[test]

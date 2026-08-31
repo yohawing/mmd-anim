@@ -34,6 +34,22 @@ pub enum MmdPackagePackCompression {
     AutoZstdV1,
 }
 
+impl MmdPackagePackCompression {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ZstdV1 => "zstd-v1",
+            Self::AutoZstdV1 => "auto-zstd-v1",
+        }
+    }
+
+    pub fn from_token(value: &str) -> Option<Self> {
+        [Self::None, Self::ZstdV1, Self::AutoZstdV1]
+            .into_iter()
+            .find(|compression| compression.as_str() == value)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MmdPackageMotionMetadata {
     pub role: MmdPackageMotionRole,
@@ -45,6 +61,22 @@ pub enum MmdPackageMotionRole {
     Model,
     Scene,
     Mixed,
+}
+
+impl MmdPackageMotionRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Scene => "scene",
+            Self::Mixed => "mixed",
+        }
+    }
+
+    pub fn from_token(value: &str) -> Option<Self> {
+        [Self::Model, Self::Scene, Self::Mixed]
+            .into_iter()
+            .find(|role| role.as_str() == value)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -346,24 +378,21 @@ fn build_manifest(input: &MmdPackagePackInput, entries: &[MmdPackageEntry]) -> P
         root.insert("defaultMotionEntryId".into(), Value::from(id));
     }
 
-    let input_by_id: std::collections::HashMap<_, _> = input
-        .entries
-        .iter()
-        .map(|entry| (entry.id, entry))
-        .collect();
+    if entries.len() != input.entries.len() {
+        return Err(MmdPackagePackError::PackingFailed(
+            "manifest entries do not match pack input entries".into(),
+        ));
+    }
     let mut manifest_entries = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let input_entry = input_by_id.get(&entry.id).ok_or_else(|| {
-            MmdPackagePackError::PackingFailed(format!("duplicate entry id {}", entry.id))
-        })?;
+    for (entry, input_entry) in entries.iter().zip(&input.entries) {
         let mut value = Map::new();
         value.insert("id".into(), Value::from(entry.id));
         value.insert("path".into(), Value::String(entry.path.clone()));
-        value.insert("kind".into(), Value::String(kind_name(entry.kind).into()));
+        value.insert("kind".into(), Value::String(entry.kind.as_str().into()));
         value.insert("codec".into(), Value::String(entry.codec.clone()));
         value.insert(
             "compression".into(),
-            Value::String(compression_name(entry.compression).into()),
+            Value::String(entry.compression.as_str().into()),
         );
         value.insert("offset".into(), Value::from(entry.offset));
         value.insert("cipherSize".into(), Value::from(entry.cipher_size));
@@ -373,10 +402,7 @@ fn build_manifest(input: &MmdPackagePackInput, entries: &[MmdPackageEntry]) -> P
         }
         if let Some(motion) = &input_entry.motion {
             let mut metadata = Map::new();
-            metadata.insert(
-                "role".into(),
-                Value::String(motion_role_name(motion.role).into()),
-            );
+            metadata.insert("role".into(), Value::String(motion.role.as_str().into()));
             if let Some(id) = motion.target_model_entry_id {
                 metadata.insert("targetModelEntryId".into(), Value::from(id));
             }
@@ -440,32 +466,6 @@ fn build_header(
     header[32..40].copy_from_slice(&nonce_prefix);
     header[40..48].copy_from_slice(&manifest_cipher_size.to_le_bytes());
     header
-}
-
-fn kind_name(kind: MmdPackageEntryKind) -> &'static str {
-    match kind {
-        MmdPackageEntryKind::Model => "model",
-        MmdPackageEntryKind::Motion => "motion",
-        MmdPackageEntryKind::Texture => "texture",
-        MmdPackageEntryKind::Metadata => "metadata",
-        MmdPackageEntryKind::Audio => "audio",
-        MmdPackageEntryKind::Binary => "binary",
-    }
-}
-
-fn compression_name(compression: MmdPackageCompression) -> &'static str {
-    match compression {
-        MmdPackageCompression::None => "none",
-        MmdPackageCompression::ZstdV1 => "zstd-v1",
-    }
-}
-
-fn motion_role_name(role: MmdPackageMotionRole) -> &'static str {
-    match role {
-        MmdPackageMotionRole::Model => "model",
-        MmdPackageMotionRole::Scene => "scene",
-        MmdPackageMotionRole::Mixed => "mixed",
-    }
 }
 
 #[cfg(test)]

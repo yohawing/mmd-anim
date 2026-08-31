@@ -158,7 +158,6 @@ fn draft_0_2_vector_opens_reads_and_verifies() {
 
     let report = package.verify(MmdPackageVerifyOptions::default()).unwrap();
     assert_eq!(report.entry_count, 1);
-    assert_eq!(report.authenticated_entry_count, 1);
     assert_eq!(report.total_decoded_bytes, 3);
     assert!(report.unknown_codec_entry_ids.is_empty());
 }

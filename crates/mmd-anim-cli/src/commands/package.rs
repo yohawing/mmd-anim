@@ -14,10 +14,10 @@ use std::{
 use anyhow::anyhow;
 use clap::Subcommand;
 use mmd_anim_package::{
-    MMDPACK_HEADER_LEN, MmdModelBinding, MmdPackage, MmdPackageCompression, MmdPackageEntryKind,
-    MmdPackageHeader, MmdPackageLimits, MmdPackageMotionMetadata, MmdPackageMotionRole,
-    MmdPackagePackCompression, MmdPackagePackEntry, MmdPackagePackInput, MmdPackagePacker,
-    MmdPackageVerifyOptions, MmdTextureBinding,
+    MMDPACK_HEADER_LEN, MmdModelBinding, MmdPackage, MmdPackageEntryKind, MmdPackageHeader,
+    MmdPackageLimits, MmdPackageMotionMetadata, MmdPackageMotionRole, MmdPackagePackCompression,
+    MmdPackagePackEntry, MmdPackagePackInput, MmdPackagePacker, MmdPackageVerifyOptions,
+    MmdTextureBinding,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -187,9 +187,9 @@ fn print_manifest(package_path: &Path, key_path: &Path) -> CommandResult {
             "entry id={} path={:?} kind={} codec={} compression={} offset={} cipher_size={} decoded_size={}",
             entry.id,
             entry.path,
-            kind_name(entry.kind),
+            entry.kind.as_str(),
             entry.codec,
-            compression_name(entry.compression),
+            entry.compression.as_str(),
             entry.offset,
             entry.cipher_size,
             entry.decoded_size,
@@ -218,7 +218,7 @@ fn verify_package(package_path: &Path, key_path: &Path, strict_codecs: bool) -> 
             ))
         })?;
 
-    println!("entries_verified: {}", report.authenticated_entry_count);
+    println!("entries_verified: {}", report.entry_count);
     println!("total_decoded_bytes: {}", report.total_decoded_bytes);
     println!("pmx_bindings_verified: {pmx_bindings_verified}");
     println!(
@@ -314,7 +314,7 @@ fn unpack_package(package_path: &Path, output_dir: &Path, key_path: &Path) -> Co
     };
     publish_unpack_staging(&staging_dir, output_dir)?;
     println!("output: {}", output_dir.display());
-    println!("entries_verified: {}", report.authenticated_entry_count);
+    println!("entries_verified: {}", report.entry_count);
     println!("entries_unpacked: {}", package.manifest().entries.len());
     println!("pmx_bindings_verified: {pmx_bindings_verified}");
     Ok(ExitCode::SUCCESS)
@@ -434,14 +434,13 @@ fn validate_pack_model_binding_ranges(input: &MmdPackagePackInput) -> Result<(),
         }) else {
             continue;
         };
-        let texture_count = mmd_anim_format::pmx::parse_pmx_texture_table(&model.decoded)
-            .map_err(|error| {
+        let texture_count =
+            mmd_anim_format::pmx::count_pmx_textures(&model.decoded).map_err(|error| {
                 command_error(format!(
                     "package pack model entry {}: failed to read PMX texture table: {error}",
                     model.id
                 ))
-            })?
-            .len();
+            })?;
         for texture in &binding.texture_bindings {
             if usize::try_from(texture.texture_index).map_or(true, |index| index >= texture_count) {
                 return Err(command_error(format!(
@@ -466,14 +465,14 @@ fn validate_pmx_binding(
     if package.model_binding(entry.id).is_none() {
         return Ok(false);
     }
-    let textures = mmd_anim_format::pmx::parse_pmx_texture_table(model).map_err(|error| {
+    let texture_count = mmd_anim_format::pmx::count_pmx_textures(model).map_err(|error| {
         command_error(format!(
             "package {operation} model entry {} ({}): failed to read PMX texture table: {error}",
             entry.id, entry.path
         ))
     })?;
     package
-        .validate_texture_bindings_against_table(entry.id, textures.len())
+        .validate_texture_bindings_against_table(entry.id, texture_count)
         .map_err(|error| {
             command_error(format!(
                 "package {operation} model entry {} ({}): {error}",
@@ -484,37 +483,18 @@ fn validate_pmx_binding(
 }
 
 fn parse_entry_kind(value: &str) -> Result<MmdPackageEntryKind, Box<dyn Error>> {
-    match value {
-        "model" => Ok(MmdPackageEntryKind::Model),
-        "motion" => Ok(MmdPackageEntryKind::Motion),
-        "texture" => Ok(MmdPackageEntryKind::Texture),
-        "metadata" => Ok(MmdPackageEntryKind::Metadata),
-        "audio" => Ok(MmdPackageEntryKind::Audio),
-        "binary" => Ok(MmdPackageEntryKind::Binary),
-        _ => Err(command_error(format!(
-            "unknown package entry kind: {value:?}"
-        ))),
-    }
+    MmdPackageEntryKind::from_token(value)
+        .ok_or_else(|| command_error(format!("unknown package entry kind: {value:?}")))
 }
 
 fn parse_pack_compression(value: &str) -> Result<MmdPackagePackCompression, Box<dyn Error>> {
-    match value {
-        "none" => Ok(MmdPackagePackCompression::None),
-        "zstd-v1" => Ok(MmdPackagePackCompression::ZstdV1),
-        "auto-zstd-v1" => Ok(MmdPackagePackCompression::AutoZstdV1),
-        _ => Err(command_error(format!(
-            "unknown package compression: {value:?}"
-        ))),
-    }
+    MmdPackagePackCompression::from_token(value)
+        .ok_or_else(|| command_error(format!("unknown package compression: {value:?}")))
 }
 
 fn parse_motion_role(value: &str) -> Result<MmdPackageMotionRole, Box<dyn Error>> {
-    match value {
-        "model" => Ok(MmdPackageMotionRole::Model),
-        "scene" => Ok(MmdPackageMotionRole::Scene),
-        "mixed" => Ok(MmdPackageMotionRole::Mixed),
-        _ => Err(command_error(format!("unknown motion role: {value:?}"))),
-    }
+    MmdPackageMotionRole::from_token(value)
+        .ok_or_else(|| command_error(format!("unknown motion role: {value:?}")))
 }
 
 fn validate_relative_path(path: &str) -> Result<(), Box<dyn Error>> {
@@ -943,24 +923,6 @@ fn io_error(operation: &str, path: &Path, error: io::Error) -> Box<dyn Error> {
 
 fn format_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn kind_name(kind: MmdPackageEntryKind) -> &'static str {
-    match kind {
-        MmdPackageEntryKind::Model => "model",
-        MmdPackageEntryKind::Motion => "motion",
-        MmdPackageEntryKind::Texture => "texture",
-        MmdPackageEntryKind::Metadata => "metadata",
-        MmdPackageEntryKind::Audio => "audio",
-        MmdPackageEntryKind::Binary => "binary",
-    }
-}
-
-fn compression_name(compression: MmdPackageCompression) -> &'static str {
-    match compression {
-        MmdPackageCompression::None => "none",
-        MmdPackageCompression::ZstdV1 => "zstd-v1",
-    }
 }
 
 #[cfg(test)]

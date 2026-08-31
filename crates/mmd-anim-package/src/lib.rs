@@ -125,10 +125,51 @@ pub enum MmdPackageEntryKind {
     Binary,
 }
 
+impl MmdPackageEntryKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Motion => "motion",
+            Self::Texture => "texture",
+            Self::Metadata => "metadata",
+            Self::Audio => "audio",
+            Self::Binary => "binary",
+        }
+    }
+
+    pub fn from_token(value: &str) -> Option<Self> {
+        [
+            Self::Model,
+            Self::Motion,
+            Self::Texture,
+            Self::Metadata,
+            Self::Audio,
+            Self::Binary,
+        ]
+        .into_iter()
+        .find(|kind| kind.as_str() == value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MmdPackageCompression {
     None,
     ZstdV1,
+}
+
+impl MmdPackageCompression {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ZstdV1 => "zstd-v1",
+        }
+    }
+
+    pub fn from_token(value: &str) -> Option<Self> {
+        [Self::None, Self::ZstdV1]
+            .into_iter()
+            .find(|compression| compression.as_str() == value)
+    }
 }
 
 /// Manifest fields required by the low-level reader.
@@ -164,7 +205,6 @@ pub struct MmdPackageVerifyOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MmdPackageVerifyReport {
     pub entry_count: usize,
-    pub authenticated_entry_count: usize,
     pub total_decoded_bytes: u64,
     /// Unknown codecs were still authenticated and decompressed when strict
     /// codec checking was disabled.
@@ -361,7 +401,6 @@ impl MmdPackage {
         }
         Ok(MmdPackageVerifyReport {
             entry_count: self.manifest.entries.len(),
-            authenticated_entry_count: self.manifest.entries.len(),
             total_decoded_bytes,
             unknown_codec_entry_ids,
         })
@@ -473,11 +512,10 @@ fn parse_entry(value: &Value, limits: &MmdPackageLimits) -> Result<MmdPackageEnt
     let codec = field(strict_json::required_str(object, "codec"))?;
     validate_codec_token(codec)?;
     validate_known_kind_codec(kind, codec)?;
-    let compression = match field(strict_json::required_str(object, "compression"))? {
-        "none" => MmdPackageCompression::None,
-        "zstd-v1" => MmdPackageCompression::ZstdV1,
-        other => return invalid_manifest(format!("unsupported compression {other:?}")),
-    };
+    let compression_token = field(strict_json::required_str(object, "compression"))?;
+    let compression = MmdPackageCompression::from_token(compression_token).ok_or_else(|| {
+        MmdPackageError::InvalidManifest(format!("unsupported compression {compression_token:?}"))
+    })?;
 
     Ok(MmdPackageEntry {
         id,
@@ -1107,15 +1145,8 @@ fn validate_texture_bindings(
 }
 
 fn parse_kind(value: &str) -> Result<MmdPackageEntryKind> {
-    match value {
-        "model" => Ok(MmdPackageEntryKind::Model),
-        "motion" => Ok(MmdPackageEntryKind::Motion),
-        "texture" => Ok(MmdPackageEntryKind::Texture),
-        "metadata" => Ok(MmdPackageEntryKind::Metadata),
-        "audio" => Ok(MmdPackageEntryKind::Audio),
-        "binary" => Ok(MmdPackageEntryKind::Binary),
-        other => invalid_manifest(format!("unknown entry kind {other:?}")),
-    }
+    MmdPackageEntryKind::from_token(value)
+        .ok_or_else(|| MmdPackageError::InvalidManifest(format!("unknown entry kind {value:?}")))
 }
 
 fn validate_known_kind_codec(kind: MmdPackageEntryKind, codec: &str) -> Result<()> {

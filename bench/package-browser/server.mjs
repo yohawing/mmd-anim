@@ -61,7 +61,7 @@ const threeRoutes = new Map([
   ['/three/examples/jsm/libs/basis/basis_transcoder.wasm', 'examples/jsm/libs/basis/basis_transcoder.wasm'],
   ['/three/examples/textures/ktx2/2d_uastc.ktx2', 'examples/textures/ktx2/2d_uastc.ktx2'],
 ]);
-const harnessFiles = ['README.md', 'lib.mjs', 'self-test.mjs', 'server.mjs', 'web/index.html', 'web/index-firefox.html', 'web/index-firefox-webgpu.html', 'web/index-zen.html', 'web/probe.js', 'web/index-webgpu.html', 'web/probe-webgpu.js', 'web/probe-common.js'];
+const harnessFiles = ['lib.mjs', 'self-test.mjs', 'server.mjs', 'web/index.html', 'web/index-firefox.html', 'web/index-firefox-webgpu.html', 'web/index-zen.html', 'web/probe.js', 'web/index-webgpu.html', 'web/probe-webgpu.js', 'web/probe-common.js'];
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 function digestNamed(items) {

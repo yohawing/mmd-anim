@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
+import { runHostRigSmoke } from './host-rig-smoke.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pkgDir = path.join(__dirname, 'pkg');
@@ -277,5 +278,7 @@ runtime.free();
 runtime2.free();
 model2.free();
 
-console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
+runHostRigSmoke(wasm);
+console.log('Host rig suite passed: native analytic parity, 300 repeats, validation and lifetime');
+console.log(`\n=== Legacy smoke: ${passed} passed, ${failed} failed ===`);
 if (failed > 0) process.exit(1);

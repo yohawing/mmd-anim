@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 use super::{
     GCM_TAG_LEN, MMDPACK_HEADER_LEN, MmdPackage, MmdPackageCompression, MmdPackageEntry,
     MmdPackageEntryKind, MmdPackageError, MmdPackageLimits, check_limit, entry_aad, entry_nonce,
-    manifest_nonce,
+    manifest_nonce, parse_ktx2_metadata, validate_ktx2_payload,
 };
 
 #[derive(Debug, Error)]
@@ -103,8 +103,7 @@ pub struct MmdPackagePackEntry {
     pub media_type: Option<String>,
     pub motion: Option<MmdPackageMotionMetadata>,
     /// Draft codec-specific texture metadata. Package-layer shape validation
-    /// applies to known UASTC/KTX2 profiles; payload semantics belong to the
-    /// later texture-pipeline slice.
+    /// applies to known UASTC/KTX2 profiles.
     pub texture: Option<Value>,
 }
 
@@ -298,6 +297,21 @@ fn validate_input_metadata(input: &MmdPackagePackInput) -> PackResult<()> {
             }
             _ => {}
         }
+        if entry.codec == "ktx2-uastc-v1" {
+            if entry.kind != MmdPackageEntryKind::Texture {
+                return Err(MmdPackagePackError::PackingFailed(format!(
+                    "codec ktx2-uastc-v1 requires texture kind for entry {}",
+                    entry.id
+                )));
+            }
+            let texture = entry.texture.as_ref().ok_or_else(|| {
+                MmdPackagePackError::PackingFailed(format!(
+                    "texture entry {} requires texture metadata",
+                    entry.id
+                ))
+            })?;
+            parse_ktx2_metadata(texture, entry.id)?;
+        }
         if entry.kind != MmdPackageEntryKind::Motion && entry.motion.is_some() {
             return Err(MmdPackagePackError::PackingFailed(format!(
                 "non-motion entry {} cannot contain motion metadata",
@@ -322,28 +336,41 @@ fn encode_entries(
     let mut encoded_entries = Vec::with_capacity(inputs.len());
     for input in inputs {
         let decoded_size = input.decoded.len() as u64;
-        let (compression, encoded) = match input.compression {
-            MmdPackagePackCompression::None => (
-                MmdPackageCompression::None,
-                std::mem::take(&mut input.decoded),
-            ),
+        let compressed = match input.compression {
+            MmdPackagePackCompression::None => None,
             MmdPackagePackCompression::ZstdV1 => {
                 let compressed = compress_zstd(&input.decoded)?;
-                input.decoded.clear();
-                (MmdPackageCompression::ZstdV1, compressed)
+                Some(compressed)
             }
             MmdPackagePackCompression::AutoZstdV1 => {
                 let compressed = compress_zstd(&input.decoded)?;
                 if compressed.len() < input.decoded.len() {
-                    input.decoded.clear();
-                    (MmdPackageCompression::ZstdV1, compressed)
+                    Some(compressed)
                 } else {
-                    (
-                        MmdPackageCompression::None,
-                        std::mem::take(&mut input.decoded),
-                    )
+                    None
                 }
             }
+        };
+        let compression = if compressed.is_some() {
+            MmdPackageCompression::ZstdV1
+        } else {
+            MmdPackageCompression::None
+        };
+        if input.codec == "ktx2-uastc-v1" {
+            let texture = input.texture.as_ref().ok_or_else(|| {
+                MmdPackagePackError::PackingFailed(format!(
+                    "texture entry {} requires texture metadata",
+                    input.id
+                ))
+            })?;
+            let metadata = parse_ktx2_metadata(texture, input.id)?;
+            validate_ktx2_payload(&input.decoded, compression, &metadata)?;
+        }
+        let encoded = if let Some(compressed) = compressed {
+            input.decoded.clear();
+            compressed
+        } else {
+            std::mem::take(&mut input.decoded)
         };
         let cipher_size = (encoded.len() as u64)
             .checked_add(GCM_TAG_LEN)

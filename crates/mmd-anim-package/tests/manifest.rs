@@ -3,8 +3,9 @@ use std::sync::Arc;
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use mmd_anim_package::{
-    MMDPACK_HEADER_LEN, MmdPackage, MmdPackageCompression, MmdPackageEntryKind, MmdPackageError,
-    MmdPackageLimits,
+    MMDPACK_HEADER_LEN, MmdModelBinding, MmdPackage, MmdPackageCompression, MmdPackageEntryKind,
+    MmdPackageError, MmdPackageLimits, MmdPackagePackCompression, MmdPackagePackEntry,
+    MmdPackagePackError, MmdPackagePackInput, MmdPackagePacker,
 };
 use serde_json::{Map, Value, json};
 
@@ -67,6 +68,140 @@ fn ktx2_texture_metadata() -> Value {
         "alphaMode": "straight",
         "origin": "top-left",
     })
+}
+
+fn valid_ktx2_payload() -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"\xabKTX 20\xbb\r\n\x1a\n");
+    for value in [0_u32, 1, 1, 1, 0, 0, 1, 1, 0, 104, 44, 0, 0] {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    payload.extend_from_slice(&0_u64.to_le_bytes());
+    payload.extend_from_slice(&0_u64.to_le_bytes());
+    payload.extend_from_slice(&160_u64.to_le_bytes());
+    payload.extend_from_slice(&16_u64.to_le_bytes());
+    payload.extend_from_slice(&16_u64.to_le_bytes());
+
+    payload.extend_from_slice(&44_u32.to_le_bytes());
+    payload.extend_from_slice(&0_u32.to_le_bytes());
+    payload.extend_from_slice(&0x0028_0002_u32.to_le_bytes());
+    payload.extend_from_slice(&0x0002_01a6_u32.to_le_bytes());
+    payload.extend_from_slice(&[3, 3, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0]);
+    payload.extend_from_slice(&0x037f_0000_u32.to_le_bytes());
+    payload.extend_from_slice(&[0; 4]);
+    payload.extend_from_slice(&[0; 4]);
+    payload.extend_from_slice(&[0xff; 4]);
+    payload.extend_from_slice(&[0; 12]);
+    payload.extend_from_slice(&[0; 16]);
+    assert_eq!(payload.len(), 176);
+    payload
+}
+
+fn valid_ktx2_zstd_payload(data: &[u8], bytes_plane: u8) -> Vec<u8> {
+    let compressed = zstd::bulk::compress(data, 3).unwrap();
+    let mut payload = valid_ktx2_payload();
+    payload[44..48].copy_from_slice(&2_u32.to_le_bytes());
+    payload[104 + 20] = bytes_plane;
+    payload[88..96].copy_from_slice(&(compressed.len() as u64).to_le_bytes());
+    payload.truncate(160);
+    payload.extend_from_slice(&compressed);
+    payload
+}
+
+fn valid_ktx2_payload_with_swizzle_kvd() -> Vec<u8> {
+    let mut payload = valid_ktx2_payload();
+    let level = payload.split_off(160);
+    payload.truncate(148);
+    payload[56..60].copy_from_slice(&148_u32.to_le_bytes());
+    payload[60..64].copy_from_slice(&20_u32.to_le_bytes());
+    payload.extend_from_slice(&16_u32.to_le_bytes());
+    payload.extend_from_slice(b"KTXswizzle\0rgba\0");
+    payload.extend_from_slice(&[0; 8]);
+    assert_eq!(payload.len(), 176);
+    payload[80..88].copy_from_slice(&176_u64.to_le_bytes());
+    payload.extend_from_slice(&level);
+    payload
+}
+
+fn incompressible_ktx2_zstd_payload() -> Vec<u8> {
+    let compressed = zstd::bulk::compress(&[0; 16], 3).unwrap();
+    let mut payload = valid_ktx2_payload();
+    let mut state = 0x6d2b_79f5_u32;
+    let mut pair = b"probe\0".to_vec();
+    for _ in 0..(256 * 1024) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        pair.push((state >> 24) as u8);
+    }
+    pair.push(0);
+
+    payload.truncate(148);
+    let kvd_length = (4 + pair.len() + 3) & !3;
+    let level_offset = (148 + kvd_length + 15) & !15;
+    payload[44..48].copy_from_slice(&2_u32.to_le_bytes());
+    payload[104 + 20] = 16;
+    payload[56..60].copy_from_slice(&148_u32.to_le_bytes());
+    payload[60..64].copy_from_slice(&(kvd_length as u32).to_le_bytes());
+    payload.extend_from_slice(&(pair.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&pair);
+    payload.resize(level_offset, 0);
+    payload[80..88].copy_from_slice(&(level_offset as u64).to_le_bytes());
+    payload[88..96].copy_from_slice(&(compressed.len() as u64).to_le_bytes());
+    payload.extend_from_slice(&compressed);
+    payload
+}
+
+fn open_ktx2(payload: &[u8]) -> Result<MmdPackage, MmdPackageError> {
+    open(
+        manifest(vec![
+            model_entry(),
+            texture_entry(2, "ktx2-uastc-v1", ktx2_texture_metadata()),
+        ]),
+        &[b"PMX", payload],
+        MmdPackageLimits::default(),
+    )
+}
+
+fn pack_ktx2(
+    payload: Vec<u8>,
+    compression: MmdPackagePackCompression,
+) -> Result<mmd_anim_package::MmdPackedPackage, MmdPackagePackError> {
+    MmdPackagePacker::pack(
+        MmdPackagePackInput {
+            default_model_entry_id: 1,
+            default_motion_entry_id: None,
+            entries: vec![
+                MmdPackagePackEntry {
+                    id: 1,
+                    path: "model/model.pmx".into(),
+                    kind: MmdPackageEntryKind::Model,
+                    codec: "pmx".into(),
+                    compression: MmdPackagePackCompression::None,
+                    decoded: b"PMX".to_vec(),
+                    media_type: None,
+                    motion: None,
+                    texture: None,
+                },
+                MmdPackagePackEntry {
+                    id: 2,
+                    path: "texture/2.ktx2".into(),
+                    kind: MmdPackageEntryKind::Texture,
+                    codec: "ktx2-uastc-v1".into(),
+                    compression,
+                    decoded: payload,
+                    media_type: None,
+                    motion: None,
+                    texture: Some(ktx2_texture_metadata()),
+                },
+            ],
+            model_bindings: vec![MmdModelBinding {
+                model_entry_id: 1,
+                texture_bindings: vec![],
+            }],
+        },
+        MmdPackageLimits::default(),
+    )
 }
 
 fn manifest(entries: Vec<Value>) -> Value {
@@ -163,7 +298,7 @@ fn invalid_manifest_message(result: Result<MmdPackage, MmdPackageError>, needle:
 }
 
 #[test]
-fn accepts_valid_raw_uastc_and_ktx2_summary_metadata() {
+fn accepts_valid_raw_uastc_and_ktx2_payload() {
     let raw = open(
         manifest(vec![
             model_entry(),
@@ -181,7 +316,7 @@ fn accepts_valid_raw_uastc_and_ktx2_summary_metadata() {
             model_entry(),
             texture_entry(2, "ktx2-uastc-v1", ktx2_texture_metadata()),
         ]),
-        &[b"PMX", b"not-a-real-ktx2-payload"],
+        &[b"PMX", &valid_ktx2_payload()],
         MmdPackageLimits::default(),
     )
     .unwrap();
@@ -189,7 +324,204 @@ fn accepts_valid_raw_uastc_and_ktx2_summary_metadata() {
         ktx2.manifest().entries[1].compression,
         MmdPackageCompression::None
     );
-    assert_eq!(ktx2.read_entry(2).unwrap(), b"not-a-real-ktx2-payload");
+    assert_eq!(ktx2.read_entry(2).unwrap().len(), 176);
+    assert_eq!(ktx2.read("texture/2.bin").unwrap().len(), 176);
+}
+
+#[test]
+fn rejects_ktx2_payload_manifest_mismatch_and_truncation_on_read_and_verify() {
+    let payload = valid_ktx2_payload();
+    let mut mismatch = ktx2_texture_metadata();
+    mismatch["width"] = 2.into();
+    let package = open(
+        manifest(vec![
+            model_entry(),
+            texture_entry(2, "ktx2-uastc-v1", mismatch),
+        ]),
+        &[b"PMX", &payload],
+        MmdPackageLimits::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        package.read_entry(2),
+        Err(MmdPackageError::InvalidKtx2(message)) if message.contains("dimensions")
+    ));
+    assert!(matches!(
+        package.read("texture/2.bin"),
+        Err(MmdPackageError::InvalidKtx2(message)) if message.contains("dimensions")
+    ));
+    assert!(matches!(
+        package.verify(Default::default()),
+        Err(MmdPackageError::InvalidKtx2(message)) if message.contains("dimensions")
+    ));
+
+    let package = open(
+        manifest(vec![
+            model_entry(),
+            texture_entry(2, "ktx2-uastc-v1", ktx2_texture_metadata()),
+        ]),
+        &[b"PMX", &payload[..payload.len() - 1]],
+        MmdPackageLimits::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        package.read_entry(2),
+        Err(MmdPackageError::InvalidKtx2(message)) if message.contains("outside")
+    ));
+}
+
+#[test]
+fn rejects_ktx2_dfd_mismatch_and_bad_level_ranges() {
+    let mut dfd_mismatch = valid_ktx2_payload();
+    dfd_mismatch[104 + 14] = 1;
+    let package = open_ktx2(&dfd_mismatch).unwrap();
+    assert!(matches!(
+        package.read_entry(2),
+        Err(MmdPackageError::InvalidKtx2(message)) if message.contains("transfer function")
+    ));
+
+    let mut unaligned = valid_ktx2_payload();
+    unaligned[80..88].copy_from_slice(&161_u64.to_le_bytes());
+    let package = open_ktx2(&unaligned).unwrap();
+    assert!(matches!(
+        package.read_entry(2),
+        Err(MmdPackageError::InvalidKtx2(message)) if message.contains("16-byte aligned")
+    ));
+
+    let mut overlap = valid_ktx2_zstd_payload(&[0; 16], 16);
+    overlap[80..88].copy_from_slice(&104_u64.to_le_bytes());
+    let package = open_ktx2(&overlap).unwrap();
+    assert!(matches!(
+        package.read_entry(2),
+        Err(MmdPackageError::InvalidKtx2(message)) if message.contains("overlaps")
+    ));
+}
+
+#[test]
+fn rejects_ktx2_metadata_without_required_kvd_terminator() {
+    let mut payload = valid_ktx2_payload_with_swizzle_kvd();
+    payload[148 + 4 + 15] = b'x';
+    let package = open_ktx2(&payload).unwrap();
+    assert!(matches!(
+        package.read_entry(2),
+        Err(MmdPackageError::InvalidKtx2(message)) if message.contains("KTXswizzle must be NUL-terminated")
+    ));
+}
+
+#[test]
+fn validates_ktx2_internal_zstd_current_and_legacy_byte_plane_sizes() {
+    for bytes_plane in [16, 0] {
+        let payload = valid_ktx2_zstd_payload(&[0; 16], bytes_plane);
+        let package = open_ktx2(&payload).unwrap();
+        assert_eq!(package.read_entry(2).unwrap(), payload);
+    }
+
+    let payload = valid_ktx2_zstd_payload(&[0; 15], 16);
+    let package = open_ktx2(&payload).unwrap();
+    assert!(matches!(
+        package.read_entry(2),
+        Err(MmdPackageError::InvalidKtx2(message)) if message.contains("expanded to 15 bytes")
+    ));
+
+    let mut payload = valid_ktx2_zstd_payload(&[0; 16], 16);
+    payload[160] ^= 0xff;
+    let package = open_ktx2(&payload).unwrap();
+    assert!(matches!(
+        package.read_entry(2),
+        Err(MmdPackageError::InvalidKtx2(_))
+    ));
+}
+
+#[test]
+fn selects_effective_outer_compression_before_ktx2_validation() {
+    let payload = incompressible_ktx2_zstd_payload();
+    let packed = pack_ktx2(payload.clone(), MmdPackagePackCompression::AutoZstdV1).unwrap();
+    let package = MmdPackage::open_bytes(
+        Arc::from(packed.bytes()),
+        *packed.key(),
+        MmdPackageLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        package.manifest().entries[1].compression,
+        MmdPackageCompression::None
+    );
+    assert_eq!(package.read_entry(2).unwrap(), payload);
+
+    let explicit = pack_ktx2(
+        valid_ktx2_zstd_payload(&[0; 16], 16),
+        MmdPackagePackCompression::None,
+    )
+    .unwrap();
+    let package = MmdPackage::open_bytes(
+        Arc::from(explicit.bytes()),
+        *explicit.key(),
+        MmdPackageLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        package.manifest().entries[1].compression,
+        MmdPackageCompression::None
+    );
+    assert!(package.read_entry(2).is_ok());
+
+    let result = pack_ktx2(
+        valid_ktx2_zstd_payload(&[0; 16], 16),
+        MmdPackagePackCompression::AutoZstdV1,
+    );
+    assert!(matches!(
+        result,
+        Err(MmdPackagePackError::Package(
+            MmdPackageError::InvalidKtx2(message)
+        )) if message.contains("internal Zstd requires MMDPACK entry compression none")
+    ));
+}
+
+#[test]
+fn pack_rejects_ktx2_before_payload_is_consumed() {
+    let mut payload = valid_ktx2_payload();
+    payload[104 + 12] = 0;
+    let result = MmdPackagePacker::pack(
+        MmdPackagePackInput {
+            default_model_entry_id: 1,
+            default_motion_entry_id: None,
+            entries: vec![
+                MmdPackagePackEntry {
+                    id: 1,
+                    path: "model/model.pmx".into(),
+                    kind: MmdPackageEntryKind::Model,
+                    codec: "pmx".into(),
+                    compression: MmdPackagePackCompression::None,
+                    decoded: b"PMX".to_vec(),
+                    media_type: None,
+                    motion: None,
+                    texture: None,
+                },
+                MmdPackagePackEntry {
+                    id: 2,
+                    path: "texture/2.ktx2".into(),
+                    kind: MmdPackageEntryKind::Texture,
+                    codec: "ktx2-uastc-v1".into(),
+                    compression: MmdPackagePackCompression::None,
+                    decoded: payload,
+                    media_type: None,
+                    motion: None,
+                    texture: Some(ktx2_texture_metadata()),
+                },
+            ],
+            model_bindings: vec![MmdModelBinding {
+                model_entry_id: 1,
+                texture_bindings: vec![],
+            }],
+        },
+        MmdPackageLimits::default(),
+    );
+    assert!(matches!(
+        result,
+        Err(mmd_anim_package::MmdPackagePackError::Package(
+            MmdPackageError::InvalidKtx2(message)
+        )) if message.contains("color model")
+    ));
 }
 
 #[test]

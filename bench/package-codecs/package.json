@@ -1,8 +1,0 @@
-{
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "build:wasm": "node build.mjs",
-    "run:wasm": "node build.mjs && node run-wasm.mjs"
-  }
-}

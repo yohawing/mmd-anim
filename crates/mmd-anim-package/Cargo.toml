@@ -8,11 +8,6 @@ repository.workspace = true
 publish = false
 description = "Experimental bounded reader for draft MMDPACK containers"
 
-[features]
-# Internal hooks used only by the nested cargo-fuzz workspace. They are not
-# part of the normal package API and may change with the draft wire format.
-fuzzing = []
-
 [dependencies]
 aes-gcm = "0.10.3"
 rand_core = { version = "0.6.4", features = ["getrandom"] }

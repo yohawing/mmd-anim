@@ -7,9 +7,6 @@ mod error;
 mod pack;
 mod strict_json;
 
-#[cfg(feature = "fuzzing")]
-pub mod fuzz_support;
-
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::sync::Arc;

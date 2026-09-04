@@ -6,6 +6,7 @@ pub(crate) mod fbx_skin_diff;
 pub(crate) mod golden;
 pub(crate) mod import;
 pub(crate) mod oracle;
+pub(crate) mod package;
 pub(crate) mod parse;
 pub(crate) mod patch;
 pub(crate) mod rig;

@@ -29,6 +29,45 @@ fn completion_subcommand_is_registered_in_clap_metadata() {
 }
 
 #[test]
+fn package_commands_are_nested_and_do_not_collide_with_verify() {
+    use clap::{CommandFactory, Parser};
+
+    let command = Cli::command();
+    let package = command
+        .get_subcommands()
+        .find(|command| command.get_name() == "package")
+        .expect("package command should be registered");
+    let nested: Vec<_> = package
+        .get_subcommands()
+        .map(|command| command.get_name().to_owned())
+        .collect();
+    assert_eq!(
+        nested,
+        vec!["header", "inspect", "verify", "pack", "unpack"]
+    );
+
+    let cli = Cli::try_parse_from([
+        "mmd-anim",
+        "package",
+        "verify",
+        "scene.mmdpack",
+        "--key-file",
+        "package.key",
+        "--strict-codecs",
+    ])
+    .expect("nested package verify should parse");
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Package {
+            command: commands::package::PackageCommand::Verify {
+                strict_codecs: true,
+                ..
+            }
+        })
+    ));
+}
+
+#[test]
 fn convert_fbx_physics_bake_requires_vmd_at_clap_level() {
     use clap::Parser;
 

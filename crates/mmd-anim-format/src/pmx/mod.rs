@@ -40,6 +40,11 @@ const PMX_SKINNING_MODE_BDEF4: &str = "bdef4";
 const PMX_SKINNING_MODE_SDEF: &str = "sdef";
 const PMX_SKINNING_MODE_QDEF: &str = "qdef";
 
+// Keep texture-table preallocation bounded even when the PMX input has enough
+// bytes to satisfy the minimum record-size check. A million entries is well
+// above normal MMD asset sizes while capping the String-slot allocation.
+const MAX_PMX_TEXTURE_COUNT: usize = 1_000_000;
+
 fn decode_utf16le_lossy(bytes: &[u8]) -> String {
     let end = bytes.len().saturating_sub(bytes.len() % 2);
     let units = bytes[..end]
@@ -137,6 +142,14 @@ impl<'a> ByteReader<'a> {
             }
             TextEncoding::Utf16Le => Ok(decode_utf16le_lossy(bytes)),
         }
+    }
+
+    fn skip_string(&mut self) -> Result<(), ImportError> {
+        let len = self.read_i32_le()?;
+        if len > 0 {
+            self.skip(len as usize)?;
+        }
+        Ok(())
     }
 
     fn read_string_owned(
@@ -876,15 +889,31 @@ pub fn read_bones(
     Ok((legacy_bone_import(&bone_read), pos))
 }
 
-pub fn import_pmx_model(data: &[u8]) -> Result<PmxBoneImport, ImportError> {
+fn read_texture_section_start(data: &[u8]) -> Result<(PmxHeader, usize), ImportError> {
     let (header, pos) = read_header(data)?;
     let pos = skip_model_info(data, &header, pos)?;
     let pos = skip_vertices(data, &header, pos)?;
     let pos = skip_faces(data, header.vertex_index_size, pos)?;
+    Ok((header, pos))
+}
+
+pub fn import_pmx_model(data: &[u8]) -> Result<PmxBoneImport, ImportError> {
+    let (header, pos) = read_texture_section_start(data)?;
     let pos = skip_textures(data, header.encoding, pos)?;
     let pos = skip_materials(data, &header, pos)?;
     let (bones, _pos) = read_bones(data, &header, pos)?;
     Ok(bones)
+}
+
+/// Counts PMX texture records without retaining their paths.
+pub fn count_pmx_textures(data: &[u8]) -> Result<usize, ImportError> {
+    let (_, pos) = read_texture_section_start(data)?;
+    let mut reader = Reader { data, pos };
+    let count = read_section_count_with_max_and_min_record(&mut reader, MAX_PMX_TEXTURE_COUNT, 4)?;
+    for _ in 0..count {
+        reader.skip_string()?;
+    }
+    Ok(count)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3305,6 +3334,19 @@ fn read_section_count_with_min_record(
     Ok(count)
 }
 
+fn read_section_count_with_max_and_min_record(
+    r: &mut Reader<'_>,
+    max_count: usize,
+    min_record_size: usize,
+) -> Result<usize, ImportError> {
+    let count = read_section_count(r)?;
+    if count > max_count {
+        return Err(ImportError::SectionOverflow);
+    }
+    r.require_record_bytes(count, min_record_size)?;
+    Ok(count)
+}
+
 fn read_parsed_geometry(
     r: &mut Reader<'_>,
     header: &PmxHeader,
@@ -3922,7 +3964,7 @@ fn read_parsed_textures(
     r: &mut Reader<'_>,
     encoding: TextEncoding,
 ) -> Result<Vec<String>, ImportError> {
-    let count = read_section_count_with_min_record(r, 4)?;
+    let count = read_section_count_with_max_and_min_record(r, MAX_PMX_TEXTURE_COUNT, 4)?;
     let mut textures = Vec::with_capacity(count);
     for _ in 0..count {
         textures.push(r.read_string(encoding)?);
@@ -4772,10 +4814,7 @@ pub struct PmxRuntimeImport {
 }
 
 pub fn import_pmx_runtime(data: &[u8]) -> Result<PmxRuntimeImport, ImportError> {
-    let (header, pos) = read_header(data)?;
-    let pos = skip_model_info(data, &header, pos)?;
-    let pos = skip_vertices(data, &header, pos)?;
-    let pos = skip_faces(data, header.vertex_index_size, pos)?;
+    let (header, pos) = read_texture_section_start(data)?;
     let pos = skip_textures(data, header.encoding, pos)?;
     let pos = skip_materials(data, &header, pos)?;
     let (bone_read, pos) = read_bones_with_local_axes(data, &header, pos)?;
@@ -5573,6 +5612,73 @@ mod tests {
         assert_eq!(header.bone_index_size, 4);
         assert_eq!(header.vertex_index_size, 4);
         assert!(pos > 0);
+    }
+
+    #[test]
+    fn counts_pmx_texture_table_without_reading_later_sections() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&2i32.to_le_bytes());
+        for texture in ["diffuse.png", "toon.spa"] {
+            let bytes = texture.as_bytes();
+            buf.extend_from_slice(&(bytes.len() as i32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        }
+
+        assert_eq!(count_pmx_textures(&buf).unwrap(), 2);
+    }
+
+    #[test]
+    fn rejects_truncated_pmx_texture_table() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&1i32.to_le_bytes());
+
+        assert!(matches!(
+            count_pmx_textures(&buf),
+            Err(ImportError::UnexpectedEof(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_negative_pmx_texture_count() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&(-1i32).to_le_bytes());
+
+        assert_eq!(
+            count_pmx_textures(&buf).unwrap_err(),
+            ImportError::SectionOverflow
+        );
+    }
+
+    #[test]
+    fn rejects_pmx_texture_count_before_allocating_texture_table() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        let count = MAX_PMX_TEXTURE_COUNT + 1;
+        buf.extend_from_slice(&(count as i32).to_le_bytes());
+        // Each empty UTF-8 string is still a complete four-byte PMX record.
+        // Without the explicit count limit, the parser would accept this input
+        // and allocate one String slot per attacker-controlled record.
+        buf.resize(buf.len() + count * 4, 0);
+
+        assert_eq!(
+            count_pmx_textures(&buf).unwrap_err(),
+            ImportError::SectionOverflow
+        );
     }
 
     #[test]

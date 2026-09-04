@@ -30,6 +30,15 @@ use mmd_anim_runtime::{
 };
 
 pub const ABI_VERSION: u32 = 3;
+pub const MMD_RUNTIME_FEATURE_HOST_RIG: u32 = 1 << 13;
+
+/// Model-bound rig plus reusable native input conversion buffers.
+pub struct MmdRuntimeHostRig {
+    rig: mmd_anim_runtime::HostRigDefinition,
+    positions: Vec<glam::Vec3A>,
+    rotations: Vec<glam::Quat>,
+    scales: Vec<glam::Vec3A>,
+}
 const FEATURE_SPLIT_PHYSICS_EVALUATION: u32 = 1 << 0;
 const FEATURE_PHYSICS_BULLET_NATIVE: u32 = 1 << 1;
 pub const MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR: u32 = 1 << 2;
@@ -1163,6 +1172,7 @@ pub extern "C" fn mmd_runtime_feature_flags() -> u32 {
 
 fn runtime_feature_flags() -> u32 {
     FEATURE_SPLIT_PHYSICS_EVALUATION
+        | MMD_RUNTIME_FEATURE_HOST_RIG
         | FEATURE_MODEL_DESCRIPTOR
         | FEATURE_HOST_POSE_NATIVE_MORPHS
         | FEATURE_REDUCED_POSE_GENERIC_CURVES
@@ -5938,6 +5948,152 @@ pub unsafe extern "C" fn mmd_runtime_instance_apply_host_pose_and_evaluate_befor
     })
 }
 
+/// Creates a model-bound host rig. Empty goal list disables all IK.
+/// Errors return null and set last_error_message. No input pointers are retained.
+///
+/// # Safety
+/// Model must be a live model handle. Nonempty input arrays must be aligned,
+/// initialized, readable u32 arrays of the given length for this call. Null is
+/// permitted for empty arrays. Handles must not be accessed concurrently with
+/// mutation/free. The rig retains model storage and may outlive the model handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_host_rig_create(
+    model: *const MmdRuntimeModel,
+    driven_bones: *const u32,
+    driven_count: usize,
+    goal_bones: *const u32,
+    goal_count: usize,
+) -> *mut MmdRuntimeHostRig {
+    ffi_guard(ptr::null_mut(), || {
+        if checked_pointer_range(model, 1).is_none() {
+            set_last_error("invalid host rig model pointer");
+            return ptr::null_mut();
+        }
+        let model = unsafe { &*model };
+        let (Some(driven), Some(goals)) = (
+            unsafe { checked_slice(driven_bones, driven_count) },
+            unsafe { checked_slice(goal_bones, goal_count) },
+        ) else {
+            set_last_error("invalid host rig bone array");
+            return ptr::null_mut();
+        };
+        let driven: Vec<_> = driven.iter().copied().map(BoneIndex).collect();
+        let goals: Vec<_> = goals.iter().copied().map(BoneIndex).collect();
+        match mmd_anim_runtime::HostRigDefinition::new(Arc::clone(&model.model), &driven, &goals) {
+            Ok(rig) => Box::into_raw(Box::new(MmdRuntimeHostRig {
+                rig,
+                positions: vec![glam::Vec3A::ZERO; model.model.bone_count()],
+                rotations: vec![glam::Quat::IDENTITY; model.model.bone_count()],
+                scales: vec![glam::Vec3A::ONE; model.model.bone_count()],
+            })),
+            Err(error) => {
+                set_last_error(error.to_string());
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Releases a host rig and its input buffers. Null is a no-op.
+///
+/// # Safety
+/// A non-null pointer must be a live handle returned by host_rig_create,
+/// freed exactly once, with no concurrent evaluation or access.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_host_rig_free(rig: *mut MmdRuntimeHostRig) {
+    ffi_guard((), || {
+        if !rig.is_null() {
+            drop(unsafe { Box::from_raw(rig) });
+        }
+    });
+}
+
+/// Evaluates pre-morph input with host ownership through both MMD phases.
+/// Physics must be Off. Errors leave the instance pose and output caches intact.
+/// cap=0 uses authored iterations. Copy outputs with existing instance APIs.
+///
+/// # Safety
+/// Instance and rig must be distinct live handles, exclusively accessed for
+/// this call. View and its arrays must be aligned, initialized, readable for
+/// their declared lengths, and must not overlap either handle's owned storage.
+/// No input pointer is retained. The model identity must match the rig's model.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_evaluate_host_rig_pose(
+    instance: *mut MmdRuntimeInstance,
+    rig: *mut MmdRuntimeHostRig,
+    view: *const MmdRuntimeFfiHostPoseView,
+    ik_tolerance: f32,
+    ik_max_iterations_cap: u32,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if checked_pointer_range(instance, 1).is_none()
+            || checked_pointer_range(rig, 1).is_none()
+            || checked_pointer_range(view, 1).is_none()
+        {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "invalid host rig handle or view",
+            );
+        }
+        let instance = unsafe { &mut *instance };
+        let rig = unsafe { &mut *rig };
+        let view = unsafe { &*view };
+        let n = rig.positions.len();
+        if view.bone_count != n
+            || view.bone_count != instance.model.bone_count()
+            || view.morph_count != instance.runtime.morph_weights().len()
+            || view.ik_count != instance.runtime.ik_enabled().len()
+        {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "host rig pose counts do not match instance",
+            );
+        }
+        let (Some(p), Some(q), Some(s), Some(morph), Some(ik)) = (
+            unsafe { checked_slice(view.local_position_offsets_xyz, n * 3) },
+            unsafe { checked_slice(view.local_rotation_xyzw, n * 4) },
+            unsafe { checked_slice(view.local_scales_xyz, n * 3) },
+            unsafe { checked_slice(view.morph_weights, view.morph_count) },
+            unsafe { checked_slice(view.ik_enabled, view.ik_count) },
+        ) else {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "invalid host rig pose arrays",
+            );
+        };
+        for (dst, src) in rig.positions.iter_mut().zip(p.chunks_exact(3)) {
+            *dst = glam::Vec3A::new(src[0], src[1], src[2]);
+        }
+        for (dst, src) in rig.rotations.iter_mut().zip(q.chunks_exact(4)) {
+            *dst = glam::Quat::from_xyzw(src[0], src[1], src[2], src[3]);
+        }
+        for (dst, src) in rig.scales.iter_mut().zip(s.chunks_exact(3)) {
+            *dst = glam::Vec3A::new(src[0], src[1], src[2]);
+        }
+        let pose = HostPoseView {
+            local_position_offsets: &rig.positions,
+            local_rotations: &rig.rotations,
+            local_scales: &rig.scales,
+            morph_weights: morph,
+            ik_enabled: ik,
+        };
+        let options = IkSolveOptions {
+            tolerance: ik_tolerance,
+            max_iterations_cap: (ik_max_iterations_cap != 0).then_some(ik_max_iterations_cap),
+        };
+        match instance
+            .runtime
+            .evaluate_host_rig_pose(&rig.rig, &pose, options)
+        {
+            Ok(()) => {
+                instance.refresh_matrix_caches();
+                MmdRuntimeStatus::Ok
+            }
+            Err(error) => status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string()),
+        }
+    })
+}
+
 fn apply_host_pose_impl(
     instance: &mut MmdRuntimeInstance,
     view: &MmdRuntimeFfiHostPoseView,
@@ -10636,3 +10792,6 @@ fn build_morph_init_from_ffi(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod host_rig_tests;

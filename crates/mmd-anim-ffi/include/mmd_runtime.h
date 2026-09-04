@@ -99,6 +99,7 @@ extern "C" {
 
 typedef struct mmd_runtime_model_t    mmd_runtime_model_t;
 typedef struct mmd_runtime_instance_t mmd_runtime_instance_t;
+typedef struct mmd_runtime_host_rig_t mmd_runtime_host_rig_t;
 typedef struct mmd_runtime_clip_t     mmd_runtime_clip_t;
 typedef struct mmd_runtime_pmx_geometry_t mmd_runtime_pmx_geometry_t;
 typedef struct mmd_runtime_pmx_material_split_t mmd_runtime_pmx_material_split_t;
@@ -141,6 +142,7 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK (1u << 10)
 #define MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES (1u << 11)
 #define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK (1u << 12)
+#define MMD_RUNTIME_FEATURE_HOST_RIG (1u << 13)
 #define MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
@@ -1552,6 +1554,39 @@ mmd_runtime_status_t mmd_runtime_instance_evaluate_current_pose_before_physics(
 mmd_runtime_status_t mmd_runtime_instance_apply_host_pose(
     mmd_runtime_instance_t *instance,
     const mmd_runtime_ffi_host_pose_view_t *view);
+
+/* Host rig: driven bone transforms are preserved in model space after bone
+   morphs, before Append/IK/fixed-axis constraints. Other bones retain MMD
+   evaluation. Driven bones' input local deltas remain Append sources, even
+   if they declare incoming Append. All indices refer to the original model.
+   Only declared PMX goal/controller bones may enable IK through view.ik_enabled;
+   goals whose chains write a driven bone or its ancestor are rejected.
+   Empty goal list means all IK must be disabled. Lists may be NULL iff empty;
+   nonempty lists must be readable, initialized, aligned arrays. No pointers
+   are retained. Null result reports an indexed error through last_error_message.
+   The rig retains model storage. Model, rig and instance may be freed in any
+   order after use; each handle must be freed exactly once. */
+mmd_runtime_host_rig_t* mmd_runtime_host_rig_create(
+    const mmd_runtime_model_t* model,
+    const uint32_t* driven_bones, size_t driven_count,
+    const uint32_t* goal_bones, size_t goal_count);
+
+/* NULL is a no-op. No concurrent use/free of a rig is permitted. */
+void mmd_runtime_host_rig_free(mmd_runtime_host_rig_t* rig);
+
+/* Full Physics-Off evaluation (including the after-physics bone phase).
+   Fresh pre-morph base arrays are required each call; never recapture evaluated
+   helper matrices as input. Local scales must be positive and uniform per bone.
+   Instance and rig must refer to the same model and be accessed exclusively.
+   View and arrays must be aligned/readable, and not alias handle-owned storage.
+   Input lengths must match the instance counts. No input pointers are retained.
+   tolerance must be finite and nonnegative; cap=0 uses authored iterations.
+   On validation failure, pose and output caches remain unchanged.
+   Read outputs with existing instance world/skinning/morph APIs. */
+mmd_runtime_status_t mmd_runtime_instance_evaluate_host_rig_pose(
+    mmd_runtime_instance_t* instance, mmd_runtime_host_rig_t* rig,
+    const mmd_runtime_ffi_host_pose_view_t* view,
+    float ik_tolerance, uint32_t ik_max_iterations_cap);
 
 /* Applies the same pre-morph host pose contract as apply_host_pose, expands
    group/bone morphs natively, and evaluates the before-physics phase. */

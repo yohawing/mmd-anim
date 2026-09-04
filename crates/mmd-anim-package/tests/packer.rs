@@ -254,6 +254,29 @@ fn rejects_invalid_input_and_limits() {
 }
 
 #[test]
+fn rejects_ktx2_codec_on_non_texture_before_encoding() {
+    let result = MmdPackagePacker::pack(
+        input(vec![MmdPackagePackEntry {
+            id: 1,
+            path: "model/model.pmx".into(),
+            kind: MmdPackageEntryKind::Model,
+            codec: "ktx2-uastc-v1".into(),
+            compression: MmdPackagePackCompression::None,
+            decoded: vec![0],
+            media_type: None,
+            motion: None,
+            texture: None,
+        }]),
+        MmdPackageLimits::default(),
+    );
+    assert!(matches!(
+        result,
+        Err(MmdPackagePackError::PackingFailed(message))
+            if message.contains("requires texture kind")
+    ));
+}
+
+#[test]
 fn generated_entry_tampering_is_rejected() {
     let packed = MmdPackagePacker::pack(
         input(vec![model(

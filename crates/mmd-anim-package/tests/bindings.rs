@@ -22,11 +22,11 @@ fn package_with_bindings(texture_bindings: Vec<MmdTextureBinding>) -> MmdPackage
     if !texture_bindings.is_empty() {
         entries.push(MmdPackagePackEntry {
             id: 2,
-            path: "texture/diffuse.ktx2".into(),
+            path: "texture/diffuse.bin".into(),
             kind: MmdPackageEntryKind::Texture,
-            codec: "ktx2-uastc-v1".into(),
+            codec: "uastc-ldr-4x4-v1".into(),
             compression: MmdPackagePackCompression::None,
-            decoded: vec![0],
+            decoded: vec![0; 16],
             media_type: None,
             motion: None,
             texture: Some(json!({
@@ -38,7 +38,9 @@ fn package_with_bindings(texture_bindings: Vec<MmdTextureBinding>) -> MmdPackage
                 "channelModel": "rgba",
                 "swizzle": "rgba",
                 "alphaMode": "straight",
-                "origin": "top-left"
+                "origin": "top-left",
+                "blockOrder": "row-major-top-left",
+                "mips": [{"width": 1, "height": 1, "offset": 0, "size": 16}]
             })),
         });
     }

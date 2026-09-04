@@ -47,6 +47,8 @@ pub enum MmdPackageError {
     UnsupportedCodec(String),
     #[error("invalid zstd-v1 payload: {0}")]
     InvalidZstd(String),
+    #[error("invalid KTX2 UASTC payload: {0}")]
+    InvalidKtx2(String),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, MmdPackageError>;

@@ -244,7 +244,7 @@ fn verify_package(package_path: &Path, key_path: &Path, strict_codecs: bool) -> 
             .join(",");
         println!("unknown_codecs: {ids}");
     }
-    println!("texture_payload_validation: manifest metadata only; KTX2 payload/DFD deferred");
+    println!("texture_payload_validation: KTX2 header/DFD/mip ranges validated");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1185,30 +1185,11 @@ mod tests {
     }
 
     #[test]
-    fn pack_and_unpack_roundtrip_minimal_pmx_without_external_assets() {
+    fn pack_and_unpack_roundtrip_minimal_pmx_and_ktx2_without_external_assets() {
         let root = tempfile_path("roundtrip-input");
-        fs::create_dir_all(root.join("model")).unwrap();
         let model = minimal_pmx_prefix();
-        fs::write(root.join("model/model.pmx"), &model).unwrap();
-        let config = json!({
-            "defaultModelEntryId": 1,
-            "entries": [{
-                "id": 1,
-                "path": "model/model.pmx",
-                "kind": "model",
-                "codec": "pmx",
-                "compression": "none"
-            }],
-            "modelBindings": [{
-                "modelEntryId": 1,
-                "textureBindings": []
-            }]
-        });
-        fs::write(
-            root.join("mmdpack.json"),
-            serde_json::to_vec(&config).unwrap(),
-        )
-        .unwrap();
+        let texture = minimal_ktx2_uastc_4x4();
+        write_ktx2_pack_fixture(&root, &texture, ktx2_texture_metadata());
         let package_path = tempfile_path("roundtrip.mmdpack");
         let key_path = tempfile_path("roundtrip.key");
         let output_dir = tempfile_path("roundtrip-output");
@@ -1219,11 +1200,42 @@ mod tests {
         verify_package(&package_path, &key_path, true).unwrap();
         unpack_package(&package_path, &output_dir, &key_path).unwrap();
         assert_eq!(fs::read(output_dir.join("model/model.pmx")).unwrap(), model);
+        assert_eq!(
+            fs::read(output_dir.join("texture/diffuse.ktx2")).unwrap(),
+            texture
+        );
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_file(package_path);
         let _ = fs::remove_file(key_path);
         let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn pack_rejects_invalid_ktx2_metadata_and_payload_before_publish() {
+        let mut mismatched_metadata = ktx2_texture_metadata();
+        mismatched_metadata["width"] = Value::from(8);
+        let mut malformed_payload = minimal_ktx2_uastc_4x4();
+        malformed_payload[0] ^= 0xff;
+        let cases = [
+            ("metadata", minimal_ktx2_uastc_4x4(), mismatched_metadata),
+            ("payload", malformed_payload, ktx2_texture_metadata()),
+        ];
+
+        for (name, texture, metadata) in cases {
+            let root = tempfile_path(&format!("ktx2-invalid-{name}-input"));
+            write_ktx2_pack_fixture(&root, &texture, metadata);
+            let package_path = tempfile_path(&format!("ktx2-invalid-{name}.mmdpack"));
+            let key_path = tempfile_path(&format!("ktx2-invalid-{name}.key"));
+
+            assert!(pack_package(&root, None, &package_path, &key_path).is_err());
+            assert!(!package_path.exists());
+            assert!(!key_path.exists());
+
+            let _ = fs::remove_dir_all(root);
+            let _ = fs::remove_file(package_path);
+            let _ = fs::remove_file(key_path);
+        }
     }
 
     #[test]
@@ -1283,6 +1295,96 @@ mod tests {
         bytes.extend_from_slice(&0_i32.to_le_bytes());
         bytes.extend_from_slice(&0_i32.to_le_bytes());
         bytes.extend_from_slice(&0_i32.to_le_bytes());
+        bytes
+    }
+
+    fn write_ktx2_pack_fixture(root: &Path, texture: &[u8], metadata: Value) {
+        fs::create_dir_all(root.join("model")).unwrap();
+        fs::create_dir_all(root.join("texture")).unwrap();
+        fs::write(root.join("model/model.pmx"), minimal_pmx_prefix()).unwrap();
+        fs::write(root.join("texture/diffuse.ktx2"), texture).unwrap();
+        let config = json!({
+            "defaultModelEntryId": 1,
+            "entries": [
+                {
+                    "id": 1,
+                    "path": "model/model.pmx",
+                    "kind": "model",
+                    "codec": "pmx",
+                    "compression": "none"
+                },
+                {
+                    "id": 2,
+                    "path": "texture/diffuse.ktx2",
+                    "kind": "texture",
+                    "codec": "ktx2-uastc-v1",
+                    "compression": "none",
+                    "texture": metadata
+                }
+            ],
+            "modelBindings": [{"modelEntryId": 1, "textureBindings": []}]
+        });
+        fs::write(
+            root.join("mmdpack.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn ktx2_texture_metadata() -> Value {
+        json!({
+            "width": 4,
+            "height": 4,
+            "mipCount": 1,
+            "colorSpace": "srgb",
+            "usage": "color",
+            "channelModel": "rgba",
+            "swizzle": "rgba",
+            "alphaMode": "straight",
+            "origin": "top-left"
+        })
+    }
+
+    fn minimal_ktx2_uastc_4x4() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(176);
+        bytes.extend_from_slice(b"\xABKTX 20\xBB\r\n\x1A\n");
+        for value in [
+            0_u32, // vkFormat: DFD describes the UASTC block format.
+            1,     // typeSize
+            4,     // pixelWidth
+            4,     // pixelHeight
+            0,     // pixelDepth
+            0,     // layerCount
+            1,     // faceCount
+            1,     // levelCount
+            0,     // supercompressionScheme
+            104,   // dfdByteOffset (after the 80-byte header and level index)
+            44,    // dfdByteLength
+            0,     // kvdByteOffset
+            0,     // kvdByteLength
+        ] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // sgdByteOffset
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // sgdByteLength
+        bytes.extend_from_slice(&160_u64.to_le_bytes()); // level byte offset
+        bytes.extend_from_slice(&16_u64.to_le_bytes()); // level byte length
+        bytes.extend_from_slice(&16_u64.to_le_bytes()); // uncompressed level length
+        bytes.extend_from_slice(&[
+            0x2c, 0x00, 0x00, 0x00, // total DFD size
+            0x00, 0x00, // vendorId
+            0x00, 0x00, // descriptorType: basic
+            0x02, 0x00, // versionNumber
+            0x28, 0x00, // descriptor block size
+            0xa6, 0x01, 0x02, 0x00, // UASTC color model, primaries, transfer, flags
+            0x03, 0x03, 0x00, 0x00, // 4x4 texel block dimensions
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 16-byte plane
+            0x00, 0x00, 0x7f, 0x03, 0x00, 0x00, 0x00, 0x00, // RGBA sample
+            0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+        ]);
+        assert_eq!(bytes.len(), 148);
+        bytes.resize(160, 0);
+        bytes.extend_from_slice(&[0; 16]);
         bytes
     }
 

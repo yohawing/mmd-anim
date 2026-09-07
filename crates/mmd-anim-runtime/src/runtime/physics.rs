@@ -115,6 +115,13 @@ impl RuntimeInstance {
             let Some(slot) = target_world_matrices.get_mut(bone_index) else {
                 continue;
             };
+            // A scoped HostRigEvaluation keeps the host-owned model-space
+            // transform authoritative across physics writeback and the
+            // after-physics phase. The Bullet body remains solver-owned; only
+            // its conflicting runtime bone write is suppressed.
+            if self.is_host_driven(BoneIndex(bone_index as u32)) {
+                continue;
+            }
             *slot = *target_world_matrix;
             has_physics_target[bone_index] = true;
         }
@@ -122,6 +129,11 @@ impl RuntimeInstance {
         for bone in self.model.eval_order() {
             let bone_index = bone.as_usize();
             if has_physics_target[bone_index] {
+                continue;
+            }
+            if self.is_host_driven(*bone) {
+                target_world_matrices[bone_index] =
+                    self.host_rig.as_ref().unwrap().reference_world[bone_index];
                 continue;
             }
             let local_matrix = self.current_local_matrix_for_physics_scratch(*bone);

@@ -42,7 +42,10 @@ extern "C" {
    (MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES) is set when the non-materializing
    byte-summary endpoint is available; bit 12
    (MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK) is set when the
-   model-less raw bone/morph key readback endpoints are available.
+   model-less raw bone/morph key readback endpoints are available; bit 13
+   (MMD_RUNTIME_FEATURE_HOST_RIG) is set when Physics-Off host-rig evaluation
+   is available; bit 14 (MMD_RUNTIME_FEATURE_HOST_RIG_PHYSICS) is set when
+   the host-rig physics frame endpoint is available with native Bullet.
    Check the relevant bit before calling each optional surface; when a
    surface's bit is unset, its status-returning functions return
    MMD_RUNTIME_STATUS_UNSUPPORTED (and optional count functions return zero).
@@ -143,6 +146,7 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES (1u << 11)
 #define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK (1u << 12)
 #define MMD_RUNTIME_FEATURE_HOST_RIG (1u << 13)
+#define MMD_RUNTIME_FEATURE_HOST_RIG_PHYSICS (1u << 14)
 #define MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
@@ -1587,6 +1591,32 @@ mmd_runtime_status_t mmd_runtime_instance_evaluate_host_rig_pose(
     mmd_runtime_instance_t* instance, mmd_runtime_host_rig_t* rig,
     const mmd_runtime_ffi_host_pose_view_t* view,
     float ik_tolerance, uint32_t ik_max_iterations_cap);
+
+/* Evaluates one host-rig physics frame while retaining the same host-rig
+   ownership context across base/morph input, before-physics evaluation,
+   physics writeback, and after-physics evaluation. The host pose is copied
+   from fresh pre-morph base arrays once; hosts must not preapply morph bone
+   deltas. `action` uses MMD_RUNTIME_PHYSICS_FRAME_ACTION_* values. STEP
+   requires Trace or Live physics mode; SEED resets/seeds without advancing
+   the solver. `ik_tolerance` and `ik_max_iterations_cap` apply to the
+   before-physics phase; the physics bridge's existing after-physics phase
+   uses its default IK options. Dynamic bodies remain solver-owned, while
+   writeback to bones declared driven by `rig` is suppressed. On validation
+   failure no pose, physics world, or output cache is mutated. A physics
+   backend failure leaves the applied before-physics pose in the instance,
+   matching mmd_runtime_evaluate_host_frame. Read outputs with the existing
+   instance world/skinning/morph APIs. Requires
+   MMD_RUNTIME_FEATURE_HOST_RIG_PHYSICS. */
+mmd_runtime_status_t mmd_runtime_evaluate_host_rig_frame(
+    mmd_runtime_instance_t* instance,
+    mmd_runtime_physics_world_t* world,
+    mmd_runtime_host_rig_t* rig,
+    const mmd_runtime_ffi_host_pose_view_t* view,
+    mmd_runtime_physics_frame_action_t action,
+    float dt_seconds,
+    float ik_tolerance,
+    uint32_t ik_max_iterations_cap,
+    mmd_runtime_ffi_physics_world_step_report_t* out_report);
 
 /* Applies the same pre-morph host pose contract as apply_host_pose, expands
    group/bone morphs natively, and evaluates the before-physics phase. */

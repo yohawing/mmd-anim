@@ -45,9 +45,11 @@ inferred. For ordinary Humanoid FK playback, pass an empty goal list and zero
 IK flags, retaining the Animator/retargeter's leg pose.
 
 Local scales must be positive and uniform per bone. Keep engine object/world
-scale outside these model-space arrays. This initial API supports Physics Off
-only, but evaluates both before- and after-physics bone phases. Live physics,
-foot locking, inferred goals and FK/IK blending are separate work.
+scale outside these model-space arrays. The pose API supports Physics Off and
+evaluates both before- and after-physics bone phases. The native Live physics
+frame API keeps the same HostRig ownership through physics writeback; dynamic
+bodies remain solver-owned, while writes to declared driven bones are
+suppressed. Foot locking, inferred goals and FK/IK blending are separate work.
 
 ## Rust, C and JavaScript
 
@@ -65,6 +67,11 @@ C: check `MMD_RUNTIME_FEATURE_HOST_RIG`, then use
 Use existing instance copy functions for outputs. A null creation result or
 non-OK evaluation status has details in `mmd_runtime_last_error_message()`.
 The header documents array validity, ownership and exclusive handle access.
+For native Bullet Live/Trace evaluation, also check
+`MMD_RUNTIME_FEATURE_HOST_RIG_PHYSICS` and call
+`mmd_runtime_evaluate_host_rig_frame`. Its tolerance and iteration cap apply
+to before-physics; the existing bridge after-physics defaults remain in force.
+Use `Seed` for a reset-style frame and `Step` for a fixed-clock advance.
 
 JavaScript uses `WasmMmdHostRig` from the generated WASM module:
 
@@ -109,8 +116,9 @@ cd crates/mmd-anim-wasm/harness
 npm run smoke
 ```
 
-Future Live physics integration must keep the same input snapshot and ownership
-through `base/morph → before-physics → physics writeback → after-physics`.
-Physics-owned and host-protected bone writes must be resolved before enabling
-that route. Do not call the legacy physics evaluation after this full rig call:
-it does not retain an active rig context for a later physics phase.
+The native Live route keeps the same input snapshot and ownership through
+`base/morph → before-physics → physics writeback → after-physics`. Dynamic
+bodies attached to protected driven bones stay in Bullet and may move
+independently; their runtime writeback is suppressed for the protected bone.
+Do not call the legacy physics evaluation after the full HostRig frame call: it
+does not retain an active rig context for a later physics phase.

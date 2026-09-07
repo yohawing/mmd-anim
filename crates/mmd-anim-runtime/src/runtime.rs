@@ -103,7 +103,7 @@ pub struct IkSolveOptions {
     pub max_iterations_cap: Option<u32>,
 }
 
-pub use host_rig::{HostRigDefinition, HostRigError};
+pub use host_rig::{HostRigDefinition, HostRigError, HostRigEvaluation};
 pub use physics::{PhysicsMode, PhysicsStepStats, PhysicsTickConfig};
 
 impl Default for IkSolveOptions {

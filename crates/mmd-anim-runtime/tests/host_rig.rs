@@ -313,6 +313,84 @@ fn invalid_input_is_atomic_and_next_valid_frame_recovers() {
 }
 
 #[test]
+fn physics_writeback_preserves_sparse_protected_child_under_moving_ancestor() {
+    let model = Arc::new(
+        ModelArena::new(vec![
+            BoneInit::new(None, Vec3A::ZERO),
+            BoneInit::new(Some(BoneIndex(0)), Vec3A::Y),
+            BoneInit::new(Some(BoneIndex(1)), Vec3A::Y),
+            BoneInit::new(Some(BoneIndex(2)), Vec3A::Y),
+        ])
+        .unwrap(),
+    );
+    let rig = HostRigDefinition::new(model.clone(), &[BoneIndex(2)], &[]).unwrap();
+    let input = Input::new(&model);
+    let mut runtime = RuntimeInstance::new(model);
+
+    let mut evaluation = runtime
+        .begin_host_rig_evaluation(&rig, &input.view(), IkSolveOptions::default())
+        .unwrap();
+    evaluation.evaluate_before_physics_with_ik_options(IkSolveOptions::default());
+    let updated = evaluation.runtime_mut().apply_physics_world_matrices(&[
+        None,
+        Some(Mat4::from_translation(Vec3A::new(10.0, 0.0, 0.0).into())),
+        Some(Mat4::from_translation(Vec3A::new(99.0, 99.0, 99.0).into())),
+        Some(Mat4::from_translation(Vec3A::new(3.0, 3.0, 0.0).into())),
+        Some(Mat4::from_translation(Vec3A::new(99.0, 99.0, 99.0).into())),
+    ]);
+    assert_eq!(updated, 2);
+    near(
+        evaluation.runtime_mut().world_matrices()[1],
+        Mat4::from_translation(Vec3A::new(10.0, 0.0, 0.0).into()),
+    );
+    near(
+        evaluation.runtime_mut().world_matrices()[2],
+        Mat4::from_translation(Vec3A::new(0.0, 2.0, 0.0).into()),
+    );
+    near(
+        evaluation.runtime_mut().world_matrices()[3],
+        Mat4::from_translation(Vec3A::new(3.0, 3.0, 0.0).into()),
+    );
+    evaluation.evaluate_after_physics_with_ik_options(IkSolveOptions::default());
+}
+
+#[test]
+fn host_rig_evaluation_guard_rejects_nested_and_recovers_after_panic() {
+    let model = fixture();
+    let rig = HostRigDefinition::new(model.clone(), &[BoneIndex(0)], &[]).unwrap();
+    let input = Input::new(&model);
+    let mut runtime = RuntimeInstance::new(model);
+
+    let mut evaluation = runtime
+        .begin_host_rig_evaluation(&rig, &input.view(), IkSolveOptions::default())
+        .unwrap();
+    assert!(matches!(
+        evaluation.runtime_mut().begin_host_rig_evaluation(
+            &rig,
+            &input.view(),
+            IkSolveOptions::default()
+        ),
+        Err(HostRigError::EvaluationActive)
+    ));
+    drop(evaluation);
+    runtime
+        .begin_host_rig_evaluation(&rig, &input.view(), IkSolveOptions::default())
+        .unwrap();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut evaluation = runtime
+            .begin_host_rig_evaluation(&rig, &input.view(), IkSolveOptions::default())
+            .unwrap();
+        evaluation.evaluate_before_physics_with_ik_options(IkSolveOptions::default());
+        panic!("test host-rig unwind");
+    }));
+    assert!(result.is_err());
+    runtime
+        .begin_host_rig_evaluation(&rig, &input.view(), IkSolveOptions::default())
+        .unwrap();
+}
+
+#[test]
 fn empty_rig_accepts_extra_ik_slots_without_solvers_like_legacy_host_pose() {
     let model = Arc::new(ModelArena::new(vec![BoneInit::new(None, Vec3A::ZERO)]).unwrap());
     let rig = HostRigDefinition::new(model.clone(), &[], &[]).unwrap();

@@ -108,6 +108,9 @@ impl RuntimeInstance {
         bone: crate::BoneIndex,
         visiting: &mut Vec<crate::BoneIndex>,
     ) {
+        if self.is_host_driven(bone) {
+            return;
+        }
         let Some(append_index) = self.model.append_transform_index(bone) else {
             return;
         };
@@ -120,8 +123,9 @@ impl RuntimeInstance {
         let ratio = append.ratio;
         let affect_rotation = append.affect_rotation;
         let affect_translation = append.affect_translation;
-        let use_source_append =
-            !append.local && self.model.append_transform_index(source_bone).is_some();
+        let use_source_append = !self.is_host_driven(source_bone)
+            && !append.local
+            && self.model.append_transform_index(source_bone).is_some();
         if use_source_append {
             self.update_append_transform_for_bone_inner(source_bone, visiting);
         }
@@ -152,6 +156,13 @@ impl RuntimeInstance {
     }
 
     pub(super) fn update_world_matrix_for_bone(&mut self, bone: crate::BoneIndex) {
+        if self.is_host_driven(bone) {
+            let world = self.host_rig.as_ref().unwrap().reference_world[bone.as_usize()];
+            self.pose.set_world_matrix(bone, world);
+            self.pose
+                .set_skinning_matrix(bone, world * self.model.inverse_bind_matrix(bone));
+            return;
+        }
         #[cfg(test)]
         {
             self.world_matrix_bone_update_count += 1;

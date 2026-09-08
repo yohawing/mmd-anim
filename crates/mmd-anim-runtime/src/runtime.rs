@@ -5,6 +5,7 @@ use glam::{Quat, Vec3A};
 use crate::ik_primitive::ChainLinkState;
 use crate::{AnimationClip, ModelArena, PoseArena};
 
+mod host_rig;
 mod ik;
 mod morph;
 mod physics;
@@ -102,6 +103,7 @@ pub struct IkSolveOptions {
     pub max_iterations_cap: Option<u32>,
 }
 
+pub use host_rig::{HostRigDefinition, HostRigError, HostRigEvaluation};
 pub use physics::{PhysicsMode, PhysicsStepStats, PhysicsTickConfig};
 
 impl Default for IkSolveOptions {
@@ -171,6 +173,7 @@ impl std::error::Error for HostPoseError {}
 
 #[derive(Debug)]
 pub struct RuntimeInstance {
+    host_rig: Option<host_rig::HostRigScratch>,
     model: Arc<ModelArena>,
     pose: PoseArena,
     physics_mode: PhysicsMode,
@@ -216,6 +219,7 @@ impl RuntimeInstance {
         let ik_stats = vec![IkSolverRuntimeStats::default(); model.ik_count()];
         let ik_link_change_update_bones = vec![None; model.ik_count()];
         Self {
+            host_rig: None,
             model,
             pose,
             physics_mode: PhysicsMode::default(),
@@ -400,6 +404,23 @@ impl RuntimeInstance {
     /// expanded and bone-morph offsets are applied after all input validation
     /// and pose slices have been copied, matching clip evaluation semantics.
     pub fn apply_host_pose(&mut self, view: &HostPoseView) -> Result<(), HostPoseError> {
+        self.validate_host_pose(view)?;
+        self.apply_validated_host_pose(view);
+        Ok(())
+    }
+
+    fn apply_validated_host_pose(&mut self, view: &HostPoseView) {
+        self.pose
+            .set_local_position_offsets_from_slice(view.local_position_offsets);
+        self.pose
+            .set_local_rotations_from_slice(view.local_rotations);
+        self.pose.set_local_scales_from_slice(view.local_scales);
+        self.pose.set_morph_weights_from_slice(view.morph_weights);
+        self.pose.set_ik_enabled_from_slice(view.ik_enabled);
+        self.expand_morphs();
+    }
+
+    fn validate_host_pose(&self, view: &HostPoseView) -> Result<(), HostPoseError> {
         let bone_count = self.model.bone_count();
         let morph_count = self.pose.morph_weights().len();
         let ik_count = self.pose.ik_enabled().len();
@@ -470,15 +491,6 @@ impl RuntimeInstance {
                 });
             }
         }
-
-        self.pose
-            .set_local_position_offsets_from_slice(view.local_position_offsets);
-        self.pose
-            .set_local_rotations_from_slice(view.local_rotations);
-        self.pose.set_local_scales_from_slice(view.local_scales);
-        self.pose.set_morph_weights_from_slice(view.morph_weights);
-        self.pose.set_ik_enabled_from_slice(view.ik_enabled);
-        self.expand_morphs();
 
         Ok(())
     }

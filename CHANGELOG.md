@@ -4,7 +4,7 @@
 
 Added model-bound host-rig evaluation and the first experimental MMDPACK
 package integration. This release advances the workspace crates together so
-the installable CLI can use the package core from crates.io.
+the release CLI can use the package core from the workspace.
 
 ### Added
 
@@ -27,7 +27,9 @@ the installable CLI can use the package core from crates.io.
   configuration, and package API are experimental and may change before V1.
   Packing accepts codec-ready payloads; PNG/JPEG decoding, mip generation,
   texture encoding, WASM/FFI package APIs, and high-level PMX/VMD loading are
-  not included.
+  not included. The `mmd-anim-package` crate is workspace-private for now, and
+  the dependent CLI crate is also not published to crates.io; use release
+  binaries or a workspace build.
 - Host-rig mapping, retargeting, coordinate conversion, root motion, and
   display application remain host responsibilities. WASM exposes stateless
   pose evaluation; it does not add WASM Live physics.

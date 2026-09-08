@@ -2,6 +2,9 @@
 
 Experimental Rust package core for the draft `.mmdpack` container.
 
+This crate is currently workspace-private and is not published to crates.io
+while the Draft 0.2 format evolves.
+
 This crate provides bounded packing of already codec-encoded payloads, fixed
 header validation, authenticated manifest parsing, entry layout checks, and
 bounded per-entry decrypt/decompress. Manifest and KTX2 UASTC payload checks

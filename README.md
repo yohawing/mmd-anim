@@ -16,10 +16,6 @@ It is tested against data exported from the original MMD and against several
 PMX/VMD assets, but real-world usage is still limited. APIs and features are not
 frozen yet, and breaking changes may happen before 1.0. Feedback is welcome.
 
-The MMDPACK package core and CLI are available as an experimental draft
-integration. The current Draft 0.2 wire format is not a stable V1 contract;
-packing accepts codec-ready payloads and does not perform image conversion.
-
 ## Runtime Evaluation
 
 - Load a PMX model and convert it into runtime-ready model data.
@@ -205,31 +201,44 @@ const generatedPmxBytes = exportPmxFromParts(
 ## CLI
 
 `mmd-anim-cli` is a command-line tool for inspecting, converting, and diagnosing
-MMD format files (PMX, VMD, VPD, PMM, X/VAC).
+MMD format files (PMX, VMD, VPD, PMM, X/VAC). The crate is currently
+workspace-private because it depends on the experimental MMDPACK package core.
+Prebuilt CLI binaries from GitHub Releases can be used directly, or the CLI
+can be built from this workspace.
+
+The examples below use a workspace build. With a GitHub Release binary,
+replace `cargo run -p mmd-anim-cli --` with `mmd-anim`.
 
 ```powershell
-cargo install mmd-anim-cli
-mmd-anim --help
+cargo run -p mmd-anim-cli -- --help
 ```
 
 Source builds of the CLI, native API, or physics crate require a C++ compiler
 for the target. Bullet itself does not need to be installed separately.
-Prebuilt CLI binaries from GitHub Releases can be used directly.
 
 You can export animated FBX files from PMX and VMD inputs.
 
 ```powershell
-mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
+cargo run -p mmd-anim-cli -- convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 ```
 
-The experimental MMDPACK commands inspect, verify, pack, and unpack encrypted
-Draft 0.2 packages. `package pack` stages codec-ready payloads from a strict
-JSON manifest; it does not decode images or encode textures.
+## MMDPACK (Experimental)
+
+MMDPACK groups codec-ready model, motion, texture, and audio payloads into one
+authenticated, encrypted package. The current commands authenticate the
+manifest, decrypt and decompress entries, and validate PMX texture bindings.
+They do not convert images.
+
+Place codec-ready payloads and a strict `mmdpack.json` in `assets/`, then run:
 
 ```powershell
-mmd-anim package pack assets --config assets/mmdpack.json -o scene.mmdpack --key-out scene.key
-mmd-anim package verify scene.mmdpack --key-file scene.key --strict-codecs
+cargo run -p mmd-anim-cli -- package pack assets --config assets/mmdpack.json -o scene.mmdpack --key-out scene.key
+cargo run -p mmd-anim-cli -- package verify scene.mmdpack --key-file scene.key --strict-codecs
 ```
+
+The first command writes the package and a raw key; both output paths must not
+already exist. Keep the key separate from the package. The package crate is
+currently workspace-private, and the Draft 0.2 format may change before V1.
 
 ## Crates
 
@@ -239,10 +248,10 @@ mmd-anim package verify scene.mmdpack --key-file scene.key --strict-codecs
 | `mmd-anim-runtime` | Format-independent evaluation core: model arena, pose, VMD evaluation, append transforms, IK, and morphs. |
 | `mmd-anim-format` | PMX/VMD runtime import, format detection, structured loading, and PMX/PMD/VMD/VPD/X/VAC writing. |
 | `mmd-anim-physics-bullet` | Bullet Physics backend for MMD. Builds the bundled Bullet3 sources for the target and integrates them with the runtime and PMX formats. |
-| `mmd-anim-package` | Experimental bounded reader and packer for the draft MMDPACK container. The wire format is not frozen and codec-ready payloads are passed through unchanged. |
+| `mmd-anim-package` | Workspace-private experimental bounded reader and packer for the draft MMDPACK container. The wire format is not frozen and codec-ready payloads are passed through unchanged. |
 | `mmd-anim-ffi` | C ABI for native hosts. Exposes runtime operations, PMX parts writing, sparse curves, and physics simulation. Repository-local and not published to crates.io. |
 | `mmd-anim-wasm` | `wasm-bindgen` wrapper for browsers. Exposes runtime operations, loading/writing APIs, PMX parts writing, and sparse curves. Workspace-local and not published to crates.io. |
-| `mmd-anim-cli` | Command-line tool for inspecting, converting, and diagnosing MMD format files, including maintainer-local oracle and numeric comparison schemas. Installable via `cargo install mmd-anim-cli`. |
+| `mmd-anim-cli` | Workspace-private command-line tool for inspecting, converting, and diagnosing MMD format files, including maintainer-local oracle and numeric comparison schemas. Release binaries are provided separately. |
 
 For normal library use, depend on `mmd-anim`. Advanced users who only need a
 lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly. Use
@@ -254,7 +263,7 @@ lower layer can depend on `mmd-anim-format` or `mmd-anim-runtime` directly. Use
 - **Writing:** PMX generation from parts currently covers the initial range of geometry, materials, bones, display frames, morphs, and physics. PMM writing is limited to the data currently represented by the PMM manifest parser.
 - **PMM:** Supported PMM data currently includes project header information, timeline-derived values, display state, initial model-slot data, referenced assets, PMMv2 summary information, and asset/header consistency diagnostics. The PMM exporter can re-emit that limited manifest/header/slot/asset-reference surface as a PMMv2 file, but it is not a full PMM project-graph exporter. Keyframe payloads, full camera/light/accessory/self-shadow tracks, and other binary project graph data that are only summarized or not preserved by the parser cannot be reconstructed from `PmmParsedManifest`.
 - **X/VAC:** Text X mesh, material, normal, UV, vertex color, and common VAC line order are handled. Binary X is diagnostic-only.
-- **MMDPACK:** The published `mmd-anim-package` crate and CLI commands are experimental Draft 0.2 support. The format, codec profile, and public configuration may change before V1; packing currently accepts codec-ready payloads and does not decode PNG/JPEG or provide WASM/FFI/high-level PMX/VMD loading.
+- **MMDPACK:** The workspace-private `mmd-anim-package` crate and CLI commands are experimental Draft 0.2 support. The format, codec profile, and public configuration may change before V1; packing currently accepts codec-ready payloads and does not decode PNG/JPEG or provide package WASM/FFI or high-level PMX/VMD loading. The CLI crate remains private while it depends on the package crate; use a workspace build or a GitHub Release binary.
 
 ## Japanese README
 

@@ -20,7 +20,7 @@ APIや機能はまだ固定されておらず、1.0 までに互換性のない�
 - PMX（モデル）を読み込んで、再生に使えるモデルデータに変換する。
 - VMD（モーション）を読み込み、ボーン・カメラ・ライトなどのモーションを、再生できる形に変換する。
 - MMD と同じベジェ補間（位置・回転）で計算するので、動きの緩急を再現できる。
-- model-bound host rig のポーズを評価し、host が管理するボーンと明示した IK goal を保持する。
+- 別のスケルトンからリターゲットしたポーズを評価して、MMDのリグを動かす。
 - Bullet Physics による MMD 向けの物理演算を、CLI や API から利用できます。
 
 ## テスト基盤
@@ -189,9 +189,6 @@ const generatedPmxBytes = exportPmxFromParts(
 ## CLI
 
 `mmd-anim-cli` は MMD 形式ファイル（PMX, VMD, VPD, PMM, X/VAC）の検査・変換・診断を行うコマンドラインツールです。
-試験的な MMDPACK package core に依存するため、現在は workspace-private です。
-GitHub Releases のビルド済み CLI、またはこの workspace からビルドして利用します。
-以下の例は workspace build を使います。GitHub Releases のバイナリでは、先頭の `cargo run -p mmd-anim-cli --` を `mmd-anim` に置き換えます。
 
 ```powershell
 cargo run -p mmd-anim-cli -- --help
@@ -245,8 +242,6 @@ cargo run -p mmd-anim-cli -- package verify scene.mmdpack --key-file scene.key -
 ```
 
 `package pack`は`scene.mmdpack`と32バイトの鍵ファイル`scene.key`を作成します。2つの出力先は、あらかじめ存在しないパスを指定します。鍵はパッケージと分けて保管し、リポジトリへ登録しないでください。
-
-`mmd-anim-package`は現在ワークスペース内だけで利用できる非公開クレートです。Draft 0.2のフォーマット、`codec profile`、公開設定はV1までに変更される可能性があります。
 
 ## クレート構成
 

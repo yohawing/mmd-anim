@@ -1,5 +1,165 @@
 use super::*;
 
+struct ExternalPhysicsCallbackState {
+    calls: usize,
+    status: u32,
+    write_non_finite: bool,
+}
+
+unsafe extern "C" fn external_physics_callback(
+    user_data: *mut c_void,
+    before_world_matrices_f32: *const f32,
+    before_world_matrices_f32_len: usize,
+    physics_world_matrices_f32: *mut f32,
+    physics_world_matrices_f32_len: usize,
+    physics_world_matrix_mask_u8: *mut u8,
+    physics_world_matrix_mask_u8_len: usize,
+) -> u32 {
+    assert_eq!(before_world_matrices_f32_len, 32);
+    assert_eq!(physics_world_matrices_f32_len, 32);
+    assert_eq!(physics_world_matrix_mask_u8_len, 2);
+    let state = unsafe { &mut *user_data.cast::<ExternalPhysicsCallbackState>() };
+    state.calls += 1;
+    if state.status != MmdRuntimeStatus::Ok as u32 {
+        return state.status;
+    }
+    let before =
+        unsafe { slice::from_raw_parts(before_world_matrices_f32, before_world_matrices_f32_len) };
+    let physics = unsafe {
+        slice::from_raw_parts_mut(physics_world_matrices_f32, physics_world_matrices_f32_len)
+    };
+    let mask = unsafe {
+        slice::from_raw_parts_mut(
+            physics_world_matrix_mask_u8,
+            physics_world_matrix_mask_u8_len,
+        )
+    };
+    assert_eq!(before, physics);
+    physics[12] = 99.0;
+    physics[16 + 13] -= 0.25;
+    if state.write_non_finite {
+        physics[16] = f32::NAN;
+    }
+    mask.copy_from_slice(&[1, 1]);
+    MmdRuntimeStatus::Ok as u32
+}
+
+#[test]
+fn host_rig_external_physics_callback_is_backend_neutral_and_recovers() {
+    let parents = [-1, 0];
+    let rest_positions = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let model = unsafe {
+        mmd_runtime_model_create(parents.as_ptr(), rest_positions.as_ptr(), parents.len())
+    };
+    let instance = unsafe { mmd_runtime_instance_create_for_model(model) };
+    let driven = [0u32];
+    let rig = unsafe {
+        mmd_runtime_host_rig_create(model, driven.as_ptr(), driven.len(), ptr::null(), 0)
+    };
+    assert!(!model.is_null() && !instance.is_null() && !rig.is_null());
+    assert_ne!(
+        mmd_runtime_feature_flags() & MMD_RUNTIME_FEATURE_HOST_RIG_EXTERNAL_PHYSICS,
+        0
+    );
+
+    let positions = [2.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let scales = [1.0f32; 6];
+    let view = MmdRuntimeFfiHostPoseView {
+        local_position_offsets_xyz: positions.as_ptr(),
+        local_rotation_xyzw: rotations.as_ptr(),
+        local_scales_xyz: scales.as_ptr(),
+        bone_count: 2,
+        morph_weights: ptr::null(),
+        morph_count: 0,
+        ik_enabled: ptr::null(),
+        ik_count: 0,
+    };
+    let mut state = ExternalPhysicsCallbackState {
+        calls: 0,
+        status: MmdRuntimeStatus::Error as u32,
+        write_non_finite: false,
+    };
+    assert_eq!(
+        unsafe {
+            mmd_runtime_evaluate_host_rig_frame_with_external_physics(
+                instance,
+                rig,
+                &view,
+                1.0e-4,
+                0,
+                Some(external_physics_callback),
+                (&mut state as *mut ExternalPhysicsCallbackState).cast(),
+            )
+        },
+        MmdRuntimeStatus::Error
+    );
+    let cached_before =
+        unsafe { slice::from_raw_parts(mmd_runtime_instance_world_matrices(instance), 32) };
+    assert!((cached_before[12] - 2.0).abs() < 1.0e-5);
+    assert!((cached_before[16 + 12] - 2.0).abs() < 1.0e-5);
+    assert!((cached_before[16 + 13] - 1.0).abs() < 1.0e-5);
+    state.status = MmdRuntimeStatus::Ok as u32;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_evaluate_host_rig_frame_with_external_physics(
+                instance,
+                rig,
+                &view,
+                1.0e-4,
+                0,
+                Some(external_physics_callback),
+                (&mut state as *mut ExternalPhysicsCallbackState).cast(),
+            )
+        },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(state.calls, 2);
+    let mut matrices = [0.0f32; 32];
+    assert!(unsafe {
+        mmd_runtime_instance_copy_world_matrices(instance, matrices.as_mut_ptr(), matrices.len())
+    });
+    assert!((matrices[12] - 2.0).abs() < 1.0e-5);
+    assert!((matrices[16 + 12] - 2.0).abs() < 1.0e-5);
+    assert!((matrices[16 + 13] - 0.75).abs() < 1.0e-5);
+
+    state.write_non_finite = true;
+    assert_eq!(
+        unsafe {
+            mmd_runtime_evaluate_host_rig_frame_with_external_physics(
+                instance,
+                rig,
+                &view,
+                1.0e-4,
+                0,
+                Some(external_physics_callback),
+                (&mut state as *mut ExternalPhysicsCallbackState).cast(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert_eq!(
+        unsafe {
+            mmd_runtime_evaluate_host_rig_frame_with_external_physics(
+                instance,
+                rig,
+                &view,
+                1.0e-4,
+                0,
+                None,
+                ptr::null_mut(),
+            )
+        },
+        MmdRuntimeStatus::InvalidInput
+    );
+
+    unsafe {
+        mmd_runtime_host_rig_free(rig);
+        mmd_runtime_instance_free(instance);
+        mmd_runtime_model_free(model);
+    }
+}
+
 #[test]
 fn host_rig_abi_preserves_pose_and_reuses_buffers_after_model_free() {
     let model_arena = Arc::new(

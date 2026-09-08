@@ -34,6 +34,8 @@ pub enum HostRigError {
     MissingGoal(usize),
     #[error("host rig belongs to a different model")]
     ModelMismatch,
+    #[error("host rig evaluation is already active")]
+    EvaluationActive,
     #[error("host rig evaluation currently requires PhysicsMode::Off")]
     PhysicsEnabled,
     #[error("IK tolerance must be finite and non-negative")]
@@ -107,55 +109,70 @@ pub(super) struct HostRigScratch {
     pub active: bool,
 }
 
+/// A scoped host-rig evaluation context.
+///
+/// The context keeps the protected model-space transforms active while a
+/// caller runs the before-physics phase, lets the physics bridge write back
+/// unprotected bones, and evaluates the after-physics phase. Dropping the
+/// context always clears the active flag, including when the bridge returns
+/// an error or unwinds through an FFI panic guard.
+pub struct HostRigEvaluation<'a> {
+    runtime: &'a mut RuntimeInstance,
+    active: bool,
+}
+
+impl HostRigEvaluation<'_> {
+    /// Evaluate the current pose through the before-physics phase.
+    pub fn evaluate_before_physics_with_ik_options(&mut self, options: IkSolveOptions) {
+        self.runtime
+            .evaluate_current_pose_before_physics_with_ik_options(options);
+    }
+
+    /// Evaluate the current pose through the after-physics phase.
+    pub fn evaluate_after_physics_with_ik_options(&mut self, options: IkSolveOptions) {
+        self.runtime
+            .evaluate_current_pose_after_physics_with_ik_options(options);
+    }
+
+    /// Borrow the runtime for a physics bridge operation while the host-rig
+    /// ownership context remains active.
+    pub fn runtime_mut(&mut self) -> &mut RuntimeInstance {
+        self.runtime
+    }
+}
+
+impl Drop for HostRigEvaluation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            if let Some(scratch) = self.runtime.host_rig.as_mut() {
+                scratch.active = false;
+            }
+        }
+    }
+}
+
 impl RuntimeInstance {
-    /// Evaluate a complete retargeted input through both MMD phases, without
-    /// physics. Inputs have the same pre-morph meaning as `apply_host_pose`.
+    /// Apply a fresh pre-morph host pose and open a scoped host-rig context.
     ///
-    /// Start every frame from a fresh base pose (including helpers); never feed
-    /// previous output matrices back as base transforms. Driven bones bypass
-    /// Append and fixed-axis projection. Their input local deltas, including
-    /// bone morphs, are authoritative Append sources even when PMX declares
-    /// an incoming Append on those bones. Descendants use the protected world
-    /// transforms during evaluation, not a post-evaluation matrix patch.
-    ///
-    /// All returned errors leave the previous pose intact. Existing clip and
-    /// current-pose evaluation methods retain their original semantics.
-    pub fn evaluate_host_rig_pose(
-        &mut self,
+    /// The returned context owns the active lifetime of the protected driven
+    /// transforms. It must stay alive across physics writeback and the
+    /// after-physics evaluation so that a physics body cannot overwrite a
+    /// host-driven bone.
+    pub fn begin_host_rig_evaluation<'a>(
+        &'a mut self,
         rig: &HostRigDefinition,
         input: &HostPoseView<'_>,
         options: IkSolveOptions,
-    ) -> Result<(), HostRigError> {
-        if !Arc::ptr_eq(&self.model, &rig.model) {
-            return Err(HostRigError::ModelMismatch);
-        }
-        if self.physics_mode != PhysicsMode::Off {
-            return Err(HostRigError::PhysicsEnabled);
-        }
-        if !options.tolerance.is_finite() || options.tolerance < 0.0 {
-            return Err(HostRigError::InvalidTolerance);
-        }
-        self.validate_host_pose(input)?;
-        for (index, scale) in input.local_scales.iter().enumerate() {
-            if scale.x <= 0.0 || scale.x != scale.y || scale.x != scale.z {
-                return Err(HostRigError::InvalidScale(index));
-            }
-        }
-        for (chain, &enabled) in input
-            .ik_enabled
-            .iter()
-            .take(self.model.ik_count())
-            .enumerate()
-        {
-            if enabled != 0 && !rig.allowed_ik[chain] {
-                return Err(HostRigError::MissingGoal(chain));
-            }
-        }
+    ) -> Result<HostRigEvaluation<'a>, HostRigError> {
+        self.validate_host_rig_input(rig, input, options)?;
         self.apply_validated_host_pose(input);
         if !rig.has_driven_bones {
-            self.evaluate_current_pose_with_ik_options(options);
-            return Ok(());
+            return Ok(HostRigEvaluation {
+                runtime: self,
+                active: false,
+            });
         }
+
         let scratch = self.host_rig.get_or_insert_with(|| HostRigScratch {
             driven: vec![false; rig.driven.len()].into_boxed_slice(),
             reference_world: vec![Mat4::IDENTITY; rig.driven.len()].into_boxed_slice(),
@@ -176,8 +193,70 @@ impl RuntimeInstance {
             };
         }
         scratch.active = true;
-        self.evaluate_current_pose_with_ik_options(options);
-        self.host_rig.as_mut().unwrap().active = false;
+        Ok(HostRigEvaluation {
+            runtime: self,
+            active: true,
+        })
+    }
+
+    fn validate_host_rig_input(
+        &self,
+        rig: &HostRigDefinition,
+        input: &HostPoseView<'_>,
+        options: IkSolveOptions,
+    ) -> Result<(), HostRigError> {
+        if self.host_rig.as_ref().is_some_and(|scratch| scratch.active) {
+            return Err(HostRigError::EvaluationActive);
+        }
+        if !Arc::ptr_eq(&self.model, &rig.model) {
+            return Err(HostRigError::ModelMismatch);
+        }
+        if !options.tolerance.is_finite() || options.tolerance < 0.0 {
+            return Err(HostRigError::InvalidTolerance);
+        }
+        self.validate_host_pose(input)?;
+        for (index, scale) in input.local_scales.iter().enumerate() {
+            if scale.x <= 0.0 || scale.x != scale.y || scale.x != scale.z {
+                return Err(HostRigError::InvalidScale(index));
+            }
+        }
+        for (chain, &enabled) in input
+            .ik_enabled
+            .iter()
+            .take(self.model.ik_count())
+            .enumerate()
+        {
+            if enabled != 0 && !rig.allowed_ik[chain] {
+                return Err(HostRigError::MissingGoal(chain));
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate a complete retargeted input through both MMD phases, without
+    /// physics. Inputs have the same pre-morph meaning as `apply_host_pose`.
+    ///
+    /// Start every frame from a fresh base pose (including helpers); never feed
+    /// previous output matrices back as base transforms. Driven bones bypass
+    /// Append and fixed-axis projection. Their input local deltas, including
+    /// bone morphs, are authoritative Append sources even when PMX declares
+    /// an incoming Append on those bones. Descendants use the protected world
+    /// transforms during evaluation, not a post-evaluation matrix patch.
+    ///
+    /// All returned errors leave the previous pose intact. Existing clip and
+    /// current-pose evaluation methods retain their original semantics.
+    pub fn evaluate_host_rig_pose(
+        &mut self,
+        rig: &HostRigDefinition,
+        input: &HostPoseView<'_>,
+        options: IkSolveOptions,
+    ) -> Result<(), HostRigError> {
+        if self.physics_mode != PhysicsMode::Off {
+            return Err(HostRigError::PhysicsEnabled);
+        }
+        let mut evaluation = self.begin_host_rig_evaluation(rig, input, options)?;
+        evaluation.evaluate_before_physics_with_ik_options(options);
+        evaluation.evaluate_after_physics_with_ik_options(options);
         Ok(())
     }
 

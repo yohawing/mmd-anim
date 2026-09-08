@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -26,8 +27,10 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 glam.workspace = true
 mmd-anim-runtime.workspace = true
-mmd-anim-format = { path = "../mmd-anim-format", version = "0.4.3", features = ["fbx"] }
-mmd-anim-physics-bullet = { path = "../mmd-anim-physics-bullet", version = "0.4.3", features = ["native", "pmx-format", "runtime"], optional = true }
+mmd-anim-format = { path = "../mmd-anim-format", version = "0.5.0", features = ["fbx"] }
+mmd-anim-package = { path = "../mmd-anim-package", version = "0.5.0" }
+mmd-anim-physics-bullet = { path = "../mmd-anim-physics-bullet", version = "0.5.0", features = ["native", "pmx-format", "runtime"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+unicode-normalization = "0.1.24"

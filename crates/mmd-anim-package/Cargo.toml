@@ -1,0 +1,25 @@
+[package]
+name = "mmd-anim-package"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+description = "Experimental bounded reader and packer for the draft MMDPACK container"
+
+[dependencies]
+aes-gcm = "0.10.3"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+unicode-normalization = "0.1.24"
+zeroize = "1.8.2"
+zstd = "0.13.3"
+
+[dev-dependencies]
+serde_json = { workspace = true }

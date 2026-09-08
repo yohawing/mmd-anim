@@ -20,6 +20,7 @@ APIや機能はまだ固定されておらず、1.0 までに互換性のない�
 - PMX（モデル）を読み込んで、再生に使えるモデルデータに変換する。
 - VMD（モーション）を読み込み、ボーン・カメラ・ライトなどのモーションを、再生できる形に変換する。
 - MMD と同じベジェ補間（位置・回転）で計算するので、動きの緩急を再現できる。
+- 別のスケルトンからリターゲットしたポーズを評価して、MMDのリグを動かす。
 - Bullet Physics による MMD 向けの物理演算を、CLI や API から利用できます。
 
 ## テスト基盤
@@ -74,7 +75,7 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 
 ```toml
 [dependencies]
-mmd-anim = "0.4.3"
+mmd-anim = "0.5.0"
 ```
 
 ## ネイティブ (C ABI) から使う
@@ -190,18 +191,57 @@ const generatedPmxBytes = exportPmxFromParts(
 `mmd-anim-cli` は MMD 形式ファイル（PMX, VMD, VPD, PMM, X/VAC）の検査・変換・診断を行うコマンドラインツールです。
 
 ```powershell
-cargo install mmd-anim-cli
-mmd-anim --help
+cargo run -p mmd-anim-cli -- --help
 ```
 
 CLI、ネイティブ API、物理演算 crate をソースからビルドする場合は、対象環境向けの C++ compiler が必要です。
-Bullet 自体を別途インストールする必要はありません。GitHub Releases のビルド済み CLI はそのまま利用できます。
+Bullet 自体を別途インストールする必要はありません。
 
 PMXとVMDから、アニメーション付きFBXを書き出せます。
 
 ```powershell
-mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
+cargo run -p mmd-anim-cli -- convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 ```
+
+## MMDPACK（試験的）
+
+MMDPACKは、モデルやモーション、テクスチャ、音声などのMMD関連データを、1つのファイルにまとめて扱うためのパッケージ形式です。MMDPACKでは、用意したデータを別の形式に変換せず、必要に応じて圧縮したうえで、認証付きで暗号化して格納します。CLIでは、マニフェストの認証、エントリの復号と展開、PMXのテクスチャ対応付けの検証を行います。PNG/JPEGのデコードや画像形式の変換は行いません。
+
+### パッケージを作る
+
+`assets/`に入力ファイルと`mmdpack.json`を用意します。`mmdpack.json`は、入力ファイルの種類、データ形式、圧縮方式、モデルとテクスチャの対応を指定するJSON設定ファイルです。項目名と値の形式が決まっているため、例の形に沿って記述してください。次の例は、テクスチャを含まないPMXモデル1つだけの最小構成です。
+
+```json
+{
+  "defaultModelEntryId": 1,
+  "entries": [
+    {
+      "id": 1,
+      "path": "model/model.pmx",
+      "kind": "model",
+      "codec": "pmx",
+      "compression": "none"
+    }
+  ],
+  "modelBindings": [
+    { "modelEntryId": 1, "textureBindings": [] }
+  ]
+}
+```
+
+`assets/model/model.pmx`を配置したら、次のコマンドでパッケージを作成します。
+
+```powershell
+cargo run -p mmd-anim-cli -- package pack assets --config assets/mmdpack.json -o scene.mmdpack --key-out scene.key
+```
+
+パッケージを作成したら、次のコマンドで内容を検証します。`--strict-codecs`を付けると、パッケージ側で対応していないデータ形式をエラーとして扱います。
+
+```powershell
+cargo run -p mmd-anim-cli -- package verify scene.mmdpack --key-file scene.key --strict-codecs
+```
+
+`package pack`は`scene.mmdpack`と32バイトの鍵ファイル`scene.key`を作成します。2つの出力先は、あらかじめ存在しないパスを指定します。鍵はパッケージと分けて保管し、リポジトリへ登録しないでください。
 
 ## クレート構成
 
@@ -211,9 +251,10 @@ mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 | `mmd-anim-runtime` | ファイル形式に依存しない評価コア。モデルアリーナ、ポーズ、VMD 評価、付与変形、IK、モーフを扱う。 |
 | `mmd-anim-format` | PMX/VMD のランタイム取り込み、形式判定、読み込み（構造化）、PMX/PMD/VMD/VPD/X/VAC の書き出しを提供する。 |
 | `mmd-anim-physics-bullet` | MMD 向けの Bullet Physics backend。同梱した Bullet3 を対象環境向けにビルドし、ランタイムと PMX 形式との連携を提供する。 |
+| `mmd-anim-package` | Draft MMDPACK container の workspace-private な試験的 bounded reader / packer。wire format は未確定で、codec-ready payload をそのまま扱う。 |
 | `mmd-anim-ffi` | ネイティブホスト向けの C ABI。ランタイム操作、PMX パーツ書き出し、疎カーブ、物理演算を公開する。crates.io では公開しない。 |
 | `mmd-anim-wasm` | ブラウザ向けの `wasm-bindgen` ラッパー。ランタイム操作、読み込み/書き出し、PMX パーツ書き出し、疎カーブを公開する。crates.io では公開しない。 |
-| `mmd-anim-cli` | MMD 形式ファイルの検査・変換・診断コマンド。メンテナ向け oracle / numeric compare schema もこの crate 側に含む。`cargo install mmd-anim-cli` でインストール可能。 |
+| `mmd-anim-cli` | MMD 形式ファイルの検査・変換・診断コマンド。メンテナ向け oracle / numeric compare schema もこの crate 側に含む。workspace-private で、リリースバイナリは別途提供します。 |
 
 通常のライブラリ利用では `mmd-anim` を依存に追加してください。低レイヤだけを直接使いたい場合は
 `mmd-anim-format` や `mmd-anim-runtime` に直接依存できます。物理演算 backend を Rust から直接使う場合は
@@ -225,6 +266,7 @@ mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 - **書き出し:** メッシュからの生成は形状、材質、ボーン、表示枠、モーフ、物理情報の初期範囲までです。PMM の書き出しは、現在の PMM manifest parser が表現している範囲に限定されます。
 - **PMM:** プロジェクトのヘッダ情報、タイムライン由来の値、表示状態、モデル枠の初期範囲、参照アセット、PMMv2 の概要情報、アセット/ヘッダの整合性診断までです。PMM exporter は、この限定された manifest/header/slot/asset-reference 情報を PMMv2 ファイルとして再出力できますが、完全な PMM project graph exporter ではありません。parser が要約だけしている、または保持していないキーフレーム本体、camera/light/accessory/self-shadow の完全なトラック、その他のバイナリ project graph データは `PmmParsedManifest` から復元できません。
 - **X/VAC:** テキスト X のメッシュ、材質、法線、UV、頂点色と VAC の共通行順を扱います。バイナリ X は診断のみです。
+- **MMDPACK:** workspace-private の `mmd-anim-package` crate と CLI コマンドは Draft 0.2 の試験対応です。format、codec profile、公開設定は V1 までに変更される可能性があり、現在の pack は codec-ready payload の受け渡しに限定され、PNG/JPEG decode や package の WASM/FFI、高レベル PMX/VMD loading は提供しません。package crate に依存するCLI crateも公開を保留しているため、workspace build または GitHub Release バイナリを利用します。
 
 ## 参考にしたプロジェクト
 

@@ -20,6 +20,9 @@ use mmd_anim_runtime::{
 };
 use wasm_bindgen::prelude::*;
 
+mod host_rig;
+pub use host_rig::WasmMmdHostRig;
+
 pub const WASM_WRAPPER_VERSION: u32 = 2;
 
 const APPEND_FLAG_ROTATION: u32 = 1;

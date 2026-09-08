@@ -16,12 +16,12 @@ use mmd_anim_runtime::ModelArena;
 use mmd_anim_runtime::{
     AnimationClip, AppendPrimitiveInput, BoneAnimationBinding, BoneIndex, DensePoseSequenceView,
     FlatAppendTransformInput, FlatBoneInput, FlatBoneMorphInput, FlatGroupMorphInput,
-    FlatIkLinkInput, FlatIkSolverInput, HostPoseView, IkAngleLimit, IkChainDefinition,
-    IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkSolveOptions, InterpolationScalar,
-    LocalAxis, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe, MorphTrack,
-    MovableBoneKeyframe, MovableBoneTrack, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
-    PoseReductionReport, PropertyAnimationBinding, PropertyKeyframe, ReducedPoseSequence,
-    ReductionTarget, ReductionTolerances, RuntimeAppendTransformDescriptorV1,
+    FlatIkLinkInput, FlatIkSolverInput, HostPoseView, HostRigEvaluation, IkAngleLimit,
+    IkChainDefinition, IkChainLinkDefinition, IkChainPoseInput, IkChainSolver, IkSolveOptions,
+    InterpolationScalar, LocalAxis, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe,
+    MorphTrack, MovableBoneKeyframe, MovableBoneTrack, PhysicsMode, PhysicsStepStats,
+    PhysicsTickConfig, PoseReductionReport, PropertyAnimationBinding, PropertyKeyframe,
+    ReducedPoseSequence, ReductionTarget, ReductionTolerances, RuntimeAppendTransformDescriptorV1,
     RuntimeBoneDescriptorV1, RuntimeBoneMorphOffsetDescriptorV1,
     RuntimeGroupMorphOffsetDescriptorV1, RuntimeIkLinkDescriptorV1, RuntimeIkSolverDescriptorV1,
     RuntimeInstance, RuntimeModelDescriptorV1, RuntimeMorphDescriptorV1, SkeletonSnapshot,
@@ -30,8 +30,19 @@ use mmd_anim_runtime::{
 };
 
 pub const ABI_VERSION: u32 = 3;
+pub const MMD_RUNTIME_FEATURE_HOST_RIG: u32 = 1 << 13;
+pub const MMD_RUNTIME_FEATURE_HOST_RIG_PHYSICS: u32 = 1 << 14;
+
+/// Model-bound rig plus reusable native input conversion buffers.
+pub struct MmdRuntimeHostRig {
+    rig: mmd_anim_runtime::HostRigDefinition,
+    positions: Vec<glam::Vec3A>,
+    rotations: Vec<glam::Quat>,
+    scales: Vec<glam::Vec3A>,
+}
 const FEATURE_SPLIT_PHYSICS_EVALUATION: u32 = 1 << 0;
 const FEATURE_PHYSICS_BULLET_NATIVE: u32 = 1 << 1;
+const FEATURE_HOST_RIG_PHYSICS: u32 = MMD_RUNTIME_FEATURE_HOST_RIG_PHYSICS;
 pub const MMD_RUNTIME_FEATURE_MODEL_DESCRIPTOR: u32 = 1 << 2;
 pub const MMD_RUNTIME_FEATURE_HOST_POSE_NATIVE_MORPHS: u32 = 1 << 3;
 pub const MMD_RUNTIME_FEATURE_REDUCED_POSE_GENERIC_CURVES: u32 = 1 << 4;
@@ -1163,6 +1174,7 @@ pub extern "C" fn mmd_runtime_feature_flags() -> u32 {
 
 fn runtime_feature_flags() -> u32 {
     FEATURE_SPLIT_PHYSICS_EVALUATION
+        | MMD_RUNTIME_FEATURE_HOST_RIG
         | FEATURE_MODEL_DESCRIPTOR
         | FEATURE_HOST_POSE_NATIVE_MORPHS
         | FEATURE_REDUCED_POSE_GENERIC_CURVES
@@ -1175,7 +1187,7 @@ fn runtime_feature_flags() -> u32 {
         | FEATURE_VMD_SUMMARY_BYTES
         | FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK
         | if cfg!(feature = "physics-bullet-native") {
-            FEATURE_PHYSICS_BULLET_NATIVE
+            FEATURE_PHYSICS_BULLET_NATIVE | FEATURE_HOST_RIG_PHYSICS
         } else {
             0
         }
@@ -5938,6 +5950,290 @@ pub unsafe extern "C" fn mmd_runtime_instance_apply_host_pose_and_evaluate_befor
     })
 }
 
+/// Creates a model-bound host rig. Empty goal list disables all IK.
+/// Errors return null and set last_error_message. No input pointers are retained.
+///
+/// # Safety
+/// Model must be a live model handle. Nonempty input arrays must be aligned,
+/// initialized, readable u32 arrays of the given length for this call. Null is
+/// permitted for empty arrays. Handles must not be accessed concurrently with
+/// mutation/free. The rig retains model storage and may outlive the model handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_host_rig_create(
+    model: *const MmdRuntimeModel,
+    driven_bones: *const u32,
+    driven_count: usize,
+    goal_bones: *const u32,
+    goal_count: usize,
+) -> *mut MmdRuntimeHostRig {
+    ffi_guard(ptr::null_mut(), || {
+        if checked_pointer_range(model, 1).is_none() {
+            set_last_error("invalid host rig model pointer");
+            return ptr::null_mut();
+        }
+        let model = unsafe { &*model };
+        let (Some(driven), Some(goals)) = (
+            unsafe { checked_slice(driven_bones, driven_count) },
+            unsafe { checked_slice(goal_bones, goal_count) },
+        ) else {
+            set_last_error("invalid host rig bone array");
+            return ptr::null_mut();
+        };
+        let driven: Vec<_> = driven.iter().copied().map(BoneIndex).collect();
+        let goals: Vec<_> = goals.iter().copied().map(BoneIndex).collect();
+        match mmd_anim_runtime::HostRigDefinition::new(Arc::clone(&model.model), &driven, &goals) {
+            Ok(rig) => Box::into_raw(Box::new(MmdRuntimeHostRig {
+                rig,
+                positions: vec![glam::Vec3A::ZERO; model.model.bone_count()],
+                rotations: vec![glam::Quat::IDENTITY; model.model.bone_count()],
+                scales: vec![glam::Vec3A::ONE; model.model.bone_count()],
+            })),
+            Err(error) => {
+                set_last_error(error.to_string());
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Releases a host rig and its input buffers. Null is a no-op.
+///
+/// # Safety
+/// A non-null pointer must be a live handle returned by host_rig_create,
+/// freed exactly once, with no concurrent evaluation or access.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_host_rig_free(rig: *mut MmdRuntimeHostRig) {
+    ffi_guard((), || {
+        if !rig.is_null() {
+            drop(unsafe { Box::from_raw(rig) });
+        }
+    });
+}
+
+/// Evaluates pre-morph input with host ownership through both MMD phases.
+/// Physics must be Off. Errors leave the instance pose and output caches intact.
+/// cap=0 uses authored iterations. Copy outputs with existing instance APIs.
+///
+/// # Safety
+/// Instance and rig must be distinct live handles, exclusively accessed for
+/// this call. View and its arrays must be aligned, initialized, readable for
+/// their declared lengths, and must not overlap either handle's owned storage.
+/// No input pointer is retained. The model identity must match the rig's model.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_evaluate_host_rig_pose(
+    instance: *mut MmdRuntimeInstance,
+    rig: *mut MmdRuntimeHostRig,
+    view: *const MmdRuntimeFfiHostPoseView,
+    ik_tolerance: f32,
+    ik_max_iterations_cap: u32,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        if checked_pointer_range(instance, 1).is_none()
+            || checked_pointer_range(rig, 1).is_none()
+            || checked_pointer_range(view, 1).is_none()
+        {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "invalid host rig handle or view",
+            );
+        }
+        let instance = unsafe { &mut *instance };
+        let rig = unsafe { &mut *rig };
+        let view = unsafe { &*view };
+        let n = rig.positions.len();
+        if view.bone_count != n
+            || view.bone_count != instance.model.bone_count()
+            || view.morph_count != instance.runtime.morph_weights().len()
+            || view.ik_count != instance.runtime.ik_enabled().len()
+        {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "host rig pose counts do not match instance",
+            );
+        }
+        let (Some(p), Some(q), Some(s), Some(morph), Some(ik)) = (
+            unsafe { checked_slice(view.local_position_offsets_xyz, n * 3) },
+            unsafe { checked_slice(view.local_rotation_xyzw, n * 4) },
+            unsafe { checked_slice(view.local_scales_xyz, n * 3) },
+            unsafe { checked_slice(view.morph_weights, view.morph_count) },
+            unsafe { checked_slice(view.ik_enabled, view.ik_count) },
+        ) else {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "invalid host rig pose arrays",
+            );
+        };
+        for (dst, src) in rig.positions.iter_mut().zip(p.chunks_exact(3)) {
+            *dst = glam::Vec3A::new(src[0], src[1], src[2]);
+        }
+        for (dst, src) in rig.rotations.iter_mut().zip(q.chunks_exact(4)) {
+            *dst = glam::Quat::from_xyzw(src[0], src[1], src[2], src[3]);
+        }
+        for (dst, src) in rig.scales.iter_mut().zip(s.chunks_exact(3)) {
+            *dst = glam::Vec3A::new(src[0], src[1], src[2]);
+        }
+        let pose = HostPoseView {
+            local_position_offsets: &rig.positions,
+            local_rotations: &rig.rotations,
+            local_scales: &rig.scales,
+            morph_weights: morph,
+            ik_enabled: ik,
+        };
+        let options = IkSolveOptions {
+            tolerance: ik_tolerance,
+            max_iterations_cap: (ik_max_iterations_cap != 0).then_some(ik_max_iterations_cap),
+        };
+        match instance
+            .runtime
+            .evaluate_host_rig_pose(&rig.rig, &pose, options)
+        {
+            Ok(()) => {
+                instance.refresh_matrix_caches();
+                MmdRuntimeStatus::Ok
+            }
+            Err(error) => status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string()),
+        }
+    })
+}
+
+/// Evaluates one host-rig physics frame while retaining the host-rig
+/// ownership context through physics writeback and after-physics evaluation.
+///
+/// `ik_tolerance` and `ik_max_iterations_cap` apply to the before-physics
+/// phase. The existing Bullet bridge evaluates after-physics with its default
+/// IK options. Dynamic bodies remain solver-owned; runtime writes to bones
+/// declared driven by `rig` are ignored while the context is active.
+///
+/// # Safety
+///
+/// All handles must be live, distinct handles returned by this library and
+/// must be accessed exclusively for this call. `view` and each non-empty
+/// array it references must be aligned, initialized, readable for the
+/// declared lengths, and must not overlap handle-owned storage. The function
+/// retains no input pointers. `out_report`, when non-null, must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_evaluate_host_rig_frame(
+    instance: *mut MmdRuntimeInstance,
+    world: *mut MmdRuntimePhysicsWorld,
+    rig: *mut MmdRuntimeHostRig,
+    view: *const MmdRuntimeFfiHostPoseView,
+    action: u32,
+    dt_seconds: f32,
+    ik_tolerance: f32,
+    ik_max_iterations_cap: u32,
+    out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let action = match action {
+            0 => MmdRuntimePhysicsFrameAction::Seed,
+            1 => MmdRuntimePhysicsFrameAction::Step,
+            _ => {
+                return status_failure(
+                    MmdRuntimeStatus::InvalidInput,
+                    "unknown physics frame action",
+                );
+            }
+        };
+        if checked_pointer_range(instance, 1).is_none()
+            || checked_pointer_range(world, 1).is_none()
+            || checked_pointer_range(rig, 1).is_none()
+            || checked_pointer_range(view, 1).is_none()
+        {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "invalid host rig physics handle or view",
+            );
+        }
+        let instance = unsafe { &mut *instance };
+        let world = unsafe { &mut *world };
+        let rig = unsafe { &mut *rig };
+        let view = unsafe { &*view };
+        if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        if action == MmdRuntimePhysicsFrameAction::Step
+            && (!dt_seconds.is_finite() || dt_seconds < 0.0)
+        {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+        let pre_status = validate_host_frame_physics_impl(world, instance, action);
+        if pre_status != MmdRuntimeStatus::Ok {
+            return pre_status;
+        }
+
+        let n = rig.positions.len();
+        if view.bone_count != n
+            || view.bone_count != instance.model.bone_count()
+            || view.morph_count != instance.runtime.morph_weights().len()
+            || view.ik_count != instance.runtime.ik_enabled().len()
+        {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "host rig pose counts do not match instance",
+            );
+        }
+        let (Some(position_len), Some(rotation_len), Some(scale_len)) =
+            (n.checked_mul(3), n.checked_mul(4), n.checked_mul(3))
+        else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let (Some(p), Some(q), Some(s), Some(morph), Some(ik)) = (
+            unsafe { checked_slice(view.local_position_offsets_xyz, position_len) },
+            unsafe { checked_slice(view.local_rotation_xyzw, rotation_len) },
+            unsafe { checked_slice(view.local_scales_xyz, scale_len) },
+            unsafe { checked_slice(view.morph_weights, view.morph_count) },
+            unsafe { checked_slice(view.ik_enabled, view.ik_count) },
+        ) else {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "invalid host rig physics pose arrays",
+            );
+        };
+        for (dst, src) in rig.positions.iter_mut().zip(p.chunks_exact(3)) {
+            *dst = glam::Vec3A::new(src[0], src[1], src[2]);
+        }
+        for (dst, src) in rig.rotations.iter_mut().zip(q.chunks_exact(4)) {
+            *dst = glam::Quat::from_xyzw(src[0], src[1], src[2], src[3]);
+        }
+        for (dst, src) in rig.scales.iter_mut().zip(s.chunks_exact(3)) {
+            *dst = glam::Vec3A::new(src[0], src[1], src[2]);
+        }
+        let host_pose = HostPoseView {
+            local_position_offsets: &rig.positions,
+            local_rotations: &rig.rotations,
+            local_scales: &rig.scales,
+            morph_weights: morph,
+            ik_enabled: ik,
+        };
+        let ik_options = IkSolveOptions {
+            tolerance: ik_tolerance,
+            max_iterations_cap: (ik_max_iterations_cap != 0).then_some(ik_max_iterations_cap),
+        };
+        let mut evaluation = match instance
+            .runtime
+            .begin_host_rig_evaluation(&rig.rig, &host_pose, ik_options)
+        {
+            Ok(evaluation) => evaluation,
+            Err(error) => {
+                return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
+            }
+        };
+        evaluation.evaluate_before_physics_with_ik_options(ik_options);
+        let status = evaluate_host_rig_frame_physics_impl(
+            world,
+            &mut evaluation,
+            action,
+            dt_seconds,
+            out_report,
+        );
+        drop(evaluation);
+        if status == MmdRuntimeStatus::Ok {
+            instance.refresh_matrix_caches();
+        }
+        status
+    })
+}
+
 fn apply_host_pose_impl(
     instance: &mut MmdRuntimeInstance,
     view: &MmdRuntimeFfiHostPoseView,
@@ -6672,6 +6968,17 @@ fn evaluate_host_frame_physics_impl(
 }
 
 #[cfg(not(feature = "physics-bullet-native"))]
+fn evaluate_host_rig_frame_physics_impl(
+    _world: *mut MmdRuntimePhysicsWorld,
+    _evaluation: &mut HostRigEvaluation<'_>,
+    _action: MmdRuntimePhysicsFrameAction,
+    _dt_seconds: f32,
+    _out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    status_failure(MmdRuntimeStatus::Unsupported, "physics backend unsupported")
+}
+
+#[cfg(not(feature = "physics-bullet-native"))]
 fn physics_world_rigidbody_count_impl(
     _world: *const MmdRuntimePhysicsWorld,
     _out_rigidbody_count: *mut usize,
@@ -7133,28 +7440,41 @@ fn evaluate_host_frame_physics_impl(
     dt_seconds: f32,
     out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
 ) -> MmdRuntimeStatus {
+    let status =
+        evaluate_physics_action_impl(world, &mut instance.runtime, action, dt_seconds, out_report);
+    if status == MmdRuntimeStatus::Ok {
+        if action == MmdRuntimePhysicsFrameAction::Seed {
+            instance.runtime.evaluate_current_pose_after_physics();
+        }
+        instance.refresh_matrix_caches();
+    }
+    status
+}
+
+/// Runs one Bullet action against an already prepared runtime pose.
+///
+/// The caller owns the phase evaluation and cache refresh. This keeps the
+/// legacy host-frame path and the scoped HostRig path on the same physics
+/// ownership and seed/step semantics.
+#[cfg(feature = "physics-bullet-native")]
+fn evaluate_physics_action_impl(
+    world: *mut MmdRuntimePhysicsWorld,
+    runtime: &mut RuntimeInstance,
+    action: MmdRuntimePhysicsFrameAction,
+    dt_seconds: f32,
+    out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
     use mmd_anim_physics_bullet::RuntimePhysicsBridgeExt;
 
-    // Safety: world was validated non-null and compatible by
-    // validate_host_frame_physics_impl before pose was applied.
     let world = unsafe { &mut *world };
-
     match action {
         MmdRuntimePhysicsFrameAction::Seed => {
-            match world
-                .world
-                .initialize_runtime_physics_bake(&mut instance.runtime)
-            {
-                Ok(_seeded) => {
-                    if let Err(err) = world.world.apply_readback_to_runtime(&mut instance.runtime) {
+            match world.world.initialize_runtime_physics_bake(runtime) {
+                Ok(_) => {
+                    if let Err(err) = world.world.apply_readback_to_runtime(runtime) {
                         return status_failure(MmdRuntimeStatus::Error, err.to_string().as_str());
                     }
-                    instance.runtime.evaluate_current_pose_after_physics();
-                    // Successful seed re-arms seed-only behavior for the next bake sample.
                     world.next_bake_sample_is_seed_only = true;
-                    instance.refresh_matrix_caches();
-                    // A seed does not advance the solver, so the step report
-                    // carries no meaningful statistics.
                     if !out_report.is_null() {
                         unsafe {
                             *out_report = MmdRuntimeFfiPhysicsWorldStepReport {
@@ -7175,16 +7495,12 @@ fn evaluate_host_frame_physics_impl(
             }
         }
         MmdRuntimePhysicsFrameAction::Step => {
-            match world.world.step_runtime_physics_with_runtime_clock_options(
-                &mut instance.runtime,
-                dt_seconds,
-                false,
-            ) {
+            match world
+                .world
+                .step_runtime_physics_with_runtime_clock_options(runtime, dt_seconds, false)
+            {
                 Ok(report) => {
-                    // Explicit physics advance disarms seed-only so the next
-                    // bake sample steps.
                     world.next_bake_sample_is_seed_only = false;
-                    instance.refresh_matrix_caches();
                     if !out_report.is_null() {
                         unsafe {
                             *out_report = MmdRuntimeFfiPhysicsWorldStepReport {
@@ -7200,6 +7516,30 @@ fn evaluate_host_frame_physics_impl(
             }
         }
     }
+}
+
+/// Runs the Bullet action while a scoped HostRigEvaluation keeps protected
+/// model-space transforms authoritative. The bridge's STEP path already
+/// performs the after-physics phase; SEED needs the explicit phase call here.
+#[cfg(feature = "physics-bullet-native")]
+fn evaluate_host_rig_frame_physics_impl(
+    world: *mut MmdRuntimePhysicsWorld,
+    evaluation: &mut HostRigEvaluation<'_>,
+    action: MmdRuntimePhysicsFrameAction,
+    dt_seconds: f32,
+    out_report: *mut MmdRuntimeFfiPhysicsWorldStepReport,
+) -> MmdRuntimeStatus {
+    let status = evaluate_physics_action_impl(
+        world,
+        evaluation.runtime_mut(),
+        action,
+        dt_seconds,
+        out_report,
+    );
+    if status == MmdRuntimeStatus::Ok && action == MmdRuntimePhysicsFrameAction::Seed {
+        evaluation.evaluate_after_physics_with_ik_options(IkSolveOptions::default());
+    }
+    status
 }
 
 #[cfg(feature = "physics-bullet-native")]
@@ -10636,3 +10976,6 @@ fn build_morph_init_from_ffi(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod host_rig_tests;

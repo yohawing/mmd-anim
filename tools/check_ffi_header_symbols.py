@@ -61,6 +61,7 @@ CLIP_TRACK_FEATURE_BITS = {
     "MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK": 10,
     "MMD_RUNTIME_FEATURE_VMD_SUMMARY_BYTES": 11,
     "MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK": 12,
+    "MMD_RUNTIME_FEATURE_HOST_RIG": 13,
 }
 
 GENERIC_STRUCTS = {
@@ -589,6 +590,22 @@ VMD_FROM_PARTS_FUNCTIONS = {
     ),
 }
 
+HOST_RIG_FUNCTIONS = {
+    "mmd_runtime_host_rig_create": (
+        "host_rig_ptr",
+        [("model", "const_model_ptr"), ("driven_bones", "const_u32_ptr"),
+         ("driven_count", "usize"), ("goal_bones", "const_u32_ptr"),
+         ("goal_count", "usize")],
+    ),
+    "mmd_runtime_host_rig_free": ("void", [("rig", "host_rig_ptr")]),
+    "mmd_runtime_instance_evaluate_host_rig_pose": (
+        "status",
+        [("instance", "instance_ptr"), ("rig", "host_rig_ptr"),
+         ("view", "const_host_pose_ptr"), ("ik_tolerance", "f32"),
+         ("ik_max_iterations_cap", "u32")],
+    ),
+}
+
 VPD_JSON_FUNCTIONS = {
     "mmd_runtime_export_vpd_pose_json": (
         "ffi_byte_buffer",
@@ -661,6 +678,9 @@ def canonical_rust_type(type_name: str) -> str:
         "*mut MmdRuntimeClip": "mut_clip_ptr",
         "*mut MmdRuntimeVmdContext": "mut_vmd_context_ptr",
         "*const MmdRuntimeModel": "const_model_ptr",
+        "*mut MmdRuntimeHostRig": "host_rig_ptr",
+        "*mut MmdRuntimeInstance": "instance_ptr",
+        "*const MmdRuntimeFfiHostPoseView": "const_host_pose_ptr",
         "*const MmdRuntimeVmdContext": "const_vmd_context_ptr",
         "*const MmdRuntimeVmdCameraTrack": "const_vmd_camera_ptr",
         "*const MmdRuntimeVmdLightTrack": "const_vmd_light_ptr",
@@ -712,6 +732,9 @@ def canonical_c_type(type_name: str) -> str:
         "const mmd_runtime_clip_t*": "const_clip_ptr",
         "const mmd_runtime_vmd_camera_track_t*": "const_vmd_camera_ptr",
         "const mmd_runtime_model_t*": "const_model_ptr",
+        "mmd_runtime_host_rig_t*": "host_rig_ptr",
+        "mmd_runtime_instance_t*": "instance_ptr",
+        "const mmd_runtime_ffi_host_pose_view_t*": "const_host_pose_ptr",
         "const mmd_runtime_vmd_context_t*": "const_vmd_context_ptr",
         "const mmd_runtime_vmd_light_track_t*": "const_vmd_light_ptr",
         "const mmd_runtime_vmd_self_shadow_track_t*": "const_vmd_self_shadow_ptr",
@@ -878,6 +901,7 @@ def check_abi_shapes(rust_text: str, header_text: str) -> list[str]:
         PHYSICS_PARAM_FUNCTIONS,
         VMD_FROM_PARTS_FUNCTIONS,
         VPD_JSON_FUNCTIONS,
+        HOST_RIG_FUNCTIONS,
     )
     for functions in function_groups:
         for name, expected in functions.items():

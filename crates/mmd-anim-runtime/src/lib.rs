@@ -56,6 +56,7 @@ pub use reduce::{
     reduce_dense_pose_sequence, reduce_dense_pose_sequence_with_worker_count,
 };
 pub use runtime::{
-    HostPoseError, HostPoseView, IkSolveOptions, IkSolverRuntimeStats, PhysicsMode,
-    PhysicsStepStats, PhysicsTickConfig, RuntimeInstance,
+    HostPoseError, HostPoseView, HostRigDefinition, HostRigError, HostRigEvaluation,
+    IkSolveOptions, IkSolverRuntimeStats, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
+    RuntimeInstance,
 };

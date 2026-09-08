@@ -44,8 +44,7 @@ jobs:
               "mmd-anim-format",
               "mmd-anim-physics-bullet",
               "mmd-anim",
-              "mmd-anim-cli",
-          }
+            }
           versions = {
               package["name"]: package["version"]
               for package in metadata["packages"]
@@ -95,7 +94,6 @@ jobs:
           cargo package -p mmd-anim-format --list
           cargo package -p mmd-anim-physics-bullet --list
           cargo package -p mmd-anim --list
-          cargo package -p mmd-anim-cli --list
 
       - name: Dry-run dependency-free crate
         run: cargo publish -p mmd-anim-runtime --dry-run
@@ -320,4 +318,3 @@ jobs:
           publish_crate mmd-anim-format
           publish_crate mmd-anim-physics-bullet
           publish_crate mmd-anim
-          publish_crate mmd-anim-cli

@@ -1,39 +1,34 @@
 # mmd-anim
 
-`mmd-anim` は、MikuMikuDanceのアニメーションをマルチプラットフォームで再生するためのRust製アニメーション基盤です。
+`mmd-anim`は、MikuMikuDanceのアニメーションをマルチプラットフォームで再生するRust製の基盤です。
 
-PMX/VMD を読み込み、任意フレームからワールド行列、スキニング行列、
-モーフ重み、IK 状態を計算する機能を提供します。
-この機能を、ブラウザ、CLI, Rustアプリケーション、モバイルアプリケーション、ゲームエンジンなど、
-様々なプラットフォームから呼び出すためのライブラリを提供します。
+PMXやVMDを読み込み、任意のフレームでワールド行列、スキニング行列、モーフの重み、IKの状態を計算します。ブラウザ、CLI、Rustアプリケーション、モバイルアプリケーション、ゲームエンジンなどから利用できます。
 
 ## ステータス
 
-`mmd-anim` は、まだ評価段階です。
+`mmd-anim`は評価段階です。
 
-本家MMDから出力したデータとの検証、およびいくつかのPMX/VMDデータで検証されていますが、使用実績がすくないため、
-APIや機能はまだ固定されておらず、1.0 までに互換性のない変更が入る可能性があります。
-ぜひともフィードバックお待ちしております。
+本家MMDから出力したデータと複数のPMX/VMDデータで検証していますが、利用実績はまだ限られています。APIや機能は固定されておらず、1.0までに互換性のない変更が入る可能性があります。フィードバックをお待ちしています。
 
 ## ランタイム評価
 
-- PMX（モデル）を読み込んで、再生に使えるモデルデータに変換する。
-- VMD（モーション）を読み込み、ボーン・カメラ・ライトなどのモーションを、再生できる形に変換する。
-- MMD と同じベジェ補間（位置・回転）で計算するので、動きの緩急を再現できる。
-- model-bound host rig のポーズを評価し、host が管理するボーンと明示した IK goal を保持する。
-- Bullet Physics による MMD 向けの物理演算を、CLI や API から利用できます。
+- PMX（モデル）を読み込み、再生に使えるモデルデータへ変換する。
+- VMD（モーション）を読み込み、ボーン、カメラ、ライトなどのモーションを再生できる形へ変換する。
+- MMDと同じベジェ補間（位置、回転）で計算し、動きの緩急を再現する。
+- `model-bound host rig`のポーズを評価し、ホストが管理するボーンと明示されたIK goalを保持する。
+- Bullet PhysicsによるMMD向けの物理演算をCLIやAPIから利用できる。
 
 ## テスト基盤
 
-`mmd-anim` は複数のプロジェクトで共有するアニメーション基盤なので、「結果が正しいこと」を重視してテストを整備しています。
+`mmd-anim`は複数のプロジェクトで共有するアニメーション基盤です。結果の正しさを重視してテストを整備しています。
 
-このリポジトリでは、次のようなテストを行っています。
+このリポジトリでは、次のテストを行っています。
 
 - アニメーションの再生計算、ボーンの親子関係の計算、IK、付与変形、モーフ、各形式の読み書きが正しく動くかを確かめる単体テスト。
 - 読み込んだデータを書き出し、もう一度読み込んでも内容が変わらないことを確かめるテスト（往復テスト）。
-- PMX/VMD を実際にフレーム単位で評価し、想定どおりの結果になるかを確かめるテスト。
-- 読み込んだモデルや計算結果を見比べるための、開発者向け CLI による点検。
-- 各プラットフォーム（C ABI / WASM）から呼んでも、同じ計算が行われることを確かめる動作確認テスト。
+- PMX/VMDを実際にフレーム単位で評価し、想定どおりの結果になるかを確かめるテスト。
+- 読み込んだモデルや計算結果を見比べるための、開発者向けCLIによる点検。
+- 各プラットフォーム（C ABI、WASM）から呼び出しても同じ計算になることを確かめる動作確認テスト。
 
 公開リリース前には、次のチェックを実行することを推奨します。
 
@@ -46,55 +41,43 @@ cargo doc --workspace --no-deps
 
 ## 採用プロジェクト
 
-`mmd-anim` は、MMD 関連プロジェクトで共有するアニメーション backend として開発されています。
+`mmd-anim`は、MMD関連プロジェクトで共有するアニメーションバックエンドとして開発しています。
 
-- [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): `mmd-anim` を
-  アニメーション・形式処理バックエンドとして利用する Three.js 向け MMD loader。
-- [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools):
-  Maya 向け MMD アニメーション編集ツールとして利用する Maya プラグイン。 VMDインポート時のフルベイク用と、リグ実装にあたっての正本として利用。
-- [unity-mmd-loader](https://github.com/yohawing/unity-mmd-loader): Unity6、URPに最適化Unity向けMMD Loader。インポーターと、コアアニメーションランタイムとして利用。
+- [three-mmd-loader](https://github.com/yohawing/three-mmd-loader): `mmd-anim`をアニメーションと形式処理のバックエンドとして利用する、Three.js向けMMDローダー。
+- [maya_mmd_tools](https://github.com/yohawing/maya_mmd_tools): Maya向けMMDアニメーション編集プラグイン。VMDインポート時のフルベイクと、リグ実装の基盤として`mmd-anim`を利用します。
+- [unity-mmd-loader](https://github.com/yohawing/unity-mmd-loader): Unity 6とURP向けのMMDローダー。インポーターとコアアニメーションランタイムに`mmd-anim`を利用します。
 
-Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同じ機能を組み込めます。
+Rust API、C ABI、WASMラッパーを通じて、他のホストや製品にも同じ機能を組み込めます。
 
 ## 対応形式
 
-形式ごとの対応状況です。「読み込み」は対象ファイルを解析して構造化データにすること、
-「書き出し」は対象ファイルとして出力できることを指します。
+形式ごとの対応状況を示します。「読み込み」は対象ファイルを解析して構造化データにすること、
+「書き出し」は対象ファイルとして出力することを指します。
 
 | 形式 | 読み込み | 書き出し |
 |--------|-----------|-------------------|
-| PMX | モデル各セクションの構造化 + ソフトボディのヘッダ診断 | 書き出し / JSON 変換 / メッシュデータから生成 |
-| PMD | モデルの構造化 + 一部のランタイム取り込み | 書き出し / JSON 変換 |
+| PMX | モデル各セクションの構造化とソフトボディのヘッダー診断 | 書き出し、JSON変換、メッシュデータからの生成 |
+| PMD | モデルの構造化と一部のランタイム取り込み | 書き出し、JSON変換 |
 | VMD | **対応** | **対応** |
 | VPD | **対応** | **対応** |
-| PMM | ヘッダ、タイムライン、表示状態、参照アセット、PMMv2 の概要情報、一部 keyframe payload metadata | 部分対応: 元データの一部のみの書き換えと、単一モデルの PMX/VMD シーンの試験生成に対応しています。 |
-| X/VAC | テキスト X のメッシュ、材質、UV、法線、頂点色の構造化 + VAC の設定/生データ行 | テキスト X / VAC ラッパーの書き出し |
-| FBX | 読み込み非対応 | 試験対応：PMX のメッシュ、スケルトン、スキン、バインドポーズ、頂点モーフ（ブレンドシェイプ）に加え、ランタイムでベイクした VMD のボーン／頂点モーフアニメーションをバイナリ形式で出力。|
+| PMM | ヘッダー、タイムライン、表示状態、参照アセット、PMMv2の概要情報、一部のkeyframe payload metadata | 部分対応。元データの一部を書き換え、単一モデルのPMX/VMDシーンを試験的に生成できます。 |
+| X/VAC | テキストXのメッシュ、材質、UV、法線、頂点色の構造化と、VACの設定および生データ行 | テキストXとVACラッパーの書き出し |
+| FBX | 読み込み非対応 | 試験対応。PMXのメッシュ、スケルトン、スキン、バインドポーズ、頂点モーフ（ブレンドシェイプ）に加え、ランタイムでベイクしたVMDのボーンと頂点モーフアニメーションをバイナリ形式で出力します。 |
 
-## Rust から使う
+## Rustから使う
 
 ```toml
 [dependencies]
 mmd-anim = "0.5.0"
 ```
 
-## ネイティブ (C ABI) から使う
+## ネイティブ（C ABI）から使う
 
-ネイティブアプリやゲームエンジンなどのホストからは、`mmd-anim-ffi` の C ABI を利用します。
-これは特定のエンジンに限定したものではなく、C ABI を呼び出せる環境であれば利用できます
-（Unity はその一例です）。
-ヘッダーは [crates/mmd-anim-ffi/include/mmd_runtime.h](../crates/mmd-anim-ffi/include/mmd_runtime.h) です。
+ネイティブアプリやゲームエンジンなどのホストからは、`mmd-anim-ffi`のC ABIを利用します。特定のエンジンに限定されず、C ABIを呼び出せる環境で利用できます（Unityはその一例です）。ヘッダーは[crates/mmd-anim-ffi/include/mmd_runtime.h](../crates/mmd-anim-ffi/include/mmd_runtime.h)です。
 
-ネイティブ VMD 書き出しでは、`mmd_runtime_export_vmd_from_parts` に型付き
-Bone/Morph SoA 配列と、名前および低密度のカメラ・ライト・セルフシャドウ・
-Property/IK セクションを含む JSON メタデータを渡せます。ファイル I/O は行わず、
-所有権を移した VMD 0002 バイト列を返します。返却バッファは
-`mmd_runtime_byte_buffer_free` で解放してください。高密度のキー値は JSON に展開しません。
+ネイティブVMDの書き出しでは、`mmd_runtime_export_vmd_from_parts`に型付きのBone/Morph SoA配列と、名前および低密度のカメラ、ライト、セルフシャドウ、Property/IKセクションを含むJSONメタデータを渡せます。ファイルI/Oは行わず、所有権を移したVMD 0002バイト列を返します。返却バッファは呼び出し側で`mmd_runtime_byte_buffer_free`を使って解放してください。高密度のキー値はJSONに展開しません。
 
-VPDポーズの受け渡しには、camelCaseのJSONポーズDTOをShift-JISのVPDバイト列へ変換する
-`mmd_runtime_export_vpd_pose_json`と、VPDバイト列をUTF-8のJSONへ戻す
-`mmd_runtime_parse_vpd_pose_json`を利用できます。どちらの返却バッファも
-`mmd_runtime_byte_buffer_free`で解放してください。
+VPDポーズの受け渡しには、camelCaseのJSONポーズDTOをShift-JISのVPDバイト列へ変換する`mmd_runtime_export_vpd_pose_json`と、VPDバイト列をUTF-8のJSONへ戻す`mmd_runtime_parse_vpd_pose_json`を利用できます。どちらの返却バッファも呼び出し側で`mmd_runtime_byte_buffer_free`を使って解放してください。
 
 ```c
 // 1. PMX のバイト列からモデルを作成
@@ -122,20 +105,18 @@ mmd_runtime_clip_free(clip);
 mmd_runtime_model_free(model);
 ```
 
-想定している分担は、メッシュ、材質、テクスチャはホスト側で保持し、このランタイムからは行列、モーフ、IK 状態だけを受け取る形です。
-ホスト側の形状データから PMX を生成したい場合は `mmd_runtime_export_pmx_from_parts` を使います。
-入力配列の所有権は呼び出し元に残り、返却されたバイト列は `mmd_runtime_byte_buffer_free` で解放します。
+ホストはメッシュ、材質、テクスチャを保持し、ランタイムから行列、モーフ、IK状態を受け取る構成を想定しています。ホスト側の形状データからPMXを生成する場合は`mmd_runtime_export_pmx_from_parts`を使います。入力配列の所有権は呼び出し元に残り、返却されたバイト列は`mmd_runtime_byte_buffer_free`で解放します。
 
-## WASM / ブラウザから使う
+## WASM/ブラウザから使う
 
-ビルドはブラウザ向けの `wasm-pack build --target web` に固定しています。Node.js 単体用ビルドは使いません。
+ビルドはブラウザ向けの`wasm-pack build --target web`に固定しています。Node.js単体用ビルドは使いません。
 
 ```powershell
 cd .\crates\mmd-anim-wasm\harness
 npm run build
 ```
 
-生成物は `crates/mmd-anim-wasm/harness/pkg/` に出ます。
+生成物は`crates/mmd-anim-wasm/harness/pkg/`に出ます。
 
 ```ts
 import init, {
@@ -188,19 +169,17 @@ const generatedPmxBytes = exportPmxFromParts(
 
 ## CLI
 
-`mmd-anim-cli` は MMD 形式ファイル（PMX, VMD, VPD, PMM, X/VAC）の検査・変換・診断を行うコマンドラインツールです。
-試験的な MMDPACK package core に依存するため、現在は workspace-private です。
-GitHub Releases のビルド済み CLI、またはこの workspace からビルドして利用します。
-以下の例は workspace build を使います。GitHub Releases のバイナリでは、先頭の `cargo run -p mmd-anim-cli --` を `mmd-anim` に置き換えます。
+`mmd-anim-cli`は、MMD形式ファイル（PMX、VMD、VPD、PMM、X/VAC）の検査、変換、診断を行うコマンドラインツールです。現在は`mmd-anim-package`に依存するため、crates.ioでは公開していません。GitHub Releasesのバイナリ、またはこのワークスペースからビルドしたCLIを使います。
+
+次の例では、ワークスペースからCLIを実行します。GitHub Releasesのバイナリを使う場合は、コマンドの先頭にある`cargo run -p mmd-anim-cli --`を`mmd-anim`に置き換えてください。
 
 ```powershell
 cargo run -p mmd-anim-cli -- --help
 ```
 
-CLI、ネイティブ API、物理演算 crate をソースからビルドする場合は、対象環境向けの C++ compiler が必要です。
-Bullet 自体を別途インストールする必要はありません。
+CLI、ネイティブAPI、物理演算クレートをソースからビルドする場合は、対象環境向けのC++コンパイラが必要です。Bullet自体を別途インストールする必要はありません。
 
-PMXとVMDから、アニメーション付きFBXを書き出せます。
+PMXとVMDからアニメーション付きFBXを書き出すには、次を実行します。
 
 ```powershell
 cargo run -p mmd-anim-cli -- convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
@@ -208,43 +187,70 @@ cargo run -p mmd-anim-cli -- convert-fbx model.pmx model.fbx --vmd motion.vmd --
 
 ## MMDPACK（試験的）
 
-MMDPACK は codec-ready のモデル、モーション、テクスチャ、音声などを、1つの認証付き暗号化 package にまとめます。
-現在のコマンドは manifest の認証、entry の復号・展開、PMX texture binding の検証を行います。画像の変換は行いません。
+MMDPACKは、コーデック処理済み（codec-ready）のモデル、モーション、テクスチャ、音声などのデータを、1つの認証付き暗号化パッケージにまとめる形式です。CLIでは、マニフェストの認証、エントリの復号と展開、PMXのテクスチャ対応付けの検証を行います。PNG/JPEGのデコードや画像形式の変換は行いません。
 
-`assets/` に codec-ready payload と strict な `mmdpack.json` を置いて、次を実行します。
+### パッケージを作る
+
+`assets/`に入力ファイルと`mmdpack.json`を用意します。`mmdpack.json`は、入力ファイルの種類、コーデック、圧縮方式、モデルとテクスチャの対応を指定する厳密なJSON（`strict JSON`）です。次の例は、テクスチャを含まないPMXモデル1つだけの最小構成です。
+
+```json
+{
+  "defaultModelEntryId": 1,
+  "entries": [
+    {
+      "id": 1,
+      "path": "model/model.pmx",
+      "kind": "model",
+      "codec": "pmx",
+      "compression": "none"
+    }
+  ],
+  "modelBindings": [
+    { "modelEntryId": 1, "textureBindings": [] }
+  ]
+}
+```
+
+`assets/model/model.pmx`を配置したら、次のコマンドでパッケージを作成します。
 
 ```powershell
 cargo run -p mmd-anim-cli -- package pack assets --config assets/mmdpack.json -o scene.mmdpack --key-out scene.key
+```
+
+パッケージを作成したら、次のコマンドで内容を検証します。`--strict-codecs`を付けると、パッケージ側で認識できないコーデックをエラーとして扱います。
+
+```powershell
 cargo run -p mmd-anim-cli -- package verify scene.mmdpack --key-file scene.key --strict-codecs
 ```
 
-1つ目のコマンドは package と raw key を書き出します。2つの出力先は既存ファイルにできません。key は package と分けて保管します。
-package crate は現在 workspace-private で、Draft 0.2 の format は V1 までに変更される可能性があります。
+`package pack`は`scene.mmdpack`と32バイトの鍵ファイル`scene.key`を作成します。2つの出力先は、あらかじめ存在しないパスを指定します。鍵はパッケージと分けて保管し、リポジトリへ登録しないでください。
+
+`mmd-anim-package`は現在ワークスペース内だけで利用できる非公開クレートです。Draft 0.2のフォーマット、`codec profile`、公開設定はV1までに変更される可能性があります。
 
 ## クレート構成
 
-| Crate | 役割 |
+| クレート | 役割 |
 |---|---|
-| `mmd-anim` | 主要な公開クレート。評価コアと形式処理をまとめて使えるようにする。 |
-| `mmd-anim-runtime` | ファイル形式に依存しない評価コア。モデルアリーナ、ポーズ、VMD 評価、付与変形、IK、モーフを扱う。 |
-| `mmd-anim-format` | PMX/VMD のランタイム取り込み、形式判定、読み込み（構造化）、PMX/PMD/VMD/VPD/X/VAC の書き出しを提供する。 |
-| `mmd-anim-physics-bullet` | MMD 向けの Bullet Physics backend。同梱した Bullet3 を対象環境向けにビルドし、ランタイムと PMX 形式との連携を提供する。 |
-| `mmd-anim-package` | Draft MMDPACK container の workspace-private な試験的 bounded reader / packer。wire format は未確定で、codec-ready payload をそのまま扱う。 |
-| `mmd-anim-ffi` | ネイティブホスト向けの C ABI。ランタイム操作、PMX パーツ書き出し、疎カーブ、物理演算を公開する。crates.io では公開しない。 |
-| `mmd-anim-wasm` | ブラウザ向けの `wasm-bindgen` ラッパー。ランタイム操作、読み込み/書き出し、PMX パーツ書き出し、疎カーブを公開する。crates.io では公開しない。 |
-| `mmd-anim-cli` | MMD 形式ファイルの検査・変換・診断コマンド。メンテナ向け oracle / numeric compare schema もこの crate 側に含む。workspace-private で、リリースバイナリは別途提供します。 |
+| `mmd-anim` | 主要な公開クレート。評価コアと形式処理をまとめて利用できます。 |
+| `mmd-anim-runtime` | ファイル形式に依存しない評価コア。モデルアリーナ、ポーズ、VMD評価、付与変形、IK、モーフを扱います。 |
+| `mmd-anim-format` | PMX/VMDのランタイム取り込み、形式判定、構造化データへの読み込み、PMX/PMD/VMD/VPD/X/VACの書き出しを提供します。 |
+| `mmd-anim-physics-bullet` | MMD向けのBullet Physicsバックエンド。同梱のBullet3を対象環境向けにビルドし、ランタイムやPMX形式と連携します。 |
+| `mmd-anim-package` | Draft MMDPACKの試験的な読み込みとパッキング。現在はワークスペース内だけで利用でき、wire formatは未確定です。codec-ready payloadをそのまま扱います。 |
+| `mmd-anim-ffi` | ネイティブホスト向けのC ABI。ランタイム操作、PMXパーツの書き出し、疎カーブ、物理演算を公開します。crates.ioでは公開していません。 |
+| `mmd-anim-wasm` | ブラウザ向けの`wasm-bindgen`ラッパー。ランタイム操作、読み込みと書き出し、PMXパーツの書き出し、疎カーブを公開します。crates.ioでは公開していません。 |
+| `mmd-anim-cli` | MMD形式ファイルの検査、変換、診断を行うコマンド。メンテナ向けのoracleやnumeric compare schemaも含みます。crates.ioでは公開していませんが、GitHub ReleasesでCLIバイナリを提供します。 |
 
-通常のライブラリ利用では `mmd-anim` を依存に追加してください。低レイヤだけを直接使いたい場合は
-`mmd-anim-format` や `mmd-anim-runtime` に直接依存できます。物理演算 backend を Rust から直接使う場合は
-`mmd-anim-physics-bullet` を利用できます。
+通常のライブラリ利用では`mmd-anim`を依存に追加します。低レイヤだけを直接使う場合は、
+`mmd-anim-format`や`mmd-anim-runtime`に直接依存できます。Rustから物理演算バックエンドを直接使う場合は、
+`mmd-anim-physics-bullet`を利用します。
 
 ## 現在の制限と注意点
 
-- **評価コア:** PMD は読み込みと一部のランタイム取り込み（ボーン、IK、モーフ枠、頂点モーフの移動量）に対応していますが、描画側の頂点変形や PMD の完全互換ではありません。
-- **書き出し:** メッシュからの生成は形状、材質、ボーン、表示枠、モーフ、物理情報の初期範囲までです。PMM の書き出しは、現在の PMM manifest parser が表現している範囲に限定されます。
-- **PMM:** プロジェクトのヘッダ情報、タイムライン由来の値、表示状態、モデル枠の初期範囲、参照アセット、PMMv2 の概要情報、アセット/ヘッダの整合性診断までです。PMM exporter は、この限定された manifest/header/slot/asset-reference 情報を PMMv2 ファイルとして再出力できますが、完全な PMM project graph exporter ではありません。parser が要約だけしている、または保持していないキーフレーム本体、camera/light/accessory/self-shadow の完全なトラック、その他のバイナリ project graph データは `PmmParsedManifest` から復元できません。
-- **X/VAC:** テキスト X のメッシュ、材質、法線、UV、頂点色と VAC の共通行順を扱います。バイナリ X は診断のみです。
-- **MMDPACK:** workspace-private の `mmd-anim-package` crate と CLI コマンドは Draft 0.2 の試験対応です。format、codec profile、公開設定は V1 までに変更される可能性があり、現在の pack は codec-ready payload の受け渡しに限定され、PNG/JPEG decode や package の WASM/FFI、高レベル PMX/VMD loading は提供しません。package crate に依存するCLI crateも公開を保留しているため、workspace build または GitHub Release バイナリを利用します。
+- **評価コア:** PMDの読み込みと一部のランタイム取り込み（ボーン、IK、モーフ枠、頂点モーフの移動量）に対応しています。描画側の頂点変形やPMDとの完全互換には対応していません。
+- **書き出し:** メッシュからの生成は、形状、材質、ボーン、表示枠、モーフ、物理情報の初期範囲に限られます。PMMの書き出しも、現在のPMM manifest parserが表現できる範囲に限られます。
+- **PMM:** プロジェクトのヘッダー情報、タイムライン由来の値、表示状態、モデル枠の初期範囲、参照アセット、PMMv2の概要情報、アセットとヘッダーの整合性診断に対応しています。PMM exporterは、保持しているmanifest、header、slot、asset-reference情報をPMMv2ファイルとして再出力できますが、完全なPMM project graph exporterではありません。parserが要約または保持していないキーフレーム本体、camera、light、accessory、self-shadowの完全なトラック、その他のバイナリproject graphデータは`PmmParsedManifest`から復元できません。
+- **X/VAC:** テキストXのメッシュ、材質、法線、UV、頂点色と、VACの共通行順を扱います。バイナリXは診断のみです。
+- **MMDPACK:** `mmd-anim-package`と関連CLIコマンドは、Draft 0.2の試験対応です。フォーマット、`codec profile`、公開設定はV1までに変更される可能性があります。現在のpackはcodec-ready payloadの受け渡しに限られ、PNG/JPEGのデコード、パッケージのWASM/FFI、高レベルのPMX/VMD読み込みには対応していません。`mmd-anim-package`と`mmd-anim-cli`はcrates.ioで公開していません。利用時はワークスペースからビルドするか、GitHub ReleasesのCLIバイナリを使ってください。
 
 ## 参考にしたプロジェクト
 

@@ -5,8 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
-description = "Experimental bounded reader for draft MMDPACK containers"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+description = "Experimental bounded reader and packer for the draft MMDPACK container"
 
 [dependencies]
 aes-gcm = "0.10.3"

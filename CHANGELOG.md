@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.5.0 - 2026-09-08
+
+Added model-bound host-rig evaluation and the first experimental MMDPACK
+package integration. This release advances the workspace crates together so
+the installable CLI can use the package core from crates.io.
+
+### Added
+
+- Added `HostRigDefinition` and host-pose evaluation for preserving
+  host-driven bones while PMX helper bones evaluate Append and explicitly
+  declared IK goals.
+- Added native C ABI support for host-rig evaluation, including ownership
+  preservation through the existing Live physics frame, plus a stateless WASM
+  wrapper and runnable host-rig smoke example.
+- Added the experimental `mmd-anim-package` crate with bounded MMDPACK reader,
+  packer, authenticated manifest and entry verification, strict metadata
+  checks, PMX texture-binding validation, and draft KTX2 UASTC payload checks.
+- Added `mmd-anim package header|inspect|verify|pack|unpack` for inspecting and
+  transferring encrypted, codec-ready MMDPACK payloads without clobbering
+  existing destinations.
+
+### Known limitations
+
+- MMDPACK remains Draft 0.2. Its wire format, codec profile, public
+  configuration, and package API are experimental and may change before V1.
+  Packing accepts codec-ready payloads; PNG/JPEG decoding, mip generation,
+  texture encoding, WASM/FFI package APIs, and high-level PMX/VMD loading are
+  not included.
+- Host-rig mapping, retargeting, coordinate conversion, root motion, and
+  display application remain host responsibilities. WASM exposes stateless
+  pose evaluation; it does not add WASM Live physics.
+- The C ABI, WASM wrapper, PMM document conversion, and Python binding remain
+  experimental and may change before 1.0.
+
 ## 0.4.3 - 2026-08-27
 
 Added native VPD pose interchange, corrected generated PMM scene data,

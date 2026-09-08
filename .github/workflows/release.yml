@@ -44,6 +44,7 @@ jobs:
               "mmd-anim-format",
               "mmd-anim-physics-bullet",
               "mmd-anim",
+              "mmd-anim-package",
               "mmd-anim-cli",
           }
           versions = {
@@ -95,10 +96,13 @@ jobs:
           cargo package -p mmd-anim-format --list
           cargo package -p mmd-anim-physics-bullet --list
           cargo package -p mmd-anim --list
+          cargo package -p mmd-anim-package --list
           cargo package -p mmd-anim-cli --list
 
-      - name: Dry-run dependency-free crate
-        run: cargo publish -p mmd-anim-runtime --dry-run
+      - name: Dry-run publishable crates without upstream workspace dependencies
+        run: |
+          cargo publish -p mmd-anim-runtime --dry-run
+          cargo publish -p mmd-anim-package --dry-run
 
   build-cli:
     name: Build CLI (${{ matrix.target }})
@@ -320,4 +324,5 @@ jobs:
           publish_crate mmd-anim-format
           publish_crate mmd-anim-physics-bullet
           publish_crate mmd-anim
+          publish_crate mmd-anim-package
           publish_crate mmd-anim-cli

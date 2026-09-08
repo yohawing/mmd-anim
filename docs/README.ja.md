@@ -15,11 +15,16 @@ PMX/VMD を読み込み、任意フレームからワールド行列、スキニ
 APIや機能はまだ固定されておらず、1.0 までに互換性のない変更が入る可能性があります。
 ぜひともフィードバックお待ちしております。
 
+MMDPACK の package core と CLI は試験的な draft 対応として利用できます。
+現在の Draft 0.2 wire format は V1 の安定した契約ではなく、pack は codec-ready
+payload を受け渡すだけで画像変換は行いません。
+
 ## ランタイム評価
 
 - PMX（モデル）を読み込んで、再生に使えるモデルデータに変換する。
 - VMD（モーション）を読み込み、ボーン・カメラ・ライトなどのモーションを、再生できる形に変換する。
 - MMD と同じベジェ補間（位置・回転）で計算するので、動きの緩急を再現できる。
+- model-bound host rig のポーズを評価し、host が管理するボーンと明示した IK goal を保持する。
 - Bullet Physics による MMD 向けの物理演算を、CLI や API から利用できます。
 
 ## テスト基盤
@@ -74,7 +79,7 @@ Rust API、C ABI、WASM wrapper を通じて、他のホストや製品にも同
 
 ```toml
 [dependencies]
-mmd-anim = "0.4.3"
+mmd-anim = "0.5.0"
 ```
 
 ## ネイティブ (C ABI) から使う
@@ -203,6 +208,15 @@ PMXとVMDから、アニメーション付きFBXを書き出せます。
 mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 ```
 
+試験的な MMDPACK コマンドで、Draft 0.2 package の検査、検証、pack、unpack を行えます。
+`package pack` は strict JSON manifest に従って codec-ready payload を格納しますが、
+画像の decode や texture の encode は行いません。
+
+```powershell
+mmd-anim package pack assets --config assets/mmdpack.json -o scene.mmdpack --key-out scene.key
+mmd-anim package verify scene.mmdpack --key-file scene.key --strict-codecs
+```
+
 ## クレート構成
 
 | Crate | 役割 |
@@ -211,6 +225,7 @@ mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 | `mmd-anim-runtime` | ファイル形式に依存しない評価コア。モデルアリーナ、ポーズ、VMD 評価、付与変形、IK、モーフを扱う。 |
 | `mmd-anim-format` | PMX/VMD のランタイム取り込み、形式判定、読み込み（構造化）、PMX/PMD/VMD/VPD/X/VAC の書き出しを提供する。 |
 | `mmd-anim-physics-bullet` | MMD 向けの Bullet Physics backend。同梱した Bullet3 を対象環境向けにビルドし、ランタイムと PMX 形式との連携を提供する。 |
+| `mmd-anim-package` | Draft MMDPACK container の試験的な bounded reader / packer。wire format は未確定で、codec-ready payload をそのまま扱う。 |
 | `mmd-anim-ffi` | ネイティブホスト向けの C ABI。ランタイム操作、PMX パーツ書き出し、疎カーブ、物理演算を公開する。crates.io では公開しない。 |
 | `mmd-anim-wasm` | ブラウザ向けの `wasm-bindgen` ラッパー。ランタイム操作、読み込み/書き出し、PMX パーツ書き出し、疎カーブを公開する。crates.io では公開しない。 |
 | `mmd-anim-cli` | MMD 形式ファイルの検査・変換・診断コマンド。メンテナ向け oracle / numeric compare schema もこの crate 側に含む。`cargo install mmd-anim-cli` でインストール可能。 |
@@ -225,6 +240,7 @@ mmd-anim convert-fbx model.pmx model.fbx --vmd motion.vmd --max-frame 120
 - **書き出し:** メッシュからの生成は形状、材質、ボーン、表示枠、モーフ、物理情報の初期範囲までです。PMM の書き出しは、現在の PMM manifest parser が表現している範囲に限定されます。
 - **PMM:** プロジェクトのヘッダ情報、タイムライン由来の値、表示状態、モデル枠の初期範囲、参照アセット、PMMv2 の概要情報、アセット/ヘッダの整合性診断までです。PMM exporter は、この限定された manifest/header/slot/asset-reference 情報を PMMv2 ファイルとして再出力できますが、完全な PMM project graph exporter ではありません。parser が要約だけしている、または保持していないキーフレーム本体、camera/light/accessory/self-shadow の完全なトラック、その他のバイナリ project graph データは `PmmParsedManifest` から復元できません。
 - **X/VAC:** テキスト X のメッシュ、材質、法線、UV、頂点色と VAC の共通行順を扱います。バイナリ X は診断のみです。
+- **MMDPACK:** 公開する `mmd-anim-package` crate と CLI コマンドは Draft 0.2 の試験対応です。format、codec profile、公開設定は V1 までに変更される可能性があり、現在の pack は codec-ready payload の受け渡しに限定され、PNG/JPEG decode や WASM/FFI/高レベル PMX/VMD loading は提供しません。
 
 ## 参考にしたプロジェクト
 

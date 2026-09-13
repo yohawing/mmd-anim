@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.1 - 2026-09-13
+
+Added backend-neutral physics callbacks for model-bound RuntimeRig evaluation.
+
+### Added
+
+- Added a synchronous native C ABI callback that receives the before-physics
+  world matrices and writes physics results through fixed-size matrix and mask
+  buffers before after-physics evaluation completes.
+- Added the equivalent synchronous WASM callback with copied TypedArrays,
+  validation of callback results, and recovery on subsequent evaluations after
+  callback failure.
+
+### Fixed
+
+- Reject transferred WASM physics output buffers without trapping, so the
+  RuntimeRig instance remains reusable after callback failure.
+
+### Known limitations
+
+- Physics simulation and coordinate conversion remain host responsibilities.
+  Callbacks must complete synchronously and must not reenter the same instance.
+  Existing native Bullet APIs remain available.
+- The C ABI and WASM wrapper remain experimental. The MMDPACK limitations
+  recorded for 0.5.0 still apply; this release does not freeze its V1 profile.
+
 ## 0.5.0 - 2026-09-08
 
 Added model-bound host-rig evaluation and the first experimental MMDPACK

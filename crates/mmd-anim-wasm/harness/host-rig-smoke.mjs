@@ -118,6 +118,19 @@ function runExternalPhysicsSmoke(wasm) {
     ));
     apply();
     assert.equal(calls, 2, 'guard recovers after callback rejection');
+    for (const outputIndex of [1, 2]) {
+      assert.throws(() => rig.evaluateWithExternalPhysics(
+        runtime, positions, rotations, scales, morphs, ik, 1e-4, 0,
+        (...buffers) => {
+          const buffer = buffers[outputIndex].buffer;
+          structuredClone(buffer, { transfer: [buffer] });
+          return true;
+        },
+      ), /detached an output buffer/);
+      apply();
+      assert.equal(runtime.copyWorldMatrices(out), true);
+      assert.ok(Math.abs(out[29] - 0.75) < 1e-5, 'guard recovers after buffer transfer');
+    }
   } finally {
     rig.free(); runtime.free(); model.free();
   }

@@ -159,8 +159,15 @@ impl WasmMmdHostRig {
                 ));
             }
 
-            physics.copy_to(&mut self.physics_world_matrices);
-            mask.copy_to(&mut self.physics_world_matrix_mask);
+            if physics.length() as usize != matrix_len || mask.length() != mask_len {
+                return Err(JsValue::from_str(
+                    "external physics callback detached an output buffer",
+                ));
+            }
+            if bone_count != 0 {
+                physics.copy_to(&mut self.physics_world_matrices);
+                mask.copy_to(&mut self.physics_world_matrix_mask);
+            }
             self.physics_writeback.fill(None);
             for bone_index in 0..self.physics_writeback.len() {
                 if self.physics_world_matrix_mask[bone_index] == 0 {

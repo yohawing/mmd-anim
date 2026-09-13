@@ -52,4 +52,86 @@ export function runHostRigSmoke(wasm) {
   } finally {
     rig.free(); runtime.free(); otherRuntime.free(); otherModel.free();
   }
+
+  runExternalPhysicsSmoke(wasm);
+}
+
+function runExternalPhysicsSmoke(wasm) {
+  const model = new wasm.WasmMmdModel(
+    new Int32Array([-1, 0]),
+    new Float32Array([0, 0, 0, 0, 1, 0]),
+  );
+  const runtime = wasm.WasmMmdRuntimeInstance.forModel(model);
+  const rig = new wasm.WasmMmdHostRig(model, new Uint32Array([0]), new Uint32Array());
+  const positions = new Float32Array([2, 0, 0, 0, 0, 0]);
+  const rotations = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1]);
+  const scales = new Float32Array(6).fill(1);
+  const morphs = new Float32Array();
+  const ik = new Uint8Array();
+  const out = new Float32Array(32);
+  let calls = 0;
+  const apply = () => rig.evaluateWithExternalPhysics(
+    runtime, positions, rotations, scales, morphs, ik, 1e-4, 0,
+    (before, physics, mask) => {
+      calls++;
+      assert.ok(before instanceof Float32Array);
+      assert.ok(physics instanceof Float32Array);
+      assert.ok(mask instanceof Uint8Array);
+      assert.notEqual(before.buffer, physics.buffer);
+      assert.deepEqual(physics, before);
+      physics[12] = 99;
+      physics[16 + 13] -= 0.25;
+      mask.set([1, 1]);
+      return true;
+    },
+  );
+  try {
+    apply();
+    assert.equal(calls, 1);
+    assert.equal(runtime.copyWorldMatrices(out), true);
+    assert.ok(Math.abs(out[12] - 2) < 1e-5, `driven root moved: ${out[12]}`);
+    assert.ok(Math.abs(out[16 + 12] - 2) < 1e-5, `child x changed: ${out[28]}`);
+    assert.ok(Math.abs(out[16 + 13] - 0.75) < 1e-5, `child y not written: ${out[29]}`);
+
+    assert.throws(() => rig.evaluateWithExternalPhysics(
+      runtime, positions, rotations, scales, morphs, ik, 1e-4, 0,
+      () => { throw new Error('external solver failed'); },
+    ));
+    assert.equal(runtime.copyWorldMatrices(out), true);
+    assert.ok(Math.abs(out[12] - 2) < 1e-5, 'callback failure refreshes before-pose cache');
+    assert.ok(Math.abs(out[16 + 13] - 1) < 1e-5, 'callback failure skips writeback');
+    assert.throws(() => rig.evaluateWithExternalPhysics(
+      runtime, positions, rotations, scales, morphs, ik, 1e-4, 0,
+      async () => true,
+    ));
+    assert.throws(() => rig.evaluateWithExternalPhysics(
+      runtime, positions, rotations, scales, morphs, ik, 1e-4, 0,
+      () => false,
+    ));
+    assert.throws(() => rig.evaluateWithExternalPhysics(
+      runtime, positions, rotations, scales, morphs, ik, 1e-4, 0,
+      (_before, physics, mask) => {
+        physics[16] = NaN;
+        mask[1] = 1;
+        return true;
+      },
+    ));
+    apply();
+    assert.equal(calls, 2, 'guard recovers after callback rejection');
+    for (const outputIndex of [1, 2]) {
+      assert.throws(() => rig.evaluateWithExternalPhysics(
+        runtime, positions, rotations, scales, morphs, ik, 1e-4, 0,
+        (...buffers) => {
+          const buffer = buffers[outputIndex].buffer;
+          structuredClone(buffer, { transfer: [buffer] });
+          return true;
+        },
+      ), /detached an output buffer/);
+      apply();
+      assert.equal(runtime.copyWorldMatrices(out), true);
+      assert.ok(Math.abs(out[29] - 0.75) < 1e-5, 'guard recovers after buffer transfer');
+    }
+  } finally {
+    rig.free(); runtime.free(); model.free();
+  }
 }

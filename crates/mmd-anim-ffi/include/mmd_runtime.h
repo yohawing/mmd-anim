@@ -45,7 +45,9 @@ extern "C" {
    model-less raw bone/morph key readback endpoints are available; bit 13
    (MMD_RUNTIME_FEATURE_HOST_RIG) is set when Physics-Off host-rig evaluation
    is available; bit 14 (MMD_RUNTIME_FEATURE_HOST_RIG_PHYSICS) is set when
-   the host-rig physics frame endpoint is available with native Bullet.
+   the host-rig physics frame endpoint is available with native Bullet;
+   bit 15 (MMD_RUNTIME_FEATURE_HOST_RIG_EXTERNAL_PHYSICS) is set when the
+   backend-neutral synchronous callback endpoint is available.
    Check the relevant bit before calling each optional surface; when a
    surface's bit is unset, its status-returning functions return
    MMD_RUNTIME_STATUS_UNSUPPORTED (and optional count functions return zero).
@@ -147,6 +149,7 @@ typedef struct mmd_runtime_reduced_pose_t mmd_runtime_reduced_pose_t;
 #define MMD_RUNTIME_FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK (1u << 12)
 #define MMD_RUNTIME_FEATURE_HOST_RIG (1u << 13)
 #define MMD_RUNTIME_FEATURE_HOST_RIG_PHYSICS (1u << 14)
+#define MMD_RUNTIME_FEATURE_HOST_RIG_EXTERNAL_PHYSICS (1u << 15)
 #define MMD_RUNTIME_REDUCED_POSE_GENERIC_CURVE_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_BONE_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
 #define MMD_RUNTIME_CLIP_MORPH_TRACK_INTROSPECTION_ABI_VERSION_V1 1u
@@ -175,6 +178,23 @@ typedef enum mmd_runtime_status {
     MMD_RUNTIME_STATUS_BUFFER_TOO_SMALL = 3,
     MMD_RUNTIME_STATUS_ERROR = 4
 } mmd_runtime_status_t;
+
+/* Called synchronously while RuntimeRig driven-bone ownership is active.
+   All buffers are initialized, distinct, and valid only until return.
+   The callback must not retain pointers, write before_world_matrices_f32,
+   re-enter the originating instance, access buffers from another thread,
+   throw/longjmp across the callback boundary, or return before its writes
+   finish. Write model-space column-major matrices and set non-zero mask bytes
+   for bones that should receive physics writeback. Return a raw
+   MMD_RUNTIME_STATUS_* value. */
+typedef uint32_t (*mmd_runtime_host_rig_external_physics_callback_t)(
+    void*        user_data,
+    const float* before_world_matrices_f32,
+    size_t       before_world_matrices_f32_len,
+    float*       physics_world_matrices_f32,
+    size_t       physics_world_matrices_f32_len,
+    uint8_t*     physics_world_matrix_mask_u8,
+    size_t       physics_world_matrix_mask_u8_len);
 
 typedef enum mmd_runtime_reduction_target {
     MMD_RUNTIME_REDUCTION_TARGET_LINEAR_SLERP = 0,
@@ -1617,6 +1637,21 @@ mmd_runtime_status_t mmd_runtime_evaluate_host_rig_frame(
     float ik_tolerance,
     uint32_t ik_max_iterations_cap,
     mmd_runtime_ffi_physics_world_step_report_t* out_report);
+
+/* Backend-neutral RuntimeRig physics frame. The callback runs once between
+   before-physics and writeback/after-physics while the existing internal
+   HostRigEvaluation guard remains active. The same IK options are used in
+   both phases. user_data is opaque and may be NULL. No callback buffer is
+   retained. On callback failure, writeback and after-physics are skipped;
+   the before-physics pose remains applied and all handles remain reusable. */
+mmd_runtime_status_t mmd_runtime_evaluate_host_rig_frame_with_external_physics(
+    mmd_runtime_instance_t* instance,
+    mmd_runtime_host_rig_t* rig,
+    const mmd_runtime_ffi_host_pose_view_t* view,
+    float ik_tolerance,
+    uint32_t ik_max_iterations_cap,
+    mmd_runtime_host_rig_external_physics_callback_t callback,
+    void* user_data);
 
 /* Applies the same pre-morph host pose contract as apply_host_pose, expands
    group/bone morphs natively, and evaluates the before-physics phase. */

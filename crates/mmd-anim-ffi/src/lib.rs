@@ -5,7 +5,7 @@ use std::collections::HashMap;
 #[cfg(feature = "physics-bullet-native")]
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::CString;
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::{mem::size_of, ptr, slice, str, sync::Arc};
 
@@ -32,6 +32,7 @@ use mmd_anim_runtime::{
 pub const ABI_VERSION: u32 = 3;
 pub const MMD_RUNTIME_FEATURE_HOST_RIG: u32 = 1 << 13;
 pub const MMD_RUNTIME_FEATURE_HOST_RIG_PHYSICS: u32 = 1 << 14;
+pub const MMD_RUNTIME_FEATURE_HOST_RIG_EXTERNAL_PHYSICS: u32 = 1 << 15;
 
 /// Model-bound rig plus reusable native input conversion buffers.
 pub struct MmdRuntimeHostRig {
@@ -39,6 +40,10 @@ pub struct MmdRuntimeHostRig {
     positions: Vec<glam::Vec3A>,
     rotations: Vec<glam::Quat>,
     scales: Vec<glam::Vec3A>,
+    before_world_matrices: Vec<f32>,
+    physics_world_matrices: Vec<f32>,
+    physics_world_matrix_mask: Vec<u8>,
+    physics_writeback: Vec<Option<glam::Mat4>>,
 }
 const FEATURE_SPLIT_PHYSICS_EVALUATION: u32 = 1 << 0;
 const FEATURE_PHYSICS_BULLET_NATIVE: u32 = 1 << 1;
@@ -906,6 +911,21 @@ pub enum MmdRuntimeStatus {
     Error = 4,
 }
 
+/// Synchronous external-physics callback used while a HostRigEvaluation guard
+/// keeps driven bones protected. All buffers are valid only for the callback.
+/// The callback must return a raw MmdRuntimeStatus discriminant and must not
+/// retain pointers, mutate the const input, re-enter the instance, unwind, or
+/// continue accessing buffers after it returns.
+pub type MmdRuntimeHostRigExternalPhysicsCallback = unsafe extern "C" fn(
+    user_data: *mut c_void,
+    before_world_matrices_f32: *const f32,
+    before_world_matrices_f32_len: usize,
+    physics_world_matrices_f32: *mut f32,
+    physics_world_matrices_f32_len: usize,
+    physics_world_matrix_mask_u8: *mut u8,
+    physics_world_matrix_mask_u8_len: usize,
+) -> u32;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MmdRuntimeFfiPhysicsMode {
@@ -1186,6 +1206,7 @@ fn runtime_feature_flags() -> u32 {
         | FEATURE_VMD_SHARED_CONTEXT_BONE_READBACK
         | FEATURE_VMD_SUMMARY_BYTES
         | FEATURE_VMD_SHARED_CONTEXT_RAW_READBACK
+        | MMD_RUNTIME_FEATURE_HOST_RIG_EXTERNAL_PHYSICS
         | if cfg!(feature = "physics-bullet-native") {
             FEATURE_PHYSICS_BULLET_NATIVE | FEATURE_HOST_RIG_PHYSICS
         } else {
@@ -5981,12 +6002,20 @@ pub unsafe extern "C" fn mmd_runtime_host_rig_create(
         };
         let driven: Vec<_> = driven.iter().copied().map(BoneIndex).collect();
         let goals: Vec<_> = goals.iter().copied().map(BoneIndex).collect();
+        if model.model.bone_count().checked_mul(16).is_none() {
+            set_last_error("host rig matrix buffer size overflow");
+            return ptr::null_mut();
+        }
         match mmd_anim_runtime::HostRigDefinition::new(Arc::clone(&model.model), &driven, &goals) {
             Ok(rig) => Box::into_raw(Box::new(MmdRuntimeHostRig {
                 rig,
                 positions: vec![glam::Vec3A::ZERO; model.model.bone_count()],
                 rotations: vec![glam::Quat::IDENTITY; model.model.bone_count()],
                 scales: vec![glam::Vec3A::ONE; model.model.bone_count()],
+                before_world_matrices: Vec::new(),
+                physics_world_matrices: Vec::new(),
+                physics_world_matrix_mask: Vec::new(),
+                physics_writeback: Vec::new(),
             })),
             Err(error) => {
                 set_last_error(error.to_string());
@@ -6231,6 +6260,192 @@ pub unsafe extern "C" fn mmd_runtime_evaluate_host_rig_frame(
             instance.refresh_matrix_caches();
         }
         status
+    })
+}
+
+/// Evaluates one backend-neutral host-rig physics frame with a synchronous
+/// foreign callback. The callback receives the before-physics model-space
+/// world matrices and writes selected model-space physics matrices plus a
+/// byte mask. The same IK options are used for both evaluation phases.
+///
+/// Callback buffers are distinct, initialized, and valid only until the
+/// callback returns. The callback must return normally without retaining any
+/// pointer, mutating the const input, re-entering `instance`, or starting an
+/// asynchronous writer. A non-zero mask byte selects the corresponding bone.
+///
+/// On validation failure the previous pose and caches remain unchanged. A
+/// callback failure leaves the valid before-physics pose applied, performs no
+/// writeback or after-physics evaluation, releases the host-rig guard, and
+/// keeps all handles reusable for a later frame.
+///
+/// # Safety
+///
+/// `instance`, `rig`, and `view` must be distinct live handles/pointers and be
+/// accessed exclusively for this call. Every non-empty view array must be
+/// aligned, initialized, readable for its declared length, and non-overlapping
+/// with handle-owned storage. `callback` must uphold the callback contract
+/// above. `user_data` is opaque and may be null. No input pointer is retained.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_evaluate_host_rig_frame_with_external_physics(
+    instance: *mut MmdRuntimeInstance,
+    rig: *mut MmdRuntimeHostRig,
+    view: *const MmdRuntimeFfiHostPoseView,
+    ik_tolerance: f32,
+    ik_max_iterations_cap: u32,
+    callback: Option<MmdRuntimeHostRigExternalPhysicsCallback>,
+    user_data: *mut c_void,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(callback) = callback else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, "physics callback is null");
+        };
+        if checked_pointer_range(instance, 1).is_none()
+            || checked_pointer_range(rig, 1).is_none()
+            || checked_pointer_range(view, 1).is_none()
+        {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "invalid host rig external physics handle or view",
+            );
+        }
+        if !ik_tolerance.is_finite() || ik_tolerance < 0.0 {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        }
+
+        let instance = unsafe { &mut *instance };
+        let rig = unsafe { &mut *rig };
+        let view = unsafe { &*view };
+        let n = rig.positions.len();
+        if view.bone_count != n
+            || view.bone_count != instance.model.bone_count()
+            || view.morph_count != instance.runtime.morph_weights().len()
+            || view.ik_count != instance.runtime.ik_enabled().len()
+        {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "host rig pose counts do not match instance",
+            );
+        }
+        let (Some(position_len), Some(rotation_len), Some(scale_len), Some(matrix_len)) = (
+            n.checked_mul(3),
+            n.checked_mul(4),
+            n.checked_mul(3),
+            n.checked_mul(16),
+        ) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        let (Some(p), Some(q), Some(s), Some(morph), Some(ik)) = (
+            unsafe { checked_slice(view.local_position_offsets_xyz, position_len) },
+            unsafe { checked_slice(view.local_rotation_xyzw, rotation_len) },
+            unsafe { checked_slice(view.local_scales_xyz, scale_len) },
+            unsafe { checked_slice(view.morph_weights, view.morph_count) },
+            unsafe { checked_slice(view.ik_enabled, view.ik_count) },
+        ) else {
+            return status_failure(
+                MmdRuntimeStatus::InvalidInput,
+                "invalid host rig external physics pose arrays",
+            );
+        };
+        for (dst, src) in rig.positions.iter_mut().zip(p.chunks_exact(3)) {
+            *dst = glam::Vec3A::new(src[0], src[1], src[2]);
+        }
+        for (dst, src) in rig.rotations.iter_mut().zip(q.chunks_exact(4)) {
+            *dst = glam::Quat::from_xyzw(src[0], src[1], src[2], src[3]);
+        }
+        for (dst, src) in rig.scales.iter_mut().zip(s.chunks_exact(3)) {
+            *dst = glam::Vec3A::new(src[0], src[1], src[2]);
+        }
+        rig.before_world_matrices.resize(matrix_len, 0.0);
+        rig.physics_world_matrices.resize(matrix_len, 0.0);
+        rig.physics_world_matrix_mask.resize(n, 0);
+        rig.physics_writeback.resize(n, None);
+
+        let options = IkSolveOptions {
+            tolerance: ik_tolerance,
+            max_iterations_cap: (ik_max_iterations_cap != 0).then_some(ik_max_iterations_cap),
+        };
+        let host_pose = HostPoseView {
+            local_position_offsets: &rig.positions,
+            local_rotations: &rig.rotations,
+            local_scales: &rig.scales,
+            morph_weights: morph,
+            ik_enabled: ik,
+        };
+        let mut evaluation = match instance
+            .runtime
+            .begin_host_rig_evaluation(&rig.rig, &host_pose, options)
+        {
+            Ok(evaluation) => evaluation,
+            Err(error) => {
+                return status_failure(MmdRuntimeStatus::InvalidInput, &error.to_string());
+            }
+        };
+        evaluation.evaluate_before_physics_with_ik_options(options);
+
+        let outcome = (|| -> Result<(), (MmdRuntimeStatus, &'static str)> {
+            flatten_matrices_into_slice(
+                &mut rig.before_world_matrices,
+                evaluation.runtime_mut().world_matrices(),
+            );
+            rig.physics_world_matrices
+                .copy_from_slice(&rig.before_world_matrices);
+            rig.physics_world_matrix_mask.fill(0);
+            let callback_status = unsafe {
+                callback(
+                    user_data,
+                    rig.before_world_matrices.as_ptr(),
+                    rig.before_world_matrices.len(),
+                    rig.physics_world_matrices.as_mut_ptr(),
+                    rig.physics_world_matrices.len(),
+                    rig.physics_world_matrix_mask.as_mut_ptr(),
+                    rig.physics_world_matrix_mask.len(),
+                )
+            };
+            let callback_status = match callback_status {
+                0 => MmdRuntimeStatus::Ok,
+                1 => MmdRuntimeStatus::InvalidInput,
+                2 => MmdRuntimeStatus::Unsupported,
+                3 => MmdRuntimeStatus::BufferTooSmall,
+                4 => MmdRuntimeStatus::Error,
+                _ => {
+                    return Err((
+                        MmdRuntimeStatus::Error,
+                        "physics callback returned an invalid status",
+                    ));
+                }
+            };
+            if callback_status != MmdRuntimeStatus::Ok {
+                return Err((callback_status, "external physics callback failed"));
+            }
+
+            rig.physics_writeback.fill(None);
+            for bone_index in 0..n {
+                if rig.physics_world_matrix_mask[bone_index] == 0 {
+                    continue;
+                }
+                let start = bone_index * 16;
+                let raw = <[f32; 16]>::try_from(&rig.physics_world_matrices[start..start + 16])
+                    .expect("host rig matrix buffer length is fixed at construction");
+                if !all_finite(&raw) {
+                    return Err((
+                        MmdRuntimeStatus::InvalidInput,
+                        "external physics callback wrote a non-finite matrix",
+                    ));
+                }
+                rig.physics_writeback[bone_index] = Some(glam::Mat4::from_cols_array(&raw));
+            }
+            evaluation
+                .runtime_mut()
+                .apply_physics_world_matrices(&rig.physics_writeback);
+            evaluation.evaluate_after_physics_with_ik_options(options);
+            Ok(())
+        })();
+        drop(evaluation);
+        instance.refresh_matrix_caches();
+        match outcome {
+            Ok(()) => MmdRuntimeStatus::Ok,
+            Err((status, message)) => status_failure(status, message),
+        }
     })
 }
 

@@ -8,10 +8,7 @@
   before group expansion, bone morphs, Append transforms, and IK.
 - Validate override indices and finite weights before changing the pose; omission
   restores sampled weights and repeated evaluation does not accumulate offsets.
-
-### Fixed
-
-- Preserve the ordinary evaluation IK tolerance when applying manual morph input.
+- Keep the ordinary evaluation IK tolerance when applying manual morph input.
 
 ## 0.5.1 - 2026-09-13
 

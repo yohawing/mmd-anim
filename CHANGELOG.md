@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.2 - 2026-09-20
+
+### Added
+
+- Accept sparse manual morph overrides during Rust and WASM clip/rest evaluation,
+  before group expansion, bone morphs, Append transforms, and IK.
+- Validate override indices and finite weights before changing the pose; omission
+  restores sampled weights and repeated evaluation does not accumulate offsets.
+
+### Fixed
+
+- Preserve the ordinary evaluation IK tolerance when applying manual morph input.
+
 ## 0.5.1 - 2026-09-13
 
 Added backend-neutral physics callbacks for model-bound RuntimeRig evaluation.

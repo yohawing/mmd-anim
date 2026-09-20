@@ -8,6 +8,8 @@ use crate::{AnimationClip, ModelArena, PoseArena};
 mod host_rig;
 mod ik;
 mod morph;
+mod morph_overrides;
+pub use morph_overrides::MorphOverrideError;
 mod physics;
 mod world;
 

@@ -21,6 +21,7 @@ use mmd_anim_runtime::{
 use wasm_bindgen::prelude::*;
 
 mod host_rig;
+mod morph_overrides;
 pub use host_rig::WasmMmdHostRig;
 
 pub const WASM_WRAPPER_VERSION: u32 = 2;

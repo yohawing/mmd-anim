@@ -110,7 +110,6 @@ impl RuntimeInstance {
                         break 'iterations;
                     }
 
-                    let local_axis_basis = self.model.local_axis_basis(link_bone);
                     // PMX fixed-axis constrains the CCD rotation axis only. Ordinary
                     // pose projection still requires enforce_fixed_axis (kept false
                     // for PMX import).
@@ -126,7 +125,9 @@ impl RuntimeInstance {
                         iteration: _iteration,
                         iteration_count,
                         limit_angle,
-                        local_axis_basis,
+                        // PMX local axes describe manipulation handles. MMD applies
+                        // IK limits in the authored bone frame, independent of them.
+                        local_axis_basis: None,
                         fixed_axis,
                     });
 

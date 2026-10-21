@@ -668,3 +668,105 @@ fn original_mmd_fixed_axis_with_limits_matches_both_drivers() {
         assert_eq!(runtime.ik_runtime_stats()[0].rollback_breaks, 0);
     }
 }
+
+#[test]
+fn original_mmd_local_axes_do_not_change_ik_limit_frames() {
+    let cases = [
+        // control PMX 1bd8ff701f29335f6aa2110f0c96e6ad6771da3301a94e00970b9cee7f1cff5b
+        // rotated PMX 384cd011c5192073e4e4d9d259e31f8479c9f2dd1b788bd6705f1f0b9ab51589
+        (
+            "knee",
+            [0.0, -1.0, 0.0],
+            [0.2, -1.0, 1.2],
+            [[-2.9, 0.0, 0.0], [-0.01, 0.0, 0.0]],
+            false,
+            [
+                [-0.10578972, 0.0, 0.0, 0.99438853],
+                [-0.69332368, 0.0, 0.0, 0.72062632],
+            ],
+            [0.0, -1.0162218, 1.2096467],
+        ),
+        // control PMX febd073388bb6fd7c96fe52faaa9e69febda9df99a36f7caa343bee37f75406b
+        // rotated PMX 198e035831ceb47ce5ba21e97c33599dde04326e81f82efef23252de958594f0
+        (
+            "multi",
+            [1.0, 0.0, 0.0],
+            [0.5, 1.5, 0.7],
+            [[-0.7, -0.4, -0.5], [0.8, 0.6, 1.2]],
+            false,
+            [
+                [6.988317e-08, -0.15530309, 0.33279217, 0.93012381],
+                [-1.4384275e-07, -0.33163981, 0.71065665, 0.62046923],
+            ],
+            [0.50022477, 1.5009571, 0.70044661],
+        ),
+        // control PMX 714e2e08e867cc9e2d370551b18a99cb7df7e9f9a4ac1f90c8600c96c0303b3d
+        // rotated PMX 80161f1f9e22df600b0026eee3209ce7e7712fb93cc58a10760622eed610f27a
+        (
+            "fixed",
+            [1.0, 0.0, 0.0],
+            [0.5, 1.5, 0.7],
+            [[-0.7, -0.4, -0.5], [0.8, 0.6, 1.2]],
+            true,
+            [
+                [0.0, 0.0, 0.31885659, 0.94780298],
+                [0.0, 0.0, 0.7983335, 0.60221556],
+            ],
+            [0.52198809, 1.5659641, 0.0],
+        ),
+    ];
+    for (name, segment, goal, limits, fixed, rotations, tip) in cases {
+        let segment = Vec3A::from_array(segment);
+        let goal = Vec3A::from_array(goal);
+        let limits =
+            crate::IkAngleLimit::new(Vec3A::from_array(limits[0]), Vec3A::from_array(limits[1]));
+        for with_axes in [false, true] {
+            let mut bones = vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(1)), segment),
+                BoneInit::new(Some(BoneIndex(2)), segment),
+                BoneInit::new(Some(BoneIndex(0)), goal),
+            ];
+            if fixed {
+                bones[1].fixed_axis = Some(Vec3A::Z);
+                bones[2].fixed_axis = Some(Vec3A::Z);
+            }
+            let model = ModelArena::new_with_ik(
+                bones,
+                vec![IkSolverInit {
+                    ik_bone: BoneIndex(4),
+                    target_bone: BoneIndex(3),
+                    iteration_count: 4,
+                    limit_angle: 1.0,
+                    links: vec![
+                        IkLinkInit::new(BoneIndex(2)).with_angle_limit(limits),
+                        IkLinkInit::new(BoneIndex(1)).with_angle_limit(limits),
+                    ],
+                }],
+            )
+            .unwrap();
+            let axis = with_axes.then_some(crate::LocalAxis::new(-Vec3A::Z, Vec3A::X));
+            let model = model.with_local_axes([None, axis, axis, None, None]);
+            assert_eq!(model.local_axis(BoneIndex(1)), axis);
+            let mut runtime = RuntimeInstance::new(Arc::new(model));
+            runtime.evaluate_current_pose();
+            for (i, expected) in rotations.iter().enumerate() {
+                let actual = rotation(runtime.world_matrices()[i + 1]);
+                let expected = Quat::from_array(*expected).normalize();
+                let error = (actual - expected)
+                    .length()
+                    .min((actual + expected).length());
+                assert!(
+                    error < 0.0001,
+                    "{name} axes={with_axes} bone={} error={error}",
+                    i + 1
+                );
+            }
+            let error = (translation(runtime.world_matrices()[3]) - Vec3A::from_array(tip))
+                .abs()
+                .max_element();
+            assert!(error < 0.0001, "{name} axes={with_axes} tip error={error}");
+        }
+    }
+}

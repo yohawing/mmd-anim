@@ -62,6 +62,8 @@ impl IkChainSolver {
     /// Additive constructor: attach per-bone local-axis bases used only as the
     /// angle-limit evaluation frame. Shorter lists are padded with `None`;
     /// longer lists are truncated to the definition bone count.
+    /// This explicit frame override is for host-defined chains. PMX local-axis
+    /// metadata does not change the angle-limit frame in MMD model evaluation.
     pub fn new_with_local_axis_bases(
         definition: IkChainDefinition,
         local_axis_bases: Vec<Option<Quat>>,

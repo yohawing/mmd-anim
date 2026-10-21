@@ -2359,8 +2359,7 @@ fn pmx_style_fixed_axis_constrains_ik_ccd_only() {
 }
 
 #[test]
-fn runtime_ik_local_axis_limit_matches_primitive() {
-    let basis = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+fn runtime_ik_ignores_local_axis_metadata_and_matches_default_primitive() {
     let limits = IkAngleLimit::new(
         Vec3A::new(-std::f32::consts::FRAC_PI_2, 0.0, 0.0),
         Vec3A::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
@@ -2388,21 +2387,18 @@ fn runtime_ik_local_axis_limit_matches_primitive() {
     let mut runtime = RuntimeInstance::new(Arc::clone(&model));
     runtime.evaluate_current_pose();
 
-    let mut primitive = IkChainSolver::new_with_local_axis_bases(
-        IkChainDefinition {
-            parent_slots: vec![None, Some(0), None],
-            rest_positions: vec![Vec3A::ZERO, Vec3A::X, Vec3A::Y],
-            fixed_axes: vec![None, None, None],
-            target_slot: 1,
-            links: vec![IkChainLinkDefinition {
-                bone_slot: 0,
-                angle_limit: Some(limits),
-            }],
-            iteration_count: 4,
-            limit_angle: 0.0,
-        },
-        vec![Some(basis), None, None],
-    );
+    let mut primitive = IkChainSolver::new(IkChainDefinition {
+        parent_slots: vec![None, Some(0), None],
+        rest_positions: vec![Vec3A::ZERO, Vec3A::X, Vec3A::Y],
+        fixed_axes: vec![None, None, None],
+        target_slot: 1,
+        links: vec![IkChainLinkDefinition {
+            bone_slot: 0,
+            angle_limit: Some(limits),
+        }],
+        iteration_count: 4,
+        limit_angle: 0.0,
+    });
     let output = primitive.solve(IkChainPoseInput {
         parent_world_matrix: None,
         local_position_offsets: &[Vec3A::ZERO; 3],

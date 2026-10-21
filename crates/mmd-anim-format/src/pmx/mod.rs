@@ -7210,25 +7210,23 @@ mod tests {
     }
 
     #[test]
-    fn pmx_local_axis_rotates_ik_limit_frame() {
+    fn pmx_local_axis_is_preserved_without_rotating_ik_limit_frame() {
         let with_local_axis = import_pmx_runtime(&build_local_axis_limit_pmx(true)).unwrap();
         let without_local_axis = import_pmx_runtime(&build_local_axis_limit_pmx(false)).unwrap();
+        assert!(with_local_axis.model.local_axis(BoneIndex(0)).is_some());
+        assert!(without_local_axis.model.local_axis(BoneIndex(0)).is_none());
 
         let mut local_runtime = RuntimeInstance::new(Arc::new(with_local_axis.model));
         local_runtime.evaluate_current_pose();
-        let local_tip = Vec3A::from_vec4(local_runtime.world_matrices()[1].w_axis);
-        assert!(
-            (local_tip - Vec3A::Z).length() < 1.0e-3,
-            "local-axis limit should reach +Z; tip={local_tip:?}"
-        );
-
         let mut unit_runtime = RuntimeInstance::new(Arc::new(without_local_axis.model));
         unit_runtime.evaluate_current_pose();
-        let unit_tip = Vec3A::from_vec4(unit_runtime.world_matrices()[1].w_axis);
-        assert!(
-            (unit_tip - Vec3A::Z).length() > 0.2,
-            "unit XYZ limit must not use the PMX local-axis frame; tip={unit_tip:?}"
+
+        assert_eq!(
+            local_runtime.world_matrices(),
+            unit_runtime.world_matrices()
         );
+        let tip = Vec3A::from_vec4(local_runtime.world_matrices()[1].w_axis);
+        assert!((tip - Vec3A::X).length() < 1.0e-3, "tip={tip:?}");
     }
 
     #[test]

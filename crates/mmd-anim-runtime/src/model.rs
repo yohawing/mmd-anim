@@ -213,9 +213,10 @@ impl BoneIndex {
 
 /// PMX bone local-axis descriptor (bone-local X/Z directions from the file).
 ///
-/// The runtime builds a defensive right-handed orthonormal frame from these
-/// vectors for IK angle-limit evaluation only. Ordinary pose evaluation does
-/// not reorient bones by this frame.
+/// Retained as model metadata. MMD model evaluation uses neither these axes
+/// to reorient the pose nor their basis to rotate IK angle limits. Hosts can
+/// explicitly supply the orthonormal basis to `IkChainSolver::new_with_local_axis_bases`
+/// when a custom chain needs a different angle-limit frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LocalAxis {
     pub x: Vec3A,
@@ -708,7 +709,7 @@ impl ModelArena {
     }
 
     /// Orthonormal local-axis basis as a quaternion (columns of the bone-local
-    /// frame). Used only as the IK angle-limit evaluation frame.
+    /// frame). Preserved as model metadata; MMD IK does not use this frame.
     #[inline]
     pub fn local_axis_basis(&self, bone: BoneIndex) -> Option<Quat> {
         if self.local_axis_flags[bone.as_usize()] != 0 {

@@ -1468,7 +1468,20 @@ fn numeric_compare_builds_motion_from_pmm_document_tracks() {
     let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
     let pmx = format_crate.join("fixtures/pmx/ik_multi_axis_limit.pmx");
     let pmm = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
-    let oracle = r#"{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"test"},"frame":15.0,"models":[{"index":0,"name":"m","filename":"m.pmx","visible":true,"bones":[{"index":0,"name":"link_root","worldMatrix":[0.2919265,0.8414710,0.45464867,0.0, -0.45464867,0.5403023,-0.7080735,0.0, -0.8414710,0.0,0.5403023,0.0, 0.05,0.0,0.0,1.0]}],"morphs":[]}]}"#;
+    // Verify the keyed PMM translation directly; numeric dispatch below uses
+    // the controller so this import test does not freeze an IK algorithm.
+    let parsed = mmd_anim_format::parse_pmm_manifest(&fs::read(&pmm).unwrap()).unwrap();
+    let document = parsed.document_summary.unwrap();
+    let clip = mmd_anim_format::build_pmm_document_model_clip(&document.models[0]).unwrap();
+    let (position, _) = clip
+        .find_bone_track(mmd_anim_runtime::BoneIndex(0))
+        .unwrap()
+        .sample(15.0)
+        .unwrap();
+    assert!((position.x - 0.05).abs() < 1e-6);
+    assert_eq!(position.y, 0.0);
+    assert_eq!(position.z, 0.0);
+    let oracle = r#"{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"test"},"frame":15.0,"models":[{"index":0,"name":"m","filename":"m.pmx","visible":true,"bones":[{"index":2,"name":"ik_controller","worldMatrix":[1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.25,0.55,0.8,1.0]}],"morphs":[]}]}"#;
     fs::write(temp.join("oracle.actual.jsonl"), oracle).unwrap();
     let manifest_path = temp.join("manifest.json");
     fs::write(
@@ -1481,7 +1494,7 @@ fn numeric_compare_builds_motion_from_pmm_document_tracks() {
                     "assets": {{ "model": "{}", "pmm": "{}" }},
                     "oracle": {{ "path": "oracle.actual.jsonl" }},
                     "frames": [15],
-                    "metadata": {{ "focus": {{ "bones": ["link_root"] }} }},
+                    "metadata": {{ "focus": {{ "bones": ["ik_controller"] }} }},
                     "compare": {{
                         "targets": ["bones"],
                         "motionSource": "pmm-document"
@@ -1508,7 +1521,7 @@ fn numeric_compare_builds_motion_from_pmm_document_tracks() {
         "pmm-document",
         15.0,
         15.0,
-        &["link_root".to_owned()],
+        &["ik_controller".to_owned()],
     )
     .unwrap();
     assert_eq!(diagnosis, ExitCode::SUCCESS);

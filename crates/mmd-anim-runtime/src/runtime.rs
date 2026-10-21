@@ -24,7 +24,6 @@ struct IkScratch {
     base_rotations: Vec<Quat>,
     base_ik_rotations: Vec<Quat>,
     ik_rotations: Vec<Quat>,
-    best_ik_rotations: Vec<Quat>,
     chain_states: Vec<ChainLinkState>,
 }
 
@@ -41,7 +40,6 @@ impl IkScratch {
             base_rotations: Vec::with_capacity(max_links),
             base_ik_rotations: Vec::with_capacity(max_links),
             ik_rotations: Vec::with_capacity(max_links),
-            best_ik_rotations: Vec::with_capacity(max_links),
             chain_states: Vec::with_capacity(max_links),
         }
     }
@@ -79,6 +77,7 @@ pub struct IkSolverRuntimeStats {
     pub executed_iterations: u64,
     pub tolerance_precheck_breaks: u64,
     pub tolerance_post_iteration_breaks: u64,
+    /// Retained for diagnostic compatibility; MMD CCD does not roll back.
     pub rollback_breaks: u64,
     pub max_iteration_exhaustions: u64,
     pub link_visits: u64,
@@ -98,6 +97,7 @@ impl IkSolverRuntimeStats {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IkSolveOptions {
     /// Goal distance at or below which the solver stops. Defaults to `1e-4` model units.
+    /// Zero disables only this distance test; MMD directional convergence remains active.
     pub tolerance: f32,
     /// Optional per-chain iteration cap, applied after the MMD minimum-budget correction.
     pub max_iterations_cap: Option<u32>,
@@ -109,8 +109,7 @@ pub use physics::{PhysicsMode, PhysicsStepStats, PhysicsTickConfig};
 impl Default for IkSolveOptions {
     fn default() -> Self {
         Self {
-            // A zero tolerance effectively disables convergence breaks for ordinary floating-point
-            // poses. Slow-converging chains can use the corrected MMD iteration budget.
+            // Distance tolerance supplements MMD directional convergence.
             tolerance: 1.0e-4,
             max_iterations_cap: None,
         }

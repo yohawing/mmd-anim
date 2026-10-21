@@ -23,7 +23,6 @@ impl RuntimeInstance {
         let mut base_rotations = std::mem::take(&mut self.ik_scratch.base_rotations);
         let mut base_ik_rotations = std::mem::take(&mut self.ik_scratch.base_ik_rotations);
         let mut ik_rotations = std::mem::take(&mut self.ik_scratch.ik_rotations);
-        let mut best_ik_rotations = std::mem::take(&mut self.ik_scratch.best_ik_rotations);
         let mut chain_states = std::mem::take(&mut self.ik_scratch.chain_states);
 
         {
@@ -49,12 +48,9 @@ impl RuntimeInstance {
             base_ik_rotations.extend(links.iter().map(|l| self.pose.ik_rotation(l.bone)));
             ik_rotations.clear();
             ik_rotations.resize(link_count, Quat::IDENTITY);
-            best_ik_rotations.clear();
-            best_ik_rotations.resize(link_count, Quat::IDENTITY);
             chain_states.clear();
             chain_states.resize_with(link_count, || ChainLinkState {
                 previous_euler: [0.0; 3],
-                plane_mode_angle: 0.0,
             });
 
             self.apply_ik_link_rotations(
@@ -71,8 +67,7 @@ impl RuntimeInstance {
                 let ik = translation(self.pose.world_matrices()[ik_bone.as_usize()]);
                 (eff - ik).length()
             };
-            let mut best_distance = f32::MAX;
-            for _iteration in 0..iteration_count {
+            'iterations: for _iteration in 0..iteration_count {
                 let eff_pos = translation(self.pose.world_matrices()[target_bone.as_usize()]);
                 let ik_pos = translation(self.pose.world_matrices()[ik_bone.as_usize()]);
                 final_distance = (eff_pos - ik_pos).length();
@@ -107,6 +102,14 @@ impl RuntimeInstance {
                         continue;
                     }
 
+                    if (local_effector.normalize() - local_target.normalize()).length_squared()
+                        < 1e-7
+                    {
+                        final_distance = (eff_pos - ik_pos).length();
+                        broke_early = true;
+                        break 'iterations;
+                    }
+
                     let local_axis_basis = self.model.local_axis_basis(link_bone);
                     // PMX fixed-axis constrains the CCD rotation axis only. Ordinary
                     // pose projection still requires enforce_fixed_axis (kept false
@@ -121,6 +124,7 @@ impl RuntimeInstance {
                         chain_states: &mut chain_states,
                         angle_limit: link.angle_limit,
                         iteration: _iteration,
+                        iteration_count,
                         limit_angle,
                         local_axis_basis,
                         fixed_axis,
@@ -143,24 +147,8 @@ impl RuntimeInstance {
                 };
                 final_distance = current_distance;
 
-                if current_distance < best_distance {
-                    best_distance = current_distance;
-                    best_ik_rotations.copy_from_slice(&ik_rotations);
-                    if current_distance <= tolerance {
-                        self.ik_stats[ik_index].tolerance_post_iteration_breaks += 1;
-                        broke_early = true;
-                        break;
-                    }
-                } else {
-                    self.ik_stats[ik_index].rollback_breaks += 1;
-                    ik_rotations.copy_from_slice(&best_ik_rotations);
-                    self.apply_ik_link_rotations(
-                        &links,
-                        &base_rotations,
-                        &base_ik_rotations,
-                        &ik_rotations,
-                    );
-                    self.update_world_matrices_after_ik_link_change(ik_index);
+                if current_distance <= tolerance {
+                    self.ik_stats[ik_index].tolerance_post_iteration_breaks += 1;
                     broke_early = true;
                     break;
                 }
@@ -181,7 +169,7 @@ impl RuntimeInstance {
                 &links,
                 &base_rotations,
                 &base_ik_rotations,
-                &best_ik_rotations,
+                &ik_rotations,
             );
             self.update_world_matrices_after_ik_link_change(ik_index);
         }
@@ -190,7 +178,6 @@ impl RuntimeInstance {
         self.ik_scratch.base_rotations = base_rotations;
         self.ik_scratch.base_ik_rotations = base_ik_rotations;
         self.ik_scratch.ik_rotations = ik_rotations;
-        self.ik_scratch.best_ik_rotations = best_ik_rotations;
         self.ik_scratch.chain_states = chain_states;
     }
 

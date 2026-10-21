@@ -1171,8 +1171,7 @@ fn evaluate_pose_category_snapshot(
     runtime: &mut RuntimeInstance,
 ) -> WorldMatrixBoneUpdateCategorySnapshot {
     runtime.reset_world_matrix_bone_update_count();
-    // Preserve the worst-case full-iteration characterization independently of the
-    // user-facing default convergence tolerance.
+    // Disable distance tolerance; MMD directional convergence still applies.
     runtime.evaluate_current_pose_with_ik_options(IkSolveOptions {
         tolerance: 0.0,
         max_iterations_cap: None,
@@ -1183,7 +1182,7 @@ fn evaluate_pose_category_snapshot(
 }
 
 #[test]
-fn default_ik_tolerance_stops_converged_chains_without_capping_authored_iterations() {
+fn directional_convergence_remains_active_with_zero_distance_tolerance() {
     let model = build_late_chain_multi_link_ik_model(32, 3, 20);
     let mut default_runtime = RuntimeInstance::new(Arc::clone(&model));
     default_runtime.evaluate_current_pose();
@@ -1197,7 +1196,11 @@ fn default_ik_tolerance_stops_converged_chains_without_capping_authored_iteratio
     let exact_stats = exact_runtime.ik_runtime_stats()[0];
 
     assert!(default_stats.final_distance_max <= IkSolveOptions::default().tolerance);
-    assert!(default_stats.executed_iterations < exact_stats.executed_iterations);
+    assert_eq!(
+        default_stats.executed_iterations,
+        exact_stats.executed_iterations
+    );
+    assert_eq!(exact_stats.max_iteration_exhaustions, 0);
     assert_eq!(default_stats.max_iteration_exhaustions, 0);
 }
 
@@ -1215,7 +1218,7 @@ fn categorized_world_matrix_bone_update_counts_decide_trailing_suffix_for_suffix
     assert_eq!(snapshot.trailing_bookend, 0);
     assert_eq!(snapshot.phase_loop, bone_count);
     assert_eq!(snapshot.bookend(), bone_count);
-    assert_eq!(snapshot.ik_link_change, 28);
+    assert_eq!(snapshot.ik_link_change, 12);
     assert!(
         snapshot.bookend() > snapshot.ik_link_change,
         "suffix-scoped IK should leave leading bookend dominant: snapshot={snapshot:?}"
@@ -1242,7 +1245,7 @@ fn categorized_world_matrix_bone_update_counts_decide_ik_scope_for_broad_link_ch
     assert_eq!(snapshot.trailing_bookend, 0);
     assert_eq!(snapshot.phase_loop, bone_count);
     assert_eq!(snapshot.bookend(), bone_count);
-    assert_eq!(snapshot.ik_link_change, 468);
+    assert_eq!(snapshot.ik_link_change, 247);
     assert!(
         snapshot.ik_link_change > snapshot.bookend(),
         "long-chain IK should dominate leading bookend updates: snapshot={snapshot:?}"
@@ -2009,10 +2012,11 @@ fn multi_axis_limited_link_solves_before_clamping() {
     let mut ik_rotations = vec![Quat::IDENTITY];
     let mut chain_states = vec![super::ChainLinkState {
         previous_euler: [0.0; 3],
-        plane_mode_angle: 0.0,
     }];
 
     super::solve_limited_axes_link_step(super::LimitedAxesLinkStepInput {
+        iteration: 0,
+        iteration_count: 2,
         local_effector: &local_effector,
         local_target: &local_target,
         link_index: 0,
@@ -2051,10 +2055,11 @@ fn multi_axis_limited_link_applies_limits_to_total_rotation() {
     let mut ik_rotations = vec![Quat::IDENTITY];
     let mut chain_states = vec![super::ChainLinkState {
         previous_euler: [0.0; 3],
-        plane_mode_angle: 0.0,
     }];
 
     super::solve_limited_axes_link_step(super::LimitedAxesLinkStepInput {
+        iteration: 0,
+        iteration_count: 2,
         local_effector: &local_effector,
         local_target: &local_target,
         link_index: 0,
@@ -2177,6 +2182,8 @@ fn limited_axes_local_axis_basis_differs_from_unit_xyz() {
     let mut unit_ik = vec![Quat::IDENTITY];
     let mut unit_states = vec![super::ChainLinkState::default()];
     super::solve_limited_axes_link_step(super::LimitedAxesLinkStepInput {
+        iteration: 0,
+        iteration_count: 2,
         local_effector: &local_effector,
         local_target: &local_target,
         link_index: 0,
@@ -2191,6 +2198,8 @@ fn limited_axes_local_axis_basis_differs_from_unit_xyz() {
     let mut la_ik = vec![Quat::IDENTITY];
     let mut la_states = vec![super::ChainLinkState::default()];
     super::solve_limited_axes_link_step(super::LimitedAxesLinkStepInput {
+        iteration: 0,
+        iteration_count: 2,
         local_effector: &local_effector,
         local_target: &local_target,
         link_index: 0,
@@ -2235,6 +2244,8 @@ fn limited_axes_without_local_axis_matches_previous_unit_xyz_behavior() {
     let mut chain_states = vec![super::ChainLinkState::default()];
 
     super::solve_limited_axes_link_step(super::LimitedAxesLinkStepInput {
+        iteration: 0,
+        iteration_count: 2,
         local_effector: &local_effector,
         local_target: &local_target,
         link_index: 0,
@@ -2250,6 +2261,8 @@ fn limited_axes_without_local_axis_matches_previous_unit_xyz_behavior() {
     let mut ik_identity = vec![Quat::IDENTITY];
     let mut states_identity = vec![super::ChainLinkState::default()];
     super::solve_limited_axes_link_step(super::LimitedAxesLinkStepInput {
+        iteration: 0,
+        iteration_count: 2,
         local_effector: &local_effector,
         local_target: &local_target,
         link_index: 0,
@@ -2412,7 +2425,6 @@ fn plane_link_step_matches_saba_total_axis_rotation() {
     let mut ik_rotations = vec![Quat::IDENTITY];
     let mut chain_states = vec![super::ChainLinkState {
         previous_euler: [0.0; 3],
-        plane_mode_angle: 0.0,
     }];
     let local_effector = Vec3A::X;
     let local_target = Vec3A::Y;
@@ -2430,13 +2442,14 @@ fn plane_link_step_matches_saba_total_axis_rotation() {
             Vec3A::new(std::f32::consts::PI, 0.0, std::f32::consts::PI),
         ),
         iteration: 0,
+        iteration_count: 2,
         limit_angle: 0.0,
         local_axis_basis: None,
     });
 
     let effective = (ik_rotations[0] * base_rotations[0]).normalize();
     assert_near(
-        chain_states[0].plane_mode_angle,
+        chain_states[0].previous_euler[2],
         std::f32::consts::FRAC_PI_2,
     );
     assert_vec3a_near(
@@ -2470,13 +2483,14 @@ fn one_sided_x_plane_uses_authored_frame_not_pmx_local_axis() {
             Vec3A::new(-0.01, 0.0, 0.0),
         ),
         iteration: 0,
+        iteration_count: 2,
         limit_angle: 0.0,
         local_axis_basis: Some(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
     });
 
     let effective = (ik_rotations[0] * base).normalize();
     assert_vec3a_near(effective.mul_vec3a(local_effector), parent_target);
-    assert_near(chain_states[0].plane_mode_angle, -0.7);
+    assert_near(chain_states[0].previous_euler[0], -0.7);
 }
 
 #[test]
@@ -3010,7 +3024,6 @@ fn scratch_ik_capacities_stable_after_repeated_evaluate() {
     let cap_base = runtime.ik_scratch.base_rotations.capacity();
     let cap_base_ik = runtime.ik_scratch.base_ik_rotations.capacity();
     let cap_ik = runtime.ik_scratch.ik_rotations.capacity();
-    let cap_best = runtime.ik_scratch.best_ik_rotations.capacity();
     let cap_chain = runtime.ik_scratch.chain_states.capacity();
 
     for _ in 0..10 {
@@ -3021,7 +3034,6 @@ fn scratch_ik_capacities_stable_after_repeated_evaluate() {
     assert_eq!(runtime.ik_scratch.base_rotations.capacity(), cap_base);
     assert_eq!(runtime.ik_scratch.base_ik_rotations.capacity(), cap_base_ik);
     assert_eq!(runtime.ik_scratch.ik_rotations.capacity(), cap_ik);
-    assert_eq!(runtime.ik_scratch.best_ik_rotations.capacity(), cap_best);
     assert_eq!(runtime.ik_scratch.chain_states.capacity(), cap_chain);
 }
 

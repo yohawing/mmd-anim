@@ -3441,3 +3441,106 @@ fn original_mmd_budget_link_caps_and_fixed_axes_match_both_solvers() {
         }
     }
 }
+
+fn append_history_runtime(source: Option<BoneIndex>, ratio: f32, loops: u32) -> RuntimeInstance {
+    let effector = Vec3A::new(-1.9727237, -1.2808218, -0.043799207);
+    let goal = Vec3A::new(-1.9175179, -1.3498279, -0.18219003);
+    let mut bones = vec![
+        BoneInit::new(None, Vec3A::ZERO),
+        BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO),
+        BoneInit::new(Some(BoneIndex(1)), Vec3A::X),
+        BoneInit::new(Some(BoneIndex(0)), Vec3A::X),
+        BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO),
+        BoneInit::new(Some(BoneIndex(4)), Vec3A::ZERO),
+        BoneInit::new(Some(BoneIndex(5)), effector),
+        BoneInit::new(Some(BoneIndex(0)), goal),
+    ];
+    bones[4].transform_order = 1;
+    for bone in &mut bones[5..] {
+        bone.transform_order = 2;
+    }
+    bones[5].fixed_axis = Some(Vec3A::new(-0.7973362, -0.6032751, -0.017725633));
+    let solvers = vec![
+        IkSolverInit {
+            ik_bone: BoneIndex(3),
+            target_bone: BoneIndex(2),
+            links: vec![IkLinkInit::new(BoneIndex(1))],
+            iteration_count: 1,
+            limit_angle: 16.0,
+        },
+        IkSolverInit {
+            ik_bone: BoneIndex(7),
+            target_bone: BoneIndex(6),
+            links: vec![IkLinkInit::new(BoneIndex(5))],
+            iteration_count: loops,
+            limit_angle: if loops == 1 { 16.0 } else { 1.0 },
+        },
+    ];
+    let grants = source
+        .into_iter()
+        .map(|source| AppendTransformInit::new(BoneIndex(4), source, ratio).with_rotation())
+        .collect();
+    RuntimeInstance::new(Arc::new(
+        ModelArena::new_full(bones, solvers, grants).unwrap(),
+    ))
+}
+
+#[test]
+fn append_dependent_ik_history_is_retained_and_explicitly_reset() {
+    let clip = AnimationClip::new(vec![]);
+    for ratio in [0.0, 1.0] {
+        let mut runtime = append_history_runtime(Some(BoneIndex(1)), ratio, 1);
+        runtime.evaluate_clip_frame(&clip, 10.0);
+        let first = runtime.world_matrices()[5]
+            .to_scale_rotation_translation()
+            .1;
+        runtime.evaluate_clip_frame(&clip, 10.0);
+        let second = runtime.world_matrices()[5]
+            .to_scale_rotation_translation()
+            .1;
+        assert!((first - second).length() > 0.001);
+        runtime.reset_ik_history();
+        runtime.evaluate_clip_frame(&clip, 10.0);
+        assert!(
+            (first
+                - runtime.world_matrices()[5]
+                    .to_scale_rotation_translation()
+                    .1)
+                .length()
+                < 1e-6
+        );
+    }
+    for source in [None, Some(BoneIndex(0))] {
+        let mut runtime = append_history_runtime(source, 1.0, 1);
+        runtime.evaluate_clip_frame(&clip, 10.0);
+        let first = runtime.world_matrices()[5];
+        for _ in 0..10 {
+            runtime.evaluate_clip_frame(&clip, 10.0);
+        }
+        assert_eq!(first, runtime.world_matrices()[5]);
+    }
+}
+
+#[test]
+fn append_dependent_ik_converges_to_original_mmd_retained_pose() {
+    // Original MMD 9.32, independent eight-bone PMX, static VMD, 200 loops.
+    // PMX SHA256: 86b3f5d7ee2c115425519d0cff6073422d5c14a4e4746c4efed6ae09bbd6f8b6
+    // Both captured frames 10.14 and 20.0 reached this same retained rotation.
+    // This checks the converged pose, not equality of evaluation call counts.
+    let expected = [
+        0.82006705, 0.22232242, 0.52731174, 0.0, 0.25289965, 0.6857959, -0.6824346, 0.0,
+        -0.5133485, 0.6929993, 0.5061734, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let mut runtime = append_history_runtime(Some(BoneIndex(1)), 1.0, 200);
+    let clip = AnimationClip::new(vec![]);
+    for _ in 0..30 {
+        runtime.evaluate_clip_frame(&clip, 10.0);
+    }
+    let actual = runtime.world_matrices()[5].to_cols_array();
+    let error = actual
+        .iter()
+        .zip(expected)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(error < 0.001, "converged original-MMD matrix error={error}");
+}

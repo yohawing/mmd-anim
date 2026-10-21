@@ -8,6 +8,37 @@ use crate::ik_primitive::{
 use super::{IkSolveOptions, RuntimeInstance};
 
 impl RuntimeInstance {
+    pub(super) fn initial_ik_history(model: &crate::ModelArena) -> Vec<Option<Quat>> {
+        let mut under_ik = vec![false; model.bone_count()];
+        for solver in model.ik_solvers() {
+            under_ik[solver.ik_bone.as_usize()] = false;
+            under_ik[solver.target_bone.as_usize()] = false;
+            for link in &solver.links {
+                under_ik[link.bone.as_usize()] = true;
+            }
+        }
+        // MMD performs this inheritance scan in authored bone order, even when
+        // the hierarchy contains a forward parent reference. The append weight
+        // does not affect the reset path: a zero-weight grant still selects it.
+        let mut dependent = vec![false; under_ik.len()];
+        for i in 0..dependent.len() {
+            let bone = crate::BoneIndex(i as u32);
+            dependent[i] = model
+                .parent_index(bone)
+                .is_some_and(|p| dependent[p.as_usize()])
+                || model.append_transform_index(bone).is_some_and(|index| {
+                    let append = model.append_transform(index);
+                    (append.affect_rotation || append.affect_translation)
+                        && under_ik[append.source_bone.as_usize()]
+                });
+        }
+        dependent
+            .into_iter()
+            .zip(under_ik)
+            .map(|(dependent, under_ik)| (dependent && under_ik).then_some(Quat::IDENTITY))
+            .collect()
+    }
+
     pub(super) fn solve_ik_solver(
         &mut self,
         ik_index: usize,
@@ -93,8 +124,8 @@ impl RuntimeInstance {
                     let ik_pos = translation(self.pose.world_matrices()[ik_bone.as_usize()]);
 
                     let link_world_rot = rotation(link_world);
-                    let local_effector = link_world_rot.inverse().mul_vec3a(eff_pos - link_pos);
-                    let local_target = link_world_rot.inverse().mul_vec3a(ik_pos - link_pos);
+                    let mut local_effector = link_world_rot.inverse().mul_vec3a(eff_pos - link_pos);
+                    let mut local_target = link_world_rot.inverse().mul_vec3a(ik_pos - link_pos);
 
                     if local_effector.length_squared() <= f32::EPSILON
                         || local_target.length_squared() <= f32::EPSILON
@@ -110,9 +141,21 @@ impl RuntimeInstance {
                         break 'iterations;
                     }
 
-                    // PMX fixed-axis constrains the CCD rotation axis only. Ordinary
-                    // pose projection still requires enforce_fixed_axis (kept false
-                    // for PMX import).
+                    // MMD resets the link's world pose but keeps this accumulator
+                    // on the append-dependent path. Seed it only after measuring
+                    // the first step from that reset pose. Express the directions
+                    // in the seeded frame so the shared step still computes the
+                    // same parent-frame axis and clamps the accumulated rotation.
+                    if _iteration == 0 {
+                        if let Some(previous) = self.ik_history[link_bone.as_usize()] {
+                            ik_rotations[link_index] = previous;
+                            let base = base_rotations[link_index];
+                            let adjustment = (previous * base).inverse() * base;
+                            local_effector = adjustment.mul_vec3a(local_effector);
+                            local_target = adjustment.mul_vec3a(local_target);
+                        }
+                    }
+                    // Fixed-axis constrains the CCD rotation axis only.
                     let fixed_axis = self.model.fixed_axis(link_bone);
                     solve_link_step(LinkStepInput {
                         local_effector: &local_effector,
@@ -131,6 +174,11 @@ impl RuntimeInstance {
                         fixed_axis,
                     });
 
+                    if self.ik_history[link_bone.as_usize()].is_some() {
+                        self.ik_history[link_bone.as_usize()] = Some(
+                            (ik_rotations[link_index] * base_rotations[link_index]).normalize(),
+                        );
+                    }
                     self.apply_ik_link_rotations(
                         &links,
                         &base_rotations,

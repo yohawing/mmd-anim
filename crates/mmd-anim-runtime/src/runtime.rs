@@ -169,6 +169,9 @@ impl std::fmt::Display for HostPoseError {
 
 impl std::error::Error for HostPoseError {}
 
+/// Evaluates a model pose, including MMD's retained IK accumulators for links
+/// dependent on IK-sourced append transforms. All evaluation entry points share
+/// this history. Use [`Self::reset_ik_history`] to begin an independent sequence.
 #[derive(Debug)]
 pub struct RuntimeInstance {
     host_rig: Option<host_rig::HostRigScratch>,
@@ -178,6 +181,7 @@ pub struct RuntimeInstance {
     physics_tick_config: PhysicsTickConfig,
     physics_accumulator_seconds: f32,
     ik_scratch: IkScratch,
+    ik_history: Vec<Option<Quat>>,
     morph_scratch: MorphScratch,
     ik_stats: Vec<IkSolverRuntimeStats>,
     ik_link_change_update_bones: Vec<Option<Vec<crate::BoneIndex>>>,
@@ -213,6 +217,7 @@ impl RuntimeInstance {
         let ik_count = ik_count.max(model.ik_count());
         let pose = PoseArena::new_with_counts(model.bone_count(), morph_count, ik_count);
         let ik_scratch = IkScratch::new(&model);
+        let ik_history = Self::initial_ik_history(&model);
         let morph_scratch = MorphScratch::new(morph_count);
         let ik_stats = vec![IkSolverRuntimeStats::default(); model.ik_count()];
         let ik_link_change_update_bones = vec![None; model.ik_count()];
@@ -224,6 +229,7 @@ impl RuntimeInstance {
             physics_tick_config: PhysicsTickConfig::default(),
             physics_accumulator_seconds: 0.0,
             ik_scratch,
+            ik_history,
             morph_scratch,
             ik_stats,
             ik_link_change_update_bones,
@@ -257,6 +263,18 @@ impl RuntimeInstance {
     #[inline]
     pub fn pose_mut(&mut self) -> &mut PoseArena {
         &mut self.pose
+    }
+
+    /// Clear retained MMD IK accumulators before starting a fresh evaluation sequence.
+    ///
+    /// This does not change the input pose or world matrices. Apply a fresh input
+    /// pose (or evaluate a clip frame) after clearing. Resetting local pose data
+    /// alone does not clear this history. Recreate or reset the history explicitly
+    /// when independent, reproducible samples are required.
+    pub fn reset_ik_history(&mut self) {
+        for rotation in self.ik_history.iter_mut().flatten() {
+            *rotation = Quat::IDENTITY;
+        }
     }
 
     pub fn evaluate_current_pose(&mut self) {
@@ -493,6 +511,10 @@ impl RuntimeInstance {
         Ok(())
     }
 
+    /// Evaluate a clip sample. MMD IK links under an IK-dependent append transform
+    /// retain their accumulated rotation across evaluations, including repeated
+    /// evaluations of the same frame. Use [`Self::reset_ik_history`] to begin an
+    /// independent sequence; ordinary IK links remain stateless.
     pub fn evaluate_clip_frame(&mut self, clip: &AnimationClip, frame: f32) {
         clip.apply_to_pose(frame, &mut self.pose);
         self.expand_morphs();

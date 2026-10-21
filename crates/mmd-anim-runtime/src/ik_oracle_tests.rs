@@ -432,3 +432,239 @@ fn original_mmd_wide_limits_and_collinear_goals() {
         }
     }
 }
+
+#[test]
+fn original_mmd_fixed_axis_with_limits_matches_both_drivers() {
+    let cases = [
+        // PMX dc3d1d5c38ab97ab027d086ef0675bf22f918c3fa4791c4a6baf60021070aabe
+        (
+            "parity-fixedlimits-reflect",
+            4,
+            16.0,
+            [0.5, -1.5, 0.3],
+            [
+                [[0.0, 0.0, 0.2], [0.0, 0.0, 1.2]],
+                [[0.0, 0.0, 0.2], [0.0, 0.0, 1.2]],
+            ],
+            [
+                [0.0, 0.0, 0.099833415, 0.99500417],
+                [0.0, 0.0, 0.19866932, 0.98006659],
+            ],
+            [1.9011277, 0.58808768, 0.0],
+            [0.0, 0.0, 1.0],
+            false,
+        ),
+        // PMX 03626226e7bc943e012df81a3f6781408a783a64c3b2523b667156713037ad55
+        (
+            "parity-fixedlimits-clamp",
+            1,
+            16.0,
+            [0.5, -1.5, 0.3],
+            [
+                [[0.0, 0.0, 0.2], [0.0, 0.0, 1.2]],
+                [[0.0, 0.0, 0.2], [0.0, 0.0, 1.2]],
+            ],
+            [
+                [0.0, 0.0, 0.099833415, 0.99500417],
+                [0.0, 0.0, 0.19866932, 0.98006659],
+            ],
+            [1.9011277, 0.58808768, 0.0],
+            [0.0, 0.0, 1.0],
+            false,
+        ),
+        // PMX 99127e4892d906a09a9cb599c1136b22b18821d23825ad92291e77b6d92c04f0
+        (
+            "parity-fixedlimits-wide",
+            4,
+            16.0,
+            [-1.0, 1.0, 0.5],
+            [
+                [[0.0, 0.0, -2.8], [0.0, 0.0, 2.8]],
+                [[0.0, 0.0, -2.8], [0.0, 0.0, 2.8]],
+            ],
+            [
+                [0.0, 0.0, 0.70179683, 0.71237716],
+                [0.0, 0.0, 0.99997564, -0.006979691],
+            ],
+            [-0.98494005, 0.98592913, 0.0],
+            [0.0, 0.0, 1.0],
+            false,
+        ),
+        // PMX cb25452cbbb6f6ccd5027e174fc16f957905be185cdea2b7f2f37af561da9164
+        (
+            "parity-fixedlimits-offset",
+            4,
+            16.0,
+            [0.5, 1.5, 0.7],
+            [
+                [[0.0, 0.0, -0.3], [0.0, 0.0, 0.8]],
+                [[0.0, 0.0, -0.3], [0.0, 0.0, 0.8]],
+            ],
+            [
+                [0.0, 0.0, 0.38941834, 0.92106099],
+                [0.0, 0.0, 0.71735608, 0.69670671],
+            ],
+            [0.66750717, 1.7169297, 0.0],
+            [0.0, 0.0, 1.0],
+            false,
+        ),
+        // PMX f621c9d8269b2aea47c3a1ab3b630a4dfb1e7f7dc2674044990d29c6cbf65502
+        (
+            "parity-fixedlimits-conflict",
+            4,
+            16.0,
+            [0.0, 2.0, 0.0],
+            [
+                [[0.0, 0.0, -1.5707963], [0.0, 0.0, 1.5707963]],
+                [[0.0, 0.0, -1.5707963], [0.0, 0.0, 1.5707963]],
+            ],
+            [
+                [0.0, 0.0, 0.51392443, 0.85783546],
+                [0.0, 0.0, 0.85783549, 0.51392434],
+            ],
+            [-2.3841858e-07, 1.7634503, 0.0],
+            [0.0, 1.0, 0.0],
+            false,
+        ),
+        // PMX 8b067fec3175a8bb8fc8af4549a0f436895e2f5995bfe4007a5d855558a5fded
+        (
+            "parity-fixedlimits-base",
+            1,
+            16.0,
+            [0.0, 2.0, 0.0],
+            [
+                [
+                    [-3.1415927, -3.1415927, -3.1415927],
+                    [3.1415927, 3.1415927, 3.1415927],
+                ],
+                [
+                    [-3.1415927, -3.1415927, -3.1415927],
+                    [3.1415927, 3.1415927, 3.1415927],
+                ],
+            ],
+            [
+                [0.70710675, 0.0, 0.0, 0.70710681],
+                [0.37174805, 0.60150096, 0.60150092, 0.37174808],
+            ],
+            [0.55278647, 0.89442724, -6.7527381e-08],
+            [0.0, 1.0, 0.0],
+            true,
+        ),
+        // PMX 6f66cd152f3410db5cbbe46d705d684d48a96a355904af9d960910d697589fcf
+        (
+            "parity-fixedlimits-multi",
+            4,
+            16.0,
+            [1.4, 0.0, 1.4],
+            [
+                [[-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]],
+                [[-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]],
+            ],
+            [
+                [0.0, -0.23498335, 0.0, 0.97199939],
+                [0.0, -0.5211491, 0.0, 0.85346564],
+            ],
+            [1.3463728, 0.0, 1.3463731],
+            [0.0, 1.0, 0.0],
+            false,
+        ),
+    ];
+    for (name, loops, angle, goal, limits, rotations, tip, fixed, rotated_base) in cases {
+        let fixed = Vec3A::from_array(fixed);
+        let base = if rotated_base {
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)
+        } else {
+            Quat::IDENTITY
+        };
+        let goal = Vec3A::from_array(goal);
+        let limits = limits
+            .map(|v| crate::IkAngleLimit::new(Vec3A::from_array(v[0]), Vec3A::from_array(v[1])));
+        let model = Arc::new(
+            ModelArena::new_with_ik(
+                vec![
+                    BoneInit::new(None, Vec3A::ZERO),
+                    {
+                        let mut b = BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO);
+                        b.fixed_axis = Some(fixed);
+                        b
+                    },
+                    {
+                        let mut b = BoneInit::new(Some(BoneIndex(1)), Vec3A::X);
+                        b.fixed_axis = Some(fixed);
+                        b
+                    },
+                    BoneInit::new(Some(BoneIndex(2)), Vec3A::X),
+                    BoneInit::new(Some(BoneIndex(0)), goal),
+                ],
+                vec![IkSolverInit {
+                    ik_bone: BoneIndex(4),
+                    target_bone: BoneIndex(3),
+                    iteration_count: loops,
+                    limit_angle: angle,
+                    links: vec![
+                        IkLinkInit::new(BoneIndex(2)).with_angle_limit(limits[1]),
+                        IkLinkInit::new(BoneIndex(1)).with_angle_limit(limits[0]),
+                    ],
+                }],
+            )
+            .unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(model);
+        runtime.pose_mut().set_local_rotation(BoneIndex(1), base);
+        runtime.evaluate_current_pose();
+        let mut primitive = IkChainSolver::new(IkChainDefinition {
+            parent_slots: vec![None, Some(0), Some(1), Some(2), Some(0)],
+            rest_positions: vec![Vec3A::ZERO, Vec3A::ZERO, Vec3A::X, Vec3A::X, goal],
+            fixed_axes: vec![None, Some(fixed), Some(fixed), None, None],
+            target_slot: 3,
+            iteration_count: loops,
+            limit_angle: angle,
+            links: vec![
+                IkChainLinkDefinition {
+                    bone_slot: 2,
+                    angle_limit: Some(limits[1]),
+                },
+                IkChainLinkDefinition {
+                    bone_slot: 1,
+                    angle_limit: Some(limits[0]),
+                },
+            ],
+        });
+        primitive.solve(IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 5],
+            local_rotations: &[
+                Quat::IDENTITY,
+                base,
+                Quat::IDENTITY,
+                Quat::IDENTITY,
+                Quat::IDENTITY,
+            ],
+            goal_position: goal,
+            tolerance: 1e-4,
+            max_iterations_cap: None,
+        });
+        for matrices in [
+            runtime.world_matrices(),
+            primitive.world_matrices.as_slice(),
+        ] {
+            for (i, expected) in rotations.iter().enumerate() {
+                let actual = rotation(matrices[i + 1]);
+                let expected = Quat::from_array(*expected).normalize();
+                let error = (actual - expected)
+                    .length()
+                    .min((actual + expected).length());
+                assert!(
+                    error < 0.00002,
+                    "{name} bone {} quaternion error={error}",
+                    i + 1
+                );
+            }
+            let error = (translation(matrices[3]) - Vec3A::from_array(tip))
+                .abs()
+                .max_element();
+            assert!(error < 0.00002, "{name} tip error={error}");
+        }
+        assert_eq!(runtime.ik_runtime_stats()[0].rollback_breaks, 0);
+    }
+}

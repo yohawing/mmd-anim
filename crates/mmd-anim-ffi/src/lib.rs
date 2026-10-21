@@ -6041,7 +6041,7 @@ pub unsafe extern "C" fn mmd_runtime_host_rig_free(rig: *mut MmdRuntimeHostRig) 
 
 /// Evaluates pre-morph input with host ownership through both MMD phases.
 /// Physics must be Off. Errors leave the instance pose and output caches intact.
-/// cap=0 uses authored iterations. Copy outputs with existing instance APIs.
+/// cap=0 leaves the MMD-corrected iteration budget uncapped. Copy outputs with existing instance APIs.
 ///
 /// # Safety
 /// Instance and rig must be distinct live handles, exclusively accessed for

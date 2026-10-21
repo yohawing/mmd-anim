@@ -1604,7 +1604,7 @@ void mmd_runtime_host_rig_free(mmd_runtime_host_rig_t* rig);
    Instance and rig must refer to the same model and be accessed exclusively.
    View and arrays must be aligned/readable, and not alias handle-owned storage.
    Input lengths must match the instance counts. No input pointers are retained.
-   tolerance must be finite and nonnegative; cap=0 uses authored iterations.
+   tolerance must be finite and nonnegative; cap=0 leaves the MMD-corrected iteration budget uncapped.
    On validation failure, pose and output caches remain unchanged.
    Read outputs with existing instance world/skinning/morph APIs. */
 mmd_runtime_status_t mmd_runtime_instance_evaluate_host_rig_pose(

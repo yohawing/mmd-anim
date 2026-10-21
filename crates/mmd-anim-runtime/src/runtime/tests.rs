@@ -1275,7 +1275,10 @@ fn clamps_ik_rotation_by_solver_limit_angle() {
     );
     let mut runtime = RuntimeInstance::new(model);
 
-    runtime.evaluate_current_pose();
+    runtime.evaluate_current_pose_with_ik_options(IkSolveOptions {
+        max_iterations_cap: Some(1),
+        ..IkSolveOptions::default()
+    });
 
     let expected = Vec3A::new(
         std::f32::consts::FRAC_1_SQRT_2,
@@ -1286,7 +1289,7 @@ fn clamps_ik_rotation_by_solver_limit_angle() {
 }
 
 #[test]
-fn applies_constant_limit_angle_per_iteration() {
+fn scales_limit_angle_by_link_index() {
     let model = Arc::new(
         ModelArena::new_with_ik(
             vec![
@@ -1306,16 +1309,13 @@ fn applies_constant_limit_angle_per_iteration() {
     );
     let mut runtime = RuntimeInstance::new(model);
 
-    runtime.evaluate_current_pose();
+    runtime.evaluate_current_pose_with_ik_options(IkSolveOptions {
+        max_iterations_cap: Some(1),
+        ..IkSolveOptions::default()
+    });
 
-    // With constant limit_angle = PI/4 (not scaled by link_index), only the root
-    // (link 1, bone 0) rotates at most PI/4. The effector bone is skipped.
-    // The child bone ends up at (cos(PI/4)*1, sin(PI/4)*1, 0)
-    let expected = Vec3A::new(
-        std::f32::consts::FRAC_1_SQRT_2,
-        std::f32::consts::FRAC_1_SQRT_2,
-        0.0,
-    );
+    // Link 0 is the effector and skipped. Link 1 still has a 2 * PI/4 cap.
+    let expected = Vec3A::Y;
     assert_vec3a_near(translation(runtime.world_matrices()[1]), expected);
 }
 
@@ -3335,4 +3335,101 @@ fn host_pose_no_mutation_on_error() {
         runtime.pose().local_position_offset(BoneIndex(3)),
         known_offset,
     );
+}
+
+#[test]
+fn original_mmd_budget_link_caps_and_fixed_axes_match_both_solvers() {
+    // Original MMD 9.32 x64 captures, neutral PMX/VMD at frame 10.
+    // Five bones: root, proximal, distal, effector, controller (0.5, 2, 0).
+    // Captured local rotation magnitudes are proximal then distal; no limits/physics/append.
+    // Fixed-axis captures use (sqrt(1-0.001^2), 0, 0.001), angle 0.5.
+    // Executable SHA256: 07516fd3bf1e6b1339836b6773a156f61bdd6f848eeb621fdda012375df313a1.
+    let tilted_axis = Some(Vec3A::new(0.999_999_5, 0.0, 0.001));
+    for (authored, angle, expected_budget, fixed_axis, expected_angles) in [
+        (1, 0.00001, 360, None, [0.007200055_f32, 0.003600017_f32]),
+        (359, 0.00001, 360, None, [0.007200055, 0.003600017]),
+        (360, 0.00001, 360, None, [0.007200055, 0.003600017]),
+        (361, 0.00001, 361, None, [0.007220055, 0.003610017]),
+        (720, 0.00001, 720, None, [0.014_400_05, 0.007200098]),
+        (1, 0.00002, 360, None, [0.014400018, 0.007200053]),
+        (1, 0.5, 25, tilted_axis, [0.033_124_68, 0.045349597]),
+        (24, 0.5, 25, tilted_axis, [0.033_124_68, 0.045349597]),
+        (25, 0.5, 25, tilted_axis, [0.033_124_68, 0.045349597]),
+        (26, 0.5, 26, tilted_axis, [0.03444794, 0.047_159_7]),
+    ] {
+        let link_bone = |parent, offset| {
+            let bone = BoneInit::new(Some(parent), offset);
+            match fixed_axis {
+                Some(axis) => bone.with_fixed_axis(axis),
+                None => bone,
+            }
+        };
+        let goal = Vec3A::new(0.5, 2.0, 0.0);
+        let model = Arc::new(
+            ModelArena::new_with_ik(
+                vec![
+                    BoneInit::new(None, Vec3A::ZERO),
+                    link_bone(BoneIndex(0), Vec3A::ZERO),
+                    link_bone(BoneIndex(1), Vec3A::X),
+                    BoneInit::new(Some(BoneIndex(2)), Vec3A::X),
+                    BoneInit::new(Some(BoneIndex(0)), goal),
+                ],
+                vec![IkSolverInit {
+                    ik_bone: BoneIndex(4),
+                    target_bone: BoneIndex(3),
+                    links: vec![IkLinkInit::new(BoneIndex(2)), IkLinkInit::new(BoneIndex(1))],
+                    iteration_count: authored,
+                    limit_angle: angle,
+                }],
+            )
+            .unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(model);
+        runtime.evaluate_current_pose();
+        let mut primitive = IkChainSolver::new(IkChainDefinition {
+            parent_slots: vec![None, Some(0), Some(1), Some(2), Some(0)],
+            rest_positions: vec![Vec3A::ZERO, Vec3A::ZERO, Vec3A::X, Vec3A::X, goal],
+            fixed_axes: vec![None, fixed_axis, fixed_axis, None, None],
+            target_slot: 3,
+            links: vec![
+                IkChainLinkDefinition {
+                    bone_slot: 2,
+                    angle_limit: None,
+                },
+                IkChainLinkDefinition {
+                    bone_slot: 1,
+                    angle_limit: None,
+                },
+            ],
+            iteration_count: authored,
+            limit_angle: angle,
+        });
+        let solved = primitive.solve(IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 5],
+            local_rotations: &[Quat::IDENTITY; 5],
+            goal_position: goal,
+            tolerance: 1e-4,
+            max_iterations_cap: None,
+        });
+        assert_eq!(
+            runtime.ik_runtime_stats()[0].executed_iterations,
+            expected_budget
+        );
+        assert_eq!(u64::from(solved.executed_iterations), expected_budget);
+        for (i, expected) in expected_angles.into_iter().enumerate() {
+            for q in [
+                runtime.pose().local_rotation(BoneIndex(i as u32 + 1)),
+                solved.solved_link_rotations[1 - i],
+            ] {
+                let z = q
+                    .to_scaled_axis()
+                    .dot(fixed_axis.unwrap_or(Vec3A::Z).normalize().into());
+                assert!(
+                    (z - expected).abs() < 3e-7,
+                    "N={authored}, angle={angle}, link={i}: {z} vs {expected}"
+                );
+            }
+        }
+    }
 }

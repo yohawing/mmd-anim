@@ -91,11 +91,11 @@ impl IkChainSolver {
 
     pub fn solve(&mut self, input: IkChainPoseInput<'_>) -> IkChainSolveOutput {
         let tolerance = input.tolerance.max(0.0);
-        let iteration_count = input
-            .max_iterations_cap
-            .map(|cap| self.definition.iteration_count.min(cap))
-            .unwrap_or(self.definition.iteration_count)
-            .max(1) as usize;
+        let iteration_count = effective_iteration_count(
+            self.definition.iteration_count,
+            self.definition.limit_angle,
+            input.max_iterations_cap,
+        ) as usize;
         let limit_angle = self.definition.limit_angle.max(0.0);
         let link_count = self.definition.links.len();
 
@@ -261,7 +261,21 @@ pub(crate) fn update_mini_chain_world_matrices(
     }
 }
 
-pub(crate) fn solve_link_step(input: LinkStepInput<'_>) {
+/// Positive PMX angles establish a minimum CCD budget. Explicit host caps
+/// apply afterwards; zero/non-finite angles retain the existing authored budget.
+pub(crate) fn effective_iteration_count(authored: u32, angle: f32, cap: Option<u32>) -> u32 {
+    let minimum = if angle.is_finite() && angle > 0.0 {
+        (4.0 * std::f32::consts::PI / angle).min(360.0) as u32
+    } else {
+        0
+    };
+    let corrected = authored.max(minimum);
+    cap.map_or(corrected, |cap| corrected.min(cap)).max(1)
+}
+
+pub(crate) fn solve_link_step(mut input: LinkStepInput<'_>) {
+    // Original MMD permits larger steps for later links in the chain.
+    input.limit_angle *= (input.link_index + 1) as f32;
     // fixedAxis is a hard CCD constraint. When present it owns the free
     // rotation axis; angle limits (single- or multi-axis) are then applied as a
     // post-step clamp so both constraints compose on every solver path.
@@ -514,7 +528,18 @@ fn solve_unconstrained_link_step(input: UnconstrainedLinkStepInput<'_>) {
         } else {
             return;
         };
-        let signed = signed_projected_angle(local_eff_n, local_tgt_n, axis);
+        let dot = local_eff_n.dot(local_tgt_n).clamp(-1.0, 1.0);
+        let cross = local_eff_n.cross(local_tgt_n);
+        // MMD projects the unconstrained rotation vector onto the fixed axis.
+        // Measuring the angle between projected positions instead exaggerates
+        // steps when the fixed axis is almost parallel to the effector.
+        let signed = if cross.length_squared() == 0.0 && dot < 0.0 {
+            // Preserve the existing half-turn fallback where the rotation-vector
+            // direction is undefined. Original-MMD parity here is unverified.
+            signed_projected_angle(local_eff_n, local_tgt_n, axis)
+        } else {
+            dot.acos() * axis.dot(cross.normalize_or_zero())
+        };
         if signed.abs() < tiny_angle {
             return;
         }
@@ -953,6 +978,36 @@ mod tests {
         assert!(
             delta[0] < 1.0e-5 && delta[1] < 1.0e-5 && delta[2] < 1.0e-5 && delta[3] < 1.0e-5,
             "actual={actual:?} expected={expected:?} delta={delta:?}"
+        );
+    }
+
+    #[test]
+    fn corrected_budget_preserves_host_caps_and_nonpositive_angle_policy() {
+        assert_eq!(effective_iteration_count(1, 0.5, None), 25);
+        assert_eq!(effective_iteration_count(26, 0.5, None), 26);
+        assert_eq!(effective_iteration_count(1, 0.00001, Some(5)), 5);
+        assert_eq!(effective_iteration_count(0, 0.00001, Some(0)), 1);
+        for angle in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(effective_iteration_count(4, angle, None), 4);
+        }
+    }
+
+    #[test]
+    fn fixed_axis_half_turn_preserves_existing_fallback() {
+        let mut definition = one_link_definition(None);
+        definition.fixed_axes[0] = Some(Vec3A::Z);
+        let mut solver = IkChainSolver::new(definition);
+        let output = solver.solve(IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 2],
+            local_rotations: &[Quat::IDENTITY; 2],
+            goal_position: -Vec3A::X,
+            tolerance: 1e-4,
+            max_iterations_cap: Some(1),
+        });
+        assert_vec3a_near(
+            output.solved_link_rotations[0].mul_vec3a(Vec3A::X),
+            -Vec3A::X,
         );
     }
 

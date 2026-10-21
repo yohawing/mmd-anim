@@ -1,6 +1,9 @@
 use glam::Quat;
 
-use crate::ik_primitive::{ChainLinkState, LinkStepInput, rotation, solve_link_step, translation};
+use crate::ik_primitive::{
+    ChainLinkState, LinkStepInput, effective_iteration_count, rotation, solve_link_step,
+    translation,
+};
 
 use super::{IkSolveOptions, RuntimeInstance};
 
@@ -27,11 +30,11 @@ impl RuntimeInstance {
             let solver = &self.model.ik_solvers()[ik_index];
             let ik_bone = solver.ik_bone;
             let target_bone = solver.target_bone;
-            let iteration_count = options
-                .max_iterations_cap
-                .map(|cap| solver.iteration_count.min(cap))
-                .unwrap_or(solver.iteration_count)
-                .max(1) as usize;
+            let iteration_count = effective_iteration_count(
+                solver.iteration_count,
+                solver.limit_angle,
+                options.max_iterations_cap,
+            ) as usize;
             let limit_angle = solver.limit_angle.max(0.0);
             let link_count = solver.links.len();
 

@@ -372,7 +372,11 @@ fn solve_unconstrained_link_step(input: UnconstrainedLinkStepInput<'_>) {
 
     let (axis_vec, mut angle) = if let Some(fixed) = input.fixed_axis {
         let axis = if fixed.length_squared() > f32::EPSILON && fixed.is_finite() {
-            fixed.normalize()
+            // The authored fixed axis is in the parent frame; the directions
+            // used by this step are in the current bone frame.
+            let current =
+                input.ik_rotations[input.link_index] * input.base_rotations[input.link_index];
+            current.inverse().mul_vec3a(fixed.normalize())
         } else {
             return;
         };

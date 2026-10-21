@@ -770,3 +770,172 @@ fn original_mmd_local_axes_do_not_change_ik_limit_frames() {
         }
     }
 }
+
+#[test]
+fn original_mmd_unlimited_fixed_axis_uses_parent_frame_with_base_rotation() {
+    let cases = [
+        // PMX 7aa8193501279ffea4fb30ee879e9a12f2982cbdff6e73395e34b2394cbc9858
+        (
+            1,
+            16.0,
+            [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    5.96046448e-08,
+                    0.99999994,
+                    0.0,
+                    0.0,
+                    -0.99999994,
+                    5.96046448e-08,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                ],
+                [
+                    -0.447213531,
+                    0.89442718,
+                    -5.33120179e-08,
+                    0.0,
+                    0.0,
+                    5.96046448e-08,
+                    0.99999994,
+                    0.0,
+                    0.89442724,
+                    0.447213501,
+                    -2.66560036e-08,
+                    0.0,
+                    1.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                ],
+                [
+                    -0.447213531,
+                    0.89442718,
+                    -5.33120179e-08,
+                    0.0,
+                    0.0,
+                    5.96046448e-08,
+                    0.99999994,
+                    0.0,
+                    0.89442724,
+                    0.447213501,
+                    -2.66560036e-08,
+                    0.0,
+                    0.552786469,
+                    0.89442718,
+                    -5.33120179e-08,
+                    1.0,
+                ],
+            ],
+        ),
+        // PMX 636ec10c3cd5829aa20e620f6de4228d2e78f8195ae2455fb0b192bd09714b50
+        (
+            4,
+            1.0,
+            [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    5.96046448e-08,
+                    0.99999994,
+                    0.0,
+                    0.0,
+                    -0.99999994,
+                    5.96046448e-08,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                ],
+                [
+                    -0.447214961,
+                    0.894426465,
+                    -5.33119753e-08,
+                    0.0,
+                    0.0,
+                    5.96046448e-08,
+                    0.99999994,
+                    0.0,
+                    0.894426525,
+                    0.447214931,
+                    -2.66560889e-08,
+                    0.0,
+                    1.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                ],
+                [
+                    -0.447214961,
+                    0.894426465,
+                    -5.33119753e-08,
+                    0.0,
+                    0.0,
+                    5.96046448e-08,
+                    0.99999994,
+                    0.0,
+                    0.894426525,
+                    0.447214931,
+                    -2.66560889e-08,
+                    0.0,
+                    0.552785039,
+                    0.894426465,
+                    -5.33119753e-08,
+                    1.0,
+                ],
+            ],
+        ),
+    ];
+    for (loops, angle, expected) in cases {
+        let mut bones = vec![
+            BoneInit::new(None, Vec3A::ZERO),
+            BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO),
+            BoneInit::new(Some(BoneIndex(1)), Vec3A::X),
+            BoneInit::new(Some(BoneIndex(2)), Vec3A::X),
+            BoneInit::new(Some(BoneIndex(0)), Vec3A::new(0.0, 2.0, 0.0)),
+        ];
+        bones[1].fixed_axis = Some(Vec3A::Y);
+        bones[2].fixed_axis = Some(Vec3A::Y);
+        let model = ModelArena::new_with_ik(
+            bones,
+            vec![IkSolverInit {
+                ik_bone: BoneIndex(4),
+                target_bone: BoneIndex(3),
+                iteration_count: loops,
+                limit_angle: angle,
+                links: vec![IkLinkInit::new(BoneIndex(2)), IkLinkInit::new(BoneIndex(1))],
+            }],
+        )
+        .unwrap();
+        let mut runtime = RuntimeInstance::new(Arc::new(model));
+        runtime.pose_mut().set_local_rotation(
+            BoneIndex(1),
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        );
+        runtime.evaluate_current_pose();
+        for (i, expected) in expected.iter().enumerate() {
+            let actual = runtime.world_matrices()[i + 1].to_cols_array();
+            let error = actual
+                .iter()
+                .zip(expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                error < 0.00001,
+                "loops={loops} bone={} error={error}",
+                i + 1
+            );
+        }
+    }
+}

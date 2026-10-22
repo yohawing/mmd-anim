@@ -1,6 +1,9 @@
 use glam::{Mat4, Quat, Vec3A};
 
 use crate::IkAngleLimit;
+use crate::mmd_math::{
+    mmd_axis_rotation, mmd_quaternion_from_matrix, mmd_quaternion_multiply, mmd_rotation_matrix,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct IkChainLinkDefinition {
@@ -156,7 +159,11 @@ impl IkChainSolver {
                     continue;
                 }
 
-                if (local_effector.normalize() - local_target.normalize()).length_squared() < 1e-7 {
+                if (normalize_ik_direction(link_pos - eff_pos)
+                    - normalize_ik_direction(link_pos - input.goal_position))
+                .length_squared()
+                    < 1e-7
+                {
                     final_distance = (eff_pos - input.goal_position).length();
                     break 'iterations;
                 }
@@ -165,6 +172,14 @@ impl IkChainSolver {
                 let fixed_axis = self.definition.fixed_axes.get(bone_slot).copied().flatten();
                 let local_axis_basis = self.local_axis_bases.get(bone_slot).copied().flatten();
                 solve_link_step(LinkStepInput {
+                    world_step: Some((
+                        link_pos - eff_pos,
+                        link_pos - input.goal_position,
+                        self.definition.parent_slots[link_slot]
+                            .map_or(input.parent_world_matrix.unwrap_or(Mat4::IDENTITY), |p| {
+                                self.world_matrices[p]
+                            }),
+                    )),
                     local_effector: &local_effector,
                     local_target: &local_target,
                     link_index,
@@ -277,6 +292,7 @@ pub(crate) fn solve_link_step(mut input: LinkStepInput<'_>) {
         // In the first half, a single-axis limit overrides the fixed axis.
         solve_limited_axes_link_step_with_fixed_axis(
             LimitedAxesLinkStepInput {
+                world_step: input.world_step,
                 local_effector: input.local_effector,
                 local_target: input.local_target,
                 link_index: input.link_index,
@@ -297,6 +313,7 @@ pub(crate) fn solve_link_step(mut input: LinkStepInput<'_>) {
     let single_axis = get_single_axis_limit(input.angle_limit);
     if let (Some(angle_limit), Some(axis_index)) = (input.angle_limit, single_axis) {
         solve_plane_link_step(PlaneLinkStepInput {
+            world_step: input.world_step,
             local_effector: input.local_effector,
             local_target: input.local_target,
             link_index: input.link_index,
@@ -312,6 +329,7 @@ pub(crate) fn solve_link_step(mut input: LinkStepInput<'_>) {
         });
     } else if let Some(angle_limit) = input.angle_limit {
         solve_limited_axes_link_step(LimitedAxesLinkStepInput {
+            world_step: input.world_step,
             local_effector: input.local_effector,
             local_target: input.local_target,
             link_index: input.link_index,
@@ -325,6 +343,23 @@ pub(crate) fn solve_link_step(mut input: LinkStepInput<'_>) {
             local_axis_basis: input.local_axis_basis,
         });
     } else {
+        if input.fixed_axis.is_none() {
+            if let Some((effector, target, parent)) = input.world_step {
+                let base = input.base_rotations[input.link_index];
+                let current = mmd_quaternion_multiply(base, input.ik_rotations[input.link_index]);
+                if let Some(solved) = solve_world_unconstrained_step(
+                    effector,
+                    target,
+                    parent,
+                    current,
+                    input.limit_angle,
+                ) {
+                    input.ik_rotations[input.link_index] =
+                        mmd_quaternion_multiply(base.inverse(), solved);
+                    return;
+                }
+            }
+        }
         solve_unconstrained_link_step(UnconstrainedLinkStepInput {
             local_effector: input.local_effector,
             local_target: input.local_target,
@@ -338,6 +373,8 @@ pub(crate) fn solve_link_step(mut input: LinkStepInput<'_>) {
 }
 
 pub(crate) struct LinkStepInput<'a> {
+    /// World directions and the parent frame for MMD's unconstrained CCD step.
+    pub world_step: Option<(Vec3A, Vec3A, Mat4)>,
     pub local_effector: &'a Vec3A,
     pub local_target: &'a Vec3A,
     pub link_index: usize,
@@ -435,6 +472,62 @@ pub(crate) fn translation(matrix: Mat4) -> Vec3A {
     Vec3A::from_vec4(matrix.w_axis)
 }
 
+// D3DX evaluates the squared-length sum in a different lane order for each
+// component. Preserve that rounding when replaying long CCD chains.
+pub(crate) fn normalize_ik_direction(v: Vec3A) -> Vec3A {
+    let x = v.x * v.x;
+    let y = v.y * v.y;
+    let z = v.z * v.z;
+    Vec3A::new(
+        v.x * ((y + x) + z).sqrt().recip(),
+        v.y * ((z + y) + x).sqrt().recip(),
+        v.z * ((x + z) + y).sqrt().recip(),
+    )
+}
+
+pub(crate) fn solve_world_unconstrained_step(
+    effector: Vec3A,
+    target: Vec3A,
+    parent: Mat4,
+    current: Quat,
+    limit: f32,
+) -> Option<Quat> {
+    // Host-authored scales are outside MMD's rigid parent-frame calculation.
+    // Keep the existing rotation-only path for those inputs.
+    let basis = glam::Mat3::from_mat4(parent);
+    if (basis.transpose() * basis - glam::Mat3::IDENTITY)
+        .to_cols_array()
+        .iter()
+        .any(|v| !v.is_finite() || v.abs() > 1e-4)
+    {
+        return None;
+    }
+    let a = normalize_ik_direction(effector);
+    let b = normalize_ik_direction(target);
+    let cross = a.cross(b);
+    let m = parent.to_cols_array();
+    let axis = Vec3A::new(
+        (m[0] * cross.x + m[1] * cross.y) + m[2] * cross.z,
+        (m[4] * cross.x + m[5] * cross.y) + m[6] * cross.z,
+        (m[8] * cross.x + m[9] * cross.y) + m[10] * cross.z,
+    );
+    if axis.length_squared() < 1e-10 || !axis.is_finite() {
+        // Preserve the established half-turn fallback for a degenerate axis.
+        return None;
+    }
+    let axis = normalize_ik_direction(axis);
+    let dot = ((a.x * b.x + a.y * b.y) + a.z * b.z).clamp(-1.0, 1.0);
+    let mut half = dot.acos() * 0.5;
+    if limit > 0.0 {
+        half = half.min(limit * 0.5);
+    }
+    let s = half.sin();
+    Some(mmd_quaternion_multiply(
+        current,
+        Quat::from_xyzw(axis.x * s, axis.y * s, axis.z * s, half.cos()),
+    ))
+}
+
 pub(crate) fn rotation(matrix: Mat4) -> Quat {
     matrix.to_scale_rotation_translation().1
 }
@@ -453,6 +546,7 @@ pub(crate) fn constrain_rotation_to_axis(rotation: Quat, axis: Vec3A) -> Quat {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct ChainLinkState {
+    pub rotation_matrix: Option<Mat4>,
     pub previous_euler: [f32; 3],
 }
 
@@ -613,6 +707,7 @@ pub(crate) fn euler_xyz_to_quat(euler: &[f32; 3]) -> Quat {
 }
 
 pub(crate) struct LimitedAxesLinkStepInput<'a> {
+    pub world_step: Option<(Vec3A, Vec3A, Mat4)>,
     pub local_effector: &'a Vec3A,
     pub local_target: &'a Vec3A,
     pub link_index: usize,
@@ -635,10 +730,14 @@ fn solve_limited_axes_link_step_with_fixed_axis(
     fixed_axis: Option<Vec3A>,
 ) {
     let base = input.base_rotations[input.link_index];
-    let current = (input.ik_rotations[input.link_index] * base).normalize();
+    let current = mmd_quaternion_multiply(base, input.ik_rotations[input.link_index]);
     let single_axis = get_single_axis_limit(Some(input.limits));
     let basis = input.local_axis_basis.unwrap_or(Quat::IDENTITY).normalize();
-    let current_la = (basis.inverse() * current * basis).normalize();
+    let current_la = if input.local_axis_basis.is_none() {
+        current
+    } else {
+        (basis.inverse() * current * basis).normalize()
+    };
     let eff = basis
         .inverse()
         .mul_vec3a(current.mul_vec3a(*input.local_effector))
@@ -647,23 +746,40 @@ fn solve_limited_axes_link_step_with_fixed_axis(
         .inverse()
         .mul_vec3a(current.mul_vec3a(*input.local_target))
         .normalize();
-    let cross = eff.cross(goal);
+    let mut cross = eff.cross(goal);
     let mut angle = input
         .local_effector
         .normalize()
         .dot(input.local_target.normalize())
         .clamp(-1.0, 1.0)
         .acos();
+    if let Some((effector, target, parent)) = input.world_step {
+        let a = normalize_ik_direction(effector);
+        let b = normalize_ik_direction(target);
+        let c = a.cross(b);
+        let m = parent.to_cols_array();
+        cross = basis.inverse().mul_vec3a(Vec3A::new(
+            (m[0] * c.x + m[1] * c.y) + m[2] * c.z,
+            (m[4] * c.x + m[5] * c.y) + m[6] * c.z,
+            (m[8] * c.x + m[9] * c.y) + m[10] * c.z,
+        ));
+        angle = ((a.x * b.x + a.y * b.y) + a.z * b.z).clamp(-1., 1.).acos();
+    }
+    let normalized_cross = if input.world_step.is_some() && cross.length_squared() > 0.0 {
+        normalize_ik_direction(cross)
+    } else {
+        cross.normalize_or_zero()
+    };
     let reflect = input.iteration < input.iteration_count / 2;
     let rotation_axis = if let Some(i) = single_axis.filter(|_| reflect) {
         let axis = axis_vec(i);
         axis * if cross.dot(axis) < 0.0 { -1.0 } else { 1.0 }
     } else if let Some(fixed) = fixed_axis {
         let fixed = basis.inverse().mul_vec3a(fixed).normalize();
-        angle *= fixed.dot(cross.normalize_or_zero());
+        angle *= fixed.dot(normalized_cross);
         fixed
     } else {
-        cross.normalize_or_zero()
+        normalized_cross
     };
     if input.limit_angle > 0.0 {
         angle = angle.clamp(-input.limit_angle, input.limit_angle);
@@ -671,9 +787,13 @@ fn solve_limited_axes_link_step_with_fixed_axis(
     if rotation_axis.length_squared() <= f32::EPSILON {
         return;
     }
-    let candidate = (Quat::from_axis_angle(rotation_axis.into(), angle) * current_la).normalize();
+    let candidate = mmd_quaternion_multiply(
+        current_la,
+        Quat::from_axis_angle(rotation_axis.into(), angle),
+    );
     // Select a decomposition whose middle angle stays within a half turn.
-    let half_pi = std::f32::consts::FRAC_PI_2;
+    // Literal thresholds from BoneTransform_CcdIk, rather than rounded PI / 2.
+    let half_pi = f32::from_bits(0x3fc90fd8);
     let order = if input.limits.min.x > -half_pi && input.limits.max.x < half_pi {
         glam::EulerRot::YXZ
     } else if input.limits.min.y > -half_pi && input.limits.max.y < half_pi {
@@ -681,19 +801,25 @@ fn solve_limited_axes_link_step_with_fixed_axis(
     } else {
         glam::EulerRot::XZY
     };
-    let (a, b, c) = candidate.to_euler(order);
+    let m = mmd_rotation_matrix(candidate).to_cols_array();
+    let cap = f32::from_bits(0x3fc49803);
     let mut angles = match order {
-        glam::EulerRot::YXZ => [b, a, c],
-        glam::EulerRot::ZYX => [c, b, a],
-        _ => [a, c, b],
+        glam::EulerRot::YXZ => {
+            let a = (-m[9]).asin().clamp(-cap, cap);
+            let c = a.cos();
+            [a, (m[8] / c).atan2(m[10] / c), (m[1] / c).atan2(m[5] / c)]
+        }
+        glam::EulerRot::ZYX => {
+            let a = (-m[2]).asin().clamp(-cap, cap);
+            let c = a.cos();
+            [(m[6] / c).atan2(m[10] / c), a, (m[1] / c).atan2(m[0] / c)]
+        }
+        _ => {
+            let a = (-m[4]).asin().clamp(-cap, cap);
+            let c = a.cos();
+            [(m[6] / c).atan2(m[5] / c), (m[8] / c).atan2(m[0] / c), a]
+        }
     };
-    // Avoid the singular middle angle before interval reflection/clamping.
-    let middle = match order {
-        glam::EulerRot::YXZ => 0,
-        glam::EulerRot::ZYX => 1,
-        _ => 2,
-    };
-    angles[middle] = angles[middle].clamp(-88.0_f32.to_radians(), 88.0_f32.to_radians());
     for (i, v) in angles.iter_mut().enumerate() {
         let (lo, hi) = limit_axis_bounds(input.limits, i);
         if *v < lo {
@@ -705,14 +831,22 @@ fn solve_limited_axes_link_step_with_fixed_axis(
             *v = if reflect && r >= lo { r } else { hi };
         }
     }
-    let q = match order {
-        glam::EulerRot::YXZ => Quat::from_euler(order, angles[1], angles[0], angles[2]),
-        glam::EulerRot::ZYX => Quat::from_euler(order, angles[2], angles[1], angles[0]),
-        _ => Quat::from_euler(order, angles[0], angles[2], angles[1]),
+    let mx = mmd_axis_rotation(0, angles[0]);
+    let my = mmd_axis_rotation(1, angles[1]);
+    let mz = mmd_axis_rotation(2, angles[2]);
+    let m = match order {
+        glam::EulerRot::YXZ => my * (mx * mz),
+        glam::EulerRot::ZYX => mz * (my * mx),
+        _ => mx * (mz * my),
     };
+    let q = mmd_quaternion_from_matrix(m);
+    input.chain_states[input.link_index].rotation_matrix = Some(m);
     input.chain_states[input.link_index].previous_euler = angles;
-    input.ik_rotations[input.link_index] =
-        (basis * q * basis.inverse() * base.inverse()).normalize();
+    input.ik_rotations[input.link_index] = if input.local_axis_basis.is_none() {
+        mmd_quaternion_multiply(base.inverse(), q)
+    } else {
+        (basis * q * basis.inverse() * base.inverse()).normalize()
+    };
 }
 
 pub(crate) fn limit_axis_bounds(limits: IkAngleLimit, axis_index: usize) -> (f32, f32) {
@@ -748,6 +882,7 @@ pub(crate) fn signed_projected_angle(from: Vec3A, to: Vec3A, axis: Vec3A) -> f32
 }
 
 pub(crate) struct PlaneLinkStepInput<'a> {
+    pub world_step: Option<(Vec3A, Vec3A, Mat4)>,
     pub local_effector: &'a Vec3A,
     pub local_target: &'a Vec3A,
     pub link_index: usize,
@@ -776,6 +911,7 @@ pub(crate) fn solve_plane_link_step(input: PlaneLinkStepInput<'_>) {
         && axis_aligned
         && ((lower < 0.0 && upper <= 0.0) || (lower >= 0.0 && upper > 0.0));
     solve_limited_axes_link_step(LimitedAxesLinkStepInput {
+        world_step: input.world_step,
         local_effector: input.local_effector,
         local_target: input.local_target,
         link_index: input.link_index,
@@ -1020,6 +1156,7 @@ mod tests {
 
                 let fixed_axis = definition.fixed_axes.get(link_slot).copied().flatten();
                 solve_link_step(LinkStepInput {
+                    world_step: None,
                     local_effector: &local_effector,
                     local_target: &local_target,
                     link_index,

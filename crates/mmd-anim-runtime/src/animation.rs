@@ -116,7 +116,11 @@ impl MovableBoneTrack {
         for keyframe in keyframes {
             frame_numbers.push(keyframe.frame);
             positions.push(keyframe.position);
-            rotations.push(keyframe.rotation.normalize());
+            rotations.push(if keyframe.rotation.is_normalized() {
+                keyframe.rotation
+            } else {
+                keyframe.rotation.normalize()
+            });
             position_interpolations.push(keyframe.position_interpolation);
             rotation_interpolations.push(keyframe.rotation_interpolation);
         }
@@ -745,6 +749,47 @@ mod tests {
             delta.x < 1.0e-4 && delta.y < 1.0e-4 && delta.z < 1.0e-4,
             "actual={actual:?} expected={expected:?} delta={delta:?}"
         );
+    }
+
+    #[test]
+    fn authored_unit_quaternion_bits_survive_track_sampling() {
+        // A valid f32 unit quaternion whose second normalization changes bits.
+        let authored = Quat::from_xyzw(0.0, 0.0, 0.6, 0.800001);
+        assert!(authored.is_normalized());
+        assert_ne!(authored.to_array(), authored.normalize().to_array());
+        let track = MovableBoneTrack::from_keyframes(vec![MovableBoneKeyframe::new(
+            12,
+            Vec3A::ZERO,
+            authored,
+        )]);
+        let expected = authored.to_array().map(f32::to_bits);
+        assert_eq!(
+            track
+                .keyframe(0)
+                .unwrap()
+                .rotation
+                .to_array()
+                .map(f32::to_bits),
+            expected
+        );
+        for frame in [0.0, 12.0, 20.0] {
+            assert_eq!(
+                track.sample(frame).unwrap().1.to_array().map(f32::to_bits),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn nonunit_quaternion_keys_are_still_normalized() {
+        let track = MovableBoneTrack::from_keyframes(vec![MovableBoneKeyframe::new(
+            0,
+            Vec3A::ZERO,
+            Quat::from_xyzw(0.0, 0.0, 3.0, 4.0),
+        )]);
+        let actual = track.sample(0.0).unwrap().1;
+        assert!(actual.is_normalized());
+        assert!(actual.abs_diff_eq(Quat::from_xyzw(0.0, 0.0, 0.6, 0.8), 1.0e-7));
     }
 
     #[test]

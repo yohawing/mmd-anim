@@ -140,10 +140,11 @@ impl RuntimeInstance {
             base_ik_rotations.clear();
             base_ik_rotations.extend(links.iter().map(|l| self.pose.ik_rotation(l.bone)));
             ik_rotations.clear();
-            ik_rotations.resize(link_count, Quat::IDENTITY);
+            ik_rotations.extend(base_rotations.iter().copied());
             chain_states.clear();
             chain_states.resize_with(link_count, || ChainLinkState {
                 previous_euler: [0.0; 3],
+                rotation_matrix: None,
             });
 
             self.apply_ik_link_rotations(
@@ -196,7 +197,9 @@ impl RuntimeInstance {
                         continue;
                     }
 
-                    if (local_effector.normalize() - local_target.normalize()).length_squared()
+                    if (crate::ik_primitive::normalize_ik_direction(link_pos - eff_pos)
+                        - crate::ik_primitive::normalize_ik_direction(link_pos - ik_pos))
+                    .length_squared()
                         < 1e-7
                     {
                         final_distance = (eff_pos - ik_pos).length();
@@ -211,7 +214,10 @@ impl RuntimeInstance {
                     // same parent-frame axis and clamps the accumulated rotation.
                     if _iteration == 0 {
                         if let Some(previous) = self.ik_history[link_bone.as_usize()] {
-                            ik_rotations[link_index] = previous;
+                            ik_rotations[link_index] = crate::mmd_math::mmd_quaternion_multiply(
+                                base_rotations[link_index],
+                                previous,
+                            );
                             let base = base_rotations[link_index];
                             let adjustment = (previous * base).inverse() * base;
                             local_effector = adjustment.mul_vec3a(local_effector);
@@ -221,16 +227,25 @@ impl RuntimeInstance {
                     // Fixed-axis constrains the CCD rotation axis only.
                     let fixed_axis = self.model.fixed_axis(link_bone);
                     solve_link_step(LinkStepInput {
+                        world_step: Some((
+                            link_pos - eff_pos,
+                            link_pos - ik_pos,
+                            self.model
+                                .parent_index(link_bone)
+                                .map_or(glam::Mat4::IDENTITY, |p| {
+                                    self.pose.world_matrices()[p.as_usize()]
+                                }),
+                        )),
                         local_effector: &local_effector,
                         local_target: &local_target,
-                        link_index,
-                        base_rotations: &base_rotations,
-                        ik_rotations: &mut ik_rotations,
-                        chain_states: &mut chain_states,
+                        link_index: 0,
+                        base_rotations: &[Quat::IDENTITY],
+                        ik_rotations: std::slice::from_mut(&mut ik_rotations[link_index]),
+                        chain_states: std::slice::from_mut(&mut chain_states[link_index]),
                         angle_limit: link.angle_limit,
                         iteration: _iteration,
                         iteration_count,
-                        limit_angle,
+                        limit_angle: limit_angle * (link_index + 1) as f32,
                         // PMX local axes describe manipulation handles. MMD applies
                         // IK limits in the authored bone frame, independent of them.
                         local_axis_basis: None,
@@ -238,9 +253,7 @@ impl RuntimeInstance {
                     });
 
                     if self.ik_history[link_bone.as_usize()].is_some() {
-                        self.ik_history[link_bone.as_usize()] = Some(
-                            (ik_rotations[link_index] * base_rotations[link_index]).normalize(),
-                        );
+                        self.ik_history[link_bone.as_usize()] = Some(ik_rotations[link_index]);
                     }
                     self.apply_ik_link_rotations(
                         &links,
@@ -248,7 +261,11 @@ impl RuntimeInstance {
                         &base_ik_rotations,
                         &ik_rotations,
                     );
-                    self.update_world_matrices_after_ik_link_change(ik_index);
+                    self.update_world_matrices_after_ik_link_change(
+                        ik_index,
+                        &links,
+                        &chain_states,
+                    );
                     self.ik_stats[ik_index].link_steps += 1;
                 }
 
@@ -283,7 +300,7 @@ impl RuntimeInstance {
                 &base_ik_rotations,
                 &ik_rotations,
             );
-            self.update_world_matrices_after_ik_link_change(ik_index);
+            self.update_world_matrices_after_ik_link_change(ik_index, &links, &chain_states);
         }
 
         self.ik_scratch.links = links;
@@ -293,7 +310,12 @@ impl RuntimeInstance {
         self.ik_scratch.chain_states = chain_states;
     }
 
-    fn update_world_matrices_after_ik_link_change(&mut self, ik_index: usize) {
+    fn update_world_matrices_after_ik_link_change(
+        &mut self,
+        ik_index: usize,
+        links: &[crate::IkLink],
+        states: &[ChainLinkState],
+    ) {
         if self.ik_link_change_update_bones[ik_index].is_none() {
             self.ik_link_change_update_bones[ik_index] =
                 Some(self.compute_ik_link_change_update_bones(ik_index));
@@ -315,7 +337,11 @@ impl RuntimeInstance {
                 bone,
                 Some(self.model.ik_solvers()[ik_index].target_bone),
             );
-            self.update_world_matrix_for_bone(bone);
+            let matrix = links
+                .iter()
+                .position(|l| l.bone == bone)
+                .and_then(|i| states[i].rotation_matrix);
+            self.update_world_matrix_for_bone_with_rotation(bone, matrix);
         }
         #[cfg(test)]
         self.set_world_matrix_bone_update_category(previous_category);
@@ -462,8 +488,9 @@ impl RuntimeInstance {
         ik_rotations: &[Quat],
     ) {
         for (i, link) in links.iter().enumerate() {
-            let effective = (ik_rotations[i] * base_rotations[i]).normalize();
-            let total_ik = (ik_rotations[i] * base_ik_rotations[i]).normalize();
+            let effective = ik_rotations[i];
+            let total_ik =
+                (ik_rotations[i] * base_rotations[i].inverse() * base_ik_rotations[i]).normalize();
             self.pose.set_ik_rotation(link.bone, total_ik);
             self.pose.set_local_rotation(link.bone, effective);
         }

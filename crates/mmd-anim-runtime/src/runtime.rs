@@ -174,6 +174,9 @@ impl std::error::Error for HostPoseError {}
 /// this history. Use [`Self::reset_ik_history`] to begin an independent sequence.
 #[derive(Debug)]
 pub struct RuntimeInstance {
+    // Rest-relative world transforms, independent of caller-supplied inverse binds.
+    // Keeping these matrices avoids quaternion round trips between CCD updates.
+    transform_matrices: Vec<glam::Mat4>,
     host_rig: Option<host_rig::HostRigScratch>,
     model: Arc<ModelArena>,
     pose: PoseArena,
@@ -238,6 +241,7 @@ impl RuntimeInstance {
         let ik_stats = vec![IkSolverRuntimeStats::default(); model.ik_count()];
         let ik_link_change_update_bones = vec![None; model.ik_count()];
         Self {
+            transform_matrices: vec![glam::Mat4::IDENTITY; model.bone_count()],
             host_rig: None,
             model,
             pose,
@@ -373,6 +377,8 @@ impl RuntimeInstance {
         for &(bone, world) in &self.ik_target_history {
             if !self.is_host_driven(bone) {
                 self.pose.set_world_matrix(bone, world);
+                self.transform_matrices[bone.as_usize()] = world
+                    * glam::Mat4::from_translation((-self.model.rest_world_position(bone)).into());
                 self.pose
                     .set_skinning_matrix(bone, world * self.model.inverse_bind_matrix(bone));
             }

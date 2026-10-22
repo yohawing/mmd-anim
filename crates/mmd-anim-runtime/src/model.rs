@@ -453,6 +453,7 @@ pub struct ModelArena {
     parent_indices: Box<[i32]>,
     rest_positions: Box<[Vec3A]>,
     inverse_bind_matrices: Box<[Mat4]>,
+    rest_world_positions: Box<[Vec3A]>,
     transform_orders: Box<[i32]>,
     fixed_axis_flags: Box<[u8]>,
     fixed_axis_constraint_flags: Box<[u8]>,
@@ -574,10 +575,30 @@ impl ModelArena {
             build_append_transforms(append_transforms, bone_count)?;
         validate_morph_init(&morph, bone_count)?;
 
+        let mut absolute_rest = vec![Vec3A::ZERO; bone_count];
+
+        for &bone in &eval_order {
+            let i = bone.as_usize();
+            let parent = parent_indices[i];
+            let parent_rest = if parent >= 0 {
+                absolute_rest[parent as usize]
+            } else {
+                Vec3A::ZERO
+            };
+            absolute_rest[i] = rest_positions[i] + parent_rest;
+            // Preserve PMX absolute rest bits only if the bind reproduces local rest exactly.
+            let candidate = -Vec3A::from_vec4(inverse_bind_matrices[i].w_axis);
+            if inverse_bind_matrices[i] == Mat4::from_translation((-candidate).into())
+                && candidate - parent_rest == rest_positions[i]
+            {
+                absolute_rest[i] = candidate;
+            }
+        }
         Ok(Self {
             parent_indices: parent_indices.into_boxed_slice(),
             rest_positions: rest_positions.into_boxed_slice(),
             inverse_bind_matrices: inverse_bind_matrices.into_boxed_slice(),
+            rest_world_positions: absolute_rest.into_boxed_slice(),
             transform_orders: transform_orders.into_boxed_slice(),
             fixed_axis_flags: fixed_axis_flags.into_boxed_slice(),
             fixed_axis_constraint_flags: fixed_axis_constraint_flags.into_boxed_slice(),
@@ -622,6 +643,10 @@ impl ModelArena {
     }
 
     #[inline]
+    pub(crate) fn rest_world_position(&self, bone: BoneIndex) -> Vec3A {
+        self.rest_world_positions[bone.as_usize()]
+    }
+
     pub fn rest_position(&self, bone: BoneIndex) -> Vec3A {
         self.rest_positions[bone.as_usize()]
     }

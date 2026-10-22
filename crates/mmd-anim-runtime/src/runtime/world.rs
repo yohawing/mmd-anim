@@ -142,8 +142,10 @@ impl RuntimeInstance {
         if use_source_append {
             // MMD inherits the source's local matrix rotation, which includes
             // both its own (possibly IK-updated) rotation and its rotation grant.
-            source_rotation =
-                (source_rotation * self.pose.append_rotation(source_bone)).normalize();
+            source_rotation = crate::mmd_math::mmd_quaternion_multiply(
+                self.pose.append_rotation(source_bone),
+                source_rotation,
+            );
         }
         let source_position_offset = if use_source_append {
             self.pose.append_position_offset(source_bone)
@@ -164,8 +166,17 @@ impl RuntimeInstance {
     }
 
     pub(super) fn update_world_matrix_for_bone(&mut self, bone: crate::BoneIndex) {
+        self.update_world_matrix_for_bone_with_rotation(bone, None);
+    }
+    pub(super) fn update_world_matrix_for_bone_with_rotation(
+        &mut self,
+        bone: crate::BoneIndex,
+        rotation_matrix: Option<Mat4>,
+    ) {
         if self.is_host_driven(bone) {
             let world = self.host_rig.as_ref().unwrap().reference_world[bone.as_usize()];
+            self.transform_matrices[bone.as_usize()] =
+                world * Mat4::from_translation((-self.model.rest_world_position(bone)).into());
             self.pose.set_world_matrix(bone, world);
             self.pose
                 .set_skinning_matrix(bone, world * self.model.inverse_bind_matrix(bone));
@@ -192,39 +203,47 @@ impl RuntimeInstance {
                 }
             }
         }
-        let mut local_position =
-            self.model.rest_position(bone) + self.pose.local_position_offset(bone);
+        let mut rotation_matrix = rotation_matrix;
         let mut local_rotation = self.pose.local_rotation(bone);
         let local_scale = self.pose.local_scale(bone);
 
         if let Some(append_index) = self.model.append_transform_index(bone) {
             let append = self.model.append_transform(append_index);
             if append.affect_rotation {
-                local_rotation = (local_rotation * self.pose.append_rotation(bone)).normalize();
-            }
-            if append.affect_translation {
-                local_position += self.pose.append_position_offset(bone);
+                rotation_matrix = None;
+                local_rotation = crate::mmd_math::mmd_quaternion_multiply(
+                    self.pose.append_rotation(bone),
+                    local_rotation,
+                );
             }
         }
 
         if let Some(axis) = self.model.fixed_axis_constraint(bone) {
+            rotation_matrix = None;
             local_rotation = constrain_rotation_to_axis(local_rotation, axis);
         }
 
-        let local_matrix = Mat4::from_scale_rotation_translation(
-            local_scale.into(),
-            local_rotation,
-            local_position.into(),
-        );
-
-        let world_matrix = match self.model.parent_index(bone) {
-            Some(parent) => self.pose.world_matrices()[parent.as_usize()] * local_matrix,
-            None => local_matrix,
-        };
-
-        self.pose.set_world_matrix(bone, world_matrix);
+        let rest: glam::Vec3 = self.model.rest_world_position(bone).into();
+        let mut offset = self.pose.local_position_offset(bone);
+        if let Some(ai) = self.model.append_transform_index(bone) {
+            if self.model.append_transform(ai).affect_translation {
+                offset += self.pose.append_position_offset(bone);
+            }
+        }
+        let local_delta = Mat4::from_translation(rest)
+            * (Mat4::from_translation(offset.into())
+                * ((rotation_matrix
+                    .unwrap_or_else(|| crate::mmd_math::mmd_rotation_matrix(local_rotation))
+                    * Mat4::from_scale(local_scale.into()))
+                    * Mat4::from_translation(-rest)));
+        let skin = self.model.parent_index(bone).map_or(local_delta, |parent| {
+            self.transform_matrices[parent.as_usize()] * local_delta
+        });
+        let world = skin * Mat4::from_translation(rest);
+        self.transform_matrices[bone.as_usize()] = skin;
+        self.pose.set_world_matrix(bone, world);
         self.pose
-            .set_skinning_matrix(bone, world_matrix * self.model.inverse_bind_matrix(bone));
+            .set_skinning_matrix(bone, world * self.model.inverse_bind_matrix(bone));
     }
 
     pub(super) fn expand_update_start_for_append_dependencies(

@@ -343,21 +343,20 @@ pub(crate) fn solve_link_step(mut input: LinkStepInput<'_>) {
             local_axis_basis: input.local_axis_basis,
         });
     } else {
-        if input.fixed_axis.is_none() {
-            if let Some((effector, target, parent)) = input.world_step {
-                let base = input.base_rotations[input.link_index];
-                let current = mmd_quaternion_multiply(base, input.ik_rotations[input.link_index]);
-                if let Some(solved) = solve_world_unconstrained_step(
-                    effector,
-                    target,
-                    parent,
-                    current,
-                    input.limit_angle,
-                ) {
-                    input.ik_rotations[input.link_index] =
-                        mmd_quaternion_multiply(base.inverse(), solved);
-                    return;
-                }
+        if let Some((effector, target, parent)) = input.world_step {
+            let base = input.base_rotations[input.link_index];
+            let current = mmd_quaternion_multiply(base, input.ik_rotations[input.link_index]);
+            if let Some(solved) = solve_world_unconstrained_step(
+                effector,
+                target,
+                parent,
+                current,
+                input.limit_angle,
+                input.fixed_axis,
+            ) {
+                input.ik_rotations[input.link_index] =
+                    mmd_quaternion_multiply(base.inverse(), solved);
+                return;
             }
         }
         solve_unconstrained_link_step(UnconstrainedLinkStepInput {
@@ -491,7 +490,13 @@ pub(crate) fn solve_world_unconstrained_step(
     parent: Mat4,
     current: Quat,
     limit: f32,
+    fixed_axis: Option<Vec3A>,
 ) -> Option<Quat> {
+    // PMX axes are already unit length. Keep the legacy normalization and
+    // rejection behavior for unnormalized or invalid host-authored axes.
+    if fixed_axis.is_some_and(|axis| !axis.is_finite() || !axis.is_normalized()) {
+        return None;
+    }
     // Host-authored scales are outside MMD's rigid parent-frame calculation.
     // Keep the existing rotation-only path for those inputs.
     let basis = glam::Mat3::from_mat4(parent);
@@ -517,9 +522,15 @@ pub(crate) fn solve_world_unconstrained_step(
     }
     let axis = normalize_ik_direction(axis);
     let dot = ((a.x * b.x + a.y * b.y) + a.z * b.z).clamp(-1.0, 1.0);
-    let mut half = dot.acos() * 0.5;
+    let (axis, align) = fixed_axis.map_or((axis, 1.0), |fixed| {
+        (
+            fixed,
+            (fixed.y * axis.y + fixed.x * axis.x) + fixed.z * axis.z,
+        )
+    });
+    let mut half = (dot.acos() * 0.5) * align;
     if limit > 0.0 {
-        half = half.min(limit * 0.5);
+        half = half.clamp(-limit * 0.5, limit * 0.5);
     }
     let s = half.sin();
     Some(mmd_quaternion_multiply(
@@ -1570,3 +1581,97 @@ mod tests {
 #[cfg(test)]
 #[path = "ik_oracle_tests.rs"]
 mod oracle_tests;
+
+#[cfg(test)]
+mod fixed_axis_native_tests {
+    use super::*;
+    #[test]
+    fn world_fixed_axis_leaves_invalid_and_scaled_axes_to_legacy_path() {
+        for axis in [Vec3A::ZERO, Vec3A::splat(f32::NAN), Vec3A::Z * 2.0] {
+            assert!(
+                solve_world_unconstrained_step(
+                    Vec3A::X,
+                    Vec3A::Y,
+                    Mat4::IDENTITY,
+                    Quat::IDENTITY,
+                    1.0,
+                    Some(axis),
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn world_fixed_axis_clamps_both_rotation_directions() {
+        for sign in [-1.0, 1.0] {
+            let actual = solve_world_unconstrained_step(
+                Vec3A::X,
+                Vec3A::Y * sign,
+                Mat4::IDENTITY,
+                Quat::IDENTITY,
+                0.1,
+                Some(Vec3A::Z),
+            )
+            .unwrap();
+            assert!(actual.abs_diff_eq(Quat::from_rotation_z(0.1 * sign), 1.0e-7));
+        }
+    }
+
+    #[test]
+    fn fixed_axis_step_matches_native_retained_accumulator() {
+        // MMD 9.32 x64 fixed-axis CCD capture: exact f32 inputs and output.
+        // Includes a retained accumulator and a rotated parent frame.
+        let effector = Vec3A::from_array([
+            f32::from_bits(0x3f962454),
+            f32::from_bits(0xbdfb1900),
+            f32::from_bits(0x40024524),
+        ]);
+        let target = Vec3A::from_array([
+            f32::from_bits(0x3f848000),
+            f32::from_bits(0xbe37a180),
+            f32::from_bits(0x4006ae04),
+        ]);
+        let parent = Mat4::from_cols_array(&[
+            f32::from_bits(0x3f4b34a1),
+            f32::from_bits(0xbeb87309),
+            f32::from_bits(0x3efae73f),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0xbe93affc),
+            f32::from_bits(0x3ef903e1),
+            f32::from_bits(0x3f532460),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0xbf091431),
+            f32::from_bits(0xbf4bc90f),
+            f32::from_bits(0x3e9074d4),
+            f32::from_bits(0x00000000),
+            f32::from_bits(0x40ac5f61),
+            f32::from_bits(0x410020b8),
+            f32::from_bits(0xc1b2466c),
+            f32::from_bits(0x3f800000),
+        ]);
+        let current = Quat::from_array([
+            f32::from_bits(0xbe7a1b12),
+            f32::from_bits(0xbe3d3bc1),
+            f32::from_bits(0xbbb1ec7f),
+            f32::from_bits(0x3f73b16d),
+        ]);
+        let fixed = Vec3A::from_array([
+            f32::from_bits(0xbf4c1e3a),
+            f32::from_bits(0xbf1a703d),
+            f32::from_bits(0xbc913559),
+        ]);
+        let expected = Quat::from_array([
+            f32::from_bits(0xbe7bc30e),
+            f32::from_bits(0xbe3e7c8b),
+            f32::from_bits(0xbbb31a1d),
+            f32::from_bits(0x3f73867e),
+        ]);
+        let actual =
+            solve_world_unconstrained_step(effector, target, parent, current, 1.0, Some(fixed))
+                .unwrap();
+        // Allow a few ulps for platform libm differences; the captured Windows
+        // input/output pair is bit-identical on the native validation host.
+        assert!(actual.abs_diff_eq(expected, 6.0e-8));
+    }
+}

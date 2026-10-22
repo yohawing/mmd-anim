@@ -2,7 +2,7 @@
 
 This directory contains a dependency-free `ctypes` bridge to the experimental
 mmd-anim C ABI v3. It is an internal integration layer, not a stable public API
-or a PyPI package.
+or a PyPI package. The current workspace release candidate is 0.5.3.
 
 ## Quick start
 

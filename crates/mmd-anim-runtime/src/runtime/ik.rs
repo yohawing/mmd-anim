@@ -8,7 +8,68 @@ use crate::ik_primitive::{
 use super::{IkSolveOptions, RuntimeInstance};
 
 impl RuntimeInstance {
+    pub(super) fn evaluation_layers(model: &crate::ModelArena) -> Vec<i32> {
+        let mut layers = vec![0; model.bone_count()];
+        // Keep the runtime's parent-before-child guarantee when authored layers
+        // are reversed. PMX also inherits the parent's layer during loading.
+        for &bone in model.eval_order() {
+            layers[bone.as_usize()] = model
+                .parent_index(bone)
+                .map_or(model.transform_order(bone), |parent| {
+                    model.transform_order(bone).max(layers[parent.as_usize()])
+                });
+        }
+        layers
+    }
+
+    pub(super) fn initial_ik_target_history(
+        model: &crate::ModelArena,
+    ) -> Vec<(crate::BoneIndex, glam::Mat4)> {
+        let mut rest = vec![glam::Vec3A::ZERO; model.bone_count()];
+        for &bone in model.eval_order() {
+            rest[bone.as_usize()] = model.rest_position(bone)
+                + model
+                    .parent_index(bone)
+                    .map_or(glam::Vec3A::ZERO, |p| rest[p.as_usize()]);
+        }
+        let mut history = Vec::new();
+        let layers = Self::evaluation_layers(model);
+        for solver in model.ik_solvers() {
+            let bone = solver.target_bone;
+            if layers[bone.as_usize()] > layers[solver.ik_bone.as_usize()]
+                && !history.iter().any(|(existing, _)| *existing == bone)
+            {
+                history.push((
+                    bone,
+                    glam::Mat4::from_translation(rest[bone.as_usize()].into()),
+                ));
+            }
+        }
+        history
+    }
+
     pub(super) fn initial_ik_history(model: &crate::ModelArena) -> Vec<Option<Quat>> {
+        let (under_ik, dependent) = Self::ik_dependency_roles(model);
+        dependent
+            .into_iter()
+            .zip(under_ik)
+            .map(|(dependent, under_ik)| (dependent && under_ik).then_some(Quat::IDENTITY))
+            .collect()
+    }
+
+    pub(super) fn ik_deferred_append_bones(model: &crate::ModelArena) -> Vec<bool> {
+        let (under_ik, mut dependent) = Self::ik_dependency_roles(model);
+        for (i, value) in dependent.iter_mut().enumerate() {
+            *value &= !under_ik[i]
+                && model
+                    .ik_solvers()
+                    .iter()
+                    .any(|s| s.target_bone.as_usize() == i);
+        }
+        dependent
+    }
+
+    fn ik_dependency_roles(model: &crate::ModelArena) -> (Vec<bool>, Vec<bool>) {
         let mut under_ik = vec![false; model.bone_count()];
         for solver in model.ik_solvers() {
             under_ik[solver.ik_bone.as_usize()] = false;
@@ -32,11 +93,7 @@ impl RuntimeInstance {
                         && under_ik[append.source_bone.as_usize()]
                 });
         }
-        dependent
-            .into_iter()
-            .zip(under_ik)
-            .map(|(dependent, under_ik)| (dependent && under_ik).then_some(Quat::IDENTITY))
-            .collect()
+        (under_ik, dependent)
     }
 
     pub(super) fn solve_ik_solver(
@@ -90,7 +147,8 @@ impl RuntimeInstance {
                 &base_ik_rotations,
                 &ik_rotations,
             );
-            self.update_world_matrices_after_ik_link_change(ik_index);
+            // CcdIk rebuilds the target's local matrix, but reads its existing
+            // world matrix for the first step. Refresh only after a link moves.
 
             let mut broke_early = false;
             let mut final_distance = {
@@ -270,6 +328,18 @@ impl RuntimeInstance {
         let mut update_bones = Vec::new();
         for position in start_position..self.model.eval_order().len() {
             let bone = self.model.eval_order()[position];
+            // Another chain's effector remains at its layer's last world pass.
+            // Refreshing it here changes the next solver's initial direction.
+            if bone != target_bone
+                && !links.iter().any(|link| link.bone == bone)
+                && self
+                    .model
+                    .ik_solvers()
+                    .iter()
+                    .any(|other| other.target_bone == bone)
+            {
+                continue;
+            }
             if self.bone_is_in_ik_update_scope(bone, links, ik_bone, target_bone)
                 || self.bone_depends_on_ik_update_scope_append_roots(bone, &append_dependency_roots)
             {

@@ -1,4 +1,4 @@
-use glam::{Quat, Vec3A};
+use glam::{Mat3, Quat, Vec3A};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AppendPrimitiveInput {
@@ -26,9 +26,7 @@ impl Default for AppendPrimitiveOutput {
 
 pub fn solve_append_transform(input: AppendPrimitiveInput) -> AppendPrimitiveOutput {
     let rotation = if input.affect_rotation {
-        Quat::IDENTITY
-            .slerp(input.source_rotation, input.ratio)
-            .normalize()
+        scale_mmd_rotation(input.source_rotation, input.ratio)
     } else {
         Quat::IDENTITY
     };
@@ -42,6 +40,52 @@ pub fn solve_append_transform(input: AppendPrimitiveInput) -> AppendPrimitiveOut
         position_offset,
         rotation,
     }
+}
+
+fn scale_mmd_rotation(rotation: Quat, ratio: f32) -> Quat {
+    // InheritRotQuat reads the source's local matrix through D3DX. Its choice
+    // of quaternion sign matters: the negative-w branch subtracts the original
+    // MMD constant 3.14, not mathematical pi. Slerp loses that distinction,
+    // even for a full-weight grant from an IK link.
+    let m = Mat3::from_quat(rotation).to_cols_array_2d();
+    let trace = m[0][0] + m[1][1] + m[2][2];
+    let mut q = [0.0; 4];
+    if trace >= 0.0 {
+        let s = (trace + 1.0).sqrt();
+        q[3] = s * 0.5;
+        let scale = 0.5 / s;
+        q[0] = (m[1][2] - m[2][1]) * scale;
+        q[1] = (m[2][0] - m[0][2]) * scale;
+        q[2] = (m[0][1] - m[1][0]) * scale;
+    } else {
+        let mut i = 0;
+        if m[1][1] > m[0][0] {
+            i = 1;
+        }
+        if m[2][2] > m[i][i] {
+            i = 2;
+        }
+        let j = (i + 1) % 3;
+        let k = (j + 1) % 3;
+        let s = (m[i][i] - m[j][j] - m[k][k] + 1.0).sqrt();
+        q[i] = s * 0.5;
+        let scale = 0.5 / s;
+        q[3] = (m[j][k] - m[k][j]) * scale;
+        q[j] = (m[i][j] + m[j][i]) * scale;
+        q[k] = (m[i][k] + m[k][i]) * scale;
+    }
+    let w = q[3].clamp(-1.0, 1.0);
+    let mut angle = w.acos();
+    if w < 0.0 {
+        angle -= f32::from_bits(0x4048_f5c3);
+    }
+    let length = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+    if angle == 0.0 || length < f32::EPSILON {
+        return Quat::IDENTITY;
+    }
+    let scaled = angle * ratio;
+    let scale = scaled.sin() / length;
+    Quat::from_xyzw(q[0] * scale, q[1] * scale, q[2] * scale, scaled.cos()).normalize()
 }
 
 #[cfg(test)]
@@ -75,6 +119,36 @@ mod tests {
                 0.0,
             ),
         );
+    }
+
+    #[test]
+    fn full_weight_grant_preserves_mmd_negative_w_angle_adjustment() {
+        // Original MMD 9.32 and MikuMikuStudio InheritRotQuat, for a source
+        // rotation of 4 radians around X. A full-weight grant is deliberately
+        // not the source rotation: the negative-w branch uses MMD's 3.14.
+        let source = Quat::from_rotation_x(4.0);
+        let expected = Quat::from_xyzw(-0.908_633_53, 0.0, 0.0, 0.417_594_4);
+        for rotation in [source, -source] {
+            for ratio in [1.0, -1.0] {
+                let actual = solve_append_transform(AppendPrimitiveInput {
+                    source_position_offset: Vec3A::ZERO,
+                    source_rotation: rotation,
+                    ratio,
+                    affect_rotation: true,
+                    affect_translation: false,
+                });
+                let expected = if ratio < 0.0 {
+                    expected.conjugate()
+                } else {
+                    expected
+                };
+                assert_vec3a_near(
+                    actual.rotation.mul_vec3a(Vec3A::Y),
+                    expected.mul_vec3a(Vec3A::Y),
+                );
+            }
+        }
+        assert!((source.mul_vec3a(Vec3A::Y) - expected.mul_vec3a(Vec3A::Y)).length() > 0.003);
     }
 
     #[test]

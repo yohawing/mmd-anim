@@ -58,6 +58,6 @@ pub use reduce::{
 };
 pub use runtime::{
     HostPoseError, HostPoseView, HostRigDefinition, HostRigError, HostRigEvaluation,
-    IkSolveOptions, IkSolverRuntimeStats, PhysicsMode, PhysicsStepStats, PhysicsTickConfig,
-    RuntimeInstance,
+    IkSolveOptions, IkSolverRuntimeStats, MorphOverrideError, PhysicsMode, PhysicsStepStats,
+    PhysicsTickConfig, RuntimeInstance,
 };

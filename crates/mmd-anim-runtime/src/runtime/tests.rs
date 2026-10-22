@@ -3548,7 +3548,7 @@ fn append_dependent_ik_converges_to_original_mmd_retained_pose() {
 // MikuMikuStudio 1b9acad6c5d86193ab006a3f3954569afd4bef13,
 // BoneFrameTransform / BoneTransform_CcdIk: independent scalar replay.
 // Both steady branches were also observed in original MMD 9.32.
-fn layered_two_ik_model(target_layer: i32) -> Arc<ModelArena> {
+fn layered_two_ik_model(target_layer: i32, append: bool) -> Arc<ModelArena> {
     let positions = [
         Vec3A::ZERO,
         Vec3A::ZERO,
@@ -3571,7 +3571,7 @@ fn layered_two_ik_model(target_layer: i32) -> Arc<ModelArena> {
     bones[5].transform_order = 1;
     bones[6].transform_order = 3;
     Arc::new(
-        ModelArena::new_with_ik(
+        ModelArena::new_full(
             bones,
             vec![
                 IkSolverInit {
@@ -3589,6 +3589,11 @@ fn layered_two_ik_model(target_layer: i32) -> Arc<ModelArena> {
                     limit_angle: 4.0,
                 },
             ],
+            if append {
+                vec![AppendTransformInit::new(BoneIndex(4), BoneIndex(2), 0.5).with_rotation()]
+            } else {
+                vec![]
+            },
         )
         .unwrap(),
     )
@@ -3610,7 +3615,7 @@ fn layered_ik_preserves_target_world_until_its_layer_and_resets_history() {
         ),
     ];
     for (layer, expected) in cases {
-        let mut runtime = RuntimeInstance::new(layered_two_ik_model(layer));
+        let mut runtime = RuntimeInstance::new(layered_two_ik_model(layer, false));
         for split_phases in [false, true] {
             runtime.reset_ik_history();
             for (tick, expected) in expected.iter().enumerate() {
@@ -3773,4 +3778,71 @@ fn retained_effector_world_and_skinning_agree_between_physics_phases() {
         runtime.world_matrices()[1] * runtime.model.inverse_bind_matrix(BoneIndex(1)),
         1.0e-6
     ));
+}
+
+#[test]
+fn active_ik_rebuilds_effector_without_rotation_grant() {
+    // Original MMD 9.32: independent seven-bone PMX, effector grant from knee.
+    // PMX hashes: 5ece11a3193c5aee892e5e162108b59ecf89ace1d26d1ce29a62e3e08ed0750c
+    // and 7acd413ee263ebd6145a2a9879dc0f3a3be643b69dc30b03db757efbfe9457e3.
+    for layer in [0, 1] {
+        let mut runtime = RuntimeInstance::new(layered_two_ik_model(layer, true));
+        runtime.evaluate_current_pose();
+        let expected = if layer == 0 {
+            Vec3A::new(0.515933, 0.8179271, 0.2545747)
+        } else {
+            Vec3A::new(0.5151071, 0.8183464, 0.2548993)
+        };
+        let actual = Vec3A::from_vec4(runtime.world_matrices()[4].x_axis);
+        assert!(
+            (actual - expected).abs().max_element() < 3.0e-5,
+            "{actual:?} != {expected:?}"
+        );
+        assert_eq!(runtime.append_rotation(BoneIndex(4)), Quat::IDENTITY);
+    }
+    // When the effector shares its controller's layer, PostIkPass restores
+    // the grant after CCD. Original MMD, PMX SHA256:
+    // 95e8e32e09625f2c57681280603f84a917dcde67e1a8c1917863e749a69796ad.
+    let mut runtime = RuntimeInstance::new(layered_two_ik_model(3, true));
+    runtime.evaluate_current_pose();
+    let actual = Vec3A::from_vec4(runtime.world_matrices()[4].x_axis);
+    let expected = Vec3A::new(0.46392733, 0.8294757, 0.31103244);
+    assert!((actual - expected).abs().max_element() < 3.0e-5);
+}
+
+#[test]
+fn ik_effector_grant_stays_cleared_through_downstream_append_recursion() {
+    let mut downstream = BoneInit::new(None, Vec3A::ZERO);
+    downstream.transform_order = -1;
+    let model = Arc::new(
+        ModelArena::new_full(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(0)), Vec3A::X),
+                BoneInit::new(None, Vec3A::Y),
+                downstream,
+            ],
+            vec![IkSolverInit::new(
+                BoneIndex(2),
+                BoneIndex(1),
+                vec![IkLinkInit::new(BoneIndex(0))],
+            )],
+            vec![
+                AppendTransformInit::new(BoneIndex(1), BoneIndex(0), 0.5).with_rotation(),
+                AppendTransformInit::new(BoneIndex(3), BoneIndex(1), 1.0).with_rotation(),
+            ],
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+    runtime
+        .pose_mut()
+        .set_local_rotation(BoneIndex(0), Quat::from_rotation_z(1.0));
+    runtime
+        .pose
+        .set_append_rotation(BoneIndex(1), Quat::IDENTITY);
+    runtime.update_world_matrices();
+    runtime.solve_ik_solver(0, IkSolveOptions::default(), false);
+    assert_eq!(runtime.append_rotation(BoneIndex(1)), Quat::IDENTITY);
+    assert_eq!(runtime.append_rotation(BoneIndex(3)), Quat::IDENTITY);
 }

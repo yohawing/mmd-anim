@@ -99,16 +99,25 @@ impl RuntimeInstance {
     }
 
     pub(super) fn update_append_transform_for_bone(&mut self, bone: crate::BoneIndex) {
+        self.update_append_transform_for_bone_except(bone, None);
+    }
+
+    pub(super) fn update_append_transform_for_bone_except(
+        &mut self,
+        bone: crate::BoneIndex,
+        preserved: Option<crate::BoneIndex>,
+    ) {
         let mut visiting = Vec::new();
-        self.update_append_transform_for_bone_inner(bone, &mut visiting);
+        self.update_append_transform_for_bone_inner(bone, &mut visiting, preserved);
     }
 
     fn update_append_transform_for_bone_inner(
         &mut self,
         bone: crate::BoneIndex,
         visiting: &mut Vec<crate::BoneIndex>,
+        preserved: Option<crate::BoneIndex>,
     ) {
-        if self.is_host_driven(bone) {
+        if preserved == Some(bone) || self.is_host_driven(bone) {
             return;
         }
         let Some(append_index) = self.model.append_transform_index(bone) else {
@@ -127,7 +136,7 @@ impl RuntimeInstance {
             && !append.local
             && self.model.append_transform_index(source_bone).is_some();
         if use_source_append {
-            self.update_append_transform_for_bone_inner(source_bone, visiting);
+            self.update_append_transform_for_bone_inner(source_bone, visiting, preserved);
         }
         let mut source_rotation = if use_source_append {
             self.pose.append_rotation(source_bone)

@@ -125,6 +125,11 @@ impl RuntimeInstance {
             let limit_angle = solver.limit_angle.max(0.0);
             let link_count = solver.links.len();
 
+            // CcdIk rebuilds the effector local rotation from physicsQuat,
+            // without InheritRotQuat. Its old world matrix is still read by
+            // the first CCD step; a later PostIkPass may restore the grant.
+            self.pose.set_append_rotation(target_bone, Quat::IDENTITY);
+
             links.clear();
             links.extend(solver.links.iter().cloned());
             self.ik_stats[ik_index].solver_evaluations += 1;
@@ -306,7 +311,10 @@ impl RuntimeInstance {
             let bone = self.ik_link_change_update_bones[ik_index]
                 .as_ref()
                 .expect("ik link-change update bones are computed lazily")[update_index];
-            self.update_append_transform_for_bone(bone);
+            self.update_append_transform_for_bone_except(
+                bone,
+                Some(self.model.ik_solvers()[ik_index].target_bone),
+            );
             self.update_world_matrix_for_bone(bone);
         }
         #[cfg(test)]

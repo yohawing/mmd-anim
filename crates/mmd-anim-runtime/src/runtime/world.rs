@@ -138,13 +138,12 @@ impl RuntimeInstance {
         if use_source_append {
             self.update_append_transform_for_bone_inner(source_bone, visiting, preserved);
         }
-        let mut source_rotation = if use_source_append {
-            self.pose.append_rotation(source_bone)
-        } else {
-            self.pose.local_rotation(source_bone)
-        };
-        if use_source_append && self.model.is_ik_link_bone(source_bone) {
-            source_rotation = (self.pose.ik_rotation(source_bone) * source_rotation).normalize();
+        let mut source_rotation = self.pose.local_rotation(source_bone);
+        if use_source_append {
+            // MMD inherits the source's local matrix rotation, which includes
+            // both its own (possibly IK-updated) rotation and its rotation grant.
+            source_rotation =
+                (source_rotation * self.pose.append_rotation(source_bone)).normalize();
         }
         let source_position_offset = if use_source_append {
             self.pose.append_position_offset(source_bone)

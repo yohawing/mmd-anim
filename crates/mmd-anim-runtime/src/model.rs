@@ -462,7 +462,6 @@ pub struct ModelArena {
     local_axis_z: Box<[Vec3A]>,
     local_axis_basis: Box<[Quat]>,
     transform_after_physics_flags: Box<[u8]>,
-    ik_link_flags: Box<[u8]>,
     eval_order: Box<[BoneIndex]>,
     eval_order_before_physics: Box<[BoneIndex]>,
     eval_order_after_physics: Box<[BoneIndex]>,
@@ -568,7 +567,7 @@ impl ModelArena {
         let eval_order_after_physics =
             build_eval_order_for_phase(&eval_order, &transform_after_physics_flags, true);
         let eval_order_positions = build_eval_order_positions(&eval_order, bone_count);
-        let (ik_solvers, ik_link_flags) = build_ik_solvers(ik_solvers, bone_count)?;
+        let ik_solvers = build_ik_solvers(ik_solvers, bone_count)?;
         let (ik_bone_solver_spans, ik_bone_solver_indices) =
             build_ik_bone_solver_lookup(&ik_solvers, bone_count);
         let (append_transforms, append_transform_indices) =
@@ -588,7 +587,6 @@ impl ModelArena {
             local_axis_z: local_axis_z.into_boxed_slice(),
             local_axis_basis: local_axis_basis.into_boxed_slice(),
             transform_after_physics_flags: transform_after_physics_flags.into_boxed_slice(),
-            ik_link_flags,
             eval_order,
             eval_order_before_physics,
             eval_order_after_physics,
@@ -733,11 +731,6 @@ impl ModelArena {
     }
 
     #[inline]
-    pub(crate) fn is_ik_link_bone(&self, bone: BoneIndex) -> bool {
-        self.ik_link_flags[bone.as_usize()] != 0
-    }
-
-    #[inline]
     pub fn eval_order(&self) -> &[BoneIndex] {
         &self.eval_order
     }
@@ -859,14 +852,12 @@ pub struct AppendTransform {
 }
 
 type AppendTransformBuildOutput = (Box<[AppendTransform]>, Box<[i32]>);
-type IkSolverBuildOutput = (Box<[IkSolver]>, Box<[u8]>);
 
 fn build_ik_solvers(
     ik_solvers: Vec<IkSolverInit>,
     bone_count: usize,
-) -> Result<IkSolverBuildOutput, ModelBuildError> {
+) -> Result<Box<[IkSolver]>, ModelBuildError> {
     let mut solvers = Vec::with_capacity(ik_solvers.len());
-    let mut ik_link_flags = vec![0; bone_count];
 
     for (solver_index, solver) in ik_solvers.into_iter().enumerate() {
         validate_ik_bone(solver_index, "ik", solver.ik_bone, bone_count)?;
@@ -875,7 +866,6 @@ fn build_ik_solvers(
         let mut links = Vec::with_capacity(solver.links.len());
         for link in solver.links {
             validate_ik_bone(solver_index, "link", link.bone, bone_count)?;
-            ik_link_flags[link.bone.as_usize()] = 1;
             links.push(IkLink {
                 bone: link.bone,
                 angle_limit: link.angle_limit,
@@ -891,7 +881,7 @@ fn build_ik_solvers(
         });
     }
 
-    Ok((solvers.into_boxed_slice(), ik_link_flags.into_boxed_slice()))
+    Ok(solvers.into_boxed_slice())
 }
 
 type IkBoneSolverLookup = (Box<[MorphOffsetSpan]>, Box<[u32]>);

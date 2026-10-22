@@ -2522,6 +2522,40 @@ fn append_rotation_propagates_post_ik_link_rotation() {
 }
 
 #[test]
+fn chained_rotation_grant_includes_source_own_rotation() {
+    let model = Arc::new(
+        ModelArena::new_full(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(2)), Vec3A::X),
+            ],
+            vec![],
+            vec![
+                AppendTransformInit::new(BoneIndex(1), BoneIndex(0), 0.5).with_rotation(),
+                AppendTransformInit::new(BoneIndex(2), BoneIndex(1), 0.5).with_rotation(),
+            ],
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+    runtime
+        .pose_mut()
+        .set_local_rotation(BoneIndex(0), Quat::from_rotation_z(0.8));
+    runtime
+        .pose_mut()
+        .set_local_rotation(BoneIndex(1), Quat::from_rotation_z(0.6));
+    runtime.evaluate_current_pose();
+    // The second source has 0.6 radians of its own rotation plus a 0.4-radian
+    // grant. Original MMD passes half of that full rotation to the final bone.
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[3]),
+        Vec3A::new(0.5_f32.cos(), 0.5_f32.sin(), 0.0),
+    );
+}
+
+#[test]
 fn append_source_with_own_append_includes_ik_link_rotation() {
     let model = Arc::new(
         ModelArena::new_full(
@@ -2562,7 +2596,7 @@ fn append_source_with_own_append_includes_ik_link_rotation() {
 }
 
 #[test]
-fn without_ik_evaluation_clears_previous_ik_link_rotation_for_append_sources() {
+fn without_ik_evaluation_inherits_the_current_source_local_rotation() {
     let model = Arc::new(
         ModelArena::new_full(
             vec![
@@ -2596,14 +2630,10 @@ fn without_ik_evaluation_clears_previous_ik_link_rotation_for_append_sources() {
     runtime.evaluate_current_pose();
     runtime.evaluate_current_pose_without_ik();
 
-    assert_vec3a_near(
-        translation(runtime.world_matrices()[5]),
-        Vec3A::new(
-            std::f32::consts::FRAC_1_SQRT_2,
-            std::f32::consts::FRAC_1_SQRT_2,
-            0.0,
-        ),
-    );
+    // Without-IK evaluation rebuilds matrices from the current pose; it does
+    // not undo the IK rotation already written into that pose. A rotation
+    // grant must therefore agree with the source's current local matrix.
+    assert_vec3a_near(translation(runtime.world_matrices()[5]), Vec3A::Y);
 }
 
 #[test]

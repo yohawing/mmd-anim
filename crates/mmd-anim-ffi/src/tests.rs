@@ -11014,3 +11014,44 @@ fn model_descriptor_fixture_physics_reset_and_steps_are_deterministic() {
     assert_eq!(first, second, "fresh create/reset physics determinism");
     assert_eq!(first.len(), 2);
 }
+
+#[test]
+fn reset_ik_history_reproduces_fresh_sequence_without_changing_cached_pose() {
+    let pmx = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_append_history.pmx");
+    let model = unsafe { mmd_runtime_model_create_from_pmx_bytes(pmx.as_ptr(), pmx.len()) };
+    assert!(!model.is_null());
+    let instance = unsafe { mmd_runtime_instance_create_for_model(model) };
+    assert!(!instance.is_null());
+    // The instance owns the model snapshot; the reset must not need this handle.
+    unsafe { mmd_runtime_model_free(model) };
+    let snapshot = || unsafe {
+        let len = mmd_runtime_instance_world_matrix_f32_len(instance);
+        assert_eq!(len, 8 * 16);
+        let data = mmd_runtime_instance_world_matrices(instance);
+        assert!(!data.is_null());
+        std::slice::from_raw_parts(data, len).to_vec()
+    };
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    let first = snapshot();
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    let second = snapshot();
+    assert!(
+        first
+            .iter()
+            .zip(&second)
+            .any(|(a, b)| (a - b).abs() > 0.001)
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_instance_reset_ik_history(instance) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(snapshot(), second);
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    assert_eq!(snapshot(), first);
+    assert_eq!(
+        unsafe { mmd_runtime_instance_reset_ik_history(std::ptr::null_mut()) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert!(last_error_cstr().is_some());
+    unsafe { mmd_runtime_instance_free(instance) };
+}

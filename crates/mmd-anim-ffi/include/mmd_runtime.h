@@ -1556,6 +1556,12 @@ mmd_runtime_status_t mmd_runtime_instance_set_physics_tick_config(
 mmd_runtime_status_t mmd_runtime_instance_reset_physics_tick(
     mmd_runtime_instance_t* instance);
 
+/* Clear retained IK history without changing pose data or matrix buffers.
+ * Evaluate fresh input afterward to begin an independent sequence.
+ * Requires exclusive access to a live instance; NULL returns INVALID_INPUT. */
+mmd_runtime_status_t mmd_runtime_instance_reset_ik_history(
+    mmd_runtime_instance_t* instance);
+
 mmd_runtime_status_t mmd_runtime_instance_evaluate_clip_frame_before_physics(
     mmd_runtime_instance_t*   instance,
     const mmd_runtime_clip_t* clip,

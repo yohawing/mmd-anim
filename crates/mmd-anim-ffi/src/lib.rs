@@ -5800,6 +5800,26 @@ pub unsafe extern "C" fn mmd_runtime_instance_set_physics_tick_config(
     })
 }
 
+/// Clears retained IK history without changing the current pose or matrix caches.
+/// Apply fresh pose input on the next evaluation to start an independent sequence.
+///
+/// # Safety
+///
+/// `instance` must be null or a live, aligned instance handle. The caller must
+/// have exclusive access to the instance for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_reset_ik_history(
+    instance: *mut MmdRuntimeInstance,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        instance.runtime.reset_ik_history();
+        MmdRuntimeStatus::Ok
+    })
+}
+
 /// Resets the split-physics fixed-step accumulator.
 ///
 /// # Safety

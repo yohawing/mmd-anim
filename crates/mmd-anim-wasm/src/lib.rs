@@ -1477,6 +1477,13 @@ impl WasmMmdRuntimeInstance {
         self.refresh_caches();
     }
 
+    /// Clear retained IK history without changing pose data or cached output.
+    /// Evaluate fresh input afterward to begin an independent sequence.
+    #[wasm_bindgen(js_name = resetIkHistory)]
+    pub fn reset_ik_history(&mut self) {
+        self.runtime.reset_ik_history();
+    }
+
     #[wasm_bindgen(js_name = evaluateClipFrame)]
     pub fn evaluate_clip_frame(&mut self, clip: &WasmMmdClip, frame: f32) {
         self.runtime.evaluate_clip_frame(&clip.clip, frame);

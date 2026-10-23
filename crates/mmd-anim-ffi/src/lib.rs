@@ -8164,7 +8164,8 @@ pub unsafe extern "C" fn mmd_runtime_instance_clip_frame_batch_morph_weight_f32_
 /// `instance` is not evaluated or mutated; it only supplies the immutable model
 /// arena plus the morph and IK state sizes. Each worker owns an independent
 /// `RuntimeInstance`, so mutable pose and scratch buffers are never shared
-/// across threads.
+/// across threads. Each frame clears IK history and matches a fresh instance
+/// evaluated once at that frame, regardless of worker count.
 ///
 /// Output layouts:
 /// - `out_world_matrices_f32`: `[frame][bone][16]`, column-major matrices
@@ -9006,6 +9007,7 @@ fn evaluate_clip_frame_batch_chunk(
     for local_frame_index in 0..frame_count {
         let global_frame_index = first_frame_index + local_frame_index;
         let frame = start_frame + frame_step * global_frame_index as f32;
+        runtime.reset_ik_history();
         runtime.evaluate_clip_frame(clip, frame);
 
         let world_start = local_frame_index * world_frame_len;

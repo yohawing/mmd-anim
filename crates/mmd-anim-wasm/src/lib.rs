@@ -1539,6 +1539,8 @@ impl WasmMmdRuntimeInstance {
             .unwrap_or(0)
     }
 
+    /// Samples each frame independently with cleared IK history.
+    /// Preserves the source instance and its retained playback history.
     #[wasm_bindgen(js_name = evaluateClipFrameBatch)]
     pub fn evaluate_clip_frame_batch(
         &self,
@@ -1578,6 +1580,7 @@ impl WasmMmdRuntimeInstance {
         let _ = worker_count;
         for frame_index in 0..frame_count {
             let frame = start_frame + frame_step * frame_index as f32;
+            runtime.reset_ik_history();
             runtime.evaluate_clip_frame(&clip.clip, frame);
             extend_matrices(&mut world_matrices, runtime.world_matrices());
             morph_weights.extend_from_slice(runtime.morph_weights());
@@ -3066,6 +3069,39 @@ TextureFilename { "tex/main.png"; }
         assert_eq!(runtime.ik_enabled(), vec![0]);
         assert_eq!(runtime.morph_weights_cache, vec![0.5]);
         assert_eq!(runtime.ik_enabled_cache, vec![0]);
+    }
+
+    #[test]
+    fn batch_samples_clear_ik_history_and_preserve_source_history() {
+        let pmx = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_append_history.pmx");
+        let model = WasmMmdModel::from_pmx_bytes(pmx).unwrap();
+        let clip = WasmMmdClip {
+            clip: AnimationClip::new(vec![]),
+        };
+        let mut source = WasmMmdRuntimeInstance::for_model(&model);
+        let mut control = WasmMmdRuntimeInstance::for_model(&model);
+        for _ in 0..3 {
+            source.evaluate_clip_frame(&clip, 0.0);
+            control.evaluate_clip_frame(&clip, 0.0);
+        }
+        let before = source.world_matrices();
+        let mut expected = Vec::new();
+        for frame in 0..6 {
+            let mut fresh = WasmMmdRuntimeInstance::for_model(&model);
+            fresh.evaluate_clip_frame(&clip, frame as f32);
+            expected.extend(fresh.world_matrices());
+        }
+        assert_ne!(&before, &expected[..before.len()]);
+        for workers in [1, 2, 0] {
+            let batch = source
+                .evaluate_clip_frame_batch(&clip, 0.0, 1.0, 6, workers)
+                .unwrap();
+            assert_eq!(batch.world_matrices(), expected);
+            assert_eq!(source.world_matrices(), before);
+        }
+        source.evaluate_clip_frame(&clip, 6.0);
+        control.evaluate_clip_frame(&clip, 6.0);
+        assert_eq!(source.world_matrices(), control.world_matrices());
     }
 
     #[test]

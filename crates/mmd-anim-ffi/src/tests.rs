@@ -11055,3 +11055,63 @@ fn reset_ik_history_reproduces_fresh_sequence_without_changing_cached_pose() {
     assert!(last_error_cstr().is_some());
     unsafe { mmd_runtime_instance_free(instance) };
 }
+
+#[test]
+fn batch_samples_clear_ik_history_independently_of_workers() {
+    let pmx = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_append_history.pmx");
+    let model = unsafe { mmd_runtime_model_create_from_pmx_bytes(pmx.as_ptr(), pmx.len()) };
+    assert!(!model.is_null());
+    let source = unsafe { mmd_runtime_instance_create_for_model(model) };
+    let control = unsafe { mmd_runtime_instance_create_for_model(model) };
+    let clip = MmdRuntimeClip {
+        clip: AnimationClip::new(vec![]),
+    };
+    let snapshot = |instance| unsafe {
+        let len = mmd_runtime_instance_world_matrix_f32_len(instance);
+        std::slice::from_raw_parts(mmd_runtime_instance_world_matrices(instance), len).to_vec()
+    };
+    for _ in 0..3 {
+        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(source, &clip, 0.0) });
+        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(control, &clip, 0.0) });
+    }
+    let before = snapshot(source);
+    let mut expected = Vec::new();
+    for frame in 0..6 {
+        let fresh = unsafe { mmd_runtime_instance_create_for_model(model) };
+        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(fresh, &clip, frame as f32) });
+        expected.extend(snapshot(fresh));
+        unsafe { mmd_runtime_instance_free(fresh) };
+    }
+    assert_ne!(&before, &expected[..before.len()]);
+    for workers in [1, 2, 0] {
+        let mut output = vec![0.0; expected.len()];
+        assert!(unsafe {
+            mmd_runtime_instance_evaluate_clip_frame_batch(
+                source,
+                &clip,
+                0.0,
+                1.0,
+                6,
+                workers,
+                output.as_mut_ptr(),
+                output.len(),
+                std::ptr::null_mut(),
+                0,
+            )
+        });
+        assert_eq!(output, expected, "worker count {workers}");
+        assert_eq!(snapshot(source), before);
+    }
+    assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(source, &clip, 6.0) });
+    assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(control, &clip, 6.0) });
+    assert_eq!(
+        snapshot(source),
+        snapshot(control),
+        "batch must preserve retained history"
+    );
+    unsafe {
+        mmd_runtime_instance_free(source);
+        mmd_runtime_instance_free(control);
+        mmd_runtime_model_free(model);
+    }
+}

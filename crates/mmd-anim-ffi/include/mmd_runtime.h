@@ -1811,6 +1811,8 @@ size_t mmd_runtime_instance_clip_frame_batch_morph_weight_f32_len(
     size_t                        frame_count);
 
 /* Evaluates a frame range into caller-owned contiguous buffers.
+   Each frame clears IK history and matches a fresh instance sampled once.
+   Results are independent of worker_count.
    worker_count == 0 uses available host parallelism.
    The source instance is not mutated; worker-local runtime instances are used.
    out_world_matrices_f32 layout: [frame][bone][16] column-major f32 matrices.

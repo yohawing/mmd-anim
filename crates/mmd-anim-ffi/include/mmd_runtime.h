@@ -1556,6 +1556,12 @@ mmd_runtime_status_t mmd_runtime_instance_set_physics_tick_config(
 mmd_runtime_status_t mmd_runtime_instance_reset_physics_tick(
     mmd_runtime_instance_t* instance);
 
+/* Clear retained IK history without changing pose data or matrix buffers.
+ * Evaluate fresh input afterward to begin an independent sequence.
+ * Requires exclusive access to a live instance; NULL returns INVALID_INPUT. */
+mmd_runtime_status_t mmd_runtime_instance_reset_ik_history(
+    mmd_runtime_instance_t* instance);
+
 mmd_runtime_status_t mmd_runtime_instance_evaluate_clip_frame_before_physics(
     mmd_runtime_instance_t*   instance,
     const mmd_runtime_clip_t* clip,
@@ -1604,7 +1610,7 @@ void mmd_runtime_host_rig_free(mmd_runtime_host_rig_t* rig);
    Instance and rig must refer to the same model and be accessed exclusively.
    View and arrays must be aligned/readable, and not alias handle-owned storage.
    Input lengths must match the instance counts. No input pointers are retained.
-   tolerance must be finite and nonnegative; cap=0 uses authored iterations.
+   tolerance must be finite and nonnegative; cap=0 leaves the MMD-corrected iteration budget uncapped.
    On validation failure, pose and output caches remain unchanged.
    Read outputs with existing instance world/skinning/morph APIs. */
 mmd_runtime_status_t mmd_runtime_instance_evaluate_host_rig_pose(
@@ -1805,6 +1811,8 @@ size_t mmd_runtime_instance_clip_frame_batch_morph_weight_f32_len(
     size_t                        frame_count);
 
 /* Evaluates a frame range into caller-owned contiguous buffers.
+   Each frame clears IK history and matches a fresh instance sampled once.
+   Results are independent of worker_count.
    worker_count == 0 uses available host parallelism.
    The source instance is not mutated; worker-local runtime instances are used.
    out_world_matrices_f32 layout: [frame][bone][16] column-major f32 matrices.

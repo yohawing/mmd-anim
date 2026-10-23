@@ -278,6 +278,37 @@ runtime.free();
 runtime2.free();
 model2.free();
 
+console.log('\n12. Retained IK history reset through web-target bindings');
+const historyPmx = readFileSync(path.resolve(__dirname, '../../mmd-anim-format/fixtures/pmx/ik_append_history.pmx'));
+const historyModel = wasm.WasmMmdModel.fromPmxBytes(historyPmx);
+const historyRuntime = wasm.WasmMmdRuntimeInstance.forModel(historyModel);
+historyModel.free();
+historyRuntime.evaluateRestPose();
+const firstHistoryPose = Array.from(historyRuntime.worldMatrices());
+historyRuntime.evaluateRestPose();
+const secondHistoryPose = Array.from(historyRuntime.worldMatrices());
+assert(firstHistoryPose.some((v, i) => Math.abs(v - secondHistoryPose[i]) > 0.001), 'append-dependent IK retains history');
+historyRuntime.resetIkHistory();
+assert(Array.from(historyRuntime.worldMatrices()).every((v, i) => v === secondHistoryPose[i]), 'reset preserves cached output');
+historyRuntime.evaluateRestPose();
+assert(Array.from(historyRuntime.worldMatrices()).every((v, i) => v === firstHistoryPose[i]), 'reset reproduces the first evaluation');
+const historyClip = new wasm.WasmMmdClip(
+  new Uint32Array(), new Uint32Array(), new Float32Array(),
+  new Uint32Array(), new Uint32Array(), new Float32Array(),
+  new Uint32Array(), new Uint8Array(), 0,
+);
+for (const workers of [1, 2, 0]) {
+  const batch = historyRuntime.evaluateClipFrameBatch(historyClip, 0, 1, 6, workers);
+  const values = Array.from(batch.worldMatrices());
+  assert(values.every((v, i) => v === firstHistoryPose[i % firstHistoryPose.length]), `batch clears IK history for worker count ${workers}`);
+  assert(Array.from(historyRuntime.worldMatrices()).every((v, i) => v === firstHistoryPose[i]), 'batch preserves source output');
+  batch.free();
+}
+historyRuntime.evaluateRestPose();
+assert(Array.from(historyRuntime.worldMatrices()).every((v, i) => v === secondHistoryPose[i]), 'batch preserves source retained history');
+historyClip.free();
+historyRuntime.free();
+
 runHostRigSmoke(wasm);
 console.log('Host rig suite passed: native analytic parity, 300 repeats, validation and lifetime');
 console.log(`\n=== Legacy smoke: ${passed} passed, ${failed} failed ===`);

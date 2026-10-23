@@ -11014,3 +11014,104 @@ fn model_descriptor_fixture_physics_reset_and_steps_are_deterministic() {
     assert_eq!(first, second, "fresh create/reset physics determinism");
     assert_eq!(first.len(), 2);
 }
+
+#[test]
+fn reset_ik_history_reproduces_fresh_sequence_without_changing_cached_pose() {
+    let pmx = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_append_history.pmx");
+    let model = unsafe { mmd_runtime_model_create_from_pmx_bytes(pmx.as_ptr(), pmx.len()) };
+    assert!(!model.is_null());
+    let instance = unsafe { mmd_runtime_instance_create_for_model(model) };
+    assert!(!instance.is_null());
+    // The instance owns the model snapshot; the reset must not need this handle.
+    unsafe { mmd_runtime_model_free(model) };
+    let snapshot = || unsafe {
+        let len = mmd_runtime_instance_world_matrix_f32_len(instance);
+        assert_eq!(len, 8 * 16);
+        let data = mmd_runtime_instance_world_matrices(instance);
+        assert!(!data.is_null());
+        std::slice::from_raw_parts(data, len).to_vec()
+    };
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    let first = snapshot();
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    let second = snapshot();
+    assert!(
+        first
+            .iter()
+            .zip(&second)
+            .any(|(a, b)| (a - b).abs() > 0.001)
+    );
+    assert_eq!(
+        unsafe { mmd_runtime_instance_reset_ik_history(instance) },
+        MmdRuntimeStatus::Ok
+    );
+    assert_eq!(snapshot(), second);
+    assert!(unsafe { mmd_runtime_instance_evaluate_rest_pose(instance) });
+    assert_eq!(snapshot(), first);
+    assert_eq!(
+        unsafe { mmd_runtime_instance_reset_ik_history(std::ptr::null_mut()) },
+        MmdRuntimeStatus::InvalidInput
+    );
+    assert!(last_error_cstr().is_some());
+    unsafe { mmd_runtime_instance_free(instance) };
+}
+
+#[test]
+fn batch_samples_clear_ik_history_independently_of_workers() {
+    let pmx = include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_append_history.pmx");
+    let model = unsafe { mmd_runtime_model_create_from_pmx_bytes(pmx.as_ptr(), pmx.len()) };
+    assert!(!model.is_null());
+    let source = unsafe { mmd_runtime_instance_create_for_model(model) };
+    let control = unsafe { mmd_runtime_instance_create_for_model(model) };
+    let clip = MmdRuntimeClip {
+        clip: AnimationClip::new(vec![]),
+    };
+    let snapshot = |instance| unsafe {
+        let len = mmd_runtime_instance_world_matrix_f32_len(instance);
+        std::slice::from_raw_parts(mmd_runtime_instance_world_matrices(instance), len).to_vec()
+    };
+    for _ in 0..3 {
+        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(source, &clip, 0.0) });
+        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(control, &clip, 0.0) });
+    }
+    let before = snapshot(source);
+    let mut expected = Vec::new();
+    for frame in 0..6 {
+        let fresh = unsafe { mmd_runtime_instance_create_for_model(model) };
+        assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(fresh, &clip, frame as f32) });
+        expected.extend(snapshot(fresh));
+        unsafe { mmd_runtime_instance_free(fresh) };
+    }
+    assert_ne!(&before, &expected[..before.len()]);
+    for workers in [1, 2, 0] {
+        let mut output = vec![0.0; expected.len()];
+        assert!(unsafe {
+            mmd_runtime_instance_evaluate_clip_frame_batch(
+                source,
+                &clip,
+                0.0,
+                1.0,
+                6,
+                workers,
+                output.as_mut_ptr(),
+                output.len(),
+                std::ptr::null_mut(),
+                0,
+            )
+        });
+        assert_eq!(output, expected, "worker count {workers}");
+        assert_eq!(snapshot(source), before);
+    }
+    assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(source, &clip, 6.0) });
+    assert!(unsafe { mmd_runtime_instance_evaluate_clip_frame(control, &clip, 6.0) });
+    assert_eq!(
+        snapshot(source),
+        snapshot(control),
+        "batch must preserve retained history"
+    );
+    unsafe {
+        mmd_runtime_instance_free(source);
+        mmd_runtime_instance_free(control);
+        mmd_runtime_model_free(model);
+    }
+}

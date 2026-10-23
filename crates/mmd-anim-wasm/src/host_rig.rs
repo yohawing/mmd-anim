@@ -53,7 +53,7 @@ impl WasmMmdHostRig {
     /// previous output pose. Scales must be positive and uniform per bone.
     /// Driven bones retain post-morph FK world transforms; other bones evaluate
     /// Append/IK through both phases. Invalid input throws without changing
-    /// instance outputs. cap=0 retains authored IK iterations. Read results with
+    /// instance outputs. cap=0 leaves the MMD-corrected IK budget uncapped. Read results with
     /// the instance's existing world/skinning/morph copy or view methods.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate(

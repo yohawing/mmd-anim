@@ -5800,6 +5800,26 @@ pub unsafe extern "C" fn mmd_runtime_instance_set_physics_tick_config(
     })
 }
 
+/// Clears retained IK history without changing the current pose or matrix caches.
+/// Apply fresh pose input on the next evaluation to start an independent sequence.
+///
+/// # Safety
+///
+/// `instance` must be null or a live, aligned instance handle. The caller must
+/// have exclusive access to the instance for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_instance_reset_ik_history(
+    instance: *mut MmdRuntimeInstance,
+) -> MmdRuntimeStatus {
+    ffi_guard(MmdRuntimeStatus::Error, || {
+        let Some(instance) = (unsafe { instance.as_mut() }) else {
+            return status_failure(MmdRuntimeStatus::InvalidInput, FFI_ERR_INVALID_INPUT);
+        };
+        instance.runtime.reset_ik_history();
+        MmdRuntimeStatus::Ok
+    })
+}
+
 /// Resets the split-physics fixed-step accumulator.
 ///
 /// # Safety
@@ -6041,7 +6061,7 @@ pub unsafe extern "C" fn mmd_runtime_host_rig_free(rig: *mut MmdRuntimeHostRig) 
 
 /// Evaluates pre-morph input with host ownership through both MMD phases.
 /// Physics must be Off. Errors leave the instance pose and output caches intact.
-/// cap=0 uses authored iterations. Copy outputs with existing instance APIs.
+/// cap=0 leaves the MMD-corrected iteration budget uncapped. Copy outputs with existing instance APIs.
 ///
 /// # Safety
 /// Instance and rig must be distinct live handles, exclusively accessed for
@@ -8144,7 +8164,8 @@ pub unsafe extern "C" fn mmd_runtime_instance_clip_frame_batch_morph_weight_f32_
 /// `instance` is not evaluated or mutated; it only supplies the immutable model
 /// arena plus the morph and IK state sizes. Each worker owns an independent
 /// `RuntimeInstance`, so mutable pose and scratch buffers are never shared
-/// across threads.
+/// across threads. Each frame clears IK history and matches a fresh instance
+/// evaluated once at that frame, regardless of worker count.
 ///
 /// Output layouts:
 /// - `out_world_matrices_f32`: `[frame][bone][16]`, column-major matrices
@@ -8986,6 +9007,7 @@ fn evaluate_clip_frame_batch_chunk(
     for local_frame_index in 0..frame_count {
         let global_frame_index = first_frame_index + local_frame_index;
         let frame = start_frame + frame_step * global_frame_index as f32;
+        runtime.reset_ik_history();
         runtime.evaluate_clip_frame(clip, frame);
 
         let world_start = local_frame_index * world_frame_len;

@@ -2,7 +2,7 @@
 
 This directory contains a dependency-free `ctypes` bridge to the experimental
 mmd-anim C ABI v3. It is an internal integration layer, not a stable public API
-or a PyPI package.
+or a PyPI package. The current workspace release candidate is 0.5.3.
 
 ## Quick start
 
@@ -37,6 +37,12 @@ print(f"evaluated {len(world_matrices) // 16} bones")
 
 `RuntimeLibrary()` loads the release library from `target/release`. Set
 `MMD_RUNTIME_LIBRARY` to use a library from another location.
+
+Instance evaluation retains IK history for continuous playback. For independent
+frame samples, call `instance.reset_ik_history()` before each
+`instance.evaluate_clip_frame(clip, frame)`. Resetting history preserves the current
+pose and output matrices; the subsequent evaluation supplies fresh pose input.
+Do not reset between frames when reproducing continuous playback.
 
 ## Tests
 

@@ -479,6 +479,19 @@ class Instance(_OwnedHandle):
 
     _closed_handle_message = "instance handle is closed"
 
+    def reset_ik_history(self) -> None:
+        """Clear retained IK history, preserving the current pose and matrices.
+
+        Apply fresh pose input on the next evaluation for an independent sample.
+        Continuous playback should retain history between evaluations.
+        """
+        status = self._model._runtime._lib.mmd_runtime_instance_reset_ik_history(
+            self._require_open()
+        )
+        self._model._runtime._require_ok(
+            status, "mmd_runtime_instance_reset_ik_history"
+        )
+
     def evaluate_rest_pose(self) -> None:
         if not self._model._runtime._lib.mmd_runtime_instance_evaluate_rest_pose(
             self._require_open()

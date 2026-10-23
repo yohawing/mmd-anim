@@ -213,9 +213,10 @@ impl BoneIndex {
 
 /// PMX bone local-axis descriptor (bone-local X/Z directions from the file).
 ///
-/// The runtime builds a defensive right-handed orthonormal frame from these
-/// vectors for IK angle-limit evaluation only. Ordinary pose evaluation does
-/// not reorient bones by this frame.
+/// Retained as model metadata. MMD model evaluation uses neither these axes
+/// to reorient the pose nor their basis to rotate IK angle limits. Hosts can
+/// explicitly supply the orthonormal basis to `IkChainSolver::new_with_local_axis_bases`
+/// when a custom chain needs a different angle-limit frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LocalAxis {
     pub x: Vec3A,
@@ -452,6 +453,7 @@ pub struct ModelArena {
     parent_indices: Box<[i32]>,
     rest_positions: Box<[Vec3A]>,
     inverse_bind_matrices: Box<[Mat4]>,
+    rest_world_positions: Box<[Vec3A]>,
     transform_orders: Box<[i32]>,
     fixed_axis_flags: Box<[u8]>,
     fixed_axis_constraint_flags: Box<[u8]>,
@@ -461,7 +463,6 @@ pub struct ModelArena {
     local_axis_z: Box<[Vec3A]>,
     local_axis_basis: Box<[Quat]>,
     transform_after_physics_flags: Box<[u8]>,
-    ik_link_flags: Box<[u8]>,
     eval_order: Box<[BoneIndex]>,
     eval_order_before_physics: Box<[BoneIndex]>,
     eval_order_after_physics: Box<[BoneIndex]>,
@@ -567,17 +568,37 @@ impl ModelArena {
         let eval_order_after_physics =
             build_eval_order_for_phase(&eval_order, &transform_after_physics_flags, true);
         let eval_order_positions = build_eval_order_positions(&eval_order, bone_count);
-        let (ik_solvers, ik_link_flags) = build_ik_solvers(ik_solvers, bone_count)?;
+        let ik_solvers = build_ik_solvers(ik_solvers, bone_count)?;
         let (ik_bone_solver_spans, ik_bone_solver_indices) =
             build_ik_bone_solver_lookup(&ik_solvers, bone_count);
         let (append_transforms, append_transform_indices) =
             build_append_transforms(append_transforms, bone_count)?;
         validate_morph_init(&morph, bone_count)?;
 
+        let mut absolute_rest = vec![Vec3A::ZERO; bone_count];
+
+        for &bone in &eval_order {
+            let i = bone.as_usize();
+            let parent = parent_indices[i];
+            let parent_rest = if parent >= 0 {
+                absolute_rest[parent as usize]
+            } else {
+                Vec3A::ZERO
+            };
+            absolute_rest[i] = rest_positions[i] + parent_rest;
+            // Preserve PMX absolute rest bits only if the bind reproduces local rest exactly.
+            let candidate = -Vec3A::from_vec4(inverse_bind_matrices[i].w_axis);
+            if inverse_bind_matrices[i] == Mat4::from_translation((-candidate).into())
+                && candidate - parent_rest == rest_positions[i]
+            {
+                absolute_rest[i] = candidate;
+            }
+        }
         Ok(Self {
             parent_indices: parent_indices.into_boxed_slice(),
             rest_positions: rest_positions.into_boxed_slice(),
             inverse_bind_matrices: inverse_bind_matrices.into_boxed_slice(),
+            rest_world_positions: absolute_rest.into_boxed_slice(),
             transform_orders: transform_orders.into_boxed_slice(),
             fixed_axis_flags: fixed_axis_flags.into_boxed_slice(),
             fixed_axis_constraint_flags: fixed_axis_constraint_flags.into_boxed_slice(),
@@ -587,7 +608,6 @@ impl ModelArena {
             local_axis_z: local_axis_z.into_boxed_slice(),
             local_axis_basis: local_axis_basis.into_boxed_slice(),
             transform_after_physics_flags: transform_after_physics_flags.into_boxed_slice(),
-            ik_link_flags,
             eval_order,
             eval_order_before_physics,
             eval_order_after_physics,
@@ -623,6 +643,10 @@ impl ModelArena {
     }
 
     #[inline]
+    pub(crate) fn rest_world_position(&self, bone: BoneIndex) -> Vec3A {
+        self.rest_world_positions[bone.as_usize()]
+    }
+
     pub fn rest_position(&self, bone: BoneIndex) -> Vec3A {
         self.rest_positions[bone.as_usize()]
     }
@@ -708,7 +732,7 @@ impl ModelArena {
     }
 
     /// Orthonormal local-axis basis as a quaternion (columns of the bone-local
-    /// frame). Used only as the IK angle-limit evaluation frame.
+    /// frame). Preserved as model metadata; MMD IK does not use this frame.
     #[inline]
     pub fn local_axis_basis(&self, bone: BoneIndex) -> Option<Quat> {
         if self.local_axis_flags[bone.as_usize()] != 0 {
@@ -729,11 +753,6 @@ impl ModelArena {
     #[inline]
     pub fn transform_after_physics(&self, bone: BoneIndex) -> bool {
         self.transform_after_physics_flags[bone.as_usize()] != 0
-    }
-
-    #[inline]
-    pub(crate) fn is_ik_link_bone(&self, bone: BoneIndex) -> bool {
-        self.ik_link_flags[bone.as_usize()] != 0
     }
 
     #[inline]
@@ -858,14 +877,12 @@ pub struct AppendTransform {
 }
 
 type AppendTransformBuildOutput = (Box<[AppendTransform]>, Box<[i32]>);
-type IkSolverBuildOutput = (Box<[IkSolver]>, Box<[u8]>);
 
 fn build_ik_solvers(
     ik_solvers: Vec<IkSolverInit>,
     bone_count: usize,
-) -> Result<IkSolverBuildOutput, ModelBuildError> {
+) -> Result<Box<[IkSolver]>, ModelBuildError> {
     let mut solvers = Vec::with_capacity(ik_solvers.len());
-    let mut ik_link_flags = vec![0; bone_count];
 
     for (solver_index, solver) in ik_solvers.into_iter().enumerate() {
         validate_ik_bone(solver_index, "ik", solver.ik_bone, bone_count)?;
@@ -874,7 +891,6 @@ fn build_ik_solvers(
         let mut links = Vec::with_capacity(solver.links.len());
         for link in solver.links {
             validate_ik_bone(solver_index, "link", link.bone, bone_count)?;
-            ik_link_flags[link.bone.as_usize()] = 1;
             links.push(IkLink {
                 bone: link.bone,
                 angle_limit: link.angle_limit,
@@ -890,7 +906,7 @@ fn build_ik_solvers(
         });
     }
 
-    Ok((solvers.into_boxed_slice(), ik_link_flags.into_boxed_slice()))
+    Ok(solvers.into_boxed_slice())
 }
 
 type IkBoneSolverLookup = (Box<[MorphOffsetSpan]>, Box<[u32]>);

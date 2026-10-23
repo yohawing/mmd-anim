@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.3 - Unreleased
+
+### Added
+
+- Expose retained IK history reset in Rust, the C ABI, Python, and WASM for callers
+  that need independent pose samples or a fresh playback sequence.
+
+### Fixed
+
+- Match MMD CCD iteration budgets, per-link angle limits, fixed-axis projection,
+  and constrained-axis processing more closely.
+- Preserve layered IK effector state and append-dependent IK accumulators;
+  correct rotation grants through chained sources and IK effector updates.
+- Reduce numerical drift in long IK chains by preserving intermediate rotation
+  matrices and matching native scalar rotation and append-scaling operations.
+- Preserve Windows rounding during limited-axis Euler decomposition on Linux,
+  avoiding divergent CCD iterations without relaxing oracle tolerances.
+- Keep batch pose samples independent of worker count and requested frame order
+  in the C ABI, WASM, and CLI diagnostics by resetting IK history per sample.
+
+### Behavior and limitations
+
+- Append-dependent IK can retain state across evaluations, including repeated
+  evaluations of the same frame. Reset IK history before independent samples;
+  resetting the local pose alone does not reset this history.
+- Full original-MMD parity is not guaranteed. REM twist comparisons remain
+  sensitive to initialization, evaluation timestamps, and snapshot timing.
+- Preserve the manual morph overrides introduced in 0.5.2. Physics simulation
+  remains host-owned; the C ABI and WASM wrapper remain experimental.
+
 ## 0.5.2 - 2026-09-20
 
 ### Added

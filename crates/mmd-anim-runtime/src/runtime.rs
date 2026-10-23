@@ -26,7 +26,6 @@ struct IkScratch {
     base_rotations: Vec<Quat>,
     base_ik_rotations: Vec<Quat>,
     ik_rotations: Vec<Quat>,
-    best_ik_rotations: Vec<Quat>,
     chain_states: Vec<ChainLinkState>,
 }
 
@@ -43,7 +42,6 @@ impl IkScratch {
             base_rotations: Vec::with_capacity(max_links),
             base_ik_rotations: Vec::with_capacity(max_links),
             ik_rotations: Vec::with_capacity(max_links),
-            best_ik_rotations: Vec::with_capacity(max_links),
             chain_states: Vec::with_capacity(max_links),
         }
     }
@@ -81,6 +79,7 @@ pub struct IkSolverRuntimeStats {
     pub executed_iterations: u64,
     pub tolerance_precheck_breaks: u64,
     pub tolerance_post_iteration_breaks: u64,
+    /// Retained for diagnostic compatibility; MMD CCD does not roll back.
     pub rollback_breaks: u64,
     pub max_iteration_exhaustions: u64,
     pub link_visits: u64,
@@ -100,8 +99,9 @@ impl IkSolverRuntimeStats {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IkSolveOptions {
     /// Goal distance at or below which the solver stops. Defaults to `1e-4` model units.
+    /// Zero disables only this distance test; MMD directional convergence remains active.
     pub tolerance: f32,
-    /// Optional per-chain iteration cap. Defaults to the iteration count stored in the model.
+    /// Optional per-chain iteration cap, applied after the MMD minimum-budget correction.
     pub max_iterations_cap: Option<u32>,
 }
 
@@ -111,9 +111,7 @@ pub use physics::{PhysicsMode, PhysicsStepStats, PhysicsTickConfig};
 impl Default for IkSolveOptions {
     fn default() -> Self {
         Self {
-            // A zero tolerance effectively disables convergence breaks for ordinary floating-point
-            // poses. This matches the TypeScript runtime while leaving slow-converging chains free
-            // to use the full iteration count authored in the model.
+            // Distance tolerance supplements MMD directional convergence.
             tolerance: 1.0e-4,
             max_iterations_cap: None,
         }
@@ -173,8 +171,14 @@ impl std::fmt::Display for HostPoseError {
 
 impl std::error::Error for HostPoseError {}
 
+/// Evaluates a model pose, including MMD's retained IK accumulators for links
+/// dependent on IK-sourced append transforms. All evaluation entry points share
+/// this history. Use [`Self::reset_ik_history`] to begin an independent sequence.
 #[derive(Debug)]
 pub struct RuntimeInstance {
+    // Rest-relative world transforms, independent of caller-supplied inverse binds.
+    // Keeping these matrices avoids quaternion round trips between CCD updates.
+    transform_matrices: Vec<glam::Mat4>,
     host_rig: Option<host_rig::HostRigScratch>,
     model: Arc<ModelArena>,
     pose: PoseArena,
@@ -182,6 +186,10 @@ pub struct RuntimeInstance {
     physics_tick_config: PhysicsTickConfig,
     physics_accumulator_seconds: f32,
     ik_scratch: IkScratch,
+    ik_history: Vec<Option<Quat>>,
+    ik_target_history: Vec<(crate::BoneIndex, glam::Mat4)>,
+    evaluation_layer_bones: [Vec<Vec<crate::BoneIndex>>; 2],
+    ik_deferred_append_bones: Vec<bool>,
     morph_scratch: MorphScratch,
     ik_stats: Vec<IkSolverRuntimeStats>,
     ik_link_change_update_bones: Vec<Option<Vec<crate::BoneIndex>>>,
@@ -217,10 +225,25 @@ impl RuntimeInstance {
         let ik_count = ik_count.max(model.ik_count());
         let pose = PoseArena::new_with_counts(model.bone_count(), morph_count, ik_count);
         let ik_scratch = IkScratch::new(&model);
+        let ik_history = Self::initial_ik_history(&model);
+        let ik_target_history = Self::initial_ik_target_history(&model);
+        let ik_deferred_append_bones = Self::ik_deferred_append_bones(&model);
+        let layers = Self::evaluation_layers(&model);
+        let evaluation_layer_bones = std::array::from_fn(|phase| {
+            let mut groups = std::collections::BTreeMap::<i32, Vec<crate::BoneIndex>>::new();
+            for &bone in model.eval_order_for_phase(phase != 0) {
+                groups
+                    .entry(layers[bone.as_usize()])
+                    .or_default()
+                    .push(bone);
+            }
+            groups.into_values().collect()
+        });
         let morph_scratch = MorphScratch::new(morph_count);
         let ik_stats = vec![IkSolverRuntimeStats::default(); model.ik_count()];
         let ik_link_change_update_bones = vec![None; model.ik_count()];
         Self {
+            transform_matrices: vec![glam::Mat4::IDENTITY; model.bone_count()],
             host_rig: None,
             model,
             pose,
@@ -228,6 +251,10 @@ impl RuntimeInstance {
             physics_tick_config: PhysicsTickConfig::default(),
             physics_accumulator_seconds: 0.0,
             ik_scratch,
+            ik_history,
+            ik_target_history,
+            evaluation_layer_bones,
+            ik_deferred_append_bones,
             morph_scratch,
             ik_stats,
             ik_link_change_update_bones,
@@ -261,6 +288,19 @@ impl RuntimeInstance {
     #[inline]
     pub fn pose_mut(&mut self) -> &mut PoseArena {
         &mut self.pose
+    }
+
+    /// Clear retained MMD IK accumulators and effector history before a fresh sequence.
+    ///
+    /// This does not change the input pose or world matrices. Apply a fresh input
+    /// pose (or evaluate a clip frame) after clearing. Resetting local pose data
+    /// alone does not clear this history. Recreate or reset the history explicitly
+    /// when independent, reproducible samples are required.
+    pub fn reset_ik_history(&mut self) {
+        for rotation in self.ik_history.iter_mut().flatten() {
+            *rotation = Quat::IDENTITY;
+        }
+        self.ik_target_history = Self::initial_ik_target_history(&self.model);
     }
 
     pub fn evaluate_current_pose(&mut self) {
@@ -334,6 +374,17 @@ impl RuntimeInstance {
         #[cfg(test)]
         self.set_world_matrix_bone_update_category(WorldMatrixBoneUpdateCategory::LeadingBookend);
         self.update_world_matrices_using_current_append_from_eval_order_position(0);
+        // A later layer has not executed its world pass yet. CcdIk observes
+        // the preceding evaluation's effector matrix (initially the rest pose).
+        for &(bone, world) in &self.ik_target_history {
+            if !self.is_host_driven(bone) {
+                self.pose.set_world_matrix(bone, world);
+                self.transform_matrices[bone.as_usize()] = world
+                    * glam::Mat4::from_translation((-self.model.rest_world_position(bone)).into());
+                self.pose
+                    .set_skinning_matrix(bone, world * self.model.inverse_bind_matrix(bone));
+            }
+        }
     }
 
     fn evaluate_current_pose_phase(
@@ -342,28 +393,46 @@ impl RuntimeInstance {
         options: IkSolveOptions,
         earliest_after_physics_eval_order_position: &mut Option<usize>,
     ) {
-        let phase_bone_count = self.model.eval_order_for_phase(after_physics).len();
-        for phase_index in 0..phase_bone_count {
-            let bone = self.model.eval_order_for_phase(after_physics)[phase_index];
-            if after_physics {
-                let position = self.model.eval_order_position(bone);
-                *earliest_after_physics_eval_order_position = Some(
-                    (*earliest_after_physics_eval_order_position)
-                        .map_or(position, |earliest| earliest.min(position)),
+        // BoneFrameTransform in MikuMikuStudio 1b9acad6: finish the layer's
+        // world pass before its CCD pass, including targets after controllers.
+        let phase = usize::from(after_physics);
+        for layer in 0..self.evaluation_layer_bones[phase].len() {
+            let bone_count = self.evaluation_layer_bones[phase][layer].len();
+            for index in 0..bone_count {
+                let bone = self.evaluation_layer_bones[phase][layer][index];
+                if after_physics {
+                    let position = self.model.eval_order_position(bone);
+                    *earliest_after_physics_eval_order_position = Some(
+                        (*earliest_after_physics_eval_order_position)
+                            .map_or(position, |earliest| earliest.min(position)),
+                    );
+                }
+                if self.model.append_transform_index(bone).is_some() {
+                    self.pose.reset_append_transform(bone);
+                    self.update_append_transform_for_bone(bone);
+                }
+                #[cfg(test)]
+                self.set_world_matrix_bone_update_category(
+                    WorldMatrixBoneUpdateCategory::PhaseLoop,
                 );
+                self.update_world_matrix_for_bone(bone);
             }
-            if self.model.append_transform_index(bone).is_some() {
-                self.pose.reset_append_transform(bone);
-                self.update_append_transform_for_bone(bone);
+            for index in 0..bone_count {
+                let bone = self.evaluation_layer_bones[phase][layer][index];
+                let ik_solver_count = self.model.ik_solver_count_for_bone(bone);
+                for local_index in 0..ik_solver_count {
+                    let ik_index = self.model.ik_solver_index_for_bone(bone, local_index);
+                    self.solve_ik_solver(ik_index, options, after_physics);
+                }
             }
-            #[cfg(test)]
-            self.set_world_matrix_bone_update_category(WorldMatrixBoneUpdateCategory::PhaseLoop);
-            self.update_world_matrix_for_bone(bone);
-
-            let ik_solver_count = self.model.ik_solver_count_for_bone(bone);
-            for local_index in 0..ik_solver_count {
-                let ik_index = self.model.ik_solver_index_for_bone(bone, local_index);
-                self.solve_ik_solver(ik_index, options, after_physics);
+            // PostIkPass updates append-dependent effectors after all solvers
+            // in their layer, even when their own IK controller is disabled.
+            for index in 0..bone_count {
+                let bone = self.evaluation_layer_bones[phase][layer][index];
+                if self.ik_deferred_append_bones[bone.as_usize()] {
+                    self.update_append_transform_for_bone(bone);
+                    self.update_world_matrix_for_bone(bone);
+                }
             }
         }
     }
@@ -392,6 +461,9 @@ impl RuntimeInstance {
                 WorldMatrixBoneUpdateCategory::TrailingBookend,
             );
             self.update_world_matrices_from_eval_order_position(start_position);
+        }
+        for (bone, world) in &mut self.ik_target_history {
+            *world = self.pose.world_matrices()[bone.as_usize()];
         }
     }
 
@@ -497,6 +569,10 @@ impl RuntimeInstance {
         Ok(())
     }
 
+    /// Evaluate a clip sample. MMD IK links under an IK-dependent append transform
+    /// retain their accumulated rotation across evaluations, including repeated
+    /// evaluations of the same frame. Use [`Self::reset_ik_history`] to begin an
+    /// independent sequence; ordinary IK links remain stateless.
     pub fn evaluate_clip_frame(&mut self, clip: &AnimationClip, frame: f32) {
         clip.apply_to_pose(frame, &mut self.pose);
         self.expand_morphs();

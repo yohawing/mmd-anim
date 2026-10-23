@@ -1,0 +1,615 @@
+{
+  "diagnostics": [],
+  "displayFrames": [
+    {
+      "englishName": "Root",
+      "frames": [
+        {
+          "index": 0,
+          "type": "bone"
+        }
+      ],
+      "name": "Root",
+      "special": true
+    },
+    {
+      "englishName": "Exp",
+      "frames": [],
+      "name": "表情",
+      "special": true
+    },
+    {
+      "englishName": "Bones",
+      "frames": [
+        {
+          "index": 1,
+          "type": "bone"
+        },
+        {
+          "index": 2,
+          "type": "bone"
+        },
+        {
+          "index": 3,
+          "type": "bone"
+        },
+        {
+          "index": 4,
+          "type": "bone"
+        },
+        {
+          "index": 5,
+          "type": "bone"
+        },
+        {
+          "index": 6,
+          "type": "bone"
+        },
+        {
+          "index": 7,
+          "type": "bone"
+        }
+      ],
+      "name": "Bones",
+      "special": false
+    }
+  ],
+  "geometry": {
+    "additionalUvs": [],
+    "edgeScale": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "indices": [
+      0,
+      1,
+      2
+    ],
+    "materialGroups": [
+      {
+        "count": 3,
+        "materialIndex": 0,
+        "start": 0
+      }
+    ],
+    "normals": [
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "positions": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.10000000149011612,
+      0.0,
+      0.10000000149011612,
+      0.0,
+      0.0
+    ],
+    "qdef": {
+      "enabled": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "sdef": {
+      "c": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "enabled": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "r0": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "r1": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rw0": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rw1": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "skinningModes": [
+        "bdef1",
+        "bdef1",
+        "bdef1"
+      ]
+    },
+    "skinIndices": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "skinWeights": [
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "uvs": [
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      1.0,
+      0.0
+    ]
+  },
+  "joints": [],
+  "materials": [
+    {
+      "ambient": [
+        0.4000000059604645,
+        0.4000000059604645,
+        0.4000000059604645
+      ],
+      "diffuse": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929,
+        1.0
+      ],
+      "edgeColor": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "edgeSize": 0.0,
+      "englishName": "material",
+      "faceCount": 1,
+      "flags": {
+        "doubleSided": true,
+        "edge": false,
+        "groundShadow": false,
+        "lineDraw": false,
+        "pointDraw": false,
+        "selfShadow": false,
+        "selfShadowMap": false,
+        "vertexColor": false
+      },
+      "name": "material",
+      "sharedToonIndex": 0,
+      "specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "specularPower": 0.0,
+      "sphereMode": "none",
+      "sphereTexturePath": "",
+      "texturePath": "",
+      "toonTexturePath": ""
+    }
+  ],
+  "metadata": {
+    "additionalUvCount": 0,
+    "comment": "Independent synthetic IK probe",
+    "counts": {
+      "bones": 8,
+      "displayFrames": 3,
+      "faces": 1,
+      "joints": 0,
+      "materials": 1,
+      "morphs": 0,
+      "rigidBodies": 0,
+      "softBodies": 0,
+      "vertices": 3
+    },
+    "encoding": "utf-16-le",
+    "englishComment": "Independent synthetic IK probe",
+    "englishName": "IK probe",
+    "format": "pmx",
+    "indexSizes": {
+      "bone": 2,
+      "material": 2,
+      "morph": 2,
+      "rigidBody": 2,
+      "texture": 2,
+      "vertex": 2
+    },
+    "name": "IK probe",
+    "version": 2.0
+  },
+  "morphs": [],
+  "rigidBodies": [],
+  "skeleton": {
+    "bones": [
+      {
+        "appendTransform": null,
+        "englishName": "root",
+        "externalParentKey": null,
+        "fixedAxis": null,
+        "flags": {
+          "appendLocal": false,
+          "appendRotate": false,
+          "appendTranslate": false,
+          "enabled": true,
+          "externalParentTransform": false,
+          "fixedAxis": false,
+          "ik": false,
+          "indexedTail": false,
+          "localAxis": false,
+          "rotatable": true,
+          "transformAfterPhysics": false,
+          "translatable": true,
+          "visible": true
+        },
+        "ik": null,
+        "layer": 0,
+        "localAxis": null,
+        "name": "root",
+        "parentIndex": -1,
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tailIndex": -1,
+        "tailPosition": [
+          0.0,
+          0.20000000298023224,
+          0.0
+        ]
+      },
+      {
+        "appendTransform": null,
+        "englishName": "source",
+        "externalParentKey": null,
+        "fixedAxis": null,
+        "flags": {
+          "appendLocal": false,
+          "appendRotate": false,
+          "appendTranslate": false,
+          "enabled": true,
+          "externalParentTransform": false,
+          "fixedAxis": false,
+          "ik": false,
+          "indexedTail": false,
+          "localAxis": false,
+          "rotatable": true,
+          "transformAfterPhysics": false,
+          "translatable": true,
+          "visible": true
+        },
+        "ik": null,
+        "layer": 0,
+        "localAxis": null,
+        "name": "source",
+        "parentIndex": 0,
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tailIndex": -1,
+        "tailPosition": [
+          0.0,
+          0.20000000298023224,
+          0.0
+        ]
+      },
+      {
+        "appendTransform": null,
+        "englishName": "sourceTip",
+        "externalParentKey": null,
+        "fixedAxis": null,
+        "flags": {
+          "appendLocal": false,
+          "appendRotate": false,
+          "appendTranslate": false,
+          "enabled": true,
+          "externalParentTransform": false,
+          "fixedAxis": false,
+          "ik": false,
+          "indexedTail": false,
+          "localAxis": false,
+          "rotatable": true,
+          "transformAfterPhysics": false,
+          "translatable": true,
+          "visible": true
+        },
+        "ik": null,
+        "layer": 0,
+        "localAxis": null,
+        "name": "sourceTip",
+        "parentIndex": 1,
+        "position": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "tailIndex": -1,
+        "tailPosition": [
+          0.0,
+          0.20000000298023224,
+          0.0
+        ]
+      },
+      {
+        "appendTransform": null,
+        "englishName": "sourceIK",
+        "externalParentKey": null,
+        "fixedAxis": null,
+        "flags": {
+          "appendLocal": false,
+          "appendRotate": false,
+          "appendTranslate": false,
+          "enabled": true,
+          "externalParentTransform": false,
+          "fixedAxis": false,
+          "ik": true,
+          "indexedTail": false,
+          "localAxis": false,
+          "rotatable": true,
+          "transformAfterPhysics": false,
+          "translatable": true,
+          "visible": true
+        },
+        "ik": {
+          "limitAngle": 16.0,
+          "links": [
+            {
+              "boneIndex": 1,
+              "limits": null
+            }
+          ],
+          "loopCount": 1,
+          "targetIndex": 2
+        },
+        "layer": 0,
+        "localAxis": null,
+        "name": "sourceIK",
+        "parentIndex": 0,
+        "position": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "tailIndex": -1,
+        "tailPosition": [
+          0.0,
+          0.20000000298023224,
+          0.0
+        ]
+      },
+      {
+        "appendTransform": {
+          "parentIndex": 1,
+          "weight": 1.0
+        },
+        "englishName": "grant",
+        "externalParentKey": null,
+        "fixedAxis": null,
+        "flags": {
+          "appendLocal": false,
+          "appendRotate": true,
+          "appendTranslate": false,
+          "enabled": true,
+          "externalParentTransform": false,
+          "fixedAxis": false,
+          "ik": false,
+          "indexedTail": false,
+          "localAxis": false,
+          "rotatable": true,
+          "transformAfterPhysics": false,
+          "translatable": true,
+          "visible": true
+        },
+        "ik": null,
+        "layer": 1,
+        "localAxis": null,
+        "name": "grant",
+        "parentIndex": 0,
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tailIndex": -1,
+        "tailPosition": [
+          0.0,
+          0.20000000298023224,
+          0.0
+        ]
+      },
+      {
+        "appendTransform": null,
+        "englishName": "twist",
+        "externalParentKey": null,
+        "fixedAxis": [
+          -0.797336220741272,
+          -0.6032751202583313,
+          -0.017725633457303047
+        ],
+        "flags": {
+          "appendLocal": false,
+          "appendRotate": false,
+          "appendTranslate": false,
+          "enabled": true,
+          "externalParentTransform": false,
+          "fixedAxis": true,
+          "ik": false,
+          "indexedTail": false,
+          "localAxis": false,
+          "rotatable": true,
+          "transformAfterPhysics": false,
+          "translatable": true,
+          "visible": true
+        },
+        "ik": null,
+        "layer": 2,
+        "localAxis": null,
+        "name": "twist",
+        "parentIndex": 4,
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tailIndex": -1,
+        "tailPosition": [
+          0.0,
+          0.20000000298023224,
+          0.0
+        ]
+      },
+      {
+        "appendTransform": null,
+        "englishName": "tip",
+        "externalParentKey": null,
+        "fixedAxis": null,
+        "flags": {
+          "appendLocal": false,
+          "appendRotate": false,
+          "appendTranslate": false,
+          "enabled": true,
+          "externalParentTransform": false,
+          "fixedAxis": false,
+          "ik": false,
+          "indexedTail": false,
+          "localAxis": false,
+          "rotatable": true,
+          "transformAfterPhysics": false,
+          "translatable": true,
+          "visible": true
+        },
+        "ik": null,
+        "layer": 2,
+        "localAxis": null,
+        "name": "tip",
+        "parentIndex": 5,
+        "position": [
+          -1.9727237224578857,
+          -1.2808218002319336,
+          -0.043799206614494324
+        ],
+        "tailIndex": -1,
+        "tailPosition": [
+          0.0,
+          0.20000000298023224,
+          0.0
+        ]
+      },
+      {
+        "appendTransform": null,
+        "englishName": "controller",
+        "externalParentKey": null,
+        "fixedAxis": null,
+        "flags": {
+          "appendLocal": false,
+          "appendRotate": false,
+          "appendTranslate": false,
+          "enabled": true,
+          "externalParentTransform": false,
+          "fixedAxis": false,
+          "ik": true,
+          "indexedTail": false,
+          "localAxis": false,
+          "rotatable": true,
+          "transformAfterPhysics": false,
+          "translatable": true,
+          "visible": true
+        },
+        "ik": {
+          "limitAngle": 16.0,
+          "links": [
+            {
+              "boneIndex": 5,
+              "limits": null
+            }
+          ],
+          "loopCount": 1,
+          "targetIndex": 6
+        },
+        "layer": 2,
+        "localAxis": null,
+        "name": "controller",
+        "parentIndex": 0,
+        "position": [
+          -1.917517900466919,
+          -1.3498278856277466,
+          -0.18219003081321716
+        ],
+        "tailIndex": -1,
+        "tailPosition": [
+          0.0,
+          0.20000000298023224,
+          0.0
+        ]
+      }
+    ]
+  },
+  "softBodies": []
+}

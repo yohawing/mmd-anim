@@ -1,10 +1,101 @@
 use glam::Quat;
 
-use crate::ik_primitive::{ChainLinkState, LinkStepInput, rotation, solve_link_step, translation};
+use crate::ik_primitive::{
+    ChainLinkState, LinkStepInput, effective_iteration_count, rotation, solve_link_step,
+    translation,
+};
 
 use super::{IkSolveOptions, RuntimeInstance};
 
 impl RuntimeInstance {
+    pub(super) fn evaluation_layers(model: &crate::ModelArena) -> Vec<i32> {
+        let mut layers = vec![0; model.bone_count()];
+        // Keep the runtime's parent-before-child guarantee when authored layers
+        // are reversed. PMX also inherits the parent's layer during loading.
+        for &bone in model.eval_order() {
+            layers[bone.as_usize()] = model
+                .parent_index(bone)
+                .map_or(model.transform_order(bone), |parent| {
+                    model.transform_order(bone).max(layers[parent.as_usize()])
+                });
+        }
+        layers
+    }
+
+    pub(super) fn initial_ik_target_history(
+        model: &crate::ModelArena,
+    ) -> Vec<(crate::BoneIndex, glam::Mat4)> {
+        let mut rest = vec![glam::Vec3A::ZERO; model.bone_count()];
+        for &bone in model.eval_order() {
+            rest[bone.as_usize()] = model.rest_position(bone)
+                + model
+                    .parent_index(bone)
+                    .map_or(glam::Vec3A::ZERO, |p| rest[p.as_usize()]);
+        }
+        let mut history = Vec::new();
+        let layers = Self::evaluation_layers(model);
+        for solver in model.ik_solvers() {
+            let bone = solver.target_bone;
+            if layers[bone.as_usize()] > layers[solver.ik_bone.as_usize()]
+                && !history.iter().any(|(existing, _)| *existing == bone)
+            {
+                history.push((
+                    bone,
+                    glam::Mat4::from_translation(rest[bone.as_usize()].into()),
+                ));
+            }
+        }
+        history
+    }
+
+    pub(super) fn initial_ik_history(model: &crate::ModelArena) -> Vec<Option<Quat>> {
+        let (under_ik, dependent) = Self::ik_dependency_roles(model);
+        dependent
+            .into_iter()
+            .zip(under_ik)
+            .map(|(dependent, under_ik)| (dependent && under_ik).then_some(Quat::IDENTITY))
+            .collect()
+    }
+
+    pub(super) fn ik_deferred_append_bones(model: &crate::ModelArena) -> Vec<bool> {
+        let (under_ik, mut dependent) = Self::ik_dependency_roles(model);
+        for (i, value) in dependent.iter_mut().enumerate() {
+            *value &= !under_ik[i]
+                && model
+                    .ik_solvers()
+                    .iter()
+                    .any(|s| s.target_bone.as_usize() == i);
+        }
+        dependent
+    }
+
+    fn ik_dependency_roles(model: &crate::ModelArena) -> (Vec<bool>, Vec<bool>) {
+        let mut under_ik = vec![false; model.bone_count()];
+        for solver in model.ik_solvers() {
+            under_ik[solver.ik_bone.as_usize()] = false;
+            under_ik[solver.target_bone.as_usize()] = false;
+            for link in &solver.links {
+                under_ik[link.bone.as_usize()] = true;
+            }
+        }
+        // MMD performs this inheritance scan in authored bone order, even when
+        // the hierarchy contains a forward parent reference. The append weight
+        // does not affect the reset path: a zero-weight grant still selects it.
+        let mut dependent = vec![false; under_ik.len()];
+        for i in 0..dependent.len() {
+            let bone = crate::BoneIndex(i as u32);
+            dependent[i] = model
+                .parent_index(bone)
+                .is_some_and(|p| dependent[p.as_usize()])
+                || model.append_transform_index(bone).is_some_and(|index| {
+                    let append = model.append_transform(index);
+                    (append.affect_rotation || append.affect_translation)
+                        && under_ik[append.source_bone.as_usize()]
+                });
+        }
+        (under_ik, dependent)
+    }
+
     pub(super) fn solve_ik_solver(
         &mut self,
         ik_index: usize,
@@ -20,20 +111,24 @@ impl RuntimeInstance {
         let mut base_rotations = std::mem::take(&mut self.ik_scratch.base_rotations);
         let mut base_ik_rotations = std::mem::take(&mut self.ik_scratch.base_ik_rotations);
         let mut ik_rotations = std::mem::take(&mut self.ik_scratch.ik_rotations);
-        let mut best_ik_rotations = std::mem::take(&mut self.ik_scratch.best_ik_rotations);
         let mut chain_states = std::mem::take(&mut self.ik_scratch.chain_states);
 
         {
             let solver = &self.model.ik_solvers()[ik_index];
             let ik_bone = solver.ik_bone;
             let target_bone = solver.target_bone;
-            let iteration_count = options
-                .max_iterations_cap
-                .map(|cap| solver.iteration_count.min(cap))
-                .unwrap_or(solver.iteration_count)
-                .max(1) as usize;
+            let iteration_count = effective_iteration_count(
+                solver.iteration_count,
+                solver.limit_angle,
+                options.max_iterations_cap,
+            ) as usize;
             let limit_angle = solver.limit_angle.max(0.0);
             let link_count = solver.links.len();
+
+            // CcdIk rebuilds the effector local rotation from physicsQuat,
+            // without InheritRotQuat. Its old world matrix is still read by
+            // the first CCD step; a later PostIkPass may restore the grant.
+            self.pose.set_append_rotation(target_bone, Quat::IDENTITY);
 
             links.clear();
             links.extend(solver.links.iter().cloned());
@@ -45,13 +140,11 @@ impl RuntimeInstance {
             base_ik_rotations.clear();
             base_ik_rotations.extend(links.iter().map(|l| self.pose.ik_rotation(l.bone)));
             ik_rotations.clear();
-            ik_rotations.resize(link_count, Quat::IDENTITY);
-            best_ik_rotations.clear();
-            best_ik_rotations.resize(link_count, Quat::IDENTITY);
+            ik_rotations.extend(base_rotations.iter().copied());
             chain_states.clear();
             chain_states.resize_with(link_count, || ChainLinkState {
                 previous_euler: [0.0; 3],
-                plane_mode_angle: 0.0,
+                rotation_matrix: None,
             });
 
             self.apply_ik_link_rotations(
@@ -60,7 +153,8 @@ impl RuntimeInstance {
                 &base_ik_rotations,
                 &ik_rotations,
             );
-            self.update_world_matrices_after_ik_link_change(ik_index);
+            // CcdIk rebuilds the target's local matrix, but reads its existing
+            // world matrix for the first step. Refresh only after a link moves.
 
             let mut broke_early = false;
             let mut final_distance = {
@@ -68,8 +162,7 @@ impl RuntimeInstance {
                 let ik = translation(self.pose.world_matrices()[ik_bone.as_usize()]);
                 (eff - ik).length()
             };
-            let mut best_distance = f32::MAX;
-            for _iteration in 0..iteration_count {
+            'iterations: for _iteration in 0..iteration_count {
                 let eff_pos = translation(self.pose.world_matrices()[target_bone.as_usize()]);
                 let ik_pos = translation(self.pose.world_matrices()[ik_bone.as_usize()]);
                 final_distance = (eff_pos - ik_pos).length();
@@ -95,8 +188,8 @@ impl RuntimeInstance {
                     let ik_pos = translation(self.pose.world_matrices()[ik_bone.as_usize()]);
 
                     let link_world_rot = rotation(link_world);
-                    let local_effector = link_world_rot.inverse().mul_vec3a(eff_pos - link_pos);
-                    let local_target = link_world_rot.inverse().mul_vec3a(ik_pos - link_pos);
+                    let mut local_effector = link_world_rot.inverse().mul_vec3a(eff_pos - link_pos);
+                    let mut local_target = link_world_rot.inverse().mul_vec3a(ik_pos - link_pos);
 
                     if local_effector.length_squared() <= f32::EPSILON
                         || local_target.length_squared() <= f32::EPSILON
@@ -104,32 +197,75 @@ impl RuntimeInstance {
                         continue;
                     }
 
-                    let local_axis_basis = self.model.local_axis_basis(link_bone);
-                    // PMX fixed-axis constrains the CCD rotation axis only. Ordinary
-                    // pose projection still requires enforce_fixed_axis (kept false
-                    // for PMX import).
+                    if (crate::ik_primitive::normalize_ik_direction(link_pos - eff_pos)
+                        - crate::ik_primitive::normalize_ik_direction(link_pos - ik_pos))
+                    .length_squared()
+                        < 1e-7
+                    {
+                        final_distance = (eff_pos - ik_pos).length();
+                        broke_early = true;
+                        break 'iterations;
+                    }
+
+                    // MMD resets the link's world pose but keeps this accumulator
+                    // on the append-dependent path. Seed it only after measuring
+                    // the first step from that reset pose. Express the directions
+                    // in the seeded frame so the shared step still computes the
+                    // same parent-frame axis and clamps the accumulated rotation.
+                    if _iteration == 0 {
+                        if let Some(previous) = self.ik_history[link_bone.as_usize()] {
+                            ik_rotations[link_index] = crate::mmd_math::mmd_quaternion_multiply(
+                                base_rotations[link_index],
+                                previous,
+                            );
+                            let base = base_rotations[link_index];
+                            let adjustment = (previous * base).inverse() * base;
+                            local_effector = adjustment.mul_vec3a(local_effector);
+                            local_target = adjustment.mul_vec3a(local_target);
+                        }
+                    }
+                    // Fixed-axis constrains the CCD rotation axis only.
                     let fixed_axis = self.model.fixed_axis(link_bone);
                     solve_link_step(LinkStepInput {
+                        world_step: Some((
+                            link_pos - eff_pos,
+                            link_pos - ik_pos,
+                            self.model
+                                .parent_index(link_bone)
+                                .map_or(glam::Mat4::IDENTITY, |p| {
+                                    self.pose.world_matrices()[p.as_usize()]
+                                }),
+                        )),
                         local_effector: &local_effector,
                         local_target: &local_target,
-                        link_index,
-                        base_rotations: &base_rotations,
-                        ik_rotations: &mut ik_rotations,
-                        chain_states: &mut chain_states,
+                        link_index: 0,
+                        base_rotations: &[Quat::IDENTITY],
+                        ik_rotations: std::slice::from_mut(&mut ik_rotations[link_index]),
+                        chain_states: std::slice::from_mut(&mut chain_states[link_index]),
                         angle_limit: link.angle_limit,
                         iteration: _iteration,
-                        limit_angle,
-                        local_axis_basis,
+                        iteration_count,
+                        limit_angle: limit_angle * (link_index + 1) as f32,
+                        // PMX local axes describe manipulation handles. MMD applies
+                        // IK limits in the authored bone frame, independent of them.
+                        local_axis_basis: None,
                         fixed_axis,
                     });
 
+                    if self.ik_history[link_bone.as_usize()].is_some() {
+                        self.ik_history[link_bone.as_usize()] = Some(ik_rotations[link_index]);
+                    }
                     self.apply_ik_link_rotations(
                         &links,
                         &base_rotations,
                         &base_ik_rotations,
                         &ik_rotations,
                     );
-                    self.update_world_matrices_after_ik_link_change(ik_index);
+                    self.update_world_matrices_after_ik_link_change(
+                        ik_index,
+                        &links,
+                        &chain_states,
+                    );
                     self.ik_stats[ik_index].link_steps += 1;
                 }
 
@@ -140,24 +276,8 @@ impl RuntimeInstance {
                 };
                 final_distance = current_distance;
 
-                if current_distance < best_distance {
-                    best_distance = current_distance;
-                    best_ik_rotations.copy_from_slice(&ik_rotations);
-                    if current_distance <= tolerance {
-                        self.ik_stats[ik_index].tolerance_post_iteration_breaks += 1;
-                        broke_early = true;
-                        break;
-                    }
-                } else {
-                    self.ik_stats[ik_index].rollback_breaks += 1;
-                    ik_rotations.copy_from_slice(&best_ik_rotations);
-                    self.apply_ik_link_rotations(
-                        &links,
-                        &base_rotations,
-                        &base_ik_rotations,
-                        &ik_rotations,
-                    );
-                    self.update_world_matrices_after_ik_link_change(ik_index);
+                if current_distance <= tolerance {
+                    self.ik_stats[ik_index].tolerance_post_iteration_breaks += 1;
                     broke_early = true;
                     break;
                 }
@@ -178,20 +298,24 @@ impl RuntimeInstance {
                 &links,
                 &base_rotations,
                 &base_ik_rotations,
-                &best_ik_rotations,
+                &ik_rotations,
             );
-            self.update_world_matrices_after_ik_link_change(ik_index);
+            self.update_world_matrices_after_ik_link_change(ik_index, &links, &chain_states);
         }
 
         self.ik_scratch.links = links;
         self.ik_scratch.base_rotations = base_rotations;
         self.ik_scratch.base_ik_rotations = base_ik_rotations;
         self.ik_scratch.ik_rotations = ik_rotations;
-        self.ik_scratch.best_ik_rotations = best_ik_rotations;
         self.ik_scratch.chain_states = chain_states;
     }
 
-    fn update_world_matrices_after_ik_link_change(&mut self, ik_index: usize) {
+    fn update_world_matrices_after_ik_link_change(
+        &mut self,
+        ik_index: usize,
+        links: &[crate::IkLink],
+        states: &[ChainLinkState],
+    ) {
         if self.ik_link_change_update_bones[ik_index].is_none() {
             self.ik_link_change_update_bones[ik_index] =
                 Some(self.compute_ik_link_change_update_bones(ik_index));
@@ -209,8 +333,15 @@ impl RuntimeInstance {
             let bone = self.ik_link_change_update_bones[ik_index]
                 .as_ref()
                 .expect("ik link-change update bones are computed lazily")[update_index];
-            self.update_append_transform_for_bone(bone);
-            self.update_world_matrix_for_bone(bone);
+            self.update_append_transform_for_bone_except(
+                bone,
+                Some(self.model.ik_solvers()[ik_index].target_bone),
+            );
+            let matrix = links
+                .iter()
+                .position(|l| l.bone == bone)
+                .and_then(|i| states[i].rotation_matrix);
+            self.update_world_matrix_for_bone_with_rotation(bone, matrix);
         }
         #[cfg(test)]
         self.set_world_matrix_bone_update_category(previous_category);
@@ -231,6 +362,18 @@ impl RuntimeInstance {
         let mut update_bones = Vec::new();
         for position in start_position..self.model.eval_order().len() {
             let bone = self.model.eval_order()[position];
+            // Another chain's effector remains at its layer's last world pass.
+            // Refreshing it here changes the next solver's initial direction.
+            if bone != target_bone
+                && !links.iter().any(|link| link.bone == bone)
+                && self
+                    .model
+                    .ik_solvers()
+                    .iter()
+                    .any(|other| other.target_bone == bone)
+            {
+                continue;
+            }
             if self.bone_is_in_ik_update_scope(bone, links, ik_bone, target_bone)
                 || self.bone_depends_on_ik_update_scope_append_roots(bone, &append_dependency_roots)
             {
@@ -345,8 +488,9 @@ impl RuntimeInstance {
         ik_rotations: &[Quat],
     ) {
         for (i, link) in links.iter().enumerate() {
-            let effective = (ik_rotations[i] * base_rotations[i]).normalize();
-            let total_ik = (ik_rotations[i] * base_ik_rotations[i]).normalize();
+            let effective = ik_rotations[i];
+            let total_ik =
+                (ik_rotations[i] * base_rotations[i].inverse() * base_ik_rotations[i]).normalize();
             self.pose.set_ik_rotation(link.bone, total_ik);
             self.pose.set_local_rotation(link.bone, effective);
         }

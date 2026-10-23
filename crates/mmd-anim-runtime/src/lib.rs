@@ -8,6 +8,7 @@ mod animation;
 pub mod append_primitive;
 mod flat_model;
 pub mod ik_primitive;
+mod mmd_math;
 mod model;
 mod model_descriptor;
 mod pose;

@@ -84,7 +84,7 @@ enum Commands {
 
     /// Import model and optional motion into runtime structures.
     #[command(
-        long_about = "Run the runtime importer for a model, or a model/motion pair.\nUse this when checking runtime names, clip build stats, a single evaluated frame, or batch frame JSON for host comparisons.\n--frame-range uses inclusive START:END:STEP in MMD frame units.\n\nSupported formats: .pmx + .vmd, .pmd + .vmd",
+        long_about = "Run the runtime importer for a model, or a model/motion pair.\nUse this when checking runtime names, clip build stats, a single evaluated frame, or batch frame JSON for host comparisons.\nBatch frames are independent samples; retained IK history is reset before each frame.\n--frame-range uses inclusive START:END:STEP in MMD frame units.\n\nSupported formats: .pmx + .vmd, .pmd + .vmd",
         after_help = "Examples:\n  mmd-anim import model.pmx\n  mmd-anim import model.pmx motion.vmd --clip\n  mmd-anim import model.pmx motion.vmd --frame 120\n  mmd-anim import model.pmx motion.vmd --frame 120 --verbose\n  mmd-anim import model.pmx motion.vmd --frames 0,30,60 --json\n  mmd-anim import model.pmx motion.vmd --frames 0,30,60 --json --verbose\n  mmd-anim import model.pmx motion.vmd --frame-range 0:120:5 --json\n  mmd-anim import model.pmx motion.vmd --frame-range 0:120:5 --json --verbose\n    (unit: MMD coordinate)"
     )]
     Import {

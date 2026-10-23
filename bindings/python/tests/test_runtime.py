@@ -407,7 +407,30 @@ class NativeRepresentativeSmoke(unittest.TestCase):
             / "fixtures"
         )
         cls.pmx = (fixtures / "pmx" / "ik_multi_axis_limit.pmx").read_bytes()
+        cls.history_pmx = (fixtures / "pmx" / "ik_append_history.pmx").read_bytes()
         cls.vmd = (fixtures / "vmd" / "ik_multi_bone_nondefault.vmd").read_bytes()
+
+    def test_reset_ik_history_preserves_output_and_restarts_independent_sample(self) -> None:
+        with self.runtime.create_model_from_pmx_bytes(self.history_pmx) as model:
+            with self.runtime.create_empty_clip() as clip:
+                with model.create_instance_for_model() as instance:
+                    instance.evaluate_clip_frame(clip, 0.0)
+                    first = instance.world_matrices_f32()
+                    instance.evaluate_clip_frame(clip, 0.0)
+                    second = instance.world_matrices_f32()
+                    self.assertGreater(
+                        max(abs(a - b) for a, b in zip(first, second)), 1.0e-5
+                    )
+                    skinning = instance.skinning_matrices_f32()
+                    morphs = instance.morph_weights_f32()
+                    instance.reset_ik_history()
+                    self.assertEqual(instance.world_matrices_f32(), second)
+                    self.assertEqual(instance.skinning_matrices_f32(), skinning)
+                    self.assertEqual(instance.morph_weights_f32(), morphs)
+                    instance.evaluate_clip_frame(clip, 0.0)
+                    self.assertEqual(instance.world_matrices_f32(), first)
+                with self.assertRaisesRegex(NativeRuntimeError, "instance handle is closed"):
+                    instance.reset_ik_history()
 
     def test_repository_fixture_parser_json_semantics(self) -> None:
         pmx = self.runtime.parse_pmx_non_geometry_json(self.pmx)

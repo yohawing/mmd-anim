@@ -26,9 +26,7 @@ impl Default for AppendPrimitiveOutput {
 
 pub fn solve_append_transform(input: AppendPrimitiveInput) -> AppendPrimitiveOutput {
     let rotation = if input.affect_rotation {
-        Quat::IDENTITY
-            .slerp(input.source_rotation, input.ratio)
-            .normalize()
+        scale_mmd_rotation(input.source_rotation, input.ratio)
     } else {
         Quat::IDENTITY
     };
@@ -42,6 +40,28 @@ pub fn solve_append_transform(input: AppendPrimitiveInput) -> AppendPrimitiveOut
         position_offset,
         rotation,
     }
+}
+
+fn scale_mmd_rotation(rotation: Quat, ratio: f32) -> Quat {
+    // InheritRotQuat reads the source's local matrix through D3DX. Its choice
+    // of quaternion sign matters: the negative-w branch subtracts the original
+    // MMD constant 3.14, not mathematical pi. Slerp loses that distinction,
+    // even for a full-weight grant from an IK link.
+    let q =
+        crate::mmd_math::mmd_quaternion_from_matrix(crate::mmd_math::mmd_rotation_matrix(rotation))
+            .to_array();
+    let w = q[3].clamp(-1.0, 1.0);
+    let mut angle = w.acos();
+    if w < 0.0 {
+        angle -= f32::from_bits(0x4048_f5c3);
+    }
+    let length = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+    if angle == 0.0 || length < f32::EPSILON {
+        return Quat::IDENTITY;
+    }
+    let scaled = angle * ratio;
+    let scale = scaled.sin() / length;
+    Quat::from_xyzw(q[0] * scale, q[1] * scale, q[2] * scale, scaled.cos())
 }
 
 #[cfg(test)]
@@ -75,6 +95,36 @@ mod tests {
                 0.0,
             ),
         );
+    }
+
+    #[test]
+    fn full_weight_grant_preserves_mmd_negative_w_angle_adjustment() {
+        // Original MMD 9.32 and MikuMikuStudio InheritRotQuat, for a source
+        // rotation of 4 radians around X. A full-weight grant is deliberately
+        // not the source rotation: the negative-w branch uses MMD's 3.14.
+        let source = Quat::from_rotation_x(4.0);
+        let expected = Quat::from_xyzw(-0.908_633_53, 0.0, 0.0, 0.417_594_4);
+        for rotation in [source, -source] {
+            for ratio in [1.0, -1.0] {
+                let actual = solve_append_transform(AppendPrimitiveInput {
+                    source_position_offset: Vec3A::ZERO,
+                    source_rotation: rotation,
+                    ratio,
+                    affect_rotation: true,
+                    affect_translation: false,
+                });
+                let expected = if ratio < 0.0 {
+                    expected.conjugate()
+                } else {
+                    expected
+                };
+                assert_vec3a_near(
+                    actual.rotation.mul_vec3a(Vec3A::Y),
+                    expected.mul_vec3a(Vec3A::Y),
+                );
+            }
+        }
+        assert!((source.mul_vec3a(Vec3A::Y) - expected.mul_vec3a(Vec3A::Y)).length() > 0.003);
     }
 
     #[test]

@@ -2,7 +2,8 @@ use glam::{Mat4, Quat, Vec3A};
 
 use crate::IkAngleLimit;
 use crate::mmd_math::{
-    mmd_axis_rotation, mmd_quaternion_from_matrix, mmd_quaternion_multiply, mmd_rotation_matrix,
+    mmd_atan2, mmd_axis_rotation, mmd_quaternion_from_matrix, mmd_quaternion_multiply,
+    mmd_rotation_matrix,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -818,17 +819,29 @@ fn solve_limited_axes_link_step_with_fixed_axis(
         glam::EulerRot::YXZ => {
             let a = (-m[9]).asin().clamp(-cap, cap);
             let c = a.cos();
-            [a, (m[8] / c).atan2(m[10] / c), (m[1] / c).atan2(m[5] / c)]
+            [
+                a,
+                mmd_atan2(m[8] / c, m[10] / c),
+                mmd_atan2(m[1] / c, m[5] / c),
+            ]
         }
         glam::EulerRot::ZYX => {
             let a = (-m[2]).asin().clamp(-cap, cap);
             let c = a.cos();
-            [(m[6] / c).atan2(m[10] / c), a, (m[1] / c).atan2(m[0] / c)]
+            [
+                mmd_atan2(m[6] / c, m[10] / c),
+                a,
+                mmd_atan2(m[1] / c, m[0] / c),
+            ]
         }
         _ => {
             let a = (-m[4]).asin().clamp(-cap, cap);
             let c = a.cos();
-            [(m[6] / c).atan2(m[5] / c), (m[8] / c).atan2(m[0] / c), a]
+            [
+                mmd_atan2(m[6] / c, m[5] / c),
+                mmd_atan2(m[8] / c, m[0] / c),
+                a,
+            ]
         }
     };
     for (i, v) in angles.iter_mut().enumerate() {

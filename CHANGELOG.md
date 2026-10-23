@@ -15,6 +15,8 @@
   correct rotation grants through chained sources and IK effector updates.
 - Reduce numerical drift in long IK chains by preserving intermediate rotation
   matrices and matching native scalar rotation and append-scaling operations.
+- Preserve Windows rounding during limited-axis Euler decomposition on Linux,
+  avoiding divergent CCD iterations without relaxing oracle tolerances.
 - Keep batch pose samples independent of worker count and requested frame order
   in the C ABI, WASM, and CLI diagnostics by resetting IK history per sample.
 

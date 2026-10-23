@@ -6,6 +6,15 @@
 
 use glam::{Mat4, Quat};
 
+/// Round the Euler decomposition angle after evaluating atan2 in f64.
+/// The Windows atan2f result for a traced CCD step rounds one f32 ULP above
+/// Linux atan2f. That difference changes subsequent limit reflections. Keep
+/// the inputs (including the preceding divisions) in f32, and only promote
+/// this operation to preserve that Windows rounding on both platforms.
+pub(crate) fn mmd_atan2(y: f32, x: f32) -> f32 {
+    (y as f64).atan2(x as f64) as f32
+}
+
 // D3DX axis rotations evaluate trigonometry in double precision before storing
 // f32 matrix entries. Using sinf/cosf changes the first YYB knee divergence by
 // one ULP and subsequently changes the CCD stopping iteration.
@@ -94,6 +103,15 @@ pub(crate) fn mmd_quaternion_from_matrix(matrix: Mat4) -> Quat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn euler_atan2_preserves_windows_limited_chain_rounding() {
+        // limited-n1, second CCD iteration, distal link: identical candidate
+        // matrices on Windows/Linux previously produced different Euler Z.
+        let y = f32::from_bits(0x3f68ab27);
+        let x = f32::from_bits(0x3ed58dde);
+        assert_eq!(mmd_atan2(y, x).to_bits(), 0x3f91fd6d);
+    }
 
     #[test]
     fn axis_rotation_preserves_d3dx_knee_recomposition_rounding() {

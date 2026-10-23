@@ -423,6 +423,14 @@
         }
       ]
     },
+    "mmd_runtime_instance_reset_ik_history": {
+      "return_type": "mmd_runtime_status_t",
+      "arguments": [
+        {
+          "type": "mmd_runtime_instance_t*"
+        }
+      ]
+    },
     "mmd_runtime_instance_evaluate_rest_pose": {
       "return_type": "bool",
       "arguments": [

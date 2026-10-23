@@ -4,7 +4,7 @@
 
 ### Added
 
-- Expose retained IK history reset in Rust, the C ABI, and WASM for callers
+- Expose retained IK history reset in Rust, the C ABI, Python, and WASM for callers
   that need independent pose samples or a fresh playback sequence.
 
 ### Fixed
@@ -15,6 +15,8 @@
   correct rotation grants through chained sources and IK effector updates.
 - Reduce numerical drift in long IK chains by preserving intermediate rotation
   matrices and matching native scalar rotation and append-scaling operations.
+- Keep batch pose samples independent of worker count and requested frame order
+  in the C ABI, WASM, and CLI diagnostics by resetting IK history per sample.
 
 ### Behavior and limitations
 

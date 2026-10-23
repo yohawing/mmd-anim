@@ -38,6 +38,12 @@ print(f"evaluated {len(world_matrices) // 16} bones")
 `RuntimeLibrary()` loads the release library from `target/release`. Set
 `MMD_RUNTIME_LIBRARY` to use a library from another location.
 
+Instance evaluation retains IK history for continuous playback. For independent
+frame samples, call `instance.reset_ik_history()` before each
+`instance.evaluate_clip_frame(clip, frame)`. Resetting history preserves the current
+pose and output matrices; the subsequent evaluation supplies fresh pose input.
+Do not reset between frames when reproducing continuous playback.
+
 ## Tests
 
 From the repository root:

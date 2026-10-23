@@ -887,6 +887,29 @@ fn import_runtime_batch_report_preserves_requested_frame_order() {
 }
 
 #[test]
+fn import_batch_frames_with_retained_ik_match_independent_samples() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format/fixtures");
+    let pmx = fixtures.join("pmx/ik_append_history.pmx");
+    let vmd = fixtures.join("vmd/simple_camera.vmd");
+    for spec in [
+        import::ImportFrameSpec::List(vec![30.0, 0.0, 30.0]),
+        import::parse_import_frame_range("0:30:10").unwrap(),
+    ] {
+        let batch = import::build_import_runtime_batch_report(&pmx, &vmd, spec, false).unwrap();
+        for actual in batch.per_frame {
+            let single = import::build_import_runtime_batch_report(
+                &pmx,
+                &vmd,
+                import::ImportFrameSpec::List(vec![actual.frame]),
+                false,
+            )
+            .unwrap();
+            assert_eq!(actual, single.per_frame[0]);
+        }
+    }
+}
+
+#[test]
 fn aggregate_import_ik_runtime_stats_sums_solver_metrics() {
     use import::ImportVerboseIkAggregate;
     use mmd_anim_runtime::IkSolverRuntimeStats;

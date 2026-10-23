@@ -723,6 +723,8 @@ pub(crate) fn build_import_runtime_batch_report(
     let mut context = build_pair_runtime_context(pmx_path, vmd_path)?;
     let mut per_frame = Vec::with_capacity(frame_spec.frames().len());
     for &frame in frame_spec.frames() {
+        // Diagnostic samples must not depend on the requested frame order.
+        context.runtime.reset_ik_history();
         let (eval, ik_stats) =
             evaluate_pair_frame_with_ik_stats(&mut context.runtime, &context.clip, frame, verbose);
         if verbose {

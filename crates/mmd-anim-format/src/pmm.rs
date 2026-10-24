@@ -3510,11 +3510,10 @@ fn parse_document_summary(
     cursor.read_i32()?;
     cursor.read_f32()?;
     cursor.skip(7)?;
+    // This is a model slot, not an index into the serialized model list.
+    // Empty/unoccupied selections do not prevent loading the scene tracks.
     let selected_model_index = cursor.read_u8()?;
     let model_count = cursor.read_u8()? as usize;
-    if model_count == 0 || selected_model_index as usize >= model_count {
-        return None;
-    }
 
     let mut models = Vec::with_capacity(model_count);
     for slot_index in 0..model_count {
@@ -3550,11 +3549,8 @@ fn parse_document_global_summary(
     cursor.read_i32()?;
     cursor.read_f32()?;
     cursor.skip(7)?;
-    let selected_model_index = cursor.read_u8()?;
+    cursor.read_u8()?; // selected model slot does not affect the stream layout
     let model_count = cursor.read_u8()? as usize;
-    if model_count == 0 || selected_model_index as usize >= model_count {
-        return None;
-    }
     for slot_index in 0..model_count {
         read_document_model_summary(&mut cursor, slot_index, references)?;
     }
@@ -9287,13 +9283,72 @@ mod tests {
     }
 
     #[test]
-    fn pmm_v2_document_summary_rejects_selected_model_index_out_of_range() {
-        let mut data = pmm_with_document_summary();
-        data[53] = 1;
+    fn pmm_v2_document_accepts_sparse_selected_model_slot() {
+        let mut data = pmm_with_document_global_summary();
+        data[53] = 5; // selected slot
+        data[55] = 5; // the single serialized model occupies slot 5
+        let parsed = parse_pmm_manifest(&data).unwrap();
+        let document = parsed.document_summary.as_ref().unwrap();
+        assert_eq!(document.selected_model_index, 5);
+        assert_eq!(document.model_count, 1);
+        assert_eq!(document.models[0].document_model_index, 5);
+        let global = parsed.document_global_summary.as_ref().unwrap();
+        assert_eq!(global.camera.keyframes, 1);
+        assert_eq!(global.accessories.accessory_count, 1);
+        let graph = parsed.project_graph.as_ref().unwrap();
+        assert_eq!(graph.models[0].document_model_index, 5);
+        assert_eq!(export_pmm_manifest(&parsed), data);
+    }
+
+    #[test]
+    fn pmm_v2_document_preserves_unoccupied_selected_slot() {
+        let mut data = pmm_with_document_global_summary();
+        data[53] = 5;
+        let parsed = parse_pmm_manifest(&data).unwrap();
+        let document = parsed.document_summary.as_ref().unwrap();
+        assert_eq!(document.selected_model_index, 5);
+        assert_eq!(document.models[0].document_model_index, 0);
+        assert!(parsed.project_graph.is_some());
+    }
+
+    #[test]
+    fn pmm_v2_document_loads_global_tracks_without_models() {
+        let mut data = pmm_with_document_global_summary();
+        let original = parse_pmm_manifest(&data).unwrap();
+        let global = original.document_global_summary.unwrap();
+        // Remove the one model's footer entry as well as its main record.
+        let footer = global.settings.model_selection_footer_offset.unwrap();
+        data.drain(footer + 1..global.settings.model_selection_footer_end_offset.unwrap());
+        data.drain(55..global.offset);
+        data[54] = 0;
 
         let parsed = parse_pmm_manifest(&data).unwrap();
+        let document = parsed.document_summary.as_ref().unwrap();
+        assert_eq!(document.model_count, 0);
+        assert!(document.models.is_empty());
+        assert_eq!(document.counts.models, 0);
+        let global = parsed.document_global_summary.as_ref().unwrap();
+        assert_eq!(global.offset, 55);
+        assert_eq!(global.offset_end, data.len());
+        assert_eq!(global.camera.keyframes, 1);
+        assert_eq!(global.light.keyframes, 1);
+        assert_eq!(global.accessories.accessory_count, 1);
+        assert_eq!(global.gravity.keyframes, 1);
+        assert_eq!(global.self_shadow.keyframes, 1);
+        assert_eq!(global.settings.current_frame_index, 12);
+        assert_eq!(global.settings.end_frame_index, 120);
+        let graph = parsed.project_graph.as_ref().unwrap();
+        assert!(graph.models.is_empty());
+        assert_eq!(graph.accessory_count, 1);
+        assert_eq!(export_pmm_manifest(&parsed), data);
 
-        assert!(parsed.document_summary.is_none());
+        // A valid empty model list must not turn a truncated global track into
+        // a complete document graph.
+        data.truncate(global.camera.offset + 1);
+        let truncated = parse_pmm_manifest(&data).unwrap();
+        assert!(truncated.document_summary.is_some());
+        assert!(truncated.document_global_summary.is_none());
+        assert!(truncated.project_graph.is_none());
     }
 
     #[test]

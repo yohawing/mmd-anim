@@ -1698,6 +1698,26 @@ fn decode_mmd_registered_bone_interpolation(
     (position, rotation)
 }
 
+// The MMD VMD loader treats LF as a terminator for bone/morph names only.
+// Keep imported names intact and apply this at lookup, not in the shared
+// normalizer (which also serves property IK names).
+fn vmd_registration_name(name: &[u8]) -> &[u8] {
+    let end = name
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .unwrap_or(name.len());
+    &name[..end]
+}
+
+// MMD registers records in file order, replacing an existing key at the same
+// frame. Apply this after name resolution so aliases share the same track.
+fn last_vmd_keys_per_frame<T>(mut keys: Vec<T>, frame: impl Fn(&T) -> u32) -> Vec<T> {
+    keys.reverse();
+    keys.sort_by_key(&frame); // stable: the last file record is now first
+    keys.dedup_by_key(|key| frame(key));
+    keys
+}
+
 pub fn build_clip_from_import(
     result: VmdImportResult,
     bone_name_to_index: &dyn Fn(&[u8]) -> Option<BoneIndex>,
@@ -1709,7 +1729,7 @@ pub fn build_clip_from_import(
     for kf in result.bone_keyframes {
         let bone_index = match &kf.bone_mode {
             VmdBoneImportMode::ByName(_name) => {
-                match bone_name_to_index(&kf.bone_name_normalized) {
+                match bone_name_to_index(vmd_registration_name(&kf.bone_name_normalized)) {
                     Some(idx) => idx,
                     None => continue,
                 }
@@ -1735,7 +1755,7 @@ pub fn build_clip_from_import(
         .into_iter()
         .map(|(bone_idx, kfs)| BoneAnimationBinding {
             bone: BoneIndex(bone_idx),
-            track: MovableBoneTrack::from_keyframes(kfs),
+            track: MovableBoneTrack::from_keyframes(last_vmd_keys_per_frame(kfs, |key| key.frame)),
         })
         .collect();
 
@@ -1744,7 +1764,7 @@ pub fn build_clip_from_import(
 
     for (morph_name, frame, weight) in result.morph_keyframes {
         let morph_name_normalized = normalize_vmd_name(&morph_name);
-        let morph_index = match morph_name_to_index(&morph_name_normalized) {
+        let morph_index = match morph_name_to_index(vmd_registration_name(&morph_name_normalized)) {
             Some(idx) => idx,
             None => continue,
         };
@@ -1758,7 +1778,7 @@ pub fn build_clip_from_import(
         .into_iter()
         .map(|(morph_idx, kfs)| MorphAnimationBinding {
             morph: MorphIndex(morph_idx),
-            track: MorphTrack::from_keyframes(kfs),
+            track: MorphTrack::from_keyframes(last_vmd_keys_per_frame(kfs, |key| key.frame)),
         })
         .collect();
 
@@ -1958,10 +1978,11 @@ fn build_pair_clip_with_registration_policy(
         std::collections::BTreeMap::new();
 
     for kf in &result.bone_keyframes {
-        let bone_index = match bone_name_to_index.get(&kf.bone_name_normalized) {
-            Some(idx) => *idx,
-            None => continue,
-        };
+        let bone_index =
+            match bone_name_to_index.get(vmd_registration_name(&kf.bone_name_normalized)) {
+                Some(idx) => *idx,
+                None => continue,
+            };
 
         bone_tracks_map
             .entry(bone_index.0)
@@ -1977,7 +1998,7 @@ fn build_pair_clip_with_registration_policy(
         .into_iter()
         .map(|(bone_idx, kfs)| BoneAnimationBinding {
             bone: BoneIndex(bone_idx),
-            track: MovableBoneTrack::from_keyframes(kfs),
+            track: MovableBoneTrack::from_keyframes(last_vmd_keys_per_frame(kfs, |key| key.frame)),
         })
         .collect();
 
@@ -1986,10 +2007,11 @@ fn build_pair_clip_with_registration_policy(
 
     for (morph_name, frame, weight) in &result.morph_keyframes {
         let morph_name_normalized = normalize_vmd_name(morph_name);
-        let morph_index = match morph_name_to_index.get(&morph_name_normalized) {
-            Some(idx) => *idx,
-            None => continue,
-        };
+        let morph_index =
+            match morph_name_to_index.get(vmd_registration_name(&morph_name_normalized)) {
+                Some(idx) => *idx,
+                None => continue,
+            };
         morph_tracks_map
             .entry(morph_index.0)
             .or_default()
@@ -2000,7 +2022,7 @@ fn build_pair_clip_with_registration_policy(
         .into_iter()
         .map(|(morph_idx, kfs)| MorphAnimationBinding {
             morph: MorphIndex(morph_idx),
-            track: MorphTrack::from_keyframes(kfs),
+            track: MorphTrack::from_keyframes(last_vmd_keys_per_frame(kfs, |key| key.frame)),
         })
         .collect();
 
@@ -3976,6 +3998,134 @@ mod tests {
         assert!(
             !clip.has_property_track(),
             "build_pair_clip_with_options(honor_property_ik: false) should omit property IK track"
+        );
+    }
+
+    #[test]
+    fn vmd_builders_use_last_duplicate_key_after_target_resolution() {
+        // Unsorted records, duplicates at both the first and last frames, and
+        // two names mapped to the same target exercise registration order.
+        let mut keys = Vec::new();
+        let mut morphs = Vec::new();
+        for (frame, value, name) in [
+            (10, 0.2, "alias"),
+            (0, 0.8, "target"),
+            (10, 1.0, "target"),
+            (0, 0.0, "alias"),
+        ] {
+            let mut key = fixed_axis_test_keyframe(Quat::from_rotation_y(value));
+            key.frame = frame;
+            key.position = Vec3A::splat(value);
+            key.bone_mode = VmdBoneImportMode::ByName(name.as_bytes().to_vec());
+            key.bone_name_normalized = name.as_bytes().to_vec();
+            keys.push(key);
+            morphs.push((name.as_bytes().to_vec(), frame, value));
+        }
+        let result = VmdImportResult {
+            bone_keyframes: keys,
+            morph_keyframes: morphs,
+            property_keyframes: Vec::new(),
+            property_ik_frames: Vec::new(),
+        };
+        let bones = std::collections::HashMap::from([
+            (b"target".to_vec(), BoneIndex(7)),
+            (b"alias".to_vec(), BoneIndex(7)),
+        ]);
+        let morphs = std::collections::HashMap::from([
+            (b"target".to_vec(), MorphIndex(0)),
+            (b"alias".to_vec(), MorphIndex(0)),
+        ]);
+        let ik = std::collections::HashMap::new();
+        let model = test_model(None);
+        let clips = [
+            build_clip_from_import(result.clone(), &|name| bones.get(name).copied(), &|name| {
+                morphs.get(name).copied()
+            }),
+            build_pair_clip(&result, &bones, &morphs, &ik, 0),
+            build_mmd_registered_pair_clip(&model, &result, &bones, &morphs, &ik, 0).unwrap(),
+        ];
+        for clip in clips {
+            assert_eq!(clip.bone_tracks()[0].track.keyframe_count(), 2);
+            assert_eq!(clip.morph_tracks()[0].track.keyframe_count(), 2);
+            for (frame, expected) in [(0.0, 0.0), (5.0, 0.5), (10.0, 1.0)] {
+                let sample = clip.sample_at(frame);
+                assert!((sample.bone_samples()[0].position.x - expected).abs() < 1e-5);
+                assert!((sample.morph_samples()[0].weight - expected).abs() < 1e-5);
+                assert_quat_near(
+                    sample.bone_samples()[0].rotation,
+                    Quat::from_rotation_y(expected),
+                );
+            }
+        }
+        // Registration does not rewrite raw imported records.
+        assert_eq!(result.bone_keyframes.len(), 4);
+        assert_eq!(result.bone_keyframes[0].position.x, 0.2);
+        assert_eq!(result.morph_keyframes.len(), 4);
+    }
+
+    #[test]
+    fn vmd_builders_terminate_bone_and_morph_names_at_lf_without_rewriting_data() {
+        let bytes = make_vmd_bytes(
+            "names",
+            &[
+                ("target", 0, [0.0; 3], [0.0, 0.0, 0.0, 1.0], [20; 64]),
+                ("target\nold", 10, [0.2; 3], [0.0, 0.0, 0.0, 1.0], [20; 64]),
+                ("target\nnew", 10, [1.0; 3], [0.0, 0.0, 0.0, 1.0], [20; 64]),
+            ],
+            &[
+                ("target", 0, 0.0),
+                ("target\nold", 10, 0.2),
+                ("target\nnew", 10, 1.0),
+            ],
+            &[(&[("target\nik", false)], 0, true)],
+        );
+        let parsed = parse_vmd_animation(&bytes).unwrap();
+        assert_eq!(parsed.bone_frames[1].bone_name_bytes, b"target\nold");
+        assert_eq!(parsed.morph_frames[2].morph_name_bytes, b"target\nnew");
+        assert_eq!(export_vmd_animation(&parsed), bytes);
+        let imported = import_vmd_motion(&bytes).unwrap();
+        assert_eq!(
+            imported.bone_keyframes[1].bone_name_normalized,
+            b"target\nold"
+        );
+        assert_eq!(imported.morph_keyframes[2].0, b"target\nnew");
+        let bones = std::collections::HashMap::from([
+            (b"target".to_vec(), BoneIndex(7)),
+            (b"target\nold".to_vec(), BoneIndex(6)),
+        ]);
+        let morphs = std::collections::HashMap::from([
+            (b"target".to_vec(), MorphIndex(0)),
+            (b"target\nold".to_vec(), MorphIndex(1)),
+        ]);
+        let ik = std::collections::HashMap::from([(b"target\nik".to_vec(), 0)]);
+        let model = test_model(None);
+        let clips = [
+            build_clip_from_import(
+                imported.clone(),
+                &|name| bones.get(name).copied(),
+                &|name| morphs.get(name).copied(),
+            ),
+            build_pair_clip(&imported, &bones, &morphs, &ik, 1),
+            build_mmd_registered_pair_clip(&model, &imported, &bones, &morphs, &ik, 1).unwrap(),
+        ];
+        for (index, clip) in clips.iter().enumerate() {
+            assert_eq!(clip.bone_track_count(), 1);
+            assert_eq!(clip.morph_track_count(), 1);
+            let sample = clip.sample_at(5.0);
+            assert_eq!(sample.bone_samples()[0].bone, BoneIndex(7));
+            assert_eq!(sample.morph_samples()[0].morph, MorphIndex(0));
+            assert!((sample.bone_samples()[0].position.x - 0.5).abs() < 1e-5);
+            assert!((sample.morph_samples()[0].weight - 0.5).abs() < 1e-5);
+            if index != 0 {
+                assert_eq!(
+                    clip.property_track().unwrap().sample(0.0),
+                    Some([0u8].as_slice())
+                );
+            }
+        }
+        assert_eq!(
+            imported.property_ik_frames[0].entries[0].name_normalized,
+            b"target\nik"
         );
     }
 

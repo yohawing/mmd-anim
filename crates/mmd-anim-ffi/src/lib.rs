@@ -726,11 +726,8 @@ pub struct MmdRuntimeFfiRigBone {
 
 /// Additive v2 per-bone local-axis descriptor for primitive IK-chain creation.
 ///
-/// Existing `MmdRuntimeFfiRigBone` layout is unchanged. Hosts that explicitly
-/// define custom angle-limit frames pass a parallel array of these into
-/// `mmd_runtime_ik_chain_create_v2`. PMX localAxis is manipulation metadata, not
-/// an MMD IK limit frame. For PMX parity pass null local axes (or use create),
-/// rather than copying PMX localAxis into this descriptor.
+/// Defines a host-specific angle-limit frame; PMX localAxis is manipulation
+/// metadata. For PMX parity, pass null local axes to create_v2 or use create.
 #[repr(C)]
 pub struct MmdRuntimeFfiRigBoneLocalAxisV2 {
     pub has_local_axis: u8,

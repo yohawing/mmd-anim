@@ -236,12 +236,8 @@ impl RuntimeInstance {
     /// Evaluate a complete retargeted input through both MMD phases, without
     /// physics. Inputs have the same pre-morph meaning as `apply_host_pose`.
     ///
-    /// Retains the instance's MMD IK accumulator and later-layer target history.
-    /// For an independent sample, call [`Self::reset_ik_history`] first, then
-    /// supply fresh input. For sequential MMD playback, retain that history.
-    /// A fresh input pose alone does not imply stateless evaluation. This also
-    /// applies to the split-phase [`Self::begin_host_rig_evaluation`] route;
-    /// reset before opening the context, not between its phases.
+    /// Retains IK history. For independent samples, call [`Self::reset_ik_history`]
+    /// before evaluation (before opening the context for split-phase evaluation).
     ///
     /// Start every frame from a fresh base pose (including helpers); never feed
     /// previous output matrices back as base transforms. Driven bones bypass

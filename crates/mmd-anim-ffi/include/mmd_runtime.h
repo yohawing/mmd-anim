@@ -654,8 +654,10 @@ typedef struct mmd_runtime_ffi_rig_bone {
 /* Additive v2 per-bone local-axis descriptor for primitive IK-chain creation.
    Existing mmd_runtime_ffi_rig_bone_t layout is intentionally unchanged.
    has_local_axis == 0 means unit XYZ angle-limit frames for that bone.
-   When has_local_axis is 1, local_axis_x_xyz / local_axis_z_xyz are the PMX
-   bone-local X/Z directions used only as the IK angle-limit evaluation frame. */
+   When has_local_axis is 1, local_axis_x_xyz / local_axis_z_xyz define an
+   explicit HOST-DEFINED angle-limit frame. PMX localAxis is manipulation
+   metadata, NOT an MMD IK limit frame. For PMX parity use create or pass NULL
+   local_axes to create_v2; do not copy PMX localAxis into this descriptor. */
 typedef struct mmd_runtime_ffi_rig_bone_local_axis_v2 {
     uint8_t has_local_axis; /* must be 0 or 1 */
     float local_axis_x_xyz[3];
@@ -1207,11 +1209,19 @@ mmd_runtime_ik_chain_t* mmd_runtime_ik_chain_create_v2(
 void mmd_runtime_ik_chain_free(
     mmd_runtime_ik_chain_t* chain);
 
-/* Solves an IK-chain primitive.
+/* Solves a stateless IK-chain primitive (not a model evaluator).
+   The caller supplies a resolved local pose and a fixed world-space goal.
+   This solver does not evaluate Append, transform layers, physics phases or
+   retained MMD IK history. initial-effector solve does not add these features.
+   For coupled PMX rigs use model + instance + apply_host_pose/evaluate, or
+   evaluate_host_rig_pose with declared controller goals. With no driven bones
+   the latter retains ordinary model evaluation, including Append inside CCD.
+   Declare driven bones only when the host deliberately owns their transforms.
    chain must be a live handle. parent_world_matrix may be NULL, which means
    identity; when provided it points to one column-major f32[16] matrix.
-   local_position_offsets_xyz and local_rotations_xyzw are required arrays with
-   bone_count * 3 and bone_count * 4 f32 values. goal_position_xyz is a required
+   local_position_offsets_xyz may be NULL for zero offsets; otherwise it has
+   bone_count * 3 f32 values. local_rotations_xyzw is required, bone_count * 4
+   f32 values. goal_position_xyz is a required
    xyz vector in MMD coordinates. max_iterations_cap == 0 means no cap.
    out_link_rotations_xyzw receives link_count xyzw quaternions and
    out_link_rotation_f32_len must be at least link_count * 4. out_stats may be
@@ -1261,7 +1271,13 @@ mmd_runtime_append_solver_t* mmd_runtime_append_solver_create(
 void mmd_runtime_append_solver_free(
     mmd_runtime_append_solver_t* solver);
 
-/* Solves an append-transform primitive.
+/* Solves an append-transform primitive on an already-resolved source.
+   It scales one supplied rotation/translation; it does not select a PMX local
+   versus non-local source, traverse dependencies or schedule reevaluation.
+   For non-local grants from another grant source, MMD rotation uses source
+   local rotation combined with its grant; translation uses its grant offset,
+   not the sum of local and grant offsets. Use model evaluation for coupled
+   Append/IK so the source is refreshed at the correct link/layer/phase.
    solver must be a live handle. source_position_offset_xyz and
    source_rotation_xyzw are required caller-owned inputs. out_position_offset_xyz
    and out_rotation_xyzw are required caller-owned outputs. The output rotation
@@ -1636,6 +1652,11 @@ void mmd_runtime_host_rig_free(mmd_runtime_host_rig_t* rig);
    tolerance must be finite and nonnegative; cap=0 leaves the MMD-corrected iteration budget uncapped.
    On validation failure, pose and output caches remain unchanged.
    Read outputs with existing instance world/skinning/morph APIs. */
+/* Host-rig evaluation retains the instance's MMD IK history. Fresh pose
+   arrays alone do not clear it. For independent samples or seek-to-fresh-pose,
+   call mmd_runtime_instance_reset_ik_history before evaluation; for sequential
+   MMD playback retain history. Reset does not evaluate or change cached output.
+   Runtime IK reset does not reset an external physics engine. */
 mmd_runtime_status_t mmd_runtime_instance_evaluate_host_rig_pose(
     mmd_runtime_instance_t* instance, mmd_runtime_host_rig_t* rig,
     const mmd_runtime_ffi_host_pose_view_t* view,

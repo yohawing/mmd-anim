@@ -1,17 +1,5 @@
-//! Stateless single-chain CCD on a host-resolved local pose.
-//!
-//! This primitive has no Append graph, transform layers, physics phases or
-//! retained MMD IK history. An initial effector override only supplies the first
-//! world-space position; it cannot reproduce Append updates inside CCD or an
-//! earlier evaluation's accumulator. Chaining primitives is not a general PMX
-//! evaluator. For coupled PMX rigs use [`crate::RuntimeInstance`] with the model,
-//! or [`crate::HostRigDefinition`] and `evaluate_host_rig_pose`. An empty driven
-//! set preserves normal model evaluation; driven bones intentionally override it.
-//! Use [`crate::RuntimeInstance::reset_ik_history`] before independent samples,
-//! and retain history for sequential MMD playback.
-//!
-//! PMX localAxis is manipulation metadata. Keep the default angle-limit frame
-//! for PMX parity; `new_with_local_axis_bases` is an explicit host-defined override.
+//! Stateless single-chain CCD on a host-resolved pose. For Append dependencies,
+//! transform layers and retained IK history, use [`crate::RuntimeInstance`].
 
 use glam::{Mat4, Quat, Vec3A};
 

@@ -726,9 +726,8 @@ pub struct MmdRuntimeFfiRigBone {
 
 /// Additive v2 per-bone local-axis descriptor for primitive IK-chain creation.
 ///
-/// Existing `MmdRuntimeFfiRigBone` layout is unchanged. Hosts that need PMX
-/// localAxis angle-limit frames pass a parallel array of these into
-/// `mmd_runtime_ik_chain_create_v2`.
+/// Defines a host-specific angle-limit frame; PMX localAxis is manipulation
+/// metadata. For PMX parity, pass null local axes to create_v2 or use create.
 #[repr(C)]
 pub struct MmdRuntimeFfiRigBoneLocalAxisV2 {
     pub has_local_axis: u8,
@@ -1372,6 +1371,44 @@ pub unsafe extern "C" fn mmd_runtime_ik_chain_solve(
     out_link_rotation_f32_len: usize,
     out_stats: *mut MmdRuntimeFfiIkSolveStats,
 ) -> bool {
+    unsafe {
+        mmd_runtime_ik_chain_solve_with_initial_effector(
+            chain,
+            parent_world_matrix,
+            local_position_offsets_xyz,
+            local_rotations_xyzw,
+            goal_position_xyz,
+            tolerance,
+            max_iterations_cap,
+            out_link_rotations_xyzw,
+            out_link_rotation_f32_len,
+            out_stats,
+            std::ptr::null(),
+        )
+    }
+}
+
+/// Additive solve entry point with an optional initial world-space effector.
+///
+/// # Safety
+/// Same pointer requirements as `mmd_runtime_ik_chain_solve`. The optional
+/// initial position must be null or readable, aligned, initialized `f32[3]`
+/// for this call. No pointers are retained. The chain must be exclusively
+/// accessible, and output buffers must not overlap each other or the handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmd_runtime_ik_chain_solve_with_initial_effector(
+    chain: *mut MmdRuntimeIkChain,
+    parent_world_matrix: *const f32,
+    local_position_offsets_xyz: *const f32,
+    local_rotations_xyzw: *const f32,
+    goal_position_xyz: *const f32,
+    tolerance: f32,
+    max_iterations_cap: u32,
+    out_link_rotations_xyzw: *mut f32,
+    out_link_rotation_f32_len: usize,
+    out_stats: *mut MmdRuntimeFfiIkSolveStats,
+    initial_effector_world_position_xyz: *const f32,
+) -> bool {
     ffi_guard(false, || {
         if chain.is_null()
             || local_rotations_xyzw.is_null()
@@ -1443,14 +1480,30 @@ pub unsafe extern "C" fn mmd_runtime_ik_chain_solve(
             Some(max_iterations_cap)
         };
 
-        let output = chain.solver.solve(IkChainPoseInput {
-            parent_world_matrix,
-            local_position_offsets: &position_offsets,
-            local_rotations: &rotations,
-            goal_position: glam::Vec3A::new(goal[0], goal[1], goal[2]),
-            tolerance,
-            max_iterations_cap,
-        });
+        let initial_effector = if initial_effector_world_position_xyz.is_null() {
+            None
+        } else {
+            if !initial_effector_world_position_xyz.is_aligned() {
+                return false;
+            }
+            // SAFETY: the caller supplies three readable initialized floats.
+            let raw = unsafe { slice::from_raw_parts(initial_effector_world_position_xyz, 3) };
+            if !all_finite(raw) {
+                return false;
+            }
+            Some(glam::Vec3A::new(raw[0], raw[1], raw[2]))
+        };
+        let output = chain.solver.solve_with_initial_effector(
+            IkChainPoseInput {
+                parent_world_matrix,
+                local_position_offsets: &position_offsets,
+                local_rotations: &rotations,
+                goal_position: glam::Vec3A::new(goal[0], goal[1], goal[2]),
+                tolerance,
+                max_iterations_cap,
+            },
+            initial_effector,
+        );
         if output.solved_link_rotations.len() != chain.link_count {
             return false;
         }

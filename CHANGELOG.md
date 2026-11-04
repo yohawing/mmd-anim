@@ -1,6 +1,31 @@
 # Changelog
 
-## 0.5.3 - Unreleased
+## 0.5.4 - 2026-11-05
+
+### Added
+
+- Add an optional initial world-space effector position to standalone IK solves
+  in Rust and the C ABI, preserving existing entry points and default behavior.
+  The override participates in initial prechecks and is replaced by ordinary FK
+  after the first link update.
+
+### Fixed
+
+- Parse sparse PMM model slots and model-free scenes, and resolve the selected
+  PMM model by its persistent slot in CLI comparisons.
+- Apply last-record precedence to duplicate VMD keys and terminate bone/morph
+  lookup names at LF to match MMD loading behavior.
+- Clarify that PMX localAxis is manipulation metadata, not an IK limit frame.
+  Document standalone primitive composition limits and model-bound IK reset
+  semantics, with regression coverage for shared links, Append and seek.
+
+### Compatibility
+
+- Existing IK APIs and ABI layouts are unchanged. Coupled Append/IK and retained
+  MMD evaluation history still require model-bound runtime evaluation; the
+  initial effector override does not turn a standalone chain into a PMX evaluator.
+
+## 0.5.3 - 2026-10-23
 
 ### Added
 

@@ -654,8 +654,8 @@ typedef struct mmd_runtime_ffi_rig_bone {
 /* Additive v2 per-bone local-axis descriptor for primitive IK-chain creation.
    Existing mmd_runtime_ffi_rig_bone_t layout is intentionally unchanged.
    has_local_axis == 0 means unit XYZ angle-limit frames for that bone.
-   When has_local_axis is 1, local_axis_x_xyz / local_axis_z_xyz are the PMX
-   bone-local X/Z directions used only as the IK angle-limit evaluation frame. */
+   The axes define a host-specific limit frame. PMX localAxis is manipulation
+   metadata; for PMX parity use create or pass NULL local_axes to create_v2. */
 typedef struct mmd_runtime_ffi_rig_bone_local_axis_v2 {
     uint8_t has_local_axis; /* must be 0 or 1 */
     float local_axis_x_xyz[3];
@@ -1207,11 +1207,14 @@ mmd_runtime_ik_chain_t* mmd_runtime_ik_chain_create_v2(
 void mmd_runtime_ik_chain_free(
     mmd_runtime_ik_chain_t* chain);
 
-/* Solves an IK-chain primitive.
+/* Solves a stateless IK chain on a resolved local pose and fixed world goal.
+   For coupled Append/IK, transform layers or retained IK history, use model-bound
+   instance evaluation (apply_host_pose + evaluate, or evaluate_host_rig_pose).
    chain must be a live handle. parent_world_matrix may be NULL, which means
    identity; when provided it points to one column-major f32[16] matrix.
-   local_position_offsets_xyz and local_rotations_xyzw are required arrays with
-   bone_count * 3 and bone_count * 4 f32 values. goal_position_xyz is a required
+   local_position_offsets_xyz may be NULL for zero offsets; otherwise it has
+   bone_count * 3 f32 values. local_rotations_xyzw is required, bone_count * 4
+   f32 values. goal_position_xyz is a required
    xyz vector in MMD coordinates. max_iterations_cap == 0 means no cap.
    out_link_rotations_xyzw receives link_count xyzw quaternions and
    out_link_rotation_f32_len must be at least link_count * 4. out_stats may be
@@ -1229,6 +1232,29 @@ bool mmd_runtime_ik_chain_solve(
     size_t                               out_link_rotation_f32_len,
     mmd_runtime_ffi_ik_solve_stats_t*    out_stats);
 
+/* Same contract as solve, with an optional initial effector world position.
+   NULL preserves legacy behavior. Otherwise supply aligned, readable,
+   initialized float[3] in the same MMD world coordinates as the goal.
+   Non-finite values return false without writing outputs or solving.
+   The position affects initial tolerance/direction prechecks and link visits
+   until the first link update; subsequent visits use normal FK. Skipped links
+   retain the initial position. No state is retained between calls.
+   Stats report the last CCD distance, including the initial position on an
+   early precheck exit. The chain requires exclusive access during the call;
+   writable outputs must not overlap each other or the handle. */
+bool mmd_runtime_ik_chain_solve_with_initial_effector(
+    mmd_runtime_ik_chain_t*              chain,
+    const float*                         parent_world_matrix,
+    const float*                         local_position_offsets_xyz,
+    const float*                         local_rotations_xyzw,
+    const float*                         goal_position_xyz,
+    float                                tolerance,
+    uint32_t                             max_iterations_cap,
+    float*                               out_link_rotations_xyzw,
+    size_t                               out_link_rotation_f32_len,
+    mmd_runtime_ffi_ik_solve_stats_t*    out_stats,
+    const float*                         initial_effector_world_position_xyz);
+
 /* Creates an owned append-transform primitive.
    config is borrowed for the call and must not be NULL. ratio and channel flags
    are copied into the handle. Returns NULL on invalid or non-finite input. */
@@ -1238,7 +1264,8 @@ mmd_runtime_append_solver_t* mmd_runtime_append_solver_create(
 void mmd_runtime_append_solver_free(
     mmd_runtime_append_solver_t* solver);
 
-/* Solves an append-transform primitive.
+/* Scales a resolved Append source. The caller selects the source; use model-bound
+   evaluation for dependency traversal and reevaluation during IK.
    solver must be a live handle. source_position_offset_xyz and
    source_rotation_xyzw are required caller-owned inputs. out_position_offset_xyz
    and out_rotation_xyzw are required caller-owned outputs. The output rotation
@@ -1613,6 +1640,8 @@ void mmd_runtime_host_rig_free(mmd_runtime_host_rig_t* rig);
    tolerance must be finite and nonnegative; cap=0 leaves the MMD-corrected iteration budget uncapped.
    On validation failure, pose and output caches remain unchanged.
    Read outputs with existing instance world/skinning/morph APIs. */
+/* Retains IK history. For independent samples, call
+   mmd_runtime_instance_reset_ik_history before evaluation. */
 mmd_runtime_status_t mmd_runtime_instance_evaluate_host_rig_pose(
     mmd_runtime_instance_t* instance, mmd_runtime_host_rig_t* rig,
     const mmd_runtime_ffi_host_pose_view_t* view,

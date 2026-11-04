@@ -1,3 +1,6 @@
+//! Scales a host-resolved Append source. Dependency selection and reevaluation
+//! during IK are handled by [`crate::RuntimeInstance`], not this primitive.
+
 use glam::{Quat, Vec3A};
 
 #[derive(Clone, Copy, Debug, PartialEq)]

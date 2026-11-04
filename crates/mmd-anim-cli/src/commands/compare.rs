@@ -1233,7 +1233,8 @@ fn select_pmm_document_model<'a>(
             }),
         None => document
             .models
-            .get(document.selected_model_index as usize)
+            .iter()
+            .find(|model| model.document_model_index == document.selected_model_index)
             .ok_or_else(|| {
                 format!(
                     "PMM selected model slot {} does not exist",
@@ -3488,6 +3489,7 @@ mod tests {
             .expect("selection fixture must contain a document summary");
 
         document.models[0].document_model_index = 7;
+        document.selected_model_index = 7;
         let mut second = document.models[0].clone();
         second.slot_index = 1;
         second.document_model_index = 23;
@@ -3498,12 +3500,31 @@ mod tests {
 
     #[test]
     fn pmm_selection_without_override_uses_selected_slot() {
-        let document = selection_test_document();
+        let mut document = selection_test_document();
         let case = serde_json::json!({ "compare": { "motionSource": "pmm-document" } });
 
         let selected = select_pmm_document_model(&case, &document).unwrap();
         assert_eq!(selected.slot_index, 0);
         assert_eq!(selected.document_model_index, 7);
+
+        document.selected_model_index = 23;
+        let selected = select_pmm_document_model(&case, &document).unwrap();
+        assert_eq!(selected.slot_index, 1);
+        assert_eq!(selected.document_model_index, 23);
+    }
+
+    #[test]
+    fn pmm_selection_rejects_unoccupied_slot_and_empty_model_list() {
+        let mut document = selection_test_document();
+        let case = serde_json::json!({ "compare": { "motionSource": "pmm-document" } });
+        document.selected_model_index = 1; // valid list index, but not a stored slot
+        assert_eq!(
+            select_pmm_document_model(&case, &document).unwrap_err(),
+            "PMM selected model slot 1 does not exist"
+        );
+        document.models.clear();
+        document.model_count = 0;
+        assert!(select_pmm_document_model(&case, &document).is_err());
     }
 
     #[test]

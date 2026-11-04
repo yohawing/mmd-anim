@@ -236,6 +236,9 @@ impl RuntimeInstance {
     /// Evaluate a complete retargeted input through both MMD phases, without
     /// physics. Inputs have the same pre-morph meaning as `apply_host_pose`.
     ///
+    /// Retains IK history. For independent samples, call [`Self::reset_ik_history`]
+    /// before evaluation (before opening the context for split-phase evaluation).
+    ///
     /// Start every frame from a fresh base pose (including helpers); never feed
     /// previous output matrices back as base transforms. Driven bones bypass
     /// Append and fixed-axis projection. Their input local deltas, including

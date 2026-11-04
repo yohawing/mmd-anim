@@ -83,7 +83,7 @@ Format support overview. "Loading" means parsing a file into structured data.
 
 ```toml
 [dependencies]
-mmd-anim = "0.5.3"
+mmd-anim = "0.5.4"
 ```
 
 ## Native Hosts (C ABI)
@@ -276,3 +276,4 @@ This project was developed with reference to:
 - [Babylon-MMD](https://github.com/noname0310/babylon-mmd)
 - [saba](https://github.com/benikabocha/saba)
 - [nanoem](https://github.com/hkrn/nanoem)
+- [MikuDanceStudio](https://github.com/Loki-0228/MikuDanceStudio)

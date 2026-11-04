@@ -1,3 +1,12 @@
+//! Scales a resolved Append source; does not evaluate a PMX dependency graph.
+//!
+//! The caller selects the source according to PMX local/non-local semantics and
+//! evaluation order. A non-local grant whose source has a grant uses the source's
+//! local-plus-grant rotation but its grant translation offset (not local+grant).
+//! During coupled IK, sources may change after each link update. Resolve such
+//! rigs with [`crate::RuntimeInstance`] rather than freezing Append inputs once
+//! before a call to [`crate::IkChainSolver`].
+
 use glam::{Quat, Vec3A};
 
 #[derive(Clone, Copy, Debug, PartialEq)]

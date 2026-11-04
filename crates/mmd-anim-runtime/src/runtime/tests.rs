@@ -3972,3 +3972,44 @@ fn cached_ik_rotation_matrix_preserves_enforced_fixed_axis() {
         Vec3A::Y,
     );
 }
+
+#[test]
+fn host_rig_preserves_append_ik_history_and_reset_matches_fresh_sample() {
+    let mut full = append_history_runtime(Some(BoneIndex(1)), 1.0, 1);
+    let model = full.model.clone();
+    let rig =
+        crate::HostRigDefinition::new(model.clone(), &[], &[BoneIndex(3), BoneIndex(7)]).unwrap();
+    let mut host = RuntimeInstance::new(model.clone());
+    let positions = vec![Vec3A::ZERO; model.bone_count()];
+    let rotations = vec![Quat::IDENTITY; model.bone_count()];
+    let scales = vec![Vec3A::ONE; model.bone_count()];
+    let input = crate::HostPoseView {
+        local_position_offsets: &positions,
+        local_rotations: &rotations,
+        local_scales: &scales,
+        morph_weights: &[],
+        ik_enabled: &[1, 1],
+    };
+    let options = crate::IkSolveOptions::default();
+    let mut first = None;
+    for tick in 0..3 {
+        full.apply_host_pose(&input).unwrap();
+        full.evaluate_current_pose_with_ik_options(options);
+        // Same scoped route used by an external physics bridge (no writeback).
+        let mut evaluation = host
+            .begin_host_rig_evaluation(&rig, &input, options)
+            .unwrap();
+        evaluation.evaluate_before_physics_with_ik_options(options);
+        evaluation.evaluate_after_physics_with_ik_options(options);
+        drop(evaluation);
+        assert_eq!(host.world_matrices(), full.world_matrices());
+        if tick == 0 {
+            first = Some(host.world_matrices().to_vec());
+        } else {
+            assert!(!host.world_matrices()[5].abs_diff_eq(first.as_ref().unwrap()[5], 1e-4));
+        }
+    }
+    host.reset_ik_history();
+    host.evaluate_host_rig_pose(&rig, &input, options).unwrap();
+    assert_eq!(host.world_matrices(), first.unwrap());
+}

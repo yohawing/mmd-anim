@@ -94,6 +94,25 @@ impl IkChainSolver {
     }
 
     pub fn solve(&mut self, input: IkChainPoseInput<'_>) -> IkChainSolveOutput {
+        self.solve_with_initial_effector(input, None)
+    }
+
+    /// Solves with an optional initial effector position in world/MMD coordinates.
+    /// This position replaces only the initial FK effector position, including
+    /// tolerance and direction prechecks. Skipped links retain it; the first
+    /// link update restores normal FK for all subsequent visits. It is not
+    /// retained across calls and does not change local offsets or the goal.
+    /// Diagnostics describe the last CCD distance (which may be the initial
+    /// override when a precheck exits without a link update).
+    ///
+    /// # Panics
+    /// Panics if the supplied position is non-finite.
+    pub fn solve_with_initial_effector(
+        &mut self,
+        input: IkChainPoseInput<'_>,
+        initial_effector_world_position: Option<Vec3A>,
+    ) -> IkChainSolveOutput {
+        assert!(initial_effector_world_position.is_none_or(|position| position.is_finite()));
         let tolerance = input.tolerance.max(0.0);
         let iteration_count = effective_iteration_count(
             self.definition.iteration_count,
@@ -121,6 +140,10 @@ impl IkChainSolver {
 
         self.apply_link_rotations();
         self.update_world_matrices(input);
+
+        if let Some(position) = initial_effector_world_position {
+            self.world_matrices[self.definition.target_slot].w_axis = position.extend(1.0);
+        }
 
         let mut final_distance = {
             let eff_pos = translation(self.world_matrices[self.definition.target_slot]);
@@ -978,6 +1001,147 @@ mod tests {
             delta[0] < 1.0e-5 && delta[1] < 1.0e-5 && delta[2] < 1.0e-5 && delta[3] < 1.0e-5,
             "actual={actual:?} expected={expected:?} delta={delta:?}"
         );
+    }
+
+    #[test]
+    fn initial_effector_none_is_legacy_and_does_not_persist() {
+        let mut solver = IkChainSolver::new(one_link_definition(None));
+        let input = IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 2],
+            local_rotations: &[Quat::IDENTITY; 2],
+            goal_position: Vec3A::Y,
+            tolerance: 1e-4,
+            max_iterations_cap: Some(1),
+        };
+        let legacy = solver.solve(input);
+        assert_eq!(legacy, solver.solve_with_initial_effector(input, None));
+        let precheck = solver.solve_with_initial_effector(input, Some(Vec3A::Y));
+        assert_eq!(precheck.link_steps, 0);
+        assert_eq!(precheck.executed_iterations, 0);
+        assert_eq!(precheck.final_distance, 0.0);
+        assert_eq!(precheck.solved_link_rotations, vec![Quat::IDENTITY]);
+        assert_eq!(legacy, solver.solve(input));
+        // Direction precheck also observes the supplied position.
+        let aligned = solver.solve_with_initial_effector(input, Some(Vec3A::Y * 2.0));
+        assert_eq!(aligned.link_steps, 0);
+        assert_eq!(aligned.final_distance, 1.0);
+    }
+
+    #[test]
+    fn initial_effector_refreshes_between_links() {
+        let definition = IkChainDefinition {
+            parent_slots: vec![None, Some(0), Some(1)],
+            rest_positions: vec![Vec3A::ZERO, Vec3A::X, Vec3A::X],
+            fixed_axes: vec![None; 3],
+            target_slot: 2,
+            links: vec![
+                IkChainLinkDefinition {
+                    bone_slot: 1,
+                    angle_limit: None,
+                },
+                IkChainLinkDefinition {
+                    bone_slot: 0,
+                    angle_limit: None,
+                },
+            ],
+            iteration_count: 1,
+            limit_angle: 0.0,
+        };
+        let input = IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 3],
+            local_rotations: &[Quat::IDENTITY; 3],
+            goal_position: Vec3A::new(1.0, 1.0, 0.0),
+            tolerance: 1e-4,
+            max_iterations_cap: Some(1),
+        };
+        // The seed points down from the distal link, so its first step is
+        // 180 degrees. Actual FK then lies at the root, skipping link 2.
+        let mut solver = IkChainSolver::new(definition);
+        let out = solver.solve_with_initial_effector(input, Some(Vec3A::new(1.0, -1.0, 0.0)));
+        assert_eq!(out.link_steps, 1);
+        assert_vec3a_near(out.solved_link_rotations[0].mul_vec3a(Vec3A::X), -Vec3A::X);
+        assert_quat_near(out.solved_link_rotations[1], Quat::IDENTITY);
+        assert!((out.final_distance - 2.0_f32.sqrt()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn initial_effector_matches_chained_runtime_with_rotated_parent() {
+        let model = Arc::new(
+            ModelArena::new_with_ik(
+                vec![
+                    BoneInit::new(None, Vec3A::ZERO),
+                    BoneInit::new(Some(BoneIndex(0)), Vec3A::ZERO),
+                    BoneInit::new(Some(BoneIndex(1)), Vec3A::X),
+                    BoneInit::new(Some(BoneIndex(2)), Vec3A::X),
+                    BoneInit::new(None, Vec3A::new(0.5, 0.8, 0.3)),
+                    BoneInit::new(None, Vec3A::new(1.1, 0.4, 0.7)),
+                ],
+                vec![
+                    IkSolverInit {
+                        ik_bone: BoneIndex(4),
+                        target_bone: BoneIndex(2),
+                        links: vec![IkLinkInit::new(BoneIndex(1))],
+                        iteration_count: 1,
+                        limit_angle: 0.0,
+                    },
+                    IkSolverInit {
+                        ik_bone: BoneIndex(5),
+                        target_bone: BoneIndex(3),
+                        links: vec![IkLinkInit::new(BoneIndex(2))],
+                        iteration_count: 1,
+                        limit_angle: 0.0,
+                    },
+                ],
+            )
+            .unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(model);
+        let parent_rotation = Quat::from_rotation_y(0.4);
+        runtime
+            .pose_mut()
+            .set_local_rotation(BoneIndex(0), parent_rotation);
+        runtime
+            .pose_mut()
+            .set_local_rotation(BoneIndex(1), Quat::from_rotation_z(0.3));
+        runtime.evaluate_current_pose_without_ik();
+        let seed = translation(runtime.pose().world_matrices()[3]);
+        runtime.evaluate_current_pose_with_ik_options(crate::IkSolveOptions {
+            tolerance: 1e-4,
+            max_iterations_cap: Some(1),
+        });
+        let mut solver = IkChainSolver::new(IkChainDefinition {
+            parent_slots: vec![None, Some(0), Some(1), Some(2)],
+            rest_positions: vec![Vec3A::ZERO, Vec3A::ZERO, Vec3A::X, Vec3A::X],
+            fixed_axes: vec![None; 4],
+            target_slot: 3,
+            links: vec![IkChainLinkDefinition {
+                bone_slot: 2,
+                angle_limit: None,
+            }],
+            iteration_count: 1,
+            limit_angle: 0.0,
+        });
+        let rotations = [
+            parent_rotation,
+            runtime.pose().local_rotation(BoneIndex(1)),
+            Quat::IDENTITY,
+            Quat::IDENTITY,
+        ];
+        let input = IkChainPoseInput {
+            parent_world_matrix: None,
+            local_position_offsets: &[Vec3A::ZERO; 4],
+            local_rotations: &rotations,
+            goal_position: Vec3A::new(1.1, 0.4, 0.7),
+            tolerance: 1e-4,
+            max_iterations_cap: Some(1),
+        };
+        let legacy = solver.solve(input);
+        let seeded = solver.solve_with_initial_effector(input, Some(seed));
+        let expected = runtime.pose().local_rotation(BoneIndex(2));
+        assert_quat_near(seeded.solved_link_rotations[0], expected);
+        assert!(legacy.solved_link_rotations[0].dot(expected).abs() < 0.999);
     }
 
     #[test]

@@ -1229,6 +1229,29 @@ bool mmd_runtime_ik_chain_solve(
     size_t                               out_link_rotation_f32_len,
     mmd_runtime_ffi_ik_solve_stats_t*    out_stats);
 
+/* Same contract as solve, with an optional initial effector world position.
+   NULL preserves legacy behavior. Otherwise supply aligned, readable,
+   initialized float[3] in the same MMD world coordinates as the goal.
+   Non-finite values return false without writing outputs or solving.
+   The position affects initial tolerance/direction prechecks and link visits
+   until the first link update; subsequent visits use normal FK. Skipped links
+   retain the initial position. No state is retained between calls.
+   Stats report the last CCD distance, including the initial position on an
+   early precheck exit. The chain requires exclusive access during the call;
+   writable outputs must not overlap each other or the handle. */
+bool mmd_runtime_ik_chain_solve_with_initial_effector(
+    mmd_runtime_ik_chain_t*              chain,
+    const float*                         parent_world_matrix,
+    const float*                         local_position_offsets_xyz,
+    const float*                         local_rotations_xyzw,
+    const float*                         goal_position_xyz,
+    float                                tolerance,
+    uint32_t                             max_iterations_cap,
+    float*                               out_link_rotations_xyzw,
+    size_t                               out_link_rotation_f32_len,
+    mmd_runtime_ffi_ik_solve_stats_t*    out_stats,
+    const float*                         initial_effector_world_position_xyz);
+
 /* Creates an owned append-transform primitive.
    config is borrowed for the call and must not be NULL. ratio and channel flags
    are copied into the handle. Returns NULL on invalid or non-finite input. */

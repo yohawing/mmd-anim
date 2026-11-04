@@ -11115,3 +11115,142 @@ fn batch_samples_clear_ik_history_independently_of_workers() {
         mmd_runtime_model_free(model);
     }
 }
+
+#[test]
+fn ik_initial_effector_optional_and_invalid_inputs() {
+    let chain = simple_ik_chain();
+    assert!(!chain.is_null());
+    let rotations = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let goal = [0.0, 1.0, 0.0];
+    let mut legacy = [0.0; 4];
+    let mut out = [99.0; 4];
+    let mut stats = MmdRuntimeFfiIkSolveStats {
+        executed_iterations: 99,
+        link_steps: 99,
+        final_distance: 99.0,
+        break_reason: 99,
+    };
+    unsafe {
+        assert!(mmd_runtime_ik_chain_solve(
+            chain,
+            ptr::null(),
+            ptr::null(),
+            rotations.as_ptr(),
+            goal.as_ptr(),
+            1e-4,
+            1,
+            legacy.as_mut_ptr(),
+            4,
+            ptr::null_mut()
+        ));
+        assert!(mmd_runtime_ik_chain_solve_with_initial_effector(
+            chain,
+            ptr::null(),
+            ptr::null(),
+            rotations.as_ptr(),
+            goal.as_ptr(),
+            1e-4,
+            1,
+            out.as_mut_ptr(),
+            4,
+            &mut stats,
+            ptr::null()
+        ));
+        assert_eq!(legacy, out);
+        assert!(mmd_runtime_ik_chain_solve_with_initial_effector(
+            chain,
+            ptr::null(),
+            ptr::null(),
+            rotations.as_ptr(),
+            goal.as_ptr(),
+            1e-4,
+            1,
+            out.as_mut_ptr(),
+            4,
+            &mut stats,
+            goal.as_ptr()
+        ));
+        assert_eq!(out, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(stats.link_steps, 0);
+        assert_eq!(stats.final_distance, 0.0);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for axis in 0..3 {
+                let mut seed = goal;
+                seed[axis] = bad;
+                out.fill(99.0);
+                stats.link_steps = 99;
+                assert!(!mmd_runtime_ik_chain_solve_with_initial_effector(
+                    chain,
+                    ptr::null(),
+                    ptr::null(),
+                    rotations.as_ptr(),
+                    goal.as_ptr(),
+                    1e-4,
+                    1,
+                    out.as_mut_ptr(),
+                    4,
+                    &mut stats,
+                    seed.as_ptr()
+                ));
+                assert_eq!(out, [99.0; 4]);
+                assert_eq!(stats.link_steps, 99);
+            }
+        }
+        assert!(!mmd_runtime_ik_chain_solve_with_initial_effector(
+            chain,
+            ptr::null(),
+            ptr::null(),
+            rotations.as_ptr(),
+            goal.as_ptr(),
+            1e-4,
+            1,
+            out.as_mut_ptr(),
+            3,
+            &mut stats,
+            goal.as_ptr()
+        ));
+        assert!(!mmd_runtime_ik_chain_solve_with_initial_effector(
+            ptr::null_mut(),
+            ptr::null(),
+            ptr::null(),
+            rotations.as_ptr(),
+            goal.as_ptr(),
+            1e-4,
+            1,
+            out.as_mut_ptr(),
+            4,
+            &mut stats,
+            goal.as_ptr()
+        ));
+        let aligned = [0.0_f32; 4];
+        let misaligned = aligned.as_ptr().cast::<u8>().add(1).cast::<f32>();
+        assert!(!mmd_runtime_ik_chain_solve_with_initial_effector(
+            chain,
+            ptr::null(),
+            ptr::null(),
+            rotations.as_ptr(),
+            goal.as_ptr(),
+            1e-4,
+            1,
+            out.as_mut_ptr(),
+            4,
+            &mut stats,
+            misaligned
+        ));
+        assert!(mmd_runtime_ik_chain_solve_with_initial_effector(
+            chain,
+            ptr::null(),
+            ptr::null(),
+            rotations.as_ptr(),
+            goal.as_ptr(),
+            1e-4,
+            1,
+            out.as_mut_ptr(),
+            4,
+            &mut stats,
+            ptr::null()
+        ));
+        assert_eq!(legacy, out);
+        mmd_runtime_ik_chain_free(chain);
+    }
+}

@@ -286,6 +286,7 @@ impl BulletWorld {
         Ok(count as usize)
     }
 
+    /// Return the current solver pose, without graphics MotionState interpolation.
     pub fn rigidbody_transform(&self, handle: RigidBodyHandle) -> Result<Transform, BulletError> {
         let mut position = [0.0; 3];
         let mut rotation_xyzw = [0.0; 4];
@@ -508,6 +509,71 @@ mod tests {
             after.position[1] < before.position[1],
             "expected y to decrease: before={before:?}, after={after:?}"
         );
+    }
+
+    fn assert_current_step_readback(substeps_per_frame: u32) {
+        let mut world = BulletWorld::new().unwrap();
+        let body = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(0.5, [0.0, 10.0, 0.0], 1.0))
+            .unwrap();
+        let h = 1.0 / 120.0;
+        for frame in 1..=4 {
+            world
+                .step_with_fixed_substep(
+                    h * substeps_per_frame as f32,
+                    substeps_per_frame as i32,
+                    h,
+                )
+                .unwrap();
+            let n = (frame * substeps_per_frame) as f32;
+            // Unconstrained, zero-damping semi-implicit Euler free fall.
+            // A MotionState interpolated one substep behind fails this oracle.
+            let expected_y = 10.0 - 98.0 * h * h * n * (n + 1.0) / 2.0;
+            let actual = world.rigidbody_transform(body).unwrap();
+            assert!(
+                (actual.position[1] - expected_y).abs() < 2.0e-5,
+                "frame={frame}, substeps={substeps_per_frame}: expected current y={expected_y}, got {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rigidbody_readback_is_current_after_one_substep() {
+        assert_current_step_readback(1);
+    }
+
+    #[test]
+    fn rigidbody_readback_is_current_at_30_fps() {
+        assert_current_step_readback(4);
+    }
+
+    #[test]
+    fn kinematic_readback_preserves_authored_pose_and_reset() {
+        let mut world = BulletWorld::new().unwrap();
+        let body = world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(0.5, [0.0, 10.0, 0.0], 0.0))
+            .unwrap();
+        let initial = world.rigidbody_transform(body).unwrap();
+        let target = Transform {
+            position: [2.0, 12.0, -3.0],
+            rotation_xyzw: [0.0, 0.0, 1.0, 0.0],
+        };
+        world.set_rigidbody_transform(body, target).unwrap();
+        assert_eq!(world.rigidbody_transform(body).unwrap(), target);
+        world.step(1.0 / 30.0, 4).unwrap();
+        assert_eq!(world.rigidbody_transform(body).unwrap(), target);
+        world.reset().unwrap();
+        assert_eq!(world.rigidbody_transform(body).unwrap(), initial);
+    }
+
+    #[test]
+    fn rigidbody_readback_rejects_invalid_handle() {
+        let mut world = BulletWorld::new().unwrap();
+        world
+            .add_rigidbody(RigidBodyDesc::dynamic_sphere(0.5, [0.0, 10.0, 0.0], 1.0))
+            .unwrap();
+        assert!(world.rigidbody_transform(RigidBodyHandle(-1)).is_err());
+        assert!(world.rigidbody_transform(RigidBodyHandle(1)).is_err());
     }
 
     #[test]

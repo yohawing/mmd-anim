@@ -348,15 +348,21 @@ fn valid_bone_index(model: &PmxParsedModel, bone_index: i32) -> Option<usize> {
 }
 
 #[cfg(feature = "pmx-format")]
+fn rigidbody_rotation_from_pmx(body: &PmxParsedRigidBody) -> Quat {
+    // PMX rigid bodies use Ry * Rx * Rz; joint frames retain their ZYX contract.
+    Quat::from_euler(
+        EulerRot::YXZ,
+        body.rotation[1],
+        body.rotation[0],
+        body.rotation[2],
+    )
+}
+
+#[cfg(feature = "pmx-format")]
 fn rigidbody_bind_transform(body: &PmxParsedRigidBody) -> Mat4 {
     Mat4::from_scale_rotation_translation(
         Vec3::ONE,
-        Quat::from_euler(
-            EulerRot::ZYX,
-            body.rotation[2],
-            body.rotation[1],
-            body.rotation[0],
-        ),
+        rigidbody_rotation_from_pmx(body),
         Vec3::from_array(body.position),
     )
 }
@@ -411,10 +417,13 @@ fn rigidbody_desc_from_pmx(
         }
     };
 
+    // The general Bullet descriptor stores ZYX Euler angles. Convert only at
+    // the PMX body boundary so construction and bone bindings share one pose.
+    let (z, y, x) = rigidbody_rotation_from_pmx(body).to_euler(EulerRot::ZYX);
     Ok(RigidBodyDesc {
         shape,
         position: body.position,
-        rotation_euler: body.rotation,
+        rotation_euler: [x, y, z],
         mass: if body.mode == "static" {
             0.0
         } else {
@@ -931,6 +940,49 @@ mod tests {
                 effective_mass: 1000000.0,
             }]
         );
+    }
+
+    #[test]
+    fn pmx_body_rotation_preserves_yxz_initial_pose_and_binding() {
+        let descriptor: PmxPartsDescriptor = serde_json::from_value(json!({
+            "bones": [{"name": "root", "position": [1.0, 2.0, 3.0]}],
+            "rigidBodies": [{
+                "name": "rotatedBox", "boneIndex": 0, "shape": "box",
+                "size": [0.3, 0.7, 1.1], "position": [2.0, 4.0, 6.0],
+                "rotation": [0.4, -0.7, 0.9], "mass": 1.0, "mode": "dynamic"
+            }]
+        }))
+        .unwrap();
+        let model = crate::test_support::build_test_pmx_model(descriptor);
+        let mut built = build_bullet_world_from_pmx(&model).unwrap();
+        // Independent axis composition: PMX bodies use Ry * Rx * Rz.
+        // All three fixed angles are nonzero so ZYX cannot accidentally agree.
+        let rotation =
+            Quat::from_rotation_y(-0.7) * Quat::from_rotation_x(0.4) * Quat::from_rotation_z(0.9);
+        let expected = Mat4::from_rotation_translation(rotation, Vec3::new(2.0, 4.0, 6.0));
+        let assert_matrix = |actual: Mat4, expected: Mat4| {
+            for (actual, expected) in actual.to_cols_array().iter().zip(expected.to_cols_array()) {
+                assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+            }
+        };
+        let handle = built.rigidbody_handles[0];
+        assert_matrix(
+            built.world.rigidbody_transform(handle).unwrap().to_mat4(),
+            expected,
+        );
+        let bone_rest = Transform::from_translation([1.0, 2.0, 3.0]);
+        built.seed_rigidbodies_from_bones(&[bone_rest]).unwrap();
+        assert_matrix(
+            built.world.rigidbody_transform(handle).unwrap().to_mat4(),
+            expected,
+        );
+        // Supply the independent world pose to test the inverse binding too.
+        built
+            .world
+            .set_rigidbody_transform(handle, Transform::from_mat4(expected))
+            .unwrap();
+        let readback = built.readback_bone_world_transforms(1).unwrap();
+        assert_matrix(readback[0].unwrap().to_mat4(), bone_rest.to_mat4());
     }
 
     #[test]

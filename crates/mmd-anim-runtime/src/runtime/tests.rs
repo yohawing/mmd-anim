@@ -225,6 +225,237 @@ fn fixed_axis_bone_rotation_keeps_only_axis_twist() {
 }
 
 #[test]
+fn physics_world_targets_remove_append_for_donor_and_recipient_in_either_order() {
+    for (donor, recipient) in [(0, 1), (1, 0)] {
+        let mut bones = vec![
+            BoneInit::new(None, Vec3A::ZERO),
+            BoneInit::new(None, Vec3A::ZERO),
+        ];
+        bones.push(BoneInit::new(Some(BoneIndex(recipient)), Vec3A::Y));
+        let model = Arc::new(
+            ModelArena::new_full(
+                bones,
+                vec![],
+                vec![
+                    AppendTransformInit::new(BoneIndex(recipient), BoneIndex(donor), 0.5)
+                        .with_rotation()
+                        .with_translation(),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut runtime = RuntimeInstance::new(model);
+        runtime.evaluate_rest_pose();
+        let donor_world = glam::Mat4::from_rotation_translation(
+            Quat::from_rotation_y(0.7),
+            glam::Vec3::new(2.0, 3.0, -1.0),
+        );
+        // The recipient's already evaluated world includes a noncommuting
+        // authored rotation, so subtracting the grant on the wrong side fails.
+        let recipient_world = glam::Mat4::from_rotation_translation(
+            Quat::from_rotation_x(-0.4) * Quat::from_rotation_y(0.35),
+            glam::Vec3::new(4.0, 5.0, 6.0),
+        );
+        let mut targets = vec![None; 3];
+        targets[donor as usize] = Some(donor_world);
+        targets[recipient as usize] = Some(recipient_world);
+        for _ in 0..2 {
+            assert_eq!(runtime.apply_physics_world_matrices(&targets), 2);
+            // A later normal evaluation must not reapply the removed grant.
+            runtime.evaluate_current_pose();
+            for (index, expected) in [(donor, donor_world), (recipient, recipient_world)] {
+                let actual = runtime.world_matrices()[index as usize];
+                for (a, b) in actual
+                    .to_cols_array()
+                    .into_iter()
+                    .zip(expected.to_cols_array())
+                {
+                    assert!(
+                        (a - b).abs() < 1.0e-5,
+                        "donor={donor} recipient={recipient}: {actual:?} != {expected:?}"
+                    );
+                }
+            }
+            assert_vec3a_near(
+                translation(runtime.world_matrices()[2]),
+                recipient_world.transform_point3(glam::Vec3::Y).into(),
+            );
+        }
+    }
+}
+
+#[test]
+fn physics_world_recipient_target_preserves_an_existing_untargeted_append_donor() {
+    let model = Arc::new(
+        ModelArena::new_full(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(None, Vec3A::ZERO),
+            ],
+            vec![],
+            vec![AppendTransformInit::new(BoneIndex(1), BoneIndex(0), 1.0).with_rotation()],
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+    let donor_rotation = Quat::from_rotation_y(0.6);
+    runtime
+        .pose_mut()
+        .set_local_rotation(BoneIndex(0), donor_rotation);
+    runtime.evaluate_current_pose();
+    let expected = glam::Mat4::from_quat(Quat::from_rotation_x(0.3));
+    assert_eq!(
+        runtime.apply_physics_world_matrices(&[None, Some(expected)]),
+        1
+    );
+    runtime.evaluate_current_pose();
+    assert_quat_near(runtime.pose().local_rotation(BoneIndex(0)), donor_rotation);
+    for (a, b) in runtime.world_matrices()[1]
+        .to_cols_array()
+        .into_iter()
+        .zip(expected.to_cols_array())
+    {
+        assert!((a - b).abs() < 1.0e-5);
+    }
+}
+
+#[test]
+fn physics_world_targets_preserve_parent_with_descendant_append_donor() {
+    for donor_index in [1, 2] {
+        for target_donor in [false, true] {
+            let mut bones = vec![BoneInit::new(None, Vec3A::ZERO)];
+            for index in 1..=donor_index + 1 {
+                bones.push(BoneInit::new(Some(BoneIndex(index - 1)), Vec3A::Y));
+            }
+            let model = Arc::new(
+                ModelArena::new_full(
+                    bones,
+                    vec![],
+                    vec![
+                        AppendTransformInit::new(BoneIndex(0), BoneIndex(donor_index), 0.5)
+                            .with_rotation(),
+                    ],
+                )
+                .unwrap(),
+            );
+            let mut runtime = RuntimeInstance::new(model.clone());
+            let donor_rotation = Quat::from_rotation_x(0.3);
+            runtime
+                .pose_mut()
+                .set_local_rotation(BoneIndex(donor_index), donor_rotation);
+            runtime.evaluate_current_pose();
+
+            let parent = glam::Mat4::from_rotation_translation(
+                Quat::from_rotation_z(0.4),
+                glam::Vec3::new(2.0, 0.0, 0.0),
+            );
+            let mut expected = vec![parent];
+            for index in 1..=donor_index + 1 {
+                let rotation = if index == donor_index {
+                    donor_rotation
+                } else {
+                    Quat::IDENTITY
+                };
+                let offset = if index == donor_index && target_donor {
+                    glam::Vec3::new(1.0, 1.0, 0.0)
+                } else {
+                    glam::Vec3::Y
+                };
+                expected.push(
+                    expected[index as usize - 1]
+                        * glam::Mat4::from_rotation_translation(rotation, offset),
+                );
+            }
+            let mut targets = vec![None; expected.len()];
+            targets[0] = Some(parent);
+            if target_donor {
+                targets[donor_index as usize] = Some(expected[donor_index as usize]);
+            }
+            for _ in 0..2 {
+                assert_eq!(
+                    runtime.apply_physics_world_matrices(&targets),
+                    1 + usize::from(target_donor)
+                );
+                // Check immediate writeback as well as a later normal evaluation.
+                for reevaluate in [false, true] {
+                    if reevaluate {
+                        runtime.evaluate_current_pose();
+                    }
+                    for (index, expected_world) in expected.iter().enumerate() {
+                        let expected_skin =
+                            *expected_world * model.inverse_bind_matrix(BoneIndex(index as u32));
+                        for (actual, expected_matrix) in [
+                            (runtime.world_matrices()[index], *expected_world),
+                            (runtime.skinning_matrices()[index], expected_skin),
+                        ] {
+                            for (a, b) in actual
+                                .to_cols_array()
+                                .into_iter()
+                                .zip(expected_matrix.to_cols_array())
+                            {
+                                assert!(
+                                    (a - b).abs() < 1.0e-5,
+                                    "donor={donor_index}, targeted={target_donor}, reevaluate={reevaluate}, bone={index}: {a} != {b}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn physics_world_target_uses_updated_untargeted_append_parent() {
+    let model = Arc::new(
+        ModelArena::new_full(
+            vec![
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(None, Vec3A::ZERO),
+                BoneInit::new(Some(BoneIndex(1)), Vec3A::Y),
+                BoneInit::new(Some(BoneIndex(2)), Vec3A::Y),
+            ],
+            vec![],
+            vec![
+                AppendTransformInit::new(BoneIndex(1), BoneIndex(0), 1.0)
+                    .with_rotation()
+                    .with_translation(),
+            ],
+        )
+        .unwrap(),
+    );
+    let mut runtime = RuntimeInstance::new(model);
+    runtime.evaluate_rest_pose();
+    let donor = glam::Mat4::from_rotation_translation(
+        Quat::from_rotation_z(0.8),
+        glam::Vec3::new(2.0, 3.0, 0.0),
+    );
+    let target = glam::Mat4::from_rotation_translation(
+        Quat::from_rotation_x(0.3),
+        glam::Vec3::new(7.0, 4.0, 1.0),
+    );
+    assert_eq!(
+        runtime.apply_physics_world_matrices(&[Some(donor), None, Some(target)]),
+        2
+    );
+    runtime.evaluate_current_pose();
+    for (index, expected) in [(0, donor), (1, donor), (2, target)] {
+        for (a, b) in runtime.world_matrices()[index]
+            .to_cols_array()
+            .into_iter()
+            .zip(expected.to_cols_array())
+        {
+            assert!((a - b).abs() < 1.0e-5, "bone {index}: {a} != {b}");
+        }
+    }
+    assert_vec3a_near(
+        translation(runtime.world_matrices()[3]),
+        target.transform_point3(glam::Vec3::Y).into(),
+    );
+}
+
+#[test]
 fn evaluates_current_pose_with_local_position_offset() {
     let model = Arc::new(
         ModelArena::new(vec![

@@ -291,9 +291,10 @@ mmd_anim_bullet_status mmd_anim_bullet_world_get_rigidbody_transform(
         return fail(MMD_ANIM_BULLET_INVALID_ARGUMENT, "rigidbody index out of range");
     }
 
-    btTransform transform;
     const auto &entry = world->rigidbodies[static_cast<size_t>(index)];
-    entry.body->getMotionState()->getWorldTransform(transform);
+    // Runtime bone writeback needs the completed solver pose. MotionState is
+    // graphics interpolation and can lag one fixed substep behind this pose.
+    const btTransform transform = entry.body->getWorldTransform();
     const btVector3 origin = transform.getOrigin();
     const btQuaternion rotation = transform.getRotation();
     out_position[0] = origin.x();

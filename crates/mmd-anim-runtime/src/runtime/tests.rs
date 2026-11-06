@@ -320,6 +320,93 @@ fn physics_world_recipient_target_preserves_an_existing_untargeted_append_donor(
 }
 
 #[test]
+fn physics_world_targets_preserve_parent_with_descendant_append_donor() {
+    for donor_index in [1, 2] {
+        for target_donor in [false, true] {
+            let mut bones = vec![BoneInit::new(None, Vec3A::ZERO)];
+            for index in 1..=donor_index + 1 {
+                bones.push(BoneInit::new(Some(BoneIndex(index - 1)), Vec3A::Y));
+            }
+            let model = Arc::new(
+                ModelArena::new_full(
+                    bones,
+                    vec![],
+                    vec![
+                        AppendTransformInit::new(BoneIndex(0), BoneIndex(donor_index), 0.5)
+                            .with_rotation(),
+                    ],
+                )
+                .unwrap(),
+            );
+            let mut runtime = RuntimeInstance::new(model.clone());
+            let donor_rotation = Quat::from_rotation_x(0.3);
+            runtime
+                .pose_mut()
+                .set_local_rotation(BoneIndex(donor_index), donor_rotation);
+            runtime.evaluate_current_pose();
+
+            let parent = glam::Mat4::from_rotation_translation(
+                Quat::from_rotation_z(0.4),
+                glam::Vec3::new(2.0, 0.0, 0.0),
+            );
+            let mut expected = vec![parent];
+            for index in 1..=donor_index + 1 {
+                let rotation = if index == donor_index {
+                    donor_rotation
+                } else {
+                    Quat::IDENTITY
+                };
+                let offset = if index == donor_index && target_donor {
+                    glam::Vec3::new(1.0, 1.0, 0.0)
+                } else {
+                    glam::Vec3::Y
+                };
+                expected.push(
+                    expected[index as usize - 1]
+                        * glam::Mat4::from_rotation_translation(rotation, offset),
+                );
+            }
+            let mut targets = vec![None; expected.len()];
+            targets[0] = Some(parent);
+            if target_donor {
+                targets[donor_index as usize] = Some(expected[donor_index as usize]);
+            }
+            for _ in 0..2 {
+                assert_eq!(
+                    runtime.apply_physics_world_matrices(&targets),
+                    1 + usize::from(target_donor)
+                );
+                // Check immediate writeback as well as a later normal evaluation.
+                for reevaluate in [false, true] {
+                    if reevaluate {
+                        runtime.evaluate_current_pose();
+                    }
+                    for (index, expected_world) in expected.iter().enumerate() {
+                        let expected_skin =
+                            *expected_world * model.inverse_bind_matrix(BoneIndex(index as u32));
+                        for (actual, expected_matrix) in [
+                            (runtime.world_matrices()[index], *expected_world),
+                            (runtime.skinning_matrices()[index], expected_skin),
+                        ] {
+                            for (a, b) in actual
+                                .to_cols_array()
+                                .into_iter()
+                                .zip(expected_matrix.to_cols_array())
+                            {
+                                assert!(
+                                    (a - b).abs() < 1.0e-5,
+                                    "donor={donor_index}, targeted={target_donor}, reevaluate={reevaluate}, bone={index}: {a} != {b}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn physics_world_target_uses_updated_untargeted_append_parent() {
     let model = Arc::new(
         ModelArena::new_full(

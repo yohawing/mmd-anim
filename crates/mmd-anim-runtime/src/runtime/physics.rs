@@ -115,6 +115,25 @@ impl RuntimeInstance {
             return 0;
         }
 
+        // A parent can inherit append from its own descendant. Publish supplied
+        // world transforms before resolving local channels so that descendant
+        // inversion never uses the parent's previous pose on this back edge.
+        for (index, target) in physics_world_matrices
+            .iter()
+            .take(self.model.bone_count())
+            .enumerate()
+        {
+            let bone = BoneIndex(index as u32);
+            if self.is_host_driven(bone) {
+                continue;
+            }
+            if let Some(world) = target {
+                self.pose.set_world_matrix(bone, *world);
+                self.transform_matrices[index] =
+                    *world * Mat4::from_translation((-self.model.rest_world_position(bone)).into());
+            }
+        }
+
         // A supplied world matrix already includes its append transform.
         // Resolve parents and append donors before inverting it into base local
         // channels, including donors ordered after their recipients in PMX.
@@ -126,6 +145,9 @@ impl RuntimeInstance {
                 &mut visited,
             );
         }
+        // Dependency traversal may visit descendants before their parent's local
+        // channels are finalized. Rebuild world and skinning in parent-first order.
+        self.update_world_matrices();
         updated
     }
 

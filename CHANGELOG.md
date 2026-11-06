@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.5 - 2026-11-06
+
+### Fixed
+
+- Remove already-applied Append transforms when reconstructing local bone poses
+  from physics world matrices. Preserve supplied poses when a parent inherits
+  Append from a descendant, including sparse writeback and later reevaluation.
+- Read the completed Bullet solver pose instead of interpolated MotionState
+  output, removing a fixed-substep delay in physics bone writeback.
+- Use PMX rigid-body rotation order (Ry * Rx * Rz) consistently for body
+  construction and bone bindings. General descriptors and joint frames keep
+  their existing rotation conventions.
+
+### Distribution
+
+- Shorten Linux and Windows CLI archive platform names to `linux-x64-gnu` and
+  `windows-x64-msvc`. The universal macOS archive name is unchanged.
+
+### Compatibility
+
+- Public API and ABI layouts are unchanged. Physics results can change for
+  Append-driven bones and compound-rotated PMX rigid bodies; consumers with
+  compensations for the old rotation order or readback delay should revalidate.
+
 ## 0.5.4 - 2026-11-05
 
 ### Added

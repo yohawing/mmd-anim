@@ -1,7 +1,7 @@
 use glam::{Mat4, Vec3A};
 
 use super::{IkSolveOptions, RuntimeInstance};
-use crate::{BoneIndex, ik_primitive::constrain_rotation_to_axis};
+use crate::BoneIndex;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PhysicsMode {
@@ -103,109 +103,109 @@ impl RuntimeInstance {
         &mut self,
         physics_world_matrices: &[Option<Mat4>],
     ) -> usize {
-        let mut updated = 0;
-        let mut earliest_eval_order_position = None;
-        let mut target_world_matrices = self.pose.world_matrices().to_vec();
-        let mut has_physics_target = vec![false; self.model.bone_count()];
-
-        for (bone_index, target_world_matrix) in physics_world_matrices.iter().enumerate() {
-            let Some(target_world_matrix) = target_world_matrix else {
-                continue;
-            };
-            let Some(slot) = target_world_matrices.get_mut(bone_index) else {
-                continue;
-            };
-            // A scoped HostRigEvaluation keeps the host-owned model-space
-            // transform authoritative across physics writeback and the
-            // after-physics phase. The Bullet body remains solver-owned; only
-            // its conflicting runtime bone write is suppressed.
-            if self.is_host_driven(BoneIndex(bone_index as u32)) {
-                continue;
-            }
-            *slot = *target_world_matrix;
-            has_physics_target[bone_index] = true;
+        let updated = physics_world_matrices
+            .iter()
+            .take(self.model.bone_count())
+            .enumerate()
+            .filter(|(index, target)| {
+                target.is_some() && !self.is_host_driven(BoneIndex(*index as u32))
+            })
+            .count();
+        if updated == 0 {
+            return 0;
         }
 
-        for bone in self.model.eval_order() {
-            let bone_index = bone.as_usize();
-            if has_physics_target[bone_index] {
+        // A parent can inherit append from its own descendant. Publish supplied
+        // world transforms before resolving local channels so that descendant
+        // inversion never uses the parent's previous pose on this back edge.
+        for (index, target) in physics_world_matrices
+            .iter()
+            .take(self.model.bone_count())
+            .enumerate()
+        {
+            let bone = BoneIndex(index as u32);
+            if self.is_host_driven(bone) {
                 continue;
             }
-            if self.is_host_driven(*bone) {
-                target_world_matrices[bone_index] =
-                    self.host_rig.as_ref().unwrap().reference_world[bone_index];
-                continue;
+            if let Some(world) = target {
+                self.pose.set_world_matrix(bone, *world);
+                self.transform_matrices[index] =
+                    *world * Mat4::from_translation((-self.model.rest_world_position(bone)).into());
             }
-            let local_matrix = self.current_local_matrix_for_physics_scratch(*bone);
-            target_world_matrices[bone_index] = self
-                .model
-                .parent_index(*bone)
-                .map(|parent| target_world_matrices[parent.as_usize()] * local_matrix)
-                .unwrap_or(local_matrix);
         }
 
-        for bone_index in 0..self.model.bone_count() {
-            if !has_physics_target[bone_index] {
-                continue;
-            }
-
-            let bone = BoneIndex(bone_index as u32);
-            let parent_inverse_world = self
-                .model
-                .parent_index(bone)
-                .map(|parent| target_world_matrices[parent.as_usize()].inverse())
-                .unwrap_or(Mat4::IDENTITY);
-            let local_matrix = parent_inverse_world * target_world_matrices[bone_index];
-            let (scale, rotation, translation) = local_matrix.to_scale_rotation_translation();
-
-            self.pose.set_local_position_offset(
-                bone,
-                Vec3A::from(translation) - self.model.rest_position(bone),
+        // A supplied world matrix already includes its append transform.
+        // Resolve parents and append donors before inverting it into base local
+        // channels, including donors ordered after their recipients in PMX.
+        let mut visited = vec![false; self.model.bone_count()];
+        for position in 0..self.model.eval_order().len() {
+            self.apply_physics_world_matrix_with_dependencies(
+                self.model.eval_order()[position],
+                physics_world_matrices,
+                &mut visited,
             );
-            self.pose.set_local_rotation(bone, rotation.normalize());
-            self.pose.set_local_scale(bone, Vec3A::from(scale));
-
-            let eval_order_position = self.model.eval_order_position(bone);
-            earliest_eval_order_position = Some(
-                earliest_eval_order_position.map_or(eval_order_position, |current: usize| {
-                    current.min(eval_order_position)
-                }),
-            );
-            updated += 1;
         }
-
-        if let Some(start) = earliest_eval_order_position {
-            self.update_world_matrices_from_eval_order_position(start);
-        }
-
+        // Dependency traversal may visit descendants before their parent's local
+        // channels are finalized. Rebuild world and skinning in parent-first order.
+        self.update_world_matrices();
         updated
     }
 
-    fn current_local_matrix_for_physics_scratch(&self, bone: BoneIndex) -> Mat4 {
-        let mut local_position =
-            self.model.rest_position(bone) + self.pose.local_position_offset(bone);
-        let mut local_rotation = self.pose.local_rotation(bone);
-        let local_scale = self.pose.local_scale(bone);
-
+    fn apply_physics_world_matrix_with_dependencies(
+        &mut self,
+        bone: BoneIndex,
+        targets: &[Option<Mat4>],
+        visited: &mut [bool],
+    ) {
+        let index = bone.as_usize();
+        // Append graphs can contain cycles; retain the existing evaluator's
+        // finite traversal behavior rather than recursing indefinitely.
+        if visited[index] {
+            return;
+        }
+        visited[index] = true;
+        if self.is_host_driven(bone) {
+            // HostRig references remain authoritative, even if Bullet also
+            // supplied this bone. Its normal update maintains skinning output.
+            self.update_world_matrix_for_bone(bone);
+            return;
+        }
+        if let Some(parent) = self.model.parent_index(bone) {
+            self.apply_physics_world_matrix_with_dependencies(parent, targets, visited);
+        }
         if let Some(append_index) = self.model.append_transform_index(bone) {
-            let append = self.model.append_transform(append_index);
-            if append.affect_rotation {
-                local_rotation = (local_rotation * self.pose.append_rotation(bone)).normalize();
-            }
-            if append.affect_translation {
-                local_position += self.pose.append_position_offset(bone);
-            }
+            let source = self.model.append_transform(append_index).source_bone;
+            self.apply_physics_world_matrix_with_dependencies(source, targets, visited);
         }
+        self.update_append_transform_for_bone(bone);
 
-        if let Some(axis) = self.model.fixed_axis_constraint(bone) {
-            local_rotation = constrain_rotation_to_axis(local_rotation, axis);
+        if let Some(Some(target)) = targets.get(index) {
+            let parent_inverse = self
+                .model
+                .parent_index(bone)
+                .map_or(Mat4::IDENTITY, |parent| {
+                    self.pose.world_matrices()[parent.as_usize()].inverse()
+                });
+            let (scale, mut rotation, translation) =
+                (parent_inverse * *target).to_scale_rotation_translation();
+            let mut offset = Vec3A::from(translation) - self.model.rest_position(bone);
+            if let Some(append_index) = self.model.append_transform_index(bone) {
+                let append = self.model.append_transform(append_index);
+                if append.affect_rotation {
+                    // Runtime world evaluation composes base * append.
+                    rotation *= self.pose.append_rotation(bone).conjugate();
+                }
+                if append.affect_translation {
+                    offset -= self.pose.append_position_offset(bone);
+                }
+            }
+            self.pose.set_local_position_offset(bone, offset);
+            self.pose.set_local_rotation(bone, rotation.normalize());
+            self.pose.set_local_scale(bone, Vec3A::from(scale));
         }
-
-        Mat4::from_scale_rotation_translation(
-            local_scale.into(),
-            local_rotation,
-            local_position.into(),
-        )
+        // Keep fixed-axis constraints, un-targeted descendants and skinning
+        // matrices on the same path used by ordinary pose evaluation.
+        self.update_world_matrix_for_bone(bone);
     }
 
     /// Advance the physics clock independently from animation sampling.

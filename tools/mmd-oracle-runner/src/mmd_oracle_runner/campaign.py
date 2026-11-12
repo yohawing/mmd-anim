@@ -104,9 +104,8 @@ def load_campaign_config(path: Path) -> CampaignConfig:
     payload = _read_json_object(manifest, "manifest")
     if payload.get("schemaVersion") != CAMPAIGN_SCHEMA_VERSION:
         raise CampaignValidationError("manifest", "schemaVersion must be 1")
-    run_value = {**_DEFAULT_RUN, **(payload.get("run", {}) if isinstance(payload.get("run", {}), dict) else {})}
-    if not isinstance(run_value, dict):
-        raise CampaignValidationError("manifest", "run must be an object")
+    run_overrides = payload.get("run", {})
+    run_value = {**_DEFAULT_RUN, **(run_overrides if isinstance(run_overrides, dict) else {})}
     run: dict[str, str] = {}
     for field in _RUN_FIELDS:
         value = run_value.get(field)
@@ -117,10 +116,9 @@ def load_campaign_config(path: Path) -> CampaignConfig:
     compare = payload.get("compare", {})
     if not isinstance(compare, dict):
         raise CampaignValidationError("manifest", "compare must be an object")
-    focus_bones = tuple(_strings(compare.get("focusBones", []), "compare.focusBones", allow_empty=True))
-    raw_thresholds = {**_DEFAULT_THRESHOLDS, **(compare.get("thresholds", {}) if isinstance(compare.get("thresholds", {}), dict) else {})}
-    if not isinstance(raw_thresholds, dict):
-        raise CampaignValidationError("manifest", "compare.thresholds must be an object")
+    focus_bones = _strings(compare.get("focusBones", []), "compare.focusBones")
+    threshold_overrides = compare.get("thresholds", {})
+    raw_thresholds = {**_DEFAULT_THRESHOLDS, **(threshold_overrides if isinstance(threshold_overrides, dict) else {})}
     thresholds: dict[str, float] = {}
     for name in _METRIC_NAMES:
         value = raw_thresholds.get(name)
@@ -154,12 +152,12 @@ def load_campaign_config(path: Path) -> CampaignConfig:
         camera_vmd = None if camera_raw in (None, "") else _existing_file(camera_raw, f"cases[{index}].cameraVmd")
         frames = _frames(raw_case.get("frames", list(default_frames)), f"cases[{index}].frames")
         output_root = _output_directory(raw_case.get("outputRoot", str(default_output_root)), f"cases[{index}].outputRoot")
-        features = tuple(_strings(raw_case.get("features", []), f"cases[{index}].features", allow_empty=True))
-        categories = tuple(_strings(raw_case.get("categories", []), f"cases[{index}].categories", allow_empty=True))
+        features = _strings(raw_case.get("features", []), f"cases[{index}].features")
+        categories = _strings(raw_case.get("categories", []), f"cases[{index}].categories")
         expectation = raw_case.get("expectation", "numeric-parity")
         if expectation not in _EXPECTATIONS:
             raise CampaignValidationError("manifest", f"cases[{index}].expectation must be one of: {', '.join(_EXPECTATIONS)}")
-        requested = tuple(_strings(raw_case.get("requestedFeatures", []), f"cases[{index}].requestedFeatures", allow_empty=True))
+        requested = _strings(raw_case.get("requestedFeatures", []), f"cases[{index}].requestedFeatures")
         dialog_opt_in = raw_case.get("dialogOptIn", default_dialog_opt_in)
         if not isinstance(dialog_opt_in, bool):
             raise CampaignValidationError("manifest", f"cases[{index}].dialogOptIn must be a boolean")
@@ -183,7 +181,7 @@ def load_campaign_config(path: Path) -> CampaignConfig:
     if isinstance(discovered, bool) or not isinstance(discovered, int) or discovered < len(cases):
         raise CampaignValidationError("manifest", "discovered must be an integer >= cases length")
     digest = hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
-    return CampaignConfig(manifest, run, discovered, tuple(focus_bones), thresholds, tuple(cases), digest)
+    return CampaignConfig(manifest, run, discovered, focus_bones, thresholds, tuple(cases), digest)
 
 
 def run_campaign(
@@ -400,10 +398,10 @@ def _label(value: object, label: str) -> str:
     return value
 
 
-def _strings(value: object, label: str, *, allow_empty: bool) -> list[str]:
-    if not isinstance(value, list) or (not allow_empty and not value) or any(not isinstance(item, str) or not item.strip() for item in value):
+def _strings(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise CampaignValidationError("manifest", f"{label} must be an array of strings")
-    return list(value)
+    return tuple(value)
 
 
 def _frames(value: object, label: str) -> tuple[int, ...]:

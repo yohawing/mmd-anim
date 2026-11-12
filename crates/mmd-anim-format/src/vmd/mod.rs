@@ -403,8 +403,7 @@ pub fn build_vmd_animation_from_parts(
     {
         return Err("bone SoA lengths do not match".to_owned());
     }
-    let morph_weight_len = morph_count;
-    if input.morph_frames.len() != morph_count || input.morph_weights.len() != morph_weight_len {
+    if input.morph_frames.len() != morph_count || input.morph_weights.len() != morph_count {
         return Err("morph SoA lengths do not match".to_owned());
     }
     validate_vmd_parts_count(bone_count, "bone")?;
@@ -414,9 +413,8 @@ pub fn build_vmd_animation_from_parts(
     validate_vmd_parts_count(descriptor.self_shadow_frames.len(), "self-shadow")?;
     validate_vmd_parts_count(descriptor.property_frames.len(), "property")?;
 
-    for (index, _frame) in input.bone_frames.iter().enumerate() {
-        let name_index = input.bone_name_indices[index] as usize;
-        if name_index >= descriptor.bone_names.len() {
+    for (index, &name_index) in input.bone_name_indices.iter().enumerate() {
+        if name_index as usize >= descriptor.bone_names.len() {
             return Err("bone name index out of range".to_owned());
         }
         if !input.bone_translations_xyz[index * 3..index * 3 + 3]
@@ -429,35 +427,31 @@ pub fn build_vmd_animation_from_parts(
             return Err("bone value is not finite".to_owned());
         }
     }
-    for (index, _frame) in input.morph_frames.iter().enumerate() {
-        let name_index = input.morph_name_indices[index] as usize;
-        if name_index >= descriptor.morph_names.len() {
+    for (&name_index, &weight) in input.morph_name_indices.iter().zip(input.morph_weights) {
+        if name_index as usize >= descriptor.morph_names.len() {
             return Err("morph name index out of range".to_owned());
         }
-        if !input.morph_weights[index].is_finite() {
+        if !weight.is_finite() {
             return Err("morph weight is not finite".to_owned());
         }
     }
 
-    let mut max_frame = 0u32;
-    for &frame in input.bone_frames {
-        max_frame = max_frame.max(frame);
-    }
-    for &frame in input.morph_frames {
-        max_frame = max_frame.max(frame);
-    }
-    for frame in &descriptor.camera_frames {
-        max_frame = max_frame.max(frame.frame);
-    }
-    for frame in &descriptor.light_frames {
-        max_frame = max_frame.max(frame.frame);
-    }
-    for frame in &descriptor.self_shadow_frames {
-        max_frame = max_frame.max(frame.frame);
-    }
-    for frame in &descriptor.property_frames {
-        max_frame = max_frame.max(frame.frame);
-    }
+    let max_frame = input
+        .bone_frames
+        .iter()
+        .chain(input.morph_frames)
+        .copied()
+        .chain(descriptor.camera_frames.iter().map(|frame| frame.frame))
+        .chain(descriptor.light_frames.iter().map(|frame| frame.frame))
+        .chain(
+            descriptor
+                .self_shadow_frames
+                .iter()
+                .map(|frame| frame.frame),
+        )
+        .chain(descriptor.property_frames.iter().map(|frame| frame.frame))
+        .max()
+        .unwrap_or(0);
 
     // Check all writer arithmetic before allocating/materializing records.
     let mut output_size = 50usize;
@@ -483,13 +477,13 @@ pub fn build_vmd_animation_from_parts(
         return Err("VMD output size exceeds addressable range".to_owned());
     }
 
-    let bone_frames = input
+    let bone_frames: Vec<VmdParsedBoneFrame> = input
         .bone_frames
         .iter()
         .enumerate()
         .map(|(index, &frame)| {
             let name = &descriptor.bone_names[input.bone_name_indices[index] as usize];
-            Ok(VmdParsedBoneFrame {
+            VmdParsedBoneFrame {
                 bone_name: name.name.clone(),
                 bone_name_bytes: name.name_bytes.clone(),
                 frame,
@@ -500,9 +494,9 @@ pub fn build_vmd_animation_from_parts(
                     .try_into()
                     .expect("validated rotation stride"),
                 interpolation: input.bone_interpolations[index * 64..index * 64 + 64].to_vec(),
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect();
     let morph_frames: Vec<VmdParsedMorphFrame> = input
         .morph_frames
         .iter()

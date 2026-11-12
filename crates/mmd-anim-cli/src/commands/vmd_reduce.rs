@@ -57,8 +57,18 @@ pub(crate) fn reduce_vmd(
     // applied to this model-independent, zero-IK sampling runtime.
     runtime_import.property_keyframes.clear();
 
-    let (bone_names, bone_indices) = unique_bone_names(&animation);
-    let (morph_names, morph_indices) = unique_morph_names(&animation);
+    let (bone_names, bone_indices) = unique_names(
+        animation
+            .bone_frames
+            .iter()
+            .map(|frame| (frame.bone_name.as_str(), frame.bone_name_bytes.as_slice())),
+    );
+    let (morph_names, morph_indices) = unique_names(
+        animation
+            .morph_frames
+            .iter()
+            .map(|frame| (frame.morph_name.as_str(), frame.morph_name_bytes.as_slice())),
+    );
     if bone_indices.is_empty() && morph_indices.is_empty() {
         return Err("reduce-vmd requires at least one bone or morph keyframe".into());
     }
@@ -328,42 +338,17 @@ fn vmd_interpolation_block(curves: mmd_anim_runtime::VmdBoneInterpolation) -> [u
     block
 }
 
-fn unique_bone_names(
-    animation: &mmd_anim_format::VmdParsedAnimation,
+fn unique_names<'a>(
+    source: impl Iterator<Item = (&'a str, &'a [u8])>,
 ) -> (Vec<mmd_anim_format::VmdExportName>, HashMap<Vec<u8>, u32>) {
     let mut names = Vec::new();
     let mut indices = HashMap::new();
-    for frame in &animation.bone_frames {
-        let normalized = mmd_anim_format::normalize_vmd_name(&frame.bone_name_bytes);
+    for (text, bytes) in source {
+        let normalized = mmd_anim_format::normalize_vmd_name(bytes);
         if let std::collections::hash_map::Entry::Vacant(entry) = indices.entry(normalized) {
             let index = names.len() as u32;
             entry.insert(index);
-            names.push(mmd_anim_format::VmdExportName::new(
-                frame.bone_name.clone(),
-                frame.bone_name_bytes.clone(),
-            ));
-        }
-    }
-    if names.is_empty() {
-        names.push(mmd_anim_format::VmdExportName::new("", Vec::new()));
-    }
-    (names, indices)
-}
-
-fn unique_morph_names(
-    animation: &mmd_anim_format::VmdParsedAnimation,
-) -> (Vec<mmd_anim_format::VmdExportName>, HashMap<Vec<u8>, u32>) {
-    let mut names = Vec::new();
-    let mut indices = HashMap::new();
-    for frame in &animation.morph_frames {
-        let normalized = mmd_anim_format::normalize_vmd_name(&frame.morph_name_bytes);
-        if let std::collections::hash_map::Entry::Vacant(entry) = indices.entry(normalized) {
-            let index = names.len() as u32;
-            entry.insert(index);
-            names.push(mmd_anim_format::VmdExportName::new(
-                frame.morph_name.clone(),
-                frame.morph_name_bytes.clone(),
-            ));
+            names.push(mmd_anim_format::VmdExportName::new(text, bytes.to_vec()));
         }
     }
     (names, indices)

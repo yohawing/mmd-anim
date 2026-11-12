@@ -144,13 +144,15 @@ pub(crate) fn reduce_vmd(
     let report = reduced.report();
     let source_bone_keys = animation.bone_frames.len();
     let source_morph_keys = animation.morph_frames.len();
-    animation.bone_frames = prefer_smaller_bone_tracks(
+    animation.bone_frames = prefer_smaller_tracks(
         &animation.bone_frames,
         reduced_bone_frames(&reduced, &bone_names),
+        |frame| (frame.frame, frame.bone_name_bytes.as_slice()),
     );
-    animation.morph_frames = prefer_smaller_morph_tracks(
+    animation.morph_frames = prefer_smaller_tracks(
         &animation.morph_frames,
         reduced_morph_frames(&reduced, &morph_names),
+        |frame| (frame.frame, frame.morph_name_bytes.as_slice()),
     );
     animation.metadata.counts = VmdParsedCounts {
         bones: animation.bone_frames.len(),
@@ -252,7 +254,6 @@ fn reduced_bone_frames(
             });
         }
     }
-    frames.sort_by(|a, b| (a.frame, &a.bone_name_bytes).cmp(&(b.frame, &b.bone_name_bytes)));
     frames
 }
 
@@ -271,25 +272,25 @@ fn reduced_morph_frames(
             });
         }
     }
-    frames.sort_by(|a, b| (a.frame, &a.morph_name_bytes).cmp(&(b.frame, &b.morph_name_bytes)));
     frames
 }
 
-fn prefer_smaller_bone_tracks(
-    source: &[VmdParsedBoneFrame],
-    candidate: Vec<VmdParsedBoneFrame>,
-) -> Vec<VmdParsedBoneFrame> {
-    let mut source_tracks: HashMap<Vec<u8>, Vec<VmdParsedBoneFrame>> = HashMap::new();
-    let mut candidate_tracks: HashMap<Vec<u8>, Vec<VmdParsedBoneFrame>> = HashMap::new();
+fn prefer_smaller_tracks<T: Clone>(
+    source: &[T],
+    candidate: Vec<T>,
+    frame_key: impl Fn(&T) -> (u32, &[u8]),
+) -> Vec<T> {
+    let mut source_tracks: HashMap<Vec<u8>, Vec<T>> = HashMap::new();
+    let mut candidate_tracks: HashMap<Vec<u8>, Vec<T>> = HashMap::new();
     for frame in source {
         source_tracks
-            .entry(mmd_anim_format::normalize_vmd_name(&frame.bone_name_bytes))
+            .entry(mmd_anim_format::normalize_vmd_name(frame_key(frame).1))
             .or_default()
             .push(frame.clone());
     }
     for frame in candidate {
         candidate_tracks
-            .entry(mmd_anim_format::normalize_vmd_name(&frame.bone_name_bytes))
+            .entry(mmd_anim_format::normalize_vmd_name(frame_key(&frame).1))
             .or_default()
             .push(frame);
     }
@@ -302,38 +303,7 @@ fn prefer_smaller_bone_tracks(
             frames.extend(source_track);
         }
     }
-    frames.sort_by(|a, b| (a.frame, &a.bone_name_bytes).cmp(&(b.frame, &b.bone_name_bytes)));
-    frames
-}
-
-fn prefer_smaller_morph_tracks(
-    source: &[VmdParsedMorphFrame],
-    candidate: Vec<VmdParsedMorphFrame>,
-) -> Vec<VmdParsedMorphFrame> {
-    let mut source_tracks: HashMap<Vec<u8>, Vec<VmdParsedMorphFrame>> = HashMap::new();
-    let mut candidate_tracks: HashMap<Vec<u8>, Vec<VmdParsedMorphFrame>> = HashMap::new();
-    for frame in source {
-        source_tracks
-            .entry(mmd_anim_format::normalize_vmd_name(&frame.morph_name_bytes))
-            .or_default()
-            .push(frame.clone());
-    }
-    for frame in candidate {
-        candidate_tracks
-            .entry(mmd_anim_format::normalize_vmd_name(&frame.morph_name_bytes))
-            .or_default()
-            .push(frame);
-    }
-    let mut frames = Vec::new();
-    for (name, source_track) in source_tracks {
-        let candidate_track = candidate_tracks.remove(&name).unwrap_or_default();
-        if candidate_track.len() < source_track.len() {
-            frames.extend(candidate_track);
-        } else {
-            frames.extend(source_track);
-        }
-    }
-    frames.sort_by(|a, b| (a.frame, &a.morph_name_bytes).cmp(&(b.frame, &b.morph_name_bytes)));
+    frames.sort_by(|a, b| frame_key(a).cmp(&frame_key(b)));
     frames
 }
 

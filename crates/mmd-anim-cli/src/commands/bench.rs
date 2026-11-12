@@ -747,13 +747,13 @@ pub(crate) fn parse_bench_synthetic_args(
     let mut use_json = false;
     let mut positional = Vec::new();
 
-    for token in &raw {
+    for token in raw {
         if token == "--json" {
             use_json = true;
         } else if token.starts_with("--") {
             return Err(format!("unknown flag: {token}").into());
         } else {
-            positional.push(token.clone());
+            positional.push(token);
         }
     }
 
@@ -854,13 +854,7 @@ fn optional_positive_usize_arg(
     let Some(value) = args.next() else {
         return Ok(default);
     };
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| format!("invalid {label}: {value}"))?;
-    if parsed == 0 {
-        return Err(format!("{label} must be positive").into());
-    }
-    Ok(parsed)
+    parse_positive_usize(&value, label)
 }
 
 fn optional_positive_u32_arg(
@@ -871,13 +865,7 @@ fn optional_positive_u32_arg(
     let Some(value) = args.next() else {
         return Ok(default);
     };
-    let parsed = value
-        .parse::<u32>()
-        .map_err(|_| format!("invalid {label}: {value}"))?;
-    if parsed == 0 {
-        return Err(format!("{label} must be positive").into());
-    }
-    Ok(parsed)
+    parse_positive_u32(&value, label)
 }
 
 fn parse_positive_usize(value: &str, label: &str) -> Result<usize, Box<dyn std::error::Error>> {
@@ -908,13 +896,7 @@ fn optional_f32_parse_arg(
     let Some(value) = args.next() else {
         return Ok(default);
     };
-    let parsed = value
-        .parse::<f32>()
-        .map_err(|_| format!("invalid {label}: {value}"))?;
-    if !parsed.is_finite() {
-        return Err(format!("{label} must be finite").into());
-    }
-    Ok(parsed)
+    parse_finite_f32(&value, label)
 }
 
 fn parse_finite_f32(value: &str, label: &str) -> Result<f32, Box<dyn std::error::Error>> {

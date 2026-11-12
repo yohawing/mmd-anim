@@ -716,11 +716,7 @@ fn dispatch_inspect(
         }
         return commands::parse::parse_format_json(asset);
     }
-    if detect_path_format(asset)? == mmd_anim_format::MmdFormatKind::Pmx {
-        commands::parse::parse_pmx_summary(asset)
-    } else {
-        commands::parse::parse_format_summary(asset)
-    }
+    commands::parse::parse_format_summary(asset)
 }
 
 fn dispatch_completion(shell: CompletionShell) -> Result<ExitCode, Box<dyn std::error::Error>> {

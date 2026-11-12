@@ -1451,21 +1451,7 @@ pub fn sample_vmd_camera_frames(
     frames: &[VmdParsedCameraFrame],
     frame: f32,
 ) -> Option<VmdCameraState> {
-    if frames.is_empty() {
-        return None;
-    }
-
-    let mut sorted: Vec<&VmdParsedCameraFrame> = frames.iter().collect();
-    sorted.sort_by_key(|keyframe| keyframe.frame);
-
-    let mut index = 0usize;
-    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
-        index += 1;
-    }
-
-    let previous = sorted[index];
-    let next = sorted.get(index + 1).copied().unwrap_or(previous);
-    let t = interpolation_ratio(previous.frame, next.frame, frame);
+    let (previous, next, t) = sample_frame_pair(frames, frame, |keyframe| keyframe.frame)?;
     let interpolation = decode_camera_interpolation(&next.interpolation);
 
     let distance_t = interpolation.distance.evaluate(t);
@@ -1500,21 +1486,7 @@ pub fn sample_vmd_light_frames(
     frames: &[VmdParsedLightFrame],
     frame: f32,
 ) -> Option<VmdLightState> {
-    if frames.is_empty() {
-        return None;
-    }
-
-    let mut sorted: Vec<&VmdParsedLightFrame> = frames.iter().collect();
-    sorted.sort_by_key(|keyframe| keyframe.frame);
-
-    let mut index = 0usize;
-    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
-        index += 1;
-    }
-
-    let previous = sorted[index];
-    let next = sorted.get(index + 1).copied().unwrap_or(previous);
-    let t = interpolation_ratio(previous.frame, next.frame, frame);
+    let (previous, next, t) = sample_frame_pair(frames, frame, |keyframe| keyframe.frame)?;
 
     Some(VmdLightState {
         color: [
@@ -1534,26 +1506,35 @@ pub fn sample_vmd_self_shadow_frames(
     frames: &[VmdParsedSelfShadowFrame],
     frame: f32,
 ) -> Option<VmdSelfShadowState> {
-    if frames.is_empty() {
-        return None;
-    }
-
-    let mut sorted: Vec<&VmdParsedSelfShadowFrame> = frames.iter().collect();
-    sorted.sort_by_key(|keyframe| keyframe.frame);
-
-    let mut index = 0usize;
-    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
-        index += 1;
-    }
-
-    let previous = sorted[index];
-    let next = sorted.get(index + 1).copied().unwrap_or(previous);
-    let t = interpolation_ratio(previous.frame, next.frame, frame);
+    let (previous, next, t) = sample_frame_pair(frames, frame, |keyframe| keyframe.frame)?;
 
     Some(VmdSelfShadowState {
         mode: if t < 1.0 { previous.mode } else { next.mode },
         distance: lerp(previous.distance, next.distance, t),
     })
+}
+
+fn sample_frame_pair<T>(
+    frames: &[T],
+    frame: f32,
+    frame_number: impl Fn(&T) -> u32,
+) -> Option<(&T, &T, f32)> {
+    if frames.is_empty() {
+        return None;
+    }
+
+    let mut sorted: Vec<&T> = frames.iter().collect();
+    sorted.sort_by_key(|keyframe| frame_number(keyframe));
+
+    let mut index = 0usize;
+    while index + 1 < sorted.len() && frame_number(sorted[index + 1]) as f32 <= frame {
+        index += 1;
+    }
+
+    let previous = sorted[index];
+    let next = sorted.get(index + 1).copied().unwrap_or(previous);
+    let t = interpolation_ratio(frame_number(previous), frame_number(next), frame);
+    Some((previous, next, t))
 }
 
 struct CameraInterpolation {
@@ -4572,6 +4553,38 @@ mod tests {
 
         assert_vec3_near(light.color, [0.5, 0.25, 0.5]);
         assert_vec3_near(light.direction, [0.5, -0.5, 0.0]);
+    }
+
+    #[test]
+    fn samples_unsorted_light_frames_with_stable_duplicate_keys() {
+        let frames: Vec<_> = [(30, 3.0), (10, 1.0), (10, 2.0)]
+            .into_iter()
+            .map(|(frame, value)| VmdParsedLightFrame {
+                frame,
+                color: [value; 3],
+                direction: [value; 3],
+            })
+            .collect();
+
+        for (frame, expected) in [
+            (f32::NEG_INFINITY, 1.0),
+            (0.0, 1.0),
+            (10.0, 2.0),
+            (20.0, 2.5),
+            (30.0, 3.0),
+            (f32::INFINITY, 3.0),
+        ] {
+            let light = sample_vmd_light_frames(&frames, frame).unwrap();
+            assert_vec3_near(light.color, [expected; 3]);
+            assert_vec3_near(light.direction, [expected; 3]);
+        }
+    }
+
+    #[test]
+    fn empty_vmd_tracks_have_no_sample() {
+        assert!(sample_vmd_camera_frames(&[], 0.0).is_none());
+        assert!(sample_vmd_light_frames(&[], 0.0).is_none());
+        assert!(sample_vmd_self_shadow_frames(&[], 0.0).is_none());
     }
 
     #[test]

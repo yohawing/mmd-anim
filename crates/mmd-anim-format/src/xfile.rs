@@ -218,35 +218,8 @@ fn export_x_manifest(manifest: &AccessoryParsedManifest) -> Vec<u8> {
 fn export_x_meshes(text: &mut String, manifest: &AccessoryParsedManifest) {
     for mesh in &manifest.mesh_summaries {
         text.push_str("Mesh {\n");
-        text.push_str(&format!("  {};\n", mesh.positions.len()));
-        for (index, position) in mesh.positions.iter().enumerate() {
-            let suffix = if index + 1 == mesh.positions.len() {
-                ";;"
-            } else {
-                ","
-            };
-            text.push_str(&format!(
-                "  {};{};{};{}\n",
-                format_x_float(position[0]),
-                format_x_float(position[1]),
-                format_x_float(position[2]),
-                suffix
-            ));
-        }
-        text.push_str(&format!("  {};\n", mesh.face_indices.len()));
-        for (index, face) in mesh.face_indices.iter().enumerate() {
-            let suffix = if index + 1 == mesh.face_indices.len() {
-                ";;"
-            } else {
-                ","
-            };
-            let indices = face
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            text.push_str(&format!("  {};{};{}\n", face.len(), indices, suffix));
-        }
+        export_x_vector_list(text, &mesh.positions, "  ");
+        export_x_face_list(text, &mesh.face_indices, "  ");
         if !mesh.normals.is_empty() {
             export_x_mesh_normals(text, mesh);
         }
@@ -279,56 +252,42 @@ fn export_x_meshes(text: &mut String, manifest: &AccessoryParsedManifest) {
     }
 }
 
-fn export_x_mesh_normals(text: &mut String, mesh: &AccessoryMeshSummary) {
-    text.push_str("  MeshNormals {\n");
-    text.push_str(&format!("    {};\n", mesh.normals.len()));
-    for (index, normal) in mesh.normals.iter().enumerate() {
-        let suffix = if index + 1 == mesh.normals.len() {
-            ";;"
-        } else {
-            ","
-        };
-        text.push_str(&format!(
-            "    {};{};{};{}\n",
-            format_x_float(normal[0]),
-            format_x_float(normal[1]),
-            format_x_float(normal[2]),
-            suffix
-        ));
+fn export_x_vector_list<const N: usize>(text: &mut String, values: &[[f32; N]], indent: &str) {
+    text.push_str(&format!("{indent}{};\n", values.len()));
+    for (index, value) in values.iter().enumerate() {
+        text.push_str(indent);
+        for &component in value {
+            text.push_str(&format_x_float(component));
+            text.push(';');
+        }
+        text.push_str(if index + 1 == values.len() { ";;" } else { "," });
+        text.push('\n');
     }
-    text.push_str(&format!("    {};\n", mesh.normal_face_indices.len()));
-    for (index, face) in mesh.normal_face_indices.iter().enumerate() {
-        let suffix = if index + 1 == mesh.normal_face_indices.len() {
-            ";;"
-        } else {
-            ","
-        };
+}
+
+fn export_x_face_list(text: &mut String, faces: &[Vec<u32>], indent: &str) {
+    text.push_str(&format!("{indent}{};\n", faces.len()));
+    for (index, face) in faces.iter().enumerate() {
+        let suffix = if index + 1 == faces.len() { ";;" } else { "," };
         let indices = face
             .iter()
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(",");
-        text.push_str(&format!("    {};{};{}\n", face.len(), indices, suffix));
+        text.push_str(&format!("{indent}{};{};{}\n", face.len(), indices, suffix));
     }
+}
+
+fn export_x_mesh_normals(text: &mut String, mesh: &AccessoryMeshSummary) {
+    text.push_str("  MeshNormals {\n");
+    export_x_vector_list(text, &mesh.normals, "    ");
+    export_x_face_list(text, &mesh.normal_face_indices, "    ");
     text.push_str("  }\n");
 }
 
 fn export_x_mesh_texture_coords(text: &mut String, mesh: &AccessoryMeshSummary) {
     text.push_str("  MeshTextureCoords {\n");
-    text.push_str(&format!("    {};\n", mesh.texture_coordinates.len()));
-    for (index, uv) in mesh.texture_coordinates.iter().enumerate() {
-        let suffix = if index + 1 == mesh.texture_coordinates.len() {
-            ";;"
-        } else {
-            ","
-        };
-        text.push_str(&format!(
-            "    {};{};{}\n",
-            format_x_float(uv[0]),
-            format_x_float(uv[1]),
-            suffix
-        ));
-    }
+    export_x_vector_list(text, &mesh.texture_coordinates, "    ");
     text.push_str("  }\n");
 }
 

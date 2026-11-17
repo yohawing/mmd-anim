@@ -15,7 +15,6 @@ pub(crate) fn rig_inspect(
         )
     })?;
     let bones = &parsed.skeleton.bones;
-    let bone_count = bones.len();
 
     let ik_bones: Vec<(usize, &mmd_anim_format::pmx::PmxParsedBone)> = bones
         .iter()
@@ -37,7 +36,6 @@ pub(crate) fn rig_inspect(
     if use_json {
         print_json(
             &parsed,
-            bones,
             &ik_bones,
             &grant_bones,
             &layer_distribution,
@@ -46,8 +44,6 @@ pub(crate) fn rig_inspect(
     } else {
         print_human(
             &parsed,
-            bones,
-            bone_count,
             &ik_bones,
             &grant_bones,
             &layer_distribution,
@@ -58,14 +54,21 @@ pub(crate) fn rig_inspect(
     Ok(ExitCode::SUCCESS)
 }
 
+fn bone_name(bones: &[mmd_anim_format::pmx::PmxParsedBone], index: i32) -> &str {
+    bones
+        .get(index as usize)
+        .map(|bone| bone.name.as_str())
+        .unwrap_or("<unknown>")
+}
+
 fn print_json(
     parsed: &mmd_anim_format::pmx::PmxParsedModel,
-    bones: &[mmd_anim_format::pmx::PmxParsedBone],
     ik_bones: &[(usize, &mmd_anim_format::pmx::PmxParsedBone)],
     grant_bones: &[(usize, &mmd_anim_format::pmx::PmxParsedBone)],
     layer_distribution: &BTreeMap<i32, usize>,
     show_bones: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let bones = &parsed.skeleton.bones;
     let ik_chains: Vec<serde_json::Value> = ik_bones
         .iter()
         .map(|(idx, bone)| {
@@ -74,10 +77,7 @@ fn print_json(
                 .links
                 .iter()
                 .map(|link| {
-                    let link_name = bones
-                        .get(link.bone_index as usize)
-                        .map(|b| b.name.as_str())
-                        .unwrap_or("<unknown>");
+                    let link_name = bone_name(bones, link.bone_index);
                     let mut obj = serde_json::json!({
                         "boneIndex": link.bone_index,
                         "boneName": link_name,
@@ -91,10 +91,7 @@ fn print_json(
                     obj
                 })
                 .collect();
-            let target_name = bones
-                .get(ik.target_index as usize)
-                .map(|b| b.name.as_str())
-                .unwrap_or("<unknown>");
+            let target_name = bone_name(bones, ik.target_index);
             serde_json::json!({
                 "boneIndex": idx,
                 "boneName": bone.name,
@@ -112,10 +109,7 @@ fn print_json(
         .iter()
         .map(|(idx, bone)| {
             let append = bone.append_transform.as_ref().unwrap();
-            let source_name = bones
-                .get(append.parent_index as usize)
-                .map(|b| b.name.as_str())
-                .unwrap_or("<unknown>");
+            let source_name = bone_name(bones, append.parent_index);
             serde_json::json!({
                 "boneIndex": idx,
                 "boneName": bone.name,
@@ -181,13 +175,13 @@ fn print_json(
 
 fn print_human(
     parsed: &mmd_anim_format::pmx::PmxParsedModel,
-    bones: &[mmd_anim_format::pmx::PmxParsedBone],
-    bone_count: usize,
     ik_bones: &[(usize, &mmd_anim_format::pmx::PmxParsedBone)],
     grant_bones: &[(usize, &mmd_anim_format::pmx::PmxParsedBone)],
     layer_distribution: &BTreeMap<i32, usize>,
     show_bones: bool,
 ) {
+    let bones = &parsed.skeleton.bones;
+    let bone_count = bones.len();
     println!(
         "rig-inspect: model={} bones={} ikChains={} grantCount={}",
         parsed.metadata.name,
@@ -207,10 +201,7 @@ fn print_human(
         println!("\nIK chains ({}):", ik_bones.len());
         for (idx, bone) in ik_bones {
             let ik = bone.ik.as_ref().unwrap();
-            let target_name = bones
-                .get(ik.target_index as usize)
-                .map(|b| b.name.as_str())
-                .unwrap_or("<unknown>");
+            let target_name = bone_name(bones, ik.target_index);
             println!(
                 "  [{idx}] {} -> target={} links={} loopCount={} limitAngle={}",
                 bone.name,
@@ -226,21 +217,12 @@ fn print_human(
         println!("\ngrants ({}):", grant_bones.len());
         for (idx, bone) in grant_bones {
             let append = bone.append_transform.as_ref().unwrap();
-            let source_name = bones
-                .get(append.parent_index as usize)
-                .map(|b| b.name.as_str())
-                .unwrap_or("<unknown>");
-            let mut affects = Vec::new();
-            if bone.flags.append_rotate {
-                affects.push("rotation");
-            }
-            if bone.flags.append_translate {
-                affects.push("translation");
-            }
-            let affects_str = if affects.is_empty() {
-                "none".to_owned()
-            } else {
-                affects.join("+")
+            let source_name = bone_name(bones, append.parent_index);
+            let affects_str = match (bone.flags.append_rotate, bone.flags.append_translate) {
+                (true, true) => "rotation+translation",
+                (true, false) => "rotation",
+                (false, true) => "translation",
+                (false, false) => "none",
             };
             println!(
                 "  [{idx}] {} <- source={} weight={:.4} affects={}{}",
@@ -260,11 +242,6 @@ fn print_human(
     if show_bones {
         println!("\nbones ({bone_count}):");
         for (idx, bone) in bones.iter().enumerate() {
-            let parent_str = if bone.parent_index < 0 {
-                "-1".to_owned()
-            } else {
-                format!("{}", bone.parent_index)
-            };
             let mut flags = Vec::new();
             if bone.flags.ik {
                 flags.push("IK");
@@ -289,7 +266,7 @@ fn print_human(
             println!(
                 "  [{idx}] {} parent={} layer={} pos=({:.4},{:.4},{:.4}){}",
                 bone.name,
-                parent_str,
+                bone.parent_index.max(-1),
                 bone.layer,
                 bone.position[0],
                 bone.position[1],

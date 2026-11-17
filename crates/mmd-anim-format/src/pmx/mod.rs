@@ -244,12 +244,12 @@ pub fn read_header(data: &[u8]) -> Result<(PmxHeader, usize), ImportError> {
     Ok((header, r.pos))
 }
 
-pub fn skip_model_info(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize, ImportError> {
+pub fn skip_model_info(data: &[u8], _header: &PmxHeader, pos: usize) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let _model_name = r.read_string(header.encoding)?;
-    let _english_name = r.read_string(header.encoding)?;
-    let _comment = r.read_string(header.encoding)?;
-    let _english_comment = r.read_string(header.encoding)?;
+    r.skip_string()?; // Model name.
+    r.skip_string()?; // English name.
+    r.skip_string()?; // Comment.
+    r.skip_string()?; // English comment.
     Ok(r.pos)
 }
 
@@ -314,7 +314,7 @@ pub fn skip_faces(data: &[u8], vertex_index_size: u8, pos: usize) -> Result<usiz
 
 pub fn skip_textures(
     data: &[u8],
-    encoding: TextEncoding,
+    _encoding: TextEncoding,
     pos: usize,
 ) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
@@ -323,7 +323,7 @@ pub fn skip_textures(
         return Err(ImportError::SectionOverflow);
     }
     for _ in 0..count {
-        let _path = r.read_string(encoding)?;
+        r.skip_string()?; // Path.
     }
     Ok(r.pos)
 }
@@ -335,8 +335,8 @@ pub fn skip_materials(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usi
         return Err(ImportError::SectionOverflow);
     }
     for _ in 0..count {
-        let _name = r.read_string(header.encoding)?;
-        let _english_name = r.read_string(header.encoding)?;
+        r.skip_string()?; // Name.
+        r.skip_string()?; // English name.
         r.skip(16)?;
         r.skip(16)?;
         r.skip(12)?;
@@ -352,7 +352,7 @@ pub fn skip_materials(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usi
         } else {
             r.skip(1)?;
         }
-        let _memo = r.read_string(header.encoding)?;
+        r.skip_string()?; // Memo.
         let _face_count = r.read_i32_le()?;
     }
     Ok(r.pos)
@@ -365,8 +365,8 @@ pub fn skip_morphs(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize,
         return Err(ImportError::SectionOverflow);
     }
     for _ in 0..count {
-        let _name = r.read_string(header.encoding)?;
-        let _english_name = r.read_string(header.encoding)?;
+        r.skip_string()?; // Name.
+        r.skip_string()?; // English name.
         r.skip(1)?;
         let _morph_type = r.read_u8()?;
         let _offset_count = r.read_i32_le()?;
@@ -449,7 +449,7 @@ pub fn read_morph_names(
 
     for _ in 0..count {
         let (raw, name) = r.read_string_owned(header.encoding)?;
-        let _english_name = r.read_string(header.encoding)?;
+        r.skip_string()?; // English name.
         name_bytes.push(raw);
         names.push(name);
 
@@ -505,7 +505,7 @@ fn read_runtime_morph_descriptor(
 
     for morph_index in 0..count {
         let (raw, name) = r.read_string_owned(header.encoding)?;
-        let _english_name = r.read_string(header.encoding)?;
+        r.skip_string()?; // English name.
         name_bytes.push(raw);
         names.push(name);
 
@@ -672,7 +672,7 @@ fn read_bones_with_local_axes(
 
     for _bone_i in 0..count {
         let (name_bytes, name) = r.read_string_owned(header.encoding)?;
-        let _english_name = r.read_string(header.encoding)?;
+        r.skip_string()?; // English name.
         let position = r.read_vec3()?;
         let parent = r.read_bone_index(header)?;
         let transform_order = r.read_i32_le()?;
@@ -3989,7 +3989,7 @@ fn read_parsed_materials(
         } else {
             (String::new(), Some(r.read_u8()?))
         };
-        let _memo = r.read_string(header.encoding)?;
+        r.skip_string()?; // Memo.
         let face_count = r.read_i32_le()? / 3;
         materials.push(PmxParsedMaterial {
             name,
@@ -4916,6 +4916,25 @@ mod tests {
 
     fn build_empty_material_section() -> Vec<u8> {
         vec![0u8, 0, 0, 0]
+    }
+
+    #[test]
+    fn skipped_model_text_keeps_tolerant_lengths_and_checks_truncation() {
+        let mut text = Vec::new();
+        text.extend_from_slice(&(-1i32).to_le_bytes());
+        for bytes in [b"\xff\xd8\x00".as_slice(), b"A\0tail", b"end"] {
+            text.extend_from_slice(&(bytes.len() as i32).to_le_bytes());
+            text.extend_from_slice(bytes);
+        }
+        for encoding in [TextEncoding::Utf8, TextEncoding::Utf16Le] {
+            let header_bytes = build_small_pmx_header_bytes(1, encoding);
+            let (header, _) = read_header(&header_bytes).unwrap();
+            assert_eq!(skip_model_info(&text, &header, 0).unwrap(), text.len());
+            assert!(matches!(
+                skip_model_info(&text[..text.len() - 1], &header, 0),
+                Err(ImportError::UnexpectedEof(1))
+            ));
+        }
     }
 
     #[test]

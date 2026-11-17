@@ -5241,10 +5241,10 @@ fn asset_count_mismatch_diagnostics(
 fn duplicate_asset_reference_diagnostics(
     references: &[PmmAssetReference],
 ) -> Vec<PmmParserDiagnostic> {
-    let mut by_file = HashMap::<(String, String), Vec<(usize, &PmmAssetReference)>>::new();
+    let mut by_file = HashMap::<(&str, &str), Vec<(usize, &PmmAssetReference)>>::new();
     for (index, reference) in references.iter().enumerate() {
         by_file
-            .entry((reference.file_name.clone(), reference.extension.clone()))
+            .entry((&reference.file_name, &reference.extension))
             .or_default()
             .push((index, reference));
     }
@@ -5254,13 +5254,11 @@ fn duplicate_asset_reference_diagnostics(
         if entries.len() < 2 {
             continue;
         }
-        let mut unique_paths = entries
+        let first_path = &entries[0].1.normalized_path;
+        if entries
             .iter()
-            .map(|(_, reference)| reference.normalized_path.to_ascii_lowercase())
-            .collect::<Vec<_>>();
-        unique_paths.sort();
-        unique_paths.dedup();
-        if unique_paths.len() < 2 {
+            .all(|(_, reference)| reference.normalized_path.eq_ignore_ascii_case(first_path))
+        {
             continue;
         }
         let indices = entries
@@ -9804,6 +9802,14 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.code == "PMM_ASSET_REFERENCE_DUPLICATE")
         );
+
+        let mut references = parsed.asset_references;
+        references[1].normalized_path = "c:/models/miku.pmx".to_owned();
+        assert!(duplicate_asset_reference_diagnostics(&references).is_empty());
+
+        references[0].normalized_path = "C:/Ä/miku.pmx".to_owned();
+        references[1].normalized_path = "C:/ä/miku.pmx".to_owned();
+        assert_eq!(duplicate_asset_reference_diagnostics(&references).len(), 1);
     }
 
     #[test]

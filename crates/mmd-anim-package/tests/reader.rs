@@ -283,17 +283,22 @@ fn rejects_non_contiguous_or_trailing_payload_layout() {
 
 #[test]
 fn rejects_duplicate_json_keys_everywhere() {
-    let manifest = br#"{
+    let manifests: [&[u8]; 2] = [
+        br#"{
         "schema":"mmdpack/1",
         "defaultModelEntryId":1,
         "entries":[],
         "modelBindings":[{"modelEntryId":1,"modelEntryId":1,"textureBindings":[]}]
-    }"#;
-    let bytes = build_parts(manifest.to_vec(), &[]);
-    assert!(matches!(
-        open(bytes),
-        Err(MmdPackageError::InvalidJson(message)) if message.contains("duplicate key")
-    ));
+    }"#,
+        br#"{"future":null,"future":0.5}"#,
+    ];
+    for manifest in manifests {
+        let bytes = build_parts(manifest.to_vec(), &[]);
+        assert!(matches!(
+            open(bytes),
+            Err(MmdPackageError::InvalidJson(message)) if message.contains("duplicate key")
+        ));
+    }
 }
 
 #[test]

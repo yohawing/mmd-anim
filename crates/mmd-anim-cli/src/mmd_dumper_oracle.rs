@@ -133,7 +133,7 @@ impl MmdDumperOracleDump {
                 });
             }
 
-            source.get_or_insert_with(|| record.source.clone());
+            source.get_or_insert(record.source);
             let frame = record.frame.round() as i32;
             if target_frames
                 .as_ref()
@@ -185,8 +185,9 @@ impl MmdDumperOracleDump {
 
         let mut frames = Vec::new();
         let mut matched_case = false;
+        let normalized_pmx_path = pmx_path.map(normalize_runtime_path);
         for case in report.case_results {
-            if !unity_runtime_case_matches(&case, case_name, pmx_path) {
+            if !unity_runtime_case_matches(&case, case_name, normalized_pmx_path.as_deref()) {
                 continue;
             }
             matched_case = true;
@@ -261,12 +262,11 @@ impl MmdDumperOracleDump {
 fn unity_runtime_case_matches(
     case: &RawUnityRuntimeVerificationCase,
     case_name: Option<&str>,
-    pmx_path: Option<&str>,
+    normalized_pmx_path: Option<&str>,
 ) -> bool {
     let case_name_matches = case_name.is_none_or(|case_name| case.name == case_name);
-    let pmx_path_matches = pmx_path.is_none_or(|pmx_path| {
-        normalize_runtime_path(&case.pmx_path) == normalize_runtime_path(pmx_path)
-    });
+    let pmx_path_matches = normalized_pmx_path
+        .is_none_or(|pmx_path| normalize_runtime_path(&case.pmx_path) == pmx_path);
     case_name_matches && pmx_path_matches
 }
 

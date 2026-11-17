@@ -297,31 +297,25 @@ fn diff_one_bone(
         .collect();
     added.sort_unstable_by_key(|entry| entry.vertex_index);
 
-    let mut removed: Vec<FbxSkinVertexWeight> = weights_a
-        .iter()
-        .filter(|(vertex, _)| !weights_b.contains_key(*vertex))
-        .map(|(vertex, weight)| FbxSkinVertexWeight {
-            vertex_index: *vertex,
-            weight: *weight,
-        })
-        .collect();
-    removed.sort_unstable_by_key(|entry| entry.vertex_index);
-
-    let mut changed: Vec<FbxSkinWeightDiff> = weights_a
-        .iter()
-        .filter_map(|(vertex, weight_a)| {
-            let weight_b = weights_b.get(vertex)?;
-            if (weight_a - weight_b).abs() > options.weight_epsilon {
-                Some(FbxSkinWeightDiff {
-                    vertex_index: *vertex,
-                    weight_a: *weight_a,
-                    weight_b: *weight_b,
-                })
-            } else {
-                None
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    for (&vertex_index, &weight_a) in &weights_a {
+        match weights_b.get(&vertex_index) {
+            Some(&weight_b) if (weight_a - weight_b).abs() > options.weight_epsilon => {
+                changed.push(FbxSkinWeightDiff {
+                    vertex_index,
+                    weight_a,
+                    weight_b,
+                });
             }
-        })
-        .collect();
+            None => removed.push(FbxSkinVertexWeight {
+                vertex_index,
+                weight: weight_a,
+            }),
+            Some(_) => {}
+        }
+    }
+    removed.sort_unstable_by_key(|entry| entry.vertex_index);
     changed.sort_unstable_by_key(|entry| entry.vertex_index);
 
     let transform_a = cluster_a.and_then(|cluster| cluster.transform);

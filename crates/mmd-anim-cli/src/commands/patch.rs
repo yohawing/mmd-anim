@@ -35,28 +35,23 @@ pub(crate) fn parse_pmm_scene_frame_range_patch_options(
         let value = iter.next().ok_or_else(|| {
             format!("missing value for option {arg}; {PATCH_PMM_SCENE_FRAME_RANGE_USAGE}")
         })?;
+        let parse_frame = || {
+            value
+                .parse::<i32>()
+                .map_err(|_| format!("invalid {arg} value: {value} (expected i32)"))
+        };
         match arg.as_str() {
             "--current-frame" => {
-                patch.current_frame_index = Some(value.parse().map_err(|_| {
-                    format!("invalid --current-frame value: {value} (expected i32)")
-                })?);
+                patch.current_frame_index = Some(parse_frame()?);
             }
             "--current-frame-text" => {
-                patch.current_frame_index_in_text_field = Some(value.parse().map_err(|_| {
-                    format!("invalid --current-frame-text value: {value} (expected i32)")
-                })?);
+                patch.current_frame_index_in_text_field = Some(parse_frame()?);
             }
             "--begin-frame" => {
-                patch.begin_frame_index =
-                    Some(value.parse().map_err(|_| {
-                        format!("invalid --begin-frame value: {value} (expected i32)")
-                    })?);
+                patch.begin_frame_index = Some(parse_frame()?);
             }
             "--end-frame" => {
-                patch.end_frame_index =
-                    Some(value.parse().map_err(|_| {
-                        format!("invalid --end-frame value: {value} (expected i32)")
-                    })?);
+                patch.end_frame_index = Some(parse_frame()?);
             }
             "--begin-frame-enabled" => {
                 patch.begin_frame_index_enabled =
@@ -79,13 +74,7 @@ pub(crate) fn parse_pmm_scene_frame_range_patch_options(
         }
     }
 
-    if patch.current_frame_index.is_none()
-        && patch.current_frame_index_in_text_field.is_none()
-        && patch.begin_frame_index.is_none()
-        && patch.end_frame_index.is_none()
-        && patch.begin_frame_index_enabled.is_none()
-        && patch.end_frame_index_enabled.is_none()
-    {
+    if count_pmm_scene_frame_range_patch_fields(&patch) == 0 {
         return Err(format!(
             "at least one patch option is required; {PATCH_PMM_SCENE_FRAME_RANGE_USAGE}"
         ));
@@ -94,29 +83,20 @@ pub(crate) fn parse_pmm_scene_frame_range_patch_options(
     Ok(patch)
 }
 
-pub(crate) fn count_pmm_scene_frame_range_patch_fields(
+fn count_pmm_scene_frame_range_patch_fields(
     patch: &mmd_anim_format::pmm::PmmSceneFrameRangePatch,
 ) -> usize {
-    let mut count = 0usize;
-    if patch.current_frame_index.is_some() {
-        count += 1;
-    }
-    if patch.current_frame_index_in_text_field.is_some() {
-        count += 1;
-    }
-    if patch.begin_frame_index.is_some() {
-        count += 1;
-    }
-    if patch.end_frame_index.is_some() {
-        count += 1;
-    }
-    if patch.begin_frame_index_enabled.is_some() {
-        count += 1;
-    }
-    if patch.end_frame_index_enabled.is_some() {
-        count += 1;
-    }
-    count
+    [
+        patch.current_frame_index.is_some(),
+        patch.current_frame_index_in_text_field.is_some(),
+        patch.begin_frame_index.is_some(),
+        patch.end_frame_index.is_some(),
+        patch.begin_frame_index_enabled.is_some(),
+        patch.end_frame_index_enabled.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count()
 }
 
 pub(crate) fn patch_document_model_path_json(
@@ -147,7 +127,6 @@ pub(crate) fn patch_scene_frame_range_json(
     bytes_in: usize,
     bytes_out: usize,
 ) -> serde_json::Value {
-    let changed_fields = count_pmm_scene_frame_range_patch_fields(patch);
     let mut patch_fields = serde_json::Map::new();
     if let Some(value) = patch.current_frame_index {
         patch_fields.insert("currentFrame".to_owned(), json!(value));
@@ -175,7 +154,7 @@ pub(crate) fn patch_scene_frame_range_json(
         "output": output.display().to_string(),
         "bytesIn": bytes_in,
         "bytesOut": bytes_out,
-        "changedFields": changed_fields,
+        "changedFields": patch_fields.len(),
         "patch": patch_fields,
     })
 }

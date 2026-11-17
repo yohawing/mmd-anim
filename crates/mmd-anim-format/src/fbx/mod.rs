@@ -992,18 +992,16 @@ fn dcc_channel(
         return None;
     }
     if constant {
+        let tangents = vec![SegmentTangents {
+            out_tangent: 0.0,
+            next_in_tangent: 0.0,
+        }];
         return Some(FbxAnimationChannel {
             sample_indices: vec![sample_indices[0]],
             frame_times: vec![frame_times[0]],
             values: vec![canonical_dcc_scalar(values[0], epsilon)],
-            tangents: vec![SegmentTangents {
-                out_tangent: 0.0,
-                next_in_tangent: 0.0,
-            }],
-            attributes: Some(curve_attributes(&[SegmentTangents {
-                out_tangent: 0.0,
-                next_in_tangent: 0.0,
-            }])),
+            attributes: Some(curve_attributes(&tangents)),
+            tangents,
         });
     }
     let tangents = tangents
@@ -1021,8 +1019,8 @@ fn dcc_channel(
         sample_indices: sample_indices.to_vec(),
         frame_times: frame_times.to_vec(),
         values,
-        tangents: tangents.clone(),
         attributes: Some(curve_attributes(&tangents)),
+        tangents,
     })
 }
 
@@ -1070,8 +1068,8 @@ fn full_dcc_channel(
             .iter()
             .map(|value| canonical_dcc_scalar(*value, epsilon))
             .collect(),
-        tangents: tangents.clone(),
         attributes: Some(curve_attributes(&tangents)),
+        tangents,
     })
 }
 

@@ -1610,10 +1610,6 @@ fn prune_ancestor_keys(
         work_stats.ancestor_prune_attempts += 1;
         let start = bone_key_indices[bone][position - 1];
         let end = bone_key_indices[bone][position + 1];
-        let mut replacement_indices = bone_key_indices[bone].clone();
-        replacement_indices.remove(position);
-        let mut replacement_provenance = bone_key_provenance[bone].clone();
-        replacement_provenance.remove(position);
         let replacement = build_bone_track_without_key(sequence, input, local_pose, bone, position);
         work_stats.candidate_bone_track_rebuilds += 1;
         if sequence.target == ReductionTarget::DccCubic {
@@ -1637,8 +1633,8 @@ fn prune_ancestor_keys(
             continue;
         }
 
-        bone_key_indices[bone] = replacement_indices;
-        bone_key_provenance[bone] = replacement_provenance;
+        bone_key_indices[bone].remove(position);
+        bone_key_provenance[bone].remove(position);
         sequence.bone_tracks[bone] = replacement;
         apply_ancestor_prune_candidate(
             sequence,

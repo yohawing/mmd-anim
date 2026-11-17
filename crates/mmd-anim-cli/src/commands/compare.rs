@@ -191,9 +191,12 @@ impl NumericCompareReport {
     }
 
     fn skipped_targets_sorted(&self) -> Vec<String> {
-        let mut targets: HashSet<String> = self.motion_stats.skipped_targets.clone();
-        targets.extend(self.camera_stats.skipped_targets.iter().cloned());
-        let mut targets: Vec<_> = targets.into_iter().collect();
+        let mut targets: Vec<_> = self
+            .motion_stats
+            .skipped_targets
+            .union(&self.camera_stats.skipped_targets)
+            .cloned()
+            .collect();
         targets.sort();
         targets
     }
@@ -814,21 +817,23 @@ impl MotionNumericCompareStats {
         }
         if other.max_abs_error > self.max_abs_error {
             self.max_abs_error = other.max_abs_error;
-            self.worst = other.worst.clone();
+            self.worst.clone_from(&other.worst);
             self.worst_frame = other.worst_frame;
-            self.worst_bone = other.worst_bone.clone();
+            self.worst_bone.clone_from(&other.worst_bone);
             self.worst_component = other.worst_component;
         }
         if other.translation_max_error > self.translation_max_error {
             self.translation_max_error = other.translation_max_error;
             self.worst_translation_frame = other.worst_translation_frame;
-            self.worst_translation_bone = other.worst_translation_bone.clone();
+            self.worst_translation_bone
+                .clone_from(&other.worst_translation_bone);
             self.worst_translation_axis = other.worst_translation_axis;
         }
         if other.rotation_max_angle_rad > self.rotation_max_angle_rad {
             self.rotation_max_angle_rad = other.rotation_max_angle_rad;
             self.worst_rotation_frame = other.worst_rotation_frame;
-            self.worst_rotation_bone = other.worst_rotation_bone.clone();
+            self.worst_rotation_bone
+                .clone_from(&other.worst_rotation_bone);
         }
     }
 }

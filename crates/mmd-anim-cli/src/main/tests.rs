@@ -1666,7 +1666,10 @@ fn numeric_compare_report_summary_reuses_merged_stats() {
         compared_cases: 1,
         compared_frames: 2,
         mismatch_count: 3,
-        skipped_targets: Default::default(),
+        skipped_targets: ["morphs", "cameras"]
+            .map(String::from)
+            .into_iter()
+            .collect(),
         max_delta: 0.25,
     };
     let mut motion = compare::MotionNumericCompareStats {
@@ -1722,7 +1725,7 @@ fn numeric_compare_report_summary_reuses_merged_stats() {
     assert_eq!(value["summary"]["cameraMaxDelta"], 0.25);
     assert_eq!(
         value["summary"]["skippedTargets"],
-        serde_json::json!(["morphs", "rigidBodies"])
+        serde_json::json!(["cameras", "morphs", "rigidBodies"])
     );
 }
 

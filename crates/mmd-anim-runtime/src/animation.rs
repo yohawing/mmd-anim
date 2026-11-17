@@ -332,19 +332,11 @@ impl PropertyAnimationBinding {
     }
 
     pub fn sample(&self, frame: f32) -> Option<&[u8]> {
-        match self.frame_numbers.len() {
-            0 => None,
-            _ => {
-                let next_index = self
-                    .frame_numbers
-                    .partition_point(|keyframe| (*keyframe as f32) <= frame);
-                if next_index == 0 {
-                    None
-                } else {
-                    Some(&self.ik_enabled[next_index - 1])
-                }
-            }
-        }
+        let index = self
+            .frame_numbers
+            .partition_point(|keyframe| (*keyframe as f32) <= frame)
+            .checked_sub(1)?;
+        Some(&self.ik_enabled[index])
     }
 
     pub fn frame_range(&self) -> Option<(u32, u32)> {

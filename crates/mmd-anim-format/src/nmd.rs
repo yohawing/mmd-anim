@@ -457,8 +457,8 @@ fn parse_accessory_keyframe(data: &[u8]) -> Result<NmdAccessoryKeyframe, ImportE
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
             (2, WIRE_VARINT) => frame.track_index = r.read_varint()?,
-            (3, WIRE_LEN) => frame.translation = parse_vec3(r.read_len()?)?,
-            (4, WIRE_LEN) => frame.orientation = parse_vec4(r.read_len()?)?,
+            (3, WIRE_LEN) => frame.translation = parse_vec(r.read_len()?)?,
+            (4, WIRE_LEN) => frame.orientation = parse_vec(r.read_len()?)?,
             (5, WIRE_FIXED32) => frame.scale_factor = r.read_f32()?,
             (6, WIRE_FIXED32) => frame.opacity = r.read_f32()?,
             (7, WIRE_LEN) => frame
@@ -481,8 +481,8 @@ fn parse_bone_keyframe(data: &[u8]) -> Result<NmdBoneKeyframe, ImportError> {
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
             (2, WIRE_VARINT) => frame.track_index = r.read_varint()?,
-            (3, WIRE_LEN) => frame.local_translation = parse_vec3(r.read_len()?)?,
-            (4, WIRE_LEN) => frame.local_orientation = parse_vec4(r.read_len()?)?,
+            (3, WIRE_LEN) => frame.local_translation = parse_vec(r.read_len()?)?,
+            (4, WIRE_LEN) => frame.local_orientation = parse_vec(r.read_len()?)?,
             (5, WIRE_LEN) => frame.interpolation = Some(parse_bone_interpolation(r.read_len()?)?),
             (6, WIRE_VARINT) => frame.stage_index = Some(read_u32_varint(&mut r)?),
             (7, WIRE_VARINT) => frame.physics_simulation_enabled = Some(r.read_bool()?),
@@ -513,8 +513,8 @@ fn parse_camera_keyframe(data: &[u8]) -> Result<NmdCameraKeyframe, ImportError> 
     while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
-            (2, WIRE_LEN) => frame.look_at = parse_vec3(r.read_len()?)?,
-            (3, WIRE_LEN) => frame.angle = parse_vec3(r.read_len()?)?,
+            (2, WIRE_LEN) => frame.look_at = parse_vec(r.read_len()?)?,
+            (3, WIRE_LEN) => frame.angle = parse_vec(r.read_len()?)?,
             (4, WIRE_FIXED32) => frame.fov = r.read_f32()?,
             (5, WIRE_FIXED32) => frame.distance = r.read_f32()?,
             (6, WIRE_LEN) => frame.interpolation = Some(parse_camera_interpolation(r.read_len()?)?),
@@ -532,8 +532,8 @@ fn parse_light_keyframe(data: &[u8]) -> Result<NmdLightKeyframe, ImportError> {
     while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
-            (2, WIRE_LEN) => frame.color = parse_vec3(r.read_len()?)?,
-            (3, WIRE_LEN) => frame.direction = parse_vec3(r.read_len()?)?,
+            (2, WIRE_LEN) => frame.color = parse_vec(r.read_len()?)?,
+            (3, WIRE_LEN) => frame.direction = parse_vec(r.read_len()?)?,
             _ => r.skip_value(wire_type)?,
         }
     }
@@ -641,7 +641,7 @@ fn parse_interpolation_unit(data: &[u8]) -> Result<NmdInterpolationUnit, ImportE
     while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => unit.integer = Some(parse_integer_interpolation(r.read_len()?)?),
-            (2, WIRE_LEN) => unit.float = Some(parse_vec4(r.read_len()?)?),
+            (2, WIRE_LEN) => unit.float = Some(parse_vec(r.read_len()?)?),
             _ => r.skip_value(wire_type)?,
         }
     }
@@ -685,7 +685,7 @@ fn parse_effect_parameter(data: &[u8]) -> Result<NmdEffectParameter, ImportError
             (2, WIRE_VARINT) => parameter.bool_value = Some(r.read_bool()?),
             (3, WIRE_VARINT) => parameter.int_value = Some(read_i32_varint(&mut r)?),
             (4, WIRE_FIXED32) => parameter.float_value = Some(r.read_f32()?),
-            (5, WIRE_LEN) => parameter.vector_value = Some(parse_vec4(r.read_len()?)?),
+            (5, WIRE_LEN) => parameter.vector_value = Some(parse_vec(r.read_len()?)?),
             _ => r.skip_value(wire_type)?,
         }
     }
@@ -711,7 +711,7 @@ fn parse_edge(data: &[u8]) -> Result<NmdEdge, ImportError> {
     let mut edge = NmdEdge::default();
     while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
-            (1, WIRE_LEN) => edge.color = parse_vec4(r.read_len()?)?,
+            (1, WIRE_LEN) => edge.color = parse_vec(r.read_len()?)?,
             (2, WIRE_FIXED32) => edge.scale_factor = r.read_f32()?,
             _ => r.skip_value(wire_type)?,
         }
@@ -719,30 +719,14 @@ fn parse_edge(data: &[u8]) -> Result<NmdEdge, ImportError> {
     Ok(edge)
 }
 
-fn parse_vec3(data: &[u8]) -> Result<[f32; 3], ImportError> {
+fn parse_vec<const N: usize>(data: &[u8]) -> Result<[f32; N], ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
-    let mut values = [0.0; 3];
+    let mut values = [0.0; N];
     while let Some((field, wire_type)) = r.read_key()? {
-        match (field, wire_type) {
-            (1, WIRE_FIXED32) => values[0] = r.read_f32()?,
-            (2, WIRE_FIXED32) => values[1] = r.read_f32()?,
-            (3, WIRE_FIXED32) => values[2] = r.read_f32()?,
-            _ => r.skip_value(wire_type)?,
-        }
-    }
-    Ok(values)
-}
-
-fn parse_vec4(data: &[u8]) -> Result<[f32; 4], ImportError> {
-    let mut r = ProtoReader { data, pos: 0 };
-    let mut values = [0.0; 4];
-    while let Some((field, wire_type)) = r.read_key()? {
-        match (field, wire_type) {
-            (1, WIRE_FIXED32) => values[0] = r.read_f32()?,
-            (2, WIRE_FIXED32) => values[1] = r.read_f32()?,
-            (3, WIRE_FIXED32) => values[2] = r.read_f32()?,
-            (4, WIRE_FIXED32) => values[3] = r.read_f32()?,
-            _ => r.skip_value(wire_type)?,
+        if wire_type == WIRE_FIXED32 && (1..=N).contains(&(field as usize)) {
+            values[field as usize - 1] = r.read_f32()?;
+        } else {
+            r.skip_value(wire_type)?;
         }
     }
     Ok(values)
@@ -1445,6 +1429,23 @@ mod tests {
             Err(ImportError::UnsupportedFormat {
                 format: "NMD",
                 detail: "int32 varint value overflows u32"
+            })
+        ));
+    }
+
+    #[test]
+    fn vector_fields_keep_last_value_and_skip_unknown_components() {
+        let mut data = vec3(1.0, 2.0, 3.0);
+        push_f32_field(&mut data, 2, 5.0);
+        push_varint_field(&mut data, 1, 9);
+        push_f32_field(&mut data, 4, f32::NAN);
+
+        assert_eq!(parse_vec::<3>(&data).unwrap(), [1.0, 5.0, 3.0]);
+        assert!(matches!(
+            parse_vec::<4>(&data),
+            Err(ImportError::UnsupportedFormat {
+                format: "NMD",
+                detail: "float value is not finite"
             })
         ));
     }

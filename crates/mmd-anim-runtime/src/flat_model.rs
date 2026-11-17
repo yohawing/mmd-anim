@@ -181,16 +181,8 @@ pub fn build_ik_solvers_from_flat_iter(
                     let mut init = IkLinkInit::new(BoneIndex(link.bone_index));
                     if link.has_angle_limit {
                         init = init.with_angle_limit(IkAngleLimit::new(
-                            glam::Vec3A::new(
-                                link.angle_limit_min_xyz[0],
-                                link.angle_limit_min_xyz[1],
-                                link.angle_limit_min_xyz[2],
-                            ),
-                            glam::Vec3A::new(
-                                link.angle_limit_max_xyz[0],
-                                link.angle_limit_max_xyz[1],
-                                link.angle_limit_max_xyz[2],
-                            ),
+                            glam::Vec3A::from_array(link.angle_limit_min_xyz),
+                            glam::Vec3A::from_array(link.angle_limit_max_xyz),
                         ));
                     }
                     init
@@ -223,34 +215,21 @@ pub fn build_morph_init_from_flat_iter(
     bone_morphs: impl IntoIterator<Item = FlatBoneMorphInput>,
     group_morphs: impl IntoIterator<Item = FlatGroupMorphInput>,
 ) -> Result<MorphInit, FlatModelInputError> {
-    let bone_morphs = bone_morphs.into_iter().collect::<Vec<_>>();
-    let group_morphs = group_morphs.into_iter().collect::<Vec<_>>();
-    if morph_count == 0 {
-        if bone_morphs.is_empty() && group_morphs.is_empty() {
-            return Ok(MorphInit::default());
-        }
-        return Err(FlatModelInputError::MorphCountZeroWithData);
-    }
     let bone_offsets = bone_morphs
-        .iter()
+        .into_iter()
         .map(|entry| {
             (
                 MorphIndex(entry.morph_index),
                 crate::BoneMorphOffset {
                     target_bone: BoneIndex(entry.target_bone_index),
                     position_offset: glam::Vec3A::from_array(entry.position_offset_xyz),
-                    rotation_offset: glam::Quat::from_xyzw(
-                        entry.rotation_offset_xyzw[0],
-                        entry.rotation_offset_xyzw[1],
-                        entry.rotation_offset_xyzw[2],
-                        entry.rotation_offset_xyzw[3],
-                    ),
+                    rotation_offset: glam::Quat::from_array(entry.rotation_offset_xyzw),
                 },
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
     let group_offsets = group_morphs
-        .iter()
+        .into_iter()
         .map(|entry| {
             (
                 MorphIndex(entry.morph_index),
@@ -260,7 +239,13 @@ pub fn build_morph_init_from_flat_iter(
                 },
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if morph_count == 0 {
+        if bone_offsets.is_empty() && group_offsets.is_empty() {
+            return Ok(MorphInit::default());
+        }
+        return Err(FlatModelInputError::MorphCountZeroWithData);
+    }
     build_morph_init_from_offsets(morph_count, bone_offsets, group_offsets).map_err(|error| {
         match error {
             crate::ModelBuildError::MorphCountZeroWithData => {

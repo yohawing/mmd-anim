@@ -1868,58 +1868,31 @@ fn build_project_asset_bindings(
     }
 
     let settings = &glob.settings;
-    let audio_asset_reference_index = if settings.audio_path.is_empty() {
-        None
-    } else {
-        asset_reference_index_for_path(asset_references, "audio", &settings.audio_path)
-    };
-    let background_video_asset_reference_index = if settings.background_video_path.is_empty() {
-        None
-    } else {
-        asset_reference_index_for_path(asset_references, "video", &settings.background_video_path)
-    };
-    let background_image_asset_reference_index = if settings.background_image_path.is_empty() {
-        None
-    } else {
-        asset_reference_index_for_path(asset_references, "image", &settings.background_image_path)
-    };
-
-    if !settings.audio_path.is_empty() {
-        asset_bindings.push(make_asset_binding(
-            "sceneSettings",
-            "audio",
-            None,
-            None,
-            None,
-            settings.audio_path.clone(),
-            Some(settings.audio_path_offset),
-            audio_asset_reference_index,
-            asset_references,
-        ));
-    }
-    if !settings.background_video_path.is_empty() {
-        asset_bindings.push(make_asset_binding(
-            "sceneSettings",
+    for (kind, path, offset) in [
+        ("audio", &settings.audio_path, settings.audio_path_offset),
+        (
             "video",
-            None,
-            None,
-            None,
-            settings.background_video_path.clone(),
-            Some(settings.background_video_path_offset),
-            background_video_asset_reference_index,
-            asset_references,
-        ));
-    }
-    if !settings.background_image_path.is_empty() {
+            &settings.background_video_path,
+            settings.background_video_path_offset,
+        ),
+        (
+            "image",
+            &settings.background_image_path,
+            settings.background_image_path_offset,
+        ),
+    ] {
+        if path.is_empty() {
+            continue;
+        }
         asset_bindings.push(make_asset_binding(
             "sceneSettings",
-            "image",
+            kind,
             None,
             None,
             None,
-            settings.background_image_path.clone(),
-            Some(settings.background_image_path_offset),
-            background_image_asset_reference_index,
+            path.clone(),
+            Some(offset),
+            asset_reference_index_for_path(asset_references, kind, path),
             asset_references,
         ));
     }

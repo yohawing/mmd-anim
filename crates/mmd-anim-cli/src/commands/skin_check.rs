@@ -110,8 +110,8 @@ fn analyze_skin(
         let weights: [f32; 4] = geometry.skin_weights[base..base + 4].try_into().unwrap();
         let mode = modes
             .get(vertex)
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_owned());
+            .map(String::as_str)
+            .unwrap_or("unknown");
 
         let is_bdef4_or_qdef = mode == "bdef4" || mode == "qdef";
 
@@ -120,7 +120,7 @@ fn analyze_skin(
             if (sum - 1.0).abs() > tolerance {
                 weight_sum.push(WeightSumAnomaly {
                     vertex,
-                    mode: mode.clone(),
+                    mode: mode.to_owned(),
                     sum,
                     indices,
                     weights,
@@ -137,7 +137,7 @@ fn analyze_skin(
                 if slots.len() > 1 {
                     duplicate_bone.push(DuplicateBoneAnomaly {
                         vertex,
-                        mode: mode.clone(),
+                        mode: mode.to_owned(),
                         bone_index,
                         slots,
                     });
@@ -165,7 +165,7 @@ fn analyze_skin(
                     if indices[slot] == 0 && weights[slot] > 0.0 {
                         negative_index.push(NegativeIndexAnomaly {
                             vertex,
-                            mode: mode.clone(),
+                            mode: mode.to_owned(),
                             slot,
                             weight: weights[slot],
                             distance,

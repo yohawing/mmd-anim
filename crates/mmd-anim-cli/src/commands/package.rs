@@ -582,14 +582,8 @@ fn validate_logical_paths<'a>(
         path_keys.push((path, key));
     }
     for (path, key) in path_keys {
-        let mut prefix = String::new();
-        let segments: Vec<_> = key.split('/').collect();
-        for segment in segments.iter().take(segments.len().saturating_sub(1)) {
-            if !prefix.is_empty() {
-                prefix.push('/');
-            }
-            prefix.push_str(segment);
-            if full_keys.contains(&prefix) {
+        for (end, _) in key.match_indices('/') {
+            if full_keys.contains(&key[..end]) {
                 return Err(command_error(format!(
                     "{operation} paths have a file/directory prefix collision: {path:?}"
                 )));
@@ -1103,12 +1097,26 @@ mod tests {
 
     #[test]
     fn unpack_path_collision_check_handles_case_and_nfd() {
-        let entries = vec![
-            test_manifest_entry("Cafe\u{301}/diffuse.bin", 1),
-            test_manifest_entry("café/diffuse.bin", 2),
-        ];
-        let error = validate_unpack_paths(&entries).unwrap_err().to_string();
-        assert!(error.contains("case/NFD"), "{error}");
+        for (paths, expected) in [
+            (["Cafe\u{301}/diffuse.bin", "café/diffuse.bin"], "case/NFD"),
+            (["Cafe\u{301}", "café/diffuse.bin"], "file/directory prefix"),
+            (
+                ["assets/模型/file.bin", "assets/模型"],
+                "file/directory prefix",
+            ),
+        ] {
+            let entries = [
+                test_manifest_entry(paths[0], 1),
+                test_manifest_entry(paths[1], 2),
+            ];
+            let error = validate_unpack_paths(&entries).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        validate_unpack_paths(&[
+            test_manifest_entry("models/a.pmx", 1),
+            test_manifest_entry("models/b.pmx", 2),
+        ])
+        .unwrap();
     }
 
     #[test]

@@ -589,30 +589,10 @@ fn parse_x_mesh_summaries(text: &str) -> Vec<AccessoryMeshSummary> {
 
 fn parse_x_mesh_summary_block(lines: &[&str]) -> Option<AccessoryMeshSummary> {
     let (vertex_count, mut index) = next_usize_line(lines, 1)?;
-    let mut positions = Vec::with_capacity(vertex_count);
-    for _ in 0..vertex_count {
-        index = next_non_empty_after(lines, index);
-        if index >= lines.len() {
-            break;
-        }
-        if let Some(pos) = parse_x_position(lines[index]) {
-            positions.push(pos);
-        }
-        index += 1;
-    }
+    let positions = parse_x_counted_lines(lines, &mut index, vertex_count, parse_x_position);
     let (face_count, next_index) = next_usize_line(lines, index)?;
     index = next_index;
-    let mut face_indices = Vec::with_capacity(face_count);
-    for _ in 0..face_count {
-        index = next_non_empty_after(lines, index);
-        if index >= lines.len() {
-            break;
-        }
-        if let Some(fi) = parse_x_face_indices(lines[index]) {
-            face_indices.push(fi);
-        }
-        index += 1;
-    }
+    let face_indices = parse_x_counted_lines(lines, &mut index, face_count, parse_x_face_indices);
     let mut normals = Vec::new();
     let mut normal_face_indices = Vec::new();
     let mut texture_coordinates = Vec::new();
@@ -664,6 +644,26 @@ fn parse_x_mesh_summary_block(lines: &[&str]) -> Option<AccessoryMeshSummary> {
     })
 }
 
+fn parse_x_counted_lines<T>(
+    lines: &[&str],
+    index: &mut usize,
+    count: usize,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Vec<T> {
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        *index = next_non_empty_after(lines, *index);
+        let Some(line) = lines.get(*index) else {
+            break;
+        };
+        if let Some(value) = parse(line) {
+            values.push(value);
+        }
+        *index += 1;
+    }
+    values
+}
+
 fn parse_x_position(line: &str) -> Option<[f32; 3]> {
     // Format: "x;y;z;[,|;]"
     let mut parts = line.trim().split(';');
@@ -690,32 +690,13 @@ fn parse_x_mesh_normals(lines: &[&str], start: usize) -> (Vec<[f32; 3]>, Vec<Vec
     let Some((normal_count, mut index)) = next_usize_line(block_lines, 1) else {
         return (Vec::new(), Vec::new(), next_index);
     };
-    let mut normals = Vec::with_capacity(normal_count);
-    for _ in 0..normal_count {
-        index = next_non_empty_after(block_lines, index);
-        if index >= block_lines.len() {
-            break;
-        }
-        if let Some(normal) = parse_x_position(block_lines[index]) {
-            normals.push(normal);
-        }
-        index += 1;
-    }
+    let normals = parse_x_counted_lines(block_lines, &mut index, normal_count, parse_x_position);
     let Some((face_count, next_line)) = next_usize_line(block_lines, index) else {
         return (normals, Vec::new(), next_index);
     };
     index = next_line;
-    let mut face_indices = Vec::with_capacity(face_count);
-    for _ in 0..face_count {
-        index = next_non_empty_after(block_lines, index);
-        if index >= block_lines.len() {
-            break;
-        }
-        if let Some(face) = parse_x_face_indices(block_lines[index]) {
-            face_indices.push(face);
-        }
-        index += 1;
-    }
+    let face_indices =
+        parse_x_counted_lines(block_lines, &mut index, face_count, parse_x_face_indices);
     (normals, face_indices, next_index)
 }
 
@@ -724,17 +705,12 @@ fn parse_x_mesh_texture_coords(lines: &[&str], start: usize) -> (Vec<[f32; 2]>, 
     let Some((coord_count, mut index)) = next_usize_line(block_lines, 1) else {
         return (Vec::new(), next_index);
     };
-    let mut coords = Vec::with_capacity(coord_count);
-    for _ in 0..coord_count {
-        index = next_non_empty_after(block_lines, index);
-        if index >= block_lines.len() {
-            break;
-        }
-        if let Some(coord) = parse_x_texture_coordinate(block_lines[index]) {
-            coords.push(coord);
-        }
-        index += 1;
-    }
+    let coords = parse_x_counted_lines(
+        block_lines,
+        &mut index,
+        coord_count,
+        parse_x_texture_coordinate,
+    );
     (coords, next_index)
 }
 
@@ -743,17 +719,7 @@ fn parse_x_mesh_vertex_colors(lines: &[&str], start: usize) -> (Vec<AccessoryVer
     let Some((color_count, mut index)) = next_usize_line(block_lines, 1) else {
         return (Vec::new(), next_index);
     };
-    let mut colors = Vec::with_capacity(color_count);
-    for _ in 0..color_count {
-        index = next_non_empty_after(block_lines, index);
-        if index >= block_lines.len() {
-            break;
-        }
-        if let Some(color) = parse_x_vertex_color(block_lines[index]) {
-            colors.push(color);
-        }
-        index += 1;
-    }
+    let colors = parse_x_counted_lines(block_lines, &mut index, color_count, parse_x_vertex_color);
     (colors, next_index)
 }
 

@@ -19,13 +19,15 @@ fn track_gate_uses_candidate_only_when_it_is_strictly_smaller() {
     }
 
     let source = vec![bone_frame(0), bone_frame(1), bone_frame(2)];
-    let smaller = prefer_smaller_tracks(&source, vec![bone_frame(0), bone_frame(2)], key);
+    let smaller = prefer_smaller_tracks(source.clone(), vec![bone_frame(0), bone_frame(2)], key);
     assert_eq!(smaller.len(), 2);
     let mut equal_candidate = source.clone();
     equal_candidate[1].translation = [99.0, 0.0, 0.0];
-    let equal = prefer_smaller_tracks(&source, equal_candidate, key);
-    assert_eq!(equal.len(), source.len());
-    assert_eq!(equal[1].translation, source[1].translation);
+    let source_len = source.len();
+    let source_translation = source[1].translation;
+    let equal = prefer_smaller_tracks(source, equal_candidate, key);
+    assert_eq!(equal.len(), source_len);
+    assert_eq!(equal[1].translation, source_translation);
 }
 
 #[test]
@@ -48,7 +50,7 @@ fn morph_track_gate_groups_normalized_names_and_sorts_selected_frames() {
         frame(b"b", 0, 0.9),
     ];
 
-    let selected = prefer_smaller_tracks(&source, candidate, |frame| {
+    let selected = prefer_smaller_tracks(source, candidate, |frame| {
         (frame.frame, frame.morph_name_bytes.as_slice())
     });
     let actual: Vec<_> = selected

@@ -82,7 +82,7 @@ pub(crate) fn reduce_vmd(
         BoneInit::new(None, Vec3A::ZERO);
         runtime_bone_count
     ])?);
-    let mut runtime = RuntimeInstance::new_with_morph_count(model.clone(), morph_names.len());
+    let mut runtime = RuntimeInstance::new_with_morph_count(model, morph_names.len());
     let pose_max_frame = animation
         .bone_frames
         .iter()
@@ -155,12 +155,12 @@ pub(crate) fn reduce_vmd(
     let source_bone_keys = animation.bone_frames.len();
     let source_morph_keys = animation.morph_frames.len();
     animation.bone_frames = prefer_smaller_tracks(
-        &animation.bone_frames,
+        animation.bone_frames,
         reduced_bone_frames(&reduced, &bone_names),
         |frame| (frame.frame, frame.bone_name_bytes.as_slice()),
     );
     animation.morph_frames = prefer_smaller_tracks(
-        &animation.morph_frames,
+        animation.morph_frames,
         reduced_morph_frames(&reduced, &morph_names),
         |frame| (frame.frame, frame.morph_name_bytes.as_slice()),
     );
@@ -285,8 +285,8 @@ fn reduced_morph_frames(
     frames
 }
 
-fn prefer_smaller_tracks<T: Clone>(
-    source: &[T],
+fn prefer_smaller_tracks<T>(
+    source: Vec<T>,
     candidate: Vec<T>,
     frame_key: impl Fn(&T) -> (u32, &[u8]),
 ) -> Vec<T> {
@@ -294,9 +294,9 @@ fn prefer_smaller_tracks<T: Clone>(
     let mut candidate_tracks: HashMap<Vec<u8>, Vec<T>> = HashMap::new();
     for frame in source {
         source_tracks
-            .entry(mmd_anim_format::normalize_vmd_name(frame_key(frame).1))
+            .entry(mmd_anim_format::normalize_vmd_name(frame_key(&frame).1))
             .or_default()
-            .push(frame.clone());
+            .push(frame);
     }
     for frame in candidate {
         candidate_tracks

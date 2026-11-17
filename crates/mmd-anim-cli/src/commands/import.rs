@@ -1,9 +1,10 @@
 use std::{collections::BTreeMap, path::Path, process::ExitCode, sync::Arc};
 
 use glam::{Quat, Vec3A};
-use mmd_anim_runtime::{AnimationClip, IkSolverRuntimeStats, RuntimeInstance};
+use mmd_anim_runtime::{AnimationClip, RuntimeInstance};
 use serde::Serialize;
 
+use crate::support::{IkRuntimeStatsSummary, summarize_ik_runtime_stats};
 use crate::{
     diagnostics_suffix, f32_checksum, import_failure_error, read_file, translation_checksum,
 };
@@ -84,21 +85,6 @@ pub(crate) struct ImportVerboseAppendDetail {
 pub(crate) struct ImportVerboseAppendDiagnostics {
     pub aggregate: ImportVerboseAppendAggregate,
     pub details: Vec<ImportVerboseAppendDetail>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ImportVerboseIkAggregate {
-    pub solver_evaluations: u64,
-    pub configured_iterations: u64,
-    pub executed_iterations: u64,
-    pub skipped_iterations: u64,
-    pub skipped_ratio: f64,
-    pub tolerance_precheck_breaks: u64,
-    pub tolerance_post_iteration_breaks: u64,
-    pub rollback_breaks: u64,
-    pub max_iteration_exhaustions: u64,
-    pub link_visits: u64,
-    pub link_steps: u64,
 }
 
 pub(crate) fn import_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -376,7 +362,7 @@ pub(crate) fn import_pair_frame_summary(
     );
 
     if verbose {
-        let ik_stats = aggregate_import_ik_runtime_stats(context.runtime.ik_runtime_stats());
+        let ik_stats = summarize_ik_runtime_stats(context.runtime.ik_runtime_stats());
         let append = collect_import_verbose_append_diagnostics(&context.runtime);
         for line in import_pair_frame_verbose_lines(&context.summary, &eval, ik_stats, append) {
             eprintln!("{line}");
@@ -384,52 +370,6 @@ pub(crate) fn import_pair_frame_summary(
     }
 
     Ok(ExitCode::SUCCESS)
-}
-
-pub(crate) fn aggregate_import_ik_runtime_stats(
-    stats: &[IkSolverRuntimeStats],
-) -> ImportVerboseIkAggregate {
-    let solver_evaluations = stats
-        .iter()
-        .map(|stats| stats.solver_evaluations)
-        .sum::<u64>();
-    let configured_iterations = stats
-        .iter()
-        .map(|stats| stats.configured_iterations)
-        .sum::<u64>();
-    let executed_iterations = stats
-        .iter()
-        .map(|stats| stats.executed_iterations)
-        .sum::<u64>();
-    let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
-    let skipped_ratio = if configured_iterations == 0 {
-        0.0
-    } else {
-        skipped_iterations as f64 / configured_iterations as f64
-    };
-
-    ImportVerboseIkAggregate {
-        solver_evaluations,
-        configured_iterations,
-        executed_iterations,
-        skipped_iterations,
-        skipped_ratio,
-        tolerance_precheck_breaks: stats
-            .iter()
-            .map(|stats| stats.tolerance_precheck_breaks)
-            .sum(),
-        tolerance_post_iteration_breaks: stats
-            .iter()
-            .map(|stats| stats.tolerance_post_iteration_breaks)
-            .sum(),
-        rollback_breaks: stats.iter().map(|stats| stats.rollback_breaks).sum(),
-        max_iteration_exhaustions: stats
-            .iter()
-            .map(|stats| stats.max_iteration_exhaustions)
-            .sum(),
-        link_visits: stats.iter().map(|stats| stats.link_visits).sum(),
-        link_steps: stats.iter().map(|stats| stats.link_steps).sum(),
-    }
 }
 
 pub(crate) fn collect_import_verbose_append_diagnostics(
@@ -504,7 +444,7 @@ fn append_rotation_output_is_nonidentity(rotation: Quat) -> bool {
 pub(crate) fn import_pair_frame_verbose_lines(
     summary: &ImportRuntimeBatchSummary,
     eval: &PairFrameEval,
-    ik_stats: ImportVerboseIkAggregate,
+    ik_stats: IkRuntimeStatsSummary,
     append: ImportVerboseAppendDiagnostics,
 ) -> Vec<String> {
     let ik_enabled_active = eval
@@ -810,12 +750,12 @@ pub(crate) fn evaluate_pair_frame_with_ik_stats(
     clip: &AnimationClip,
     frame: f32,
     reset_ik_stats: bool,
-) -> (PairFrameEval, ImportVerboseIkAggregate) {
+) -> (PairFrameEval, IkRuntimeStatsSummary) {
     if reset_ik_stats {
         runtime.reset_ik_runtime_stats();
     }
     let eval = evaluate_pair_frame(runtime, clip, frame);
-    let ik_stats = aggregate_import_ik_runtime_stats(runtime.ik_runtime_stats());
+    let ik_stats = summarize_ik_runtime_stats(runtime.ik_runtime_stats());
     (eval, ik_stats)
 }
 

@@ -654,8 +654,21 @@ fn bench_pair_report_json_includes_ik_aggregate_and_top_solvers() {
         ik_stats: Some(&ik_stats),
     });
 
-    assert_eq!(report["ik"]["aggregate"]["solverEvaluations"], 360);
-    assert_eq!(report["ik"]["aggregate"]["executedIterations"], 1800);
+    assert_eq!(
+        report["ik"]["aggregate"],
+        serde_json::json!({
+            "solverEvaluations": 360,
+            "configuredIterations": 7200,
+            "executedIterations": 1800,
+            "skippedIterations": 5400,
+            "skippedRatio": 0.75,
+            "tolerancePrecheckBreaks": 18,
+            "tolerancePostIterationBreaks": 51,
+            "rollbackBreaks": 1,
+            "maxIterationExhaustions": 3,
+            "linkSteps": 5400,
+        })
+    );
     assert_eq!(report["ik"]["topSolvers"].as_array().unwrap().len(), 2);
     assert_eq!(report["ik"]["topSolvers"][0]["name"], "左足ＩＫ");
     assert_eq!(report["ik"]["topSolvers"][0]["executedIterations"], 1200);
@@ -910,8 +923,8 @@ fn import_batch_frames_with_retained_ik_match_independent_samples() {
 }
 
 #[test]
-fn aggregate_import_ik_runtime_stats_sums_solver_metrics() {
-    use import::ImportVerboseIkAggregate;
+fn ik_runtime_stats_summary_sums_solver_metrics() {
+    use crate::support::IkRuntimeStatsSummary;
     use mmd_anim_runtime::IkSolverRuntimeStats;
 
     let stats = [
@@ -941,10 +954,10 @@ fn aggregate_import_ik_runtime_stats_sums_solver_metrics() {
         },
     ];
 
-    let aggregate = import::aggregate_import_ik_runtime_stats(&stats);
+    let aggregate = support::summarize_ik_runtime_stats(&stats);
     assert_eq!(
         aggregate,
-        ImportVerboseIkAggregate {
+        IkRuntimeStatsSummary {
             solver_evaluations: 3,
             configured_iterations: 60,
             executed_iterations: 15,
@@ -980,7 +993,7 @@ fn import_pair_frame_verbose_lines_include_summary_and_result_fields() {
         ik_enabled: vec![1, 0, 1],
         ik_enabled_count: 3,
     };
-    let ik_stats = import::ImportVerboseIkAggregate {
+    let ik_stats = support::IkRuntimeStatsSummary {
         solver_evaluations: 4,
         configured_iterations: 80,
         executed_iterations: 20,
@@ -1040,7 +1053,7 @@ fn import_pair_frame_verbose_lines_include_append_descriptor_and_output_fields()
         ik_enabled: Vec::new(),
         ik_enabled_count: 0,
     };
-    let ik_stats = import::ImportVerboseIkAggregate {
+    let ik_stats = support::IkRuntimeStatsSummary {
         solver_evaluations: 0,
         configured_iterations: 0,
         executed_iterations: 0,

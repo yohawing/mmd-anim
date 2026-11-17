@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use mmd_anim_format::MmdFormatKind;
+use mmd_anim_runtime::IkSolverRuntimeStats;
 
 pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).map_err(|error| {
@@ -183,6 +184,65 @@ pub(crate) fn copy_world_matrices_to_f32(matrices: &[glam::Mat4], out: &mut [f32
     for (index, matrix) in matrices.iter().enumerate() {
         let offset = index * 16;
         out[offset..offset + 16].copy_from_slice(&matrix.to_cols_array());
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct IkRuntimeStatsSummary {
+    pub solver_evaluations: u64,
+    pub configured_iterations: u64,
+    pub executed_iterations: u64,
+    pub skipped_iterations: u64,
+    pub skipped_ratio: f64,
+    pub tolerance_precheck_breaks: u64,
+    pub tolerance_post_iteration_breaks: u64,
+    pub rollback_breaks: u64,
+    pub max_iteration_exhaustions: u64,
+    pub link_visits: u64,
+    pub link_steps: u64,
+}
+
+pub(crate) fn summarize_ik_runtime_stats(stats: &[IkSolverRuntimeStats]) -> IkRuntimeStatsSummary {
+    let solver_evaluations = stats
+        .iter()
+        .map(|stats| stats.solver_evaluations)
+        .sum::<u64>();
+    let configured_iterations = stats
+        .iter()
+        .map(|stats| stats.configured_iterations)
+        .sum::<u64>();
+    let executed_iterations = stats
+        .iter()
+        .map(|stats| stats.executed_iterations)
+        .sum::<u64>();
+    let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
+    let skipped_ratio = if configured_iterations == 0 {
+        0.0
+    } else {
+        skipped_iterations as f64 / configured_iterations as f64
+    };
+
+    IkRuntimeStatsSummary {
+        solver_evaluations,
+        configured_iterations,
+        executed_iterations,
+        skipped_iterations,
+        skipped_ratio,
+        tolerance_precheck_breaks: stats
+            .iter()
+            .map(|stats| stats.tolerance_precheck_breaks)
+            .sum(),
+        tolerance_post_iteration_breaks: stats
+            .iter()
+            .map(|stats| stats.tolerance_post_iteration_breaks)
+            .sum(),
+        rollback_breaks: stats.iter().map(|stats| stats.rollback_breaks).sum(),
+        max_iteration_exhaustions: stats
+            .iter()
+            .map(|stats| stats.max_iteration_exhaustions)
+            .sum(),
+        link_visits: stats.iter().map(|stats| stats.link_visits).sum(),
+        link_steps: stats.iter().map(|stats| stats.link_steps).sum(),
     }
 }
 

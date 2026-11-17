@@ -7,6 +7,7 @@ use mmd_anim_runtime::{
 };
 use serde_json::json;
 
+use crate::support::summarize_ik_runtime_stats;
 use crate::{copy_world_matrices_to_f32, f32_checksum, read_file, translation_checksum};
 
 pub(crate) const BENCH_PAIR_USAGE: &str = "usage: mmd-anim bench-pair <model.pmx> <motion.vmd> [start-frame] [frame-count] [step] [--instances <count>] [--no-ik] [--ik-tolerance <value>] [--ik-max-iterations-cap <count>] [--json]";
@@ -138,38 +139,7 @@ pub(crate) fn bench_pair_report_json(input: BenchPairReportInput<'_>) -> serde_j
     });
 
     if let Some(stats) = input.ik_stats {
-        let total_evaluations = stats
-            .iter()
-            .map(|stats| stats.solver_evaluations)
-            .sum::<u64>();
-        let configured_iterations = stats
-            .iter()
-            .map(|stats| stats.configured_iterations)
-            .sum::<u64>();
-        let executed_iterations = stats
-            .iter()
-            .map(|stats| stats.executed_iterations)
-            .sum::<u64>();
-        let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
-        let tolerance_precheck_breaks = stats
-            .iter()
-            .map(|stats| stats.tolerance_precheck_breaks)
-            .sum::<u64>();
-        let tolerance_post_iteration_breaks = stats
-            .iter()
-            .map(|stats| stats.tolerance_post_iteration_breaks)
-            .sum::<u64>();
-        let rollback_breaks = stats.iter().map(|stats| stats.rollback_breaks).sum::<u64>();
-        let max_iteration_exhaustions = stats
-            .iter()
-            .map(|stats| stats.max_iteration_exhaustions)
-            .sum::<u64>();
-        let link_steps = stats.iter().map(|stats| stats.link_steps).sum::<u64>();
-        let skip_ratio = if configured_iterations == 0 {
-            0.0
-        } else {
-            skipped_iterations as f64 / configured_iterations as f64
-        };
+        let summary = summarize_ik_runtime_stats(stats);
 
         let ranked = top_ik_solvers(stats);
 
@@ -210,16 +180,16 @@ pub(crate) fn bench_pair_report_json(input: BenchPairReportInput<'_>) -> serde_j
 
         root["ik"] = json!({
             "aggregate": {
-                "solverEvaluations": total_evaluations,
-                "configuredIterations": configured_iterations,
-                "executedIterations": executed_iterations,
-                "skippedIterations": skipped_iterations,
-                "skippedRatio": skip_ratio,
-                "tolerancePrecheckBreaks": tolerance_precheck_breaks,
-                "tolerancePostIterationBreaks": tolerance_post_iteration_breaks,
-                "rollbackBreaks": rollback_breaks,
-                "maxIterationExhaustions": max_iteration_exhaustions,
-                "linkSteps": link_steps,
+                "solverEvaluations": summary.solver_evaluations,
+                "configuredIterations": summary.configured_iterations,
+                "executedIterations": summary.executed_iterations,
+                "skippedIterations": summary.skipped_iterations,
+                "skippedRatio": summary.skipped_ratio,
+                "tolerancePrecheckBreaks": summary.tolerance_precheck_breaks,
+                "tolerancePostIterationBreaks": summary.tolerance_post_iteration_breaks,
+                "rollbackBreaks": summary.rollback_breaks,
+                "maxIterationExhaustions": summary.max_iteration_exhaustions,
+                "linkSteps": summary.link_steps,
             },
             "topSolvers": top_solvers,
         });
@@ -548,50 +518,19 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
         morph_checksum,
     );
     if let Some(stats) = aggregated_ik_stats.as_deref() {
-        let total_evaluations = stats
-            .iter()
-            .map(|stats| stats.solver_evaluations)
-            .sum::<u64>();
-        let configured_iterations = stats
-            .iter()
-            .map(|stats| stats.configured_iterations)
-            .sum::<u64>();
-        let executed_iterations = stats
-            .iter()
-            .map(|stats| stats.executed_iterations)
-            .sum::<u64>();
-        let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
-        let tolerance_precheck_breaks = stats
-            .iter()
-            .map(|stats| stats.tolerance_precheck_breaks)
-            .sum::<u64>();
-        let tolerance_post_iteration_breaks = stats
-            .iter()
-            .map(|stats| stats.tolerance_post_iteration_breaks)
-            .sum::<u64>();
-        let rollback_breaks = stats.iter().map(|stats| stats.rollback_breaks).sum::<u64>();
-        let max_iteration_exhaustions = stats
-            .iter()
-            .map(|stats| stats.max_iteration_exhaustions)
-            .sum::<u64>();
-        let link_steps = stats.iter().map(|stats| stats.link_steps).sum::<u64>();
-        let skip_ratio = if configured_iterations == 0 {
-            0.0
-        } else {
-            skipped_iterations as f64 / configured_iterations as f64
-        };
+        let summary = summarize_ik_runtime_stats(stats);
         println!(
             "bench-pair-ik-stats: solverEvaluations={} configuredIterations={} executedIterations={} skippedIterations={} skippedRatio={:.3} tolerancePrecheckBreaks={} tolerancePostIterationBreaks={} rollbackBreaks={} maxIterationExhaustions={} linkSteps={}",
-            total_evaluations,
-            configured_iterations,
-            executed_iterations,
-            skipped_iterations,
-            skip_ratio,
-            tolerance_precheck_breaks,
-            tolerance_post_iteration_breaks,
-            rollback_breaks,
-            max_iteration_exhaustions,
-            link_steps,
+            summary.solver_evaluations,
+            summary.configured_iterations,
+            summary.executed_iterations,
+            summary.skipped_iterations,
+            summary.skipped_ratio,
+            summary.tolerance_precheck_breaks,
+            summary.tolerance_post_iteration_breaks,
+            summary.rollback_breaks,
+            summary.max_iteration_exhaustions,
+            summary.link_steps,
         );
 
         let ranked = top_ik_solvers(stats);

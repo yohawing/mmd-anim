@@ -108,10 +108,7 @@ fn analyze_skin(
         }
         let indices: [u32; 4] = geometry.skin_indices[base..base + 4].try_into().unwrap();
         let weights: [f32; 4] = geometry.skin_weights[base..base + 4].try_into().unwrap();
-        let mode = modes
-            .get(vertex)
-            .map(String::as_str)
-            .unwrap_or("unknown");
+        let mode = modes.get(vertex).map(String::as_str).unwrap_or("unknown");
 
         let is_bdef4_or_qdef = mode == "bdef4" || mode == "qdef";
 
@@ -210,11 +207,7 @@ impl SkinCheckReport {
         if !self.weight_sum.is_empty() {
             println!("\n[weight-sum] ({} vertices)", self.weight_sum.len());
             for anomaly in &self.weight_sum {
-                let bone_names: Vec<&str> = anomaly
-                    .indices
-                    .iter()
-                    .map(|&index| bone_name(parsed, index))
-                    .collect();
+                let bone_names = anomaly.indices.map(|index| bone_name(parsed, index));
                 println!(
                     "  [weight-sum] vertex={} mode={} sum={:.6} indices={:?} boneNames={:?} weights=[{:.4},{:.4},{:.4},{:.4}]",
                     anomaly.vertex,
@@ -288,11 +281,7 @@ impl SkinCheckReport {
             .weight_sum
             .iter()
             .map(|anomaly| {
-                let bone_names: Vec<&str> = anomaly
-                    .indices
-                    .iter()
-                    .map(|&index| bone_name(parsed, index))
-                    .collect();
+                let bone_names = anomaly.indices.map(|index| bone_name(parsed, index));
                 serde_json::json!({
                     "vertex": anomaly.vertex,
                     "mode": anomaly.mode,

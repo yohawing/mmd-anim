@@ -10,7 +10,8 @@ use mmd_anim_runtime::{
 use serde::Serialize;
 
 use crate::binary::{
-    ByteReader, write_f32_le as push_f32, write_i32_le as push_i32, write_u32_le as push_u32,
+    ByteReader, write_f32_le as push_f32, write_fixed_bytes, write_i32_le as push_i32,
+    write_u32_le as push_u32,
 };
 use crate::error::ImportError;
 use crate::pmx::PmxParsedModel;
@@ -2923,10 +2924,7 @@ fn next_keyframe_index<T>(
 
 fn push_pmm_fixed_sjis(out: &mut Vec<u8>, text: &str, length: usize) {
     let encoded = encode_sjis(text);
-    let mut bytes = vec![0u8; length];
-    let copy_len = encoded.len().min(length);
-    bytes[..copy_len].copy_from_slice(&encoded[..copy_len]);
-    out.extend_from_slice(&bytes);
+    write_fixed_bytes(out, &encoded, length);
 }
 
 /// Write Shift-JIS encoded bytes (with zero padding) into an existing fixed-size slice.

@@ -8,7 +8,8 @@ use mmd_anim_runtime::{
 use serde::{Deserialize, Serialize};
 
 use crate::binary::{
-    ByteReader, write_f32_le as write_f32, write_u16_le as write_u16, write_u32_le as write_u32,
+    ByteReader, write_f32_le as write_f32, write_fixed_bytes, write_u16_le as write_u16,
+    write_u32_le as write_u32,
 };
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
@@ -993,15 +994,12 @@ fn normalize_index(index: u16) -> i32 {
 }
 
 fn write_fixed_text(out: &mut Vec<u8>, text: &str, raw: &[u8], len: usize) {
-    let mut bytes = vec![0u8; len];
     if !raw.is_empty() {
-        let copy_len = raw.len().min(len);
-        bytes[..copy_len].copy_from_slice(&raw[..copy_len]);
+        write_fixed_bytes(out, raw, len);
     } else {
         let encoded = encode_sjis_prefix_fit(text, len);
-        bytes[..encoded.len()].copy_from_slice(&encoded);
+        write_fixed_bytes(out, &encoded, len);
     }
-    out.extend_from_slice(&bytes);
 }
 
 fn write_index_u16(out: &mut Vec<u8>, index: i32) {

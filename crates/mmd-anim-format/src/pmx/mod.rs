@@ -4977,6 +4977,17 @@ mod tests {
         buf
     }
 
+    fn build_pmx_bone_section_prefix(bone_index_size: u8, bone_count: u32) -> Vec<u8> {
+        let mut buf = build_small_pmx_header_bytes(bone_index_size, TextEncoding::Utf8);
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(bone_count));
+        buf
+    }
+
     fn build_morph_name_bytes(name: &str) -> Vec<u8> {
         let mut buf = Vec::new();
         let name_bytes = name.as_bytes();
@@ -5888,14 +5899,7 @@ mod tests {
 
     #[test]
     fn reads_single_bone_no_parent() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(4, 1);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -5924,14 +5928,7 @@ mod tests {
 
     #[test]
     fn reads_bone_with_parent() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -5967,14 +5964,7 @@ mod tests {
 
     #[test]
     fn reads_bone_with_append_transform() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6018,14 +6008,7 @@ mod tests {
 
     #[test]
     fn reads_ik_bone_with_links_and_angle_limits() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(3));
+        let mut buf = build_pmx_bone_section_prefix(2, 3);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6109,14 +6092,7 @@ mod tests {
 
     #[test]
     fn bone_names_retained_and_mapped_to_indices() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Hips"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6163,14 +6139,7 @@ mod tests {
 
     #[test]
     fn ik_solver_name_mapped_to_solver_index() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(3));
+        let mut buf = build_pmx_bone_section_prefix(2, 3);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6291,14 +6260,7 @@ mod tests {
 
     #[test]
     fn runtime_import_builds_model_arena_with_name_lookup() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Hips"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6342,14 +6304,7 @@ mod tests {
 
     #[test]
     fn parse_pmx_model_exposes_three_loader_shaped_sections() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6776,14 +6731,7 @@ mod tests {
 
     #[test]
     fn exports_parsed_pmx_skeleton_display_roundtrip() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6829,14 +6777,7 @@ mod tests {
 
     #[test]
     fn runtime_import_ik_solver_name_lookup() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(3));
+        let mut buf = build_pmx_bone_section_prefix(2, 3);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6904,14 +6845,7 @@ mod tests {
 
     #[test]
     fn converts_absolute_pmx_positions_to_local_rest_positions() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Parent"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6951,14 +6885,7 @@ mod tests {
 
     #[test]
     fn root_inverse_bind_cancels_rest_world() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6980,14 +6907,7 @@ mod tests {
 
     #[test]
     fn reads_pmx_fixed_axis_bone_descriptor() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
 
         buf.extend_from_slice(&build_bone_name_bytes("Fixed"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -7011,14 +6931,7 @@ mod tests {
 
     #[test]
     fn reads_pmx_local_axis_bone_descriptor_into_runtime_init() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
 
         buf.extend_from_slice(&build_bone_name_bytes("Local"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -7059,14 +6972,7 @@ mod tests {
 
     #[test]
     fn runtime_import_drops_degenerate_local_axis() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
         buf.extend_from_slice(&build_bone_name_bytes("DegenerateLocal"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
         buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
@@ -7086,14 +6992,7 @@ mod tests {
 
     #[test]
     fn runtime_import_drops_degenerate_fixed_axis() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
         buf.extend_from_slice(&build_bone_name_bytes("DegenerateFixed"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
         buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
@@ -7110,14 +7009,7 @@ mod tests {
 
     #[test]
     fn nil_append_parent_is_sanitized_to_no_append() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
         buf.extend_from_slice(&build_bone_name_bytes("NilAppend"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
         buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
@@ -7137,14 +7029,7 @@ mod tests {
     #[test]
     fn non_finite_append_ratio_is_sanitized_to_no_append() {
         for ratio in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-            buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-            buf.extend_from_slice(&build_empty_vertex_section());
-            buf.extend_from_slice(&build_empty_face_section());
-            buf.extend_from_slice(&build_empty_texture_section());
-            buf.extend_from_slice(&build_empty_material_section());
-            buf.extend_from_slice(&build_bone_section_header(1));
+            let mut buf = build_pmx_bone_section_prefix(2, 1);
             buf.extend_from_slice(&build_bone_name_bytes("NonFiniteAppend"));
             buf.extend_from_slice(&build_bone_name_bytes(""));
             buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
@@ -7164,14 +7049,7 @@ mod tests {
 
     #[test]
     fn pmx_fixed_axis_constrains_ik_end_to_end() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(3));
+        let mut buf = build_pmx_bone_section_prefix(2, 3);
 
         // Link: rest direction is +Y. A +Z target needs an X rotation, so it
         // is reachable without a constraint but impossible for a Z-only link.
@@ -7313,14 +7191,7 @@ mod tests {
 
     #[test]
     fn runtime_import_rejects_non_finite_derived_local_rest_position() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         for (name, position, parent) in [("Parent", f32::MAX, -1i16), ("Child", -f32::MAX, 0i16)] {
             buf.extend_from_slice(&build_bone_name_bytes(name));
@@ -7379,14 +7250,7 @@ mod tests {
         angle_limit_min: [f32; 3],
         angle_limit_max: [f32; 3],
     ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(3));
+        let mut buf = build_pmx_bone_section_prefix(2, 3);
 
         buf.extend_from_slice(&build_bone_name_bytes("link"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -7441,14 +7305,7 @@ mod tests {
 
     #[test]
     fn child_inverse_bind_uses_absolute_not_local_position() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -7484,14 +7341,7 @@ mod tests {
 
     #[test]
     fn runtime_rest_pose_skinning_matrices_are_identity() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Parent"));
         buf.extend_from_slice(&build_bone_name_bytes(""));

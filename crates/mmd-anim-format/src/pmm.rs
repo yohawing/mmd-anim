@@ -3852,26 +3852,23 @@ fn read_document_model_keyframe(
     })
 }
 
-fn read_document_camera_summary(
+fn read_document_track_summary(
     cursor: &mut PmmDocumentCursor<'_>,
+    read_keyframe: impl Fn(&mut PmmDocumentCursor<'_>, bool) -> Option<PmmDocumentKeyframeSummary>,
 ) -> Option<PmmDocumentTrackSummary> {
     let offset = cursor.offset();
-    let initial_keyframe = read_document_camera_keyframe(cursor, false)?;
+    let initial_keyframe = read_keyframe(cursor, false)?;
     let keyframe_count_offset = cursor.offset();
     let keyframes = usize_from_i32(cursor.read_i32()?)?;
     let keyframes_offset = cursor.offset();
     let mut keyframe_summaries = Vec::with_capacity(keyframes);
     for _ in 0..keyframes {
-        keyframe_summaries.push(read_document_camera_keyframe(cursor, true)?);
+        keyframe_summaries.push(read_keyframe(cursor, true)?);
     }
     let keyframes_end_offset = cursor.offset();
-    let state_offset = cursor.offset();
-    cursor.skip(12 * 3)?;
-    cursor.read_bool()?;
-    let state_end_offset = cursor.offset();
     Some(PmmDocumentTrackSummary {
         offset,
-        offset_end: state_end_offset,
+        offset_end: keyframes_end_offset,
         initial_keyframes: 1,
         keyframes,
         initial_keyframe: Some(initial_keyframe),
@@ -3879,9 +3876,21 @@ fn read_document_camera_summary(
         keyframe_count_offset,
         keyframes_offset,
         keyframes_end_offset,
-        state_offset: Some(state_offset),
-        state_end_offset: Some(state_end_offset),
+        state_offset: None,
+        state_end_offset: None,
     })
+}
+
+fn read_document_camera_summary(
+    cursor: &mut PmmDocumentCursor<'_>,
+) -> Option<PmmDocumentTrackSummary> {
+    let mut summary = read_document_track_summary(cursor, read_document_camera_keyframe)?;
+    summary.state_offset = Some(cursor.offset());
+    cursor.skip(12 * 3)?;
+    cursor.read_bool()?;
+    summary.offset_end = cursor.offset();
+    summary.state_end_offset = Some(summary.offset_end);
+    Some(summary)
 }
 
 fn read_document_camera_keyframe(
@@ -3952,33 +3961,13 @@ fn read_document_camera_keyframe(
 fn read_document_light_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset();
-    let initial_keyframe = read_document_light_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset();
-    let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset();
-    let mut keyframe_summaries = Vec::with_capacity(keyframes);
-    for _ in 0..keyframes {
-        keyframe_summaries.push(read_document_light_keyframe(cursor, true)?);
-    }
-    let keyframes_end_offset = cursor.offset();
-    let state_offset = cursor.offset();
+    let mut summary = read_document_track_summary(cursor, read_document_light_keyframe)?;
+    summary.state_offset = Some(cursor.offset());
     cursor.skip(12)?;
     cursor.skip(12)?;
-    let state_end_offset = cursor.offset();
-    Some(PmmDocumentTrackSummary {
-        offset,
-        offset_end: state_end_offset,
-        initial_keyframes: 1,
-        keyframes,
-        initial_keyframe: Some(initial_keyframe),
-        keyframe_summaries,
-        keyframe_count_offset,
-        keyframes_offset,
-        keyframes_end_offset,
-        state_offset: Some(state_offset),
-        state_end_offset: Some(state_end_offset),
-    })
+    summary.offset_end = cursor.offset();
+    summary.state_end_offset = Some(summary.offset_end);
+    Some(summary)
 }
 
 fn read_document_light_keyframe(
@@ -4303,35 +4292,17 @@ fn read_document_settings_before_gravity(
 fn read_document_gravity_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset();
     let state_offset = cursor.offset();
     cursor.read_f32()?;
     cursor.read_i32()?;
     cursor.skip(12)?;
     cursor.read_bool()?;
     let state_end_offset = cursor.offset();
-    let initial_keyframe = read_document_gravity_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset();
-    let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset();
-    let mut keyframe_summaries = Vec::with_capacity(keyframes);
-    for _ in 0..keyframes {
-        keyframe_summaries.push(read_document_gravity_keyframe(cursor, true)?);
-    }
-    let keyframes_end_offset = cursor.offset();
-    Some(PmmDocumentTrackSummary {
-        offset,
-        offset_end: keyframes_end_offset,
-        initial_keyframes: 1,
-        keyframes,
-        initial_keyframe: Some(initial_keyframe),
-        keyframe_summaries,
-        keyframe_count_offset,
-        keyframes_offset,
-        keyframes_end_offset,
-        state_offset: Some(state_offset),
-        state_end_offset: Some(state_end_offset),
-    })
+    let mut summary = read_document_track_summary(cursor, read_document_gravity_keyframe)?;
+    summary.offset = state_offset;
+    summary.state_offset = Some(state_offset);
+    summary.state_end_offset = Some(state_end_offset);
+    Some(summary)
 }
 
 fn read_document_gravity_keyframe(
@@ -4382,33 +4353,15 @@ fn read_document_gravity_keyframe(
 fn read_document_self_shadow_summary(
     cursor: &mut PmmDocumentCursor<'_>,
 ) -> Option<PmmDocumentTrackSummary> {
-    let offset = cursor.offset();
     let state_offset = cursor.offset();
     cursor.read_bool()?;
     cursor.read_f32()?;
     let state_end_offset = cursor.offset();
-    let initial_keyframe = read_document_self_shadow_keyframe(cursor, false)?;
-    let keyframe_count_offset = cursor.offset();
-    let keyframes = usize_from_i32(cursor.read_i32()?)?;
-    let keyframes_offset = cursor.offset();
-    let mut keyframe_summaries = Vec::with_capacity(keyframes);
-    for _ in 0..keyframes {
-        keyframe_summaries.push(read_document_self_shadow_keyframe(cursor, true)?);
-    }
-    let keyframes_end_offset = cursor.offset();
-    Some(PmmDocumentTrackSummary {
-        offset,
-        offset_end: keyframes_end_offset,
-        initial_keyframes: 1,
-        keyframes,
-        initial_keyframe: Some(initial_keyframe),
-        keyframe_summaries,
-        keyframe_count_offset,
-        keyframes_offset,
-        keyframes_end_offset,
-        state_offset: Some(state_offset),
-        state_end_offset: Some(state_end_offset),
-    })
+    let mut summary = read_document_track_summary(cursor, read_document_self_shadow_keyframe)?;
+    summary.offset = state_offset;
+    summary.state_offset = Some(state_offset);
+    summary.state_end_offset = Some(state_end_offset);
+    Some(summary)
 }
 
 fn read_document_self_shadow_keyframe(

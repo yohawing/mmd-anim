@@ -3,7 +3,8 @@ use std::{fs, process::ExitCode};
 use crate::schema::MmdDumperOracleDump;
 use serde::Serialize;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct OracleSummaryMetrics {
     pub(crate) frames: usize,
     pub(crate) models: usize,
@@ -37,42 +38,36 @@ pub(crate) fn oracle_summary_metrics(dump: &MmdDumperOracleDump) -> OracleSummar
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct OracleSummarySourceJson {
-    mmd_version: String,
-    dumper_version: String,
+struct OracleSummarySourceJson<'a> {
+    mmd_version: &'a str,
+    dumper_version: &'a str,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct OracleSummaryJsonReport {
+pub(crate) struct OracleSummaryJsonReport<'a> {
     status: &'static str,
     command: &'static str,
     mode: &'static str,
-    input: String,
-    frames: usize,
-    models: usize,
-    first_model_bones: usize,
-    first_model_morphs: usize,
-    source: OracleSummarySourceJson,
+    input: &'a str,
+    #[serde(flatten)]
+    metrics: OracleSummaryMetrics,
+    source: OracleSummarySourceJson<'a>,
 }
 
-pub(crate) fn oracle_summary_json_report(
-    path: &str,
-    dump: &MmdDumperOracleDump,
-) -> OracleSummaryJsonReport {
-    let metrics = oracle_summary_metrics(dump);
+pub(crate) fn oracle_summary_json_report<'a>(
+    path: &'a str,
+    dump: &'a MmdDumperOracleDump,
+) -> OracleSummaryJsonReport<'a> {
     OracleSummaryJsonReport {
         status: "ok",
         command: "verify",
         mode: "oracle",
-        input: path.to_owned(),
-        frames: metrics.frames,
-        models: metrics.models,
-        first_model_bones: metrics.first_model_bones,
-        first_model_morphs: metrics.first_model_morphs,
+        input: path,
+        metrics: oracle_summary_metrics(dump),
         source: OracleSummarySourceJson {
-            mmd_version: dump.source.mmd_version.clone(),
-            dumper_version: dump.source.dumper_version.clone(),
+            mmd_version: &dump.source.mmd_version,
+            dumper_version: &dump.source.dumper_version,
         },
     }
 }
@@ -83,7 +78,6 @@ pub(crate) fn oracle_summary(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
     let dump = MmdDumperOracleDump::from_jsonl_str(&content, None)?;
-    let metrics = oracle_summary_metrics(&dump);
 
     if use_json {
         println!(
@@ -91,6 +85,7 @@ pub(crate) fn oracle_summary(
             serde_json::to_string(&oracle_summary_json_report(path, &dump))?
         );
     } else {
+        let metrics = oracle_summary_metrics(&dump);
         println!(
             "MMDDumper oracle: frames={} models={} firstModelBones={} firstModelMorphs={} mmd={} dumper={}",
             metrics.frames,

@@ -767,7 +767,11 @@ fn reduce_dense_pose_sequence_internal(
     let mut timings = ReductionTimings::default();
     let worker_count = resolve_reduction_worker_count(worker_count, input.frame_count);
     let worker_pool = build_reduction_worker_pool(worker_count)?;
-    let local_euler_xyz = unwrap_euler_xyz(&local_rotations, input.frame_count, input.bone_count);
+    let local_euler_xyz = if target == ReductionTarget::DccCubic {
+        unwrap_euler_xyz(&local_rotations, input.frame_count, input.bone_count)
+    } else {
+        Vec::new()
+    };
     for frame in 0..input.frame_count {
         for morph in 0..input.morph_count {
             if !input.morph_weight(frame, morph).is_finite() {
@@ -2054,17 +2058,17 @@ fn measure_error_cached(
         false
     };
 
-    let mut world_dirty = dirty.bone_local.clone();
-    for &bone in sequence.snapshot.evaluation_order.iter() {
-        let parent = sequence.snapshot.parent_indices[bone];
-        if parent >= 0 {
-            for range in world_dirty[parent as usize].clone() {
-                insert_dirty_range(&mut world_dirty[bone], range);
+    if !refreshed_in_parallel {
+        let mut world_dirty = dirty.bone_local.clone();
+        for &bone in sequence.snapshot.evaluation_order.iter() {
+            let parent = sequence.snapshot.parent_indices[bone];
+            if parent >= 0 {
+                for range in world_dirty[parent as usize].clone() {
+                    insert_dirty_range(&mut world_dirty[bone], range);
+                }
             }
         }
-    }
 
-    if !refreshed_in_parallel {
         for (bone, ranges) in dirty.bone_local.iter().enumerate() {
             for range in ranges {
                 for frame in range.clone() {

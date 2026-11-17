@@ -870,9 +870,7 @@ pub(crate) fn golden_ik_compare(
     let manifest_path = root.join("oracle-batch.json");
     let manifest = GoldenIkBatchManifest::from_json_str(&fs::read_to_string(&manifest_path)?)?;
 
-    let mut cases = 0usize;
-    let mut compared_cases = 0usize;
-    let mut skipped_unsupported = 0usize;
+    let cases = manifest.cases.len();
     let mut skipped_unsupported_cases: Vec<UnsupportedGoldenCaseSummaryEntry> = Vec::new();
     let mut per_case_entries: Vec<GoldenIkCompareCaseEntry> = Vec::new();
     let mut missing = 0usize;
@@ -897,13 +895,10 @@ pub(crate) fn golden_ik_compare(
     let mut solver_worst_residuals: Vec<GoldenIkSolverResidual> = Vec::new();
 
     for case in &manifest.cases {
-        cases += 1;
-
         let case_root = root.join(&case.name);
         let pmx_path = case_root.join(&case.pmx);
 
         if !is_supported_golden_model(&pmx_path) {
-            skipped_unsupported += 1;
             let (summary, per_case) = make_unsupported_case_entry(&pmx_path, &case.name);
             skipped_unsupported_cases.push(summary);
             per_case_entries.push(GoldenIkCompareCaseEntry::Unsupported(per_case));
@@ -1105,7 +1100,6 @@ pub(crate) fn golden_ik_compare(
                 root_motion_oracle_lag: case_lag,
             },
         ));
-        compared_cases += 1;
     }
 
     // --- Summary classification: worst diagnostic tracking ---
@@ -1113,6 +1107,8 @@ pub(crate) fn golden_ik_compare(
         GoldenIkCompareCaseEntry::Compared(case) => Some(case),
         GoldenIkCompareCaseEntry::Unsupported(_) => None,
     });
+    let compared_cases = compared_entries.clone().count();
+    let skipped_unsupported = skipped_unsupported_cases.len();
     let diagnostics_total: usize = compared_entries
         .clone()
         .map(|case| case.diagnostics.len())

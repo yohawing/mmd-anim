@@ -3625,18 +3625,18 @@ fn remap_pmx_geometry(
     local_index_count: usize,
 ) -> PmxParsedGeometry {
     PmxParsedGeometry {
-        positions: gather_vertex_f32(&geometry.positions, 3, original_vertex_indices),
-        normals: gather_vertex_f32(&geometry.normals, 3, original_vertex_indices),
-        uvs: gather_vertex_f32(&geometry.uvs, 2, original_vertex_indices),
+        positions: gather_vertex_components(&geometry.positions, 3, original_vertex_indices),
+        normals: gather_vertex_components(&geometry.normals, 3, original_vertex_indices),
+        uvs: gather_vertex_components(&geometry.uvs, 2, original_vertex_indices),
         additional_uvs: geometry
             .additional_uvs
             .iter()
-            .map(|uvs| gather_vertex_f32(uvs, 4, original_vertex_indices))
+            .map(|uvs| gather_vertex_components(uvs, 4, original_vertex_indices))
             .collect(),
         indices,
-        skin_indices: gather_vertex_u32(&geometry.skin_indices, 4, original_vertex_indices),
-        skin_weights: gather_vertex_f32(&geometry.skin_weights, 4, original_vertex_indices),
-        edge_scale: gather_vertex_f32(&geometry.edge_scale, 1, original_vertex_indices),
+        skin_indices: gather_vertex_components(&geometry.skin_indices, 4, original_vertex_indices),
+        skin_weights: gather_vertex_components(&geometry.skin_weights, 4, original_vertex_indices),
+        edge_scale: gather_vertex_components(&geometry.edge_scale, 1, original_vertex_indices),
         material_groups: vec![PmxParsedMaterialGroup {
             start: 0,
             count: local_index_count,
@@ -3647,20 +3647,24 @@ fn remap_pmx_geometry(
                 &geometry.sdef.skinning_modes,
                 original_vertex_indices,
             ),
-            enabled: gather_vertex_f32(&geometry.sdef.enabled, 1, original_vertex_indices),
-            c: gather_vertex_f32(&geometry.sdef.c, 3, original_vertex_indices),
-            r0: gather_vertex_f32(&geometry.sdef.r0, 3, original_vertex_indices),
-            r1: gather_vertex_f32(&geometry.sdef.r1, 3, original_vertex_indices),
-            rw0: gather_vertex_f32(&geometry.sdef.rw0, 3, original_vertex_indices),
-            rw1: gather_vertex_f32(&geometry.sdef.rw1, 3, original_vertex_indices),
+            enabled: gather_vertex_components(&geometry.sdef.enabled, 1, original_vertex_indices),
+            c: gather_vertex_components(&geometry.sdef.c, 3, original_vertex_indices),
+            r0: gather_vertex_components(&geometry.sdef.r0, 3, original_vertex_indices),
+            r1: gather_vertex_components(&geometry.sdef.r1, 3, original_vertex_indices),
+            rw0: gather_vertex_components(&geometry.sdef.rw0, 3, original_vertex_indices),
+            rw1: gather_vertex_components(&geometry.sdef.rw1, 3, original_vertex_indices),
         },
         qdef: PmxParsedQdef {
-            enabled: gather_vertex_f32(&geometry.qdef.enabled, 1, original_vertex_indices),
+            enabled: gather_vertex_components(&geometry.qdef.enabled, 1, original_vertex_indices),
         },
     }
 }
 
-fn gather_vertex_f32(values: &[f32], stride: usize, original_vertex_indices: &[u32]) -> Vec<f32> {
+fn gather_vertex_components<T: Copy>(
+    values: &[T],
+    stride: usize,
+    original_vertex_indices: &[u32],
+) -> Vec<T> {
     let mut out = Vec::with_capacity(original_vertex_indices.len() * stride);
     for &index in original_vertex_indices {
         let start = index as usize * stride;
@@ -3677,18 +3681,6 @@ fn gather_vertex_string(values: &[String], original_vertex_indices: &[u32]) -> V
     for &index in original_vertex_indices {
         if let Some(value) = values.get(index as usize) {
             out.push(value.clone());
-        }
-    }
-    out
-}
-
-fn gather_vertex_u32(values: &[u32], stride: usize, original_vertex_indices: &[u32]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(original_vertex_indices.len() * stride);
-    for &index in original_vertex_indices {
-        let start = index as usize * stride;
-        let end = start + stride;
-        if let Some(slice) = values.get(start..end) {
-            out.extend_from_slice(slice);
         }
     }
     out

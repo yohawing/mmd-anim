@@ -734,61 +734,58 @@ mod tests {
         );
     }
 
-    #[test]
-    fn filters_unity_runtime_verification_case_results_by_pmx_path() {
-        let json = r#"{
+    fn unity_case_filter_report(pmx_paths: [&str; 2]) -> String {
+        serde_json::json!({
             "schemaVersion": 1,
             "unityVersion": "6000.4.8f1",
             "caseResults": [
                 {
                     "name": "case-a",
-                    "pmxPath": "F:\\MMD\\model-a.pmx",
-                    "sampledFrames": [
-                        {
-                            "frame": 60,
-                            "matrixLayout": "row-major",
-                            "bones": [
-                                {
-                                    "index": 1,
-                                    "name": "A",
-                                    "worldMatrix": [
-                                        1.0, 0.0, 0.0, 1.0,
-                                        0.0, 1.0, 0.0, 2.0,
-                                        0.0, 0.0, 1.0, 3.0,
-                                        0.0, 0.0, 0.0, 1.0
-                                    ]
-                                }
+                    "pmxPath": pmx_paths[0],
+                    "sampledFrames": [{
+                        "frame": 60,
+                        "matrixLayout": "row-major",
+                        "bones": [{
+                            "index": 1,
+                            "name": "A",
+                            "worldMatrix": [
+                                1.0, 0.0, 0.0, 1.0,
+                                0.0, 1.0, 0.0, 2.0,
+                                0.0, 0.0, 1.0, 3.0,
+                                0.0, 0.0, 0.0, 1.0
                             ]
-                        }
-                    ]
+                        }]
+                    }]
                 },
                 {
                     "name": "case-b",
-                    "pmxPath": "f:/mmd/model-b.pmx",
-                    "sampledFrames": [
-                        {
-                            "frame": 60,
-                            "matrixLayout": "row-major",
-                            "bones": [
-                                {
-                                    "index": 2,
-                                    "name": "B",
-                                    "worldMatrix": [
-                                        1.0, 0.0, 0.0, 4.0,
-                                        0.0, 1.0, 0.0, 5.0,
-                                        0.0, 0.0, 1.0, 6.0,
-                                        0.0, 0.0, 0.0, 1.0
-                                    ]
-                                }
+                    "pmxPath": pmx_paths[1],
+                    "sampledFrames": [{
+                        "frame": 60,
+                        "matrixLayout": "row-major",
+                        "bones": [{
+                            "index": 2,
+                            "name": "B",
+                            "worldMatrix": [
+                                1.0, 0.0, 0.0, 4.0,
+                                0.0, 1.0, 0.0, 5.0,
+                                0.0, 0.0, 1.0, 6.0,
+                                0.0, 0.0, 0.0, 1.0
                             ]
-                        }
-                    ]
+                        }]
+                    }]
                 }
             ]
-        }"#;
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn filters_unity_runtime_verification_case_results_by_pmx_path() {
+        let json = unity_case_filter_report([r"F:\MMD\model-a.pmx", "f:/mmd/model-b.pmx"]);
 
         let dump = MmdDumperOracleDump::from_unity_runtime_verification_json_str_for_case(
-            json,
+            &json,
             Some(&[60]),
             None,
             Some("F:\\MMD\\model-b.pmx"),
@@ -806,59 +803,10 @@ mod tests {
 
     #[test]
     fn filters_unity_runtime_verification_case_results_by_case_and_pmx_path() {
-        let json = r#"{
-            "schemaVersion": 1,
-            "unityVersion": "6000.4.8f1",
-            "caseResults": [
-                {
-                    "name": "case-a",
-                    "pmxPath": "F:\\MMD\\shared.pmx",
-                    "sampledFrames": [
-                        {
-                            "frame": 60,
-                            "matrixLayout": "row-major",
-                            "bones": [
-                                {
-                                    "index": 1,
-                                    "name": "A",
-                                    "worldMatrix": [
-                                        1.0, 0.0, 0.0, 1.0,
-                                        0.0, 1.0, 0.0, 2.0,
-                                        0.0, 0.0, 1.0, 3.0,
-                                        0.0, 0.0, 0.0, 1.0
-                                    ]
-                                }
-                            ]
-                        }
-                    ]
-                },
-                {
-                    "name": "case-b",
-                    "pmxPath": "f:/mmd/shared.pmx",
-                    "sampledFrames": [
-                        {
-                            "frame": 60,
-                            "matrixLayout": "row-major",
-                            "bones": [
-                                {
-                                    "index": 2,
-                                    "name": "B",
-                                    "worldMatrix": [
-                                        1.0, 0.0, 0.0, 4.0,
-                                        0.0, 1.0, 0.0, 5.0,
-                                        0.0, 0.0, 1.0, 6.0,
-                                        0.0, 0.0, 0.0, 1.0
-                                    ]
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }"#;
+        let json = unity_case_filter_report([r"F:\MMD\shared.pmx", "f:/mmd/shared.pmx"]);
 
         let dump = MmdDumperOracleDump::from_unity_runtime_verification_json_str_for_case(
-            json,
+            &json,
             Some(&[60]),
             Some("case-b"),
             Some("F:\\MMD\\shared.pmx"),
@@ -876,59 +824,13 @@ mod tests {
 
     #[test]
     fn filters_unity_runtime_verification_case_results_by_case_name_without_pmx_path() {
-        let json = r#"{
-            "schemaVersion": 1,
-            "unityVersion": "6000.4.8f1",
-            "caseResults": [
-                {
-                    "name": "case-a",
-                    "pmxPath": "F:\\UnityProject\\copied-a.pmx",
-                    "sampledFrames": [
-                        {
-                            "frame": 60,
-                            "matrixLayout": "row-major",
-                            "bones": [
-                                {
-                                    "index": 1,
-                                    "name": "A",
-                                    "worldMatrix": [
-                                        1.0, 0.0, 0.0, 1.0,
-                                        0.0, 1.0, 0.0, 2.0,
-                                        0.0, 0.0, 1.0, 3.0,
-                                        0.0, 0.0, 0.0, 1.0
-                                    ]
-                                }
-                            ]
-                        }
-                    ]
-                },
-                {
-                    "name": "case-b",
-                    "pmxPath": "F:\\UnityProject\\copied-b.pmx",
-                    "sampledFrames": [
-                        {
-                            "frame": 60,
-                            "matrixLayout": "row-major",
-                            "bones": [
-                                {
-                                    "index": 2,
-                                    "name": "B",
-                                    "worldMatrix": [
-                                        1.0, 0.0, 0.0, 4.0,
-                                        0.0, 1.0, 0.0, 5.0,
-                                        0.0, 0.0, 1.0, 6.0,
-                                        0.0, 0.0, 0.0, 1.0
-                                    ]
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }"#;
+        let json = unity_case_filter_report([
+            r"F:\UnityProject\copied-a.pmx",
+            r"F:\UnityProject\copied-b.pmx",
+        ]);
 
         let dump = MmdDumperOracleDump::from_unity_runtime_verification_json_str_for_case(
-            json,
+            &json,
             Some(&[60]),
             Some("case-b"),
             None,

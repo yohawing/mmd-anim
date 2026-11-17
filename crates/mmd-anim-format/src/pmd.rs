@@ -820,8 +820,8 @@ fn build_pmd_runtime_from_parsed(parsed: PmdParsedModel) -> Result<PmdRuntimeImp
         bone_names: parsed
             .skeleton
             .bones
-            .iter()
-            .map(|bone| bone.name.clone())
+            .into_iter()
+            .map(|bone| bone.name)
             .collect(),
         bone_name_to_index,
         morph_name_to_index,

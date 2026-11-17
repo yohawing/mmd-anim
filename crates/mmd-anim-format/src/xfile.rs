@@ -187,7 +187,7 @@ fn parse_vac_manifest(data: &[u8]) -> AccessoryParsedManifest {
         material_count: 0,
         mesh_summaries: Vec::new(),
         materials: Vec::new(),
-        vac_settings: Some(parse_vac_settings(&lines, &texture_references)),
+        vac_settings: Some(parse_vac_settings(lines, &texture_references)),
         texture_references,
         diagnostics: vec![AccessoryDiagnostic {
             level: "warning".to_owned(),
@@ -470,7 +470,7 @@ fn push_vac_vec3(text: &mut String, value: [f32; 3]) {
     ));
 }
 
-fn parse_vac_settings(lines: &[String], texture_references: &[String]) -> AccessoryVacSettings {
+fn parse_vac_settings(lines: Vec<String>, texture_references: &[String]) -> AccessoryVacSettings {
     let x_file = texture_references.first().cloned();
     let first_x_index = lines
         .iter()
@@ -492,7 +492,6 @@ fn parse_vac_settings(lines: &[String], texture_references: &[String]) -> Access
     });
 
     AccessoryVacSettings {
-        raw_lines: lines.to_vec(),
         x_file,
         scale: first_x_index
             .and_then(|index| lines.get(index + 1))
@@ -505,6 +504,7 @@ fn parse_vac_settings(lines: &[String], texture_references: &[String]) -> Access
             .and_then(|line| parse_vac_vec3(line)),
         numeric_values,
         attachment_target,
+        raw_lines: lines,
     }
 }
 

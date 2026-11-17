@@ -707,13 +707,10 @@ fn parse_x_mesh_summary_block(lines: &[&str]) -> Option<AccessoryMeshSummary> {
 
 fn parse_x_position(line: &str) -> Option<[f32; 3]> {
     // Format: "x;y;z;[,|;]"
-    let parts: Vec<&str> = line.trim().split(';').collect();
-    if parts.len() < 3 {
-        return None;
-    }
-    let x = parts[0].trim().parse::<f32>().ok()?;
-    let y = parts[1].trim().parse::<f32>().ok()?;
-    let z = parts[2].trim().parse::<f32>().ok()?;
+    let mut parts = line.trim().split(';');
+    let x = parts.next()?.trim().parse::<f32>().ok()?;
+    let y = parts.next()?.trim().parse::<f32>().ok()?;
+    let z = parts.next()?.trim().parse::<f32>().ok()?;
     Some([x, y, z])
 }
 
@@ -803,15 +800,12 @@ fn parse_x_mesh_vertex_colors(lines: &[&str], start: usize) -> (Vec<AccessoryVer
 
 fn parse_x_vertex_color(line: &str) -> Option<AccessoryVertexColor> {
     // Format: "vertexIndex;r;g;b;a;[,|;;]"
-    let parts: Vec<&str> = line.trim().split(';').collect();
-    if parts.len() < 5 {
-        return None;
-    }
-    let vertex_index = parts[0].trim().parse::<u32>().ok()?;
-    let r = parts[1].trim().parse::<f32>().ok()?;
-    let g = parts[2].trim().parse::<f32>().ok()?;
-    let b = parts[3].trim().parse::<f32>().ok()?;
-    let a = parts[4].trim().parse::<f32>().ok()?;
+    let mut parts = line.trim().split(';');
+    let vertex_index = parts.next()?.trim().parse::<u32>().ok()?;
+    let r = parts.next()?.trim().parse::<f32>().ok()?;
+    let g = parts.next()?.trim().parse::<f32>().ok()?;
+    let b = parts.next()?.trim().parse::<f32>().ok()?;
+    let a = parts.next()?.trim().parse::<f32>().ok()?;
     Some(AccessoryVertexColor {
         vertex_index,
         color: [r, g, b, a],
@@ -819,12 +813,9 @@ fn parse_x_vertex_color(line: &str) -> Option<AccessoryVertexColor> {
 }
 
 fn parse_x_texture_coordinate(line: &str) -> Option<[f32; 2]> {
-    let parts: Vec<&str> = line.trim().split(';').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let u = parts[0].trim().parse::<f32>().ok()?;
-    let v = parts[1].trim().parse::<f32>().ok()?;
+    let mut parts = line.trim().split(';');
+    let u = parts.next()?.trim().parse::<f32>().ok()?;
+    let v = parts.next()?.trim().parse::<f32>().ok()?;
     Some([u, v])
 }
 

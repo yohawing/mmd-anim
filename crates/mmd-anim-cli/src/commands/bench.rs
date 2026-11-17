@@ -171,33 +171,21 @@ pub(crate) fn bench_pair_report_json(input: BenchPairReportInput<'_>) -> serde_j
             skipped_iterations as f64 / configured_iterations as f64
         };
 
-        let mut ranked = stats
-            .iter()
-            .enumerate()
-            .map(|(index, stats)| (index, *stats))
-            .collect::<Vec<_>>();
-        ranked.sort_by_key(|(_, stats)| {
-            std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
-        });
+        let ranked = top_ik_solvers(stats);
 
         let top_solvers = ranked
             .into_iter()
-            .take(8)
             .map(|(index, stats)| {
                 let summary = &input.ik_solver_summaries[index];
                 let skipped = stats
                     .configured_iterations
                     .saturating_sub(stats.executed_iterations);
-                let avg_final_distance = if stats.solver_evaluations == 0 {
-                    0.0
-                } else {
-                    stats.final_distance_sum / stats.solver_evaluations as f64
-                };
-                let avg_exhausted_final_distance = if stats.max_iteration_exhaustions == 0 {
-                    0.0
-                } else {
-                    stats.exhausted_final_distance_sum / stats.max_iteration_exhaustions as f64
-                };
+                let avg_final_distance =
+                    average_distance(stats.final_distance_sum, stats.solver_evaluations);
+                let avg_exhausted_final_distance = average_distance(
+                    stats.exhausted_final_distance_sum,
+                    stats.max_iteration_exhaustions,
+                );
                 json!({
                     "solver": summary.solver_index,
                     "bone": summary.bone_index,
@@ -238,6 +226,23 @@ pub(crate) fn bench_pair_report_json(input: BenchPairReportInput<'_>) -> serde_j
     }
 
     root
+}
+
+fn top_ik_solvers(stats: &[IkSolverRuntimeStats]) -> Vec<(usize, &IkSolverRuntimeStats)> {
+    let mut ranked: Vec<_> = stats.iter().enumerate().collect();
+    ranked.sort_by_key(|(_, stats)| {
+        std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
+    });
+    ranked.truncate(8);
+    ranked
+}
+
+fn average_distance(total: f64, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f64
+    }
 }
 
 pub(crate) fn aggregate_ik_runtime_stats<'a>(
@@ -589,29 +594,18 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
             link_steps,
         );
 
-        let mut ranked = stats
-            .iter()
-            .enumerate()
-            .map(|(index, stats)| (index, *stats))
-            .collect::<Vec<_>>();
-        ranked.sort_by_key(|(_, stats)| {
-            std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
-        });
-        for (index, stats) in ranked.into_iter().take(8) {
+        let ranked = top_ik_solvers(stats);
+        for (index, stats) in ranked {
             let summary = &ik_solver_summaries[index];
             let skipped = stats
                 .configured_iterations
                 .saturating_sub(stats.executed_iterations);
-            let avg_final_distance = if stats.solver_evaluations == 0 {
-                0.0
-            } else {
-                stats.final_distance_sum / stats.solver_evaluations as f64
-            };
-            let avg_exhausted_final_distance = if stats.max_iteration_exhaustions == 0 {
-                0.0
-            } else {
-                stats.exhausted_final_distance_sum / stats.max_iteration_exhaustions as f64
-            };
+            let avg_final_distance =
+                average_distance(stats.final_distance_sum, stats.solver_evaluations);
+            let avg_exhausted_final_distance = average_distance(
+                stats.exhausted_final_distance_sum,
+                stats.max_iteration_exhaustions,
+            );
             println!(
                 "bench-pair-ik-solver: solver={} bone={} name={} maxIterations={} links={} evaluations={} configuredIterations={} executedIterations={} skippedIterations={} precheckBreaks={} postBreaks={} rollbackBreaks={} exhausted={} avgFinalDistance={:.8} maxFinalDistance={:.8} avgExhaustedFinalDistance={:.8} maxExhaustedFinalDistance={:.8}",
                 summary.solver_index,

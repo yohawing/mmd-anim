@@ -3143,13 +3143,7 @@ pub fn build_bone_name_map(
                 collision_suffix: None,
             })
             .collect(),
-        FbxBoneNamePolicy::Readable => {
-            let candidates = bones
-                .iter()
-                .map(resolve_readable_bone_name)
-                .collect::<Vec<_>>();
-            deduplicate_bone_names(bones, candidates)
-        }
+        FbxBoneNamePolicy::Readable => deduplicate_bone_names(bones),
     }
 }
 
@@ -3251,25 +3245,24 @@ fn standard_mmd_bone_dictionary_name(name: &str) -> Option<&'static str> {
     })
 }
 
-fn deduplicate_bone_names(
-    bones: &[PmxParsedBone],
-    candidates: Vec<BoneNameCandidate>,
-) -> Vec<FbxBoneNameMapEntry> {
+fn deduplicate_bone_names(bones: &[PmxParsedBone]) -> Vec<FbxBoneNameMapEntry> {
     let mut used = HashSet::<String>::new();
-    let mut entries = Vec::with_capacity(candidates.len());
-    for (index, candidate) in candidates.into_iter().enumerate() {
-        let mut fbx_name = candidate.name.clone();
+    let mut entries = Vec::with_capacity(bones.len());
+    for (index, bone) in bones.iter().enumerate() {
+        let candidate = resolve_readable_bone_name(bone);
+        let mut fbx_name = candidate.name;
         let mut collision_suffix = None;
         if !used.insert(fbx_name.clone()) {
+            let base_name = fbx_name;
             let suffix = format!("_{index}");
-            fbx_name = format!("{}{suffix}", candidate.name);
+            fbx_name = format!("{base_name}{suffix}");
             if used.insert(fbx_name.clone()) {
                 collision_suffix = Some(suffix);
             } else {
                 let mut suffix_index = 2usize;
                 loop {
                     let suffix = format!("_{index}_{suffix_index}");
-                    fbx_name = format!("{}{suffix}", candidate.name);
+                    fbx_name = format!("{base_name}{suffix}");
                     if used.insert(fbx_name.clone()) {
                         collision_suffix = Some(suffix);
                         break;
@@ -3278,7 +3271,6 @@ fn deduplicate_bone_names(
                 }
             }
         }
-        let bone = &bones[index];
         entries.push(FbxBoneNameMapEntry {
             index,
             pmx_name: bone.name.clone(),
@@ -5987,9 +5979,22 @@ mod tests {
             test_bone("custom1", "left_arm"),
             test_bone("custom2", "left_arm"),
             test_bone("custom3", "left_arm"),
+            test_bone("custom4", "left_arm_5"),
+            test_bone("custom5", "left_arm_5_2"),
+            test_bone("custom6", "left_arm"),
         ];
         let names = build_bone_names(&bones, FbxBoneNamePolicy::Readable);
-        assert_eq!(names, vec!["left_arm", "left_arm_1", "left_arm_2"]);
+        assert_eq!(
+            names,
+            vec![
+                "left_arm",
+                "left_arm_1",
+                "left_arm_2",
+                "left_arm_5",
+                "left_arm_5_2",
+                "left_arm_5_3",
+            ]
+        );
     }
 
     #[test]

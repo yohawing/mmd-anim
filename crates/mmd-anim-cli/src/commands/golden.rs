@@ -1509,90 +1509,29 @@ pub(crate) fn golden_ik_diagnose(
     // distance between ikBone and targetBone world translations.
     if !ik_roles.is_empty() {
         println!("  IK residuals:");
-        for (solver_idx, solver) in ik_solvers.iter().enumerate() {
-            let ik_idx = solver.ik_bone.0 as usize;
-            let tb_idx = solver.target_bone.0 as usize;
-
-            let is_involved = ik_idx == oracle_index
-                || tb_idx == oracle_index
-                || solver
-                    .links
-                    .iter()
-                    .any(|link| link.bone.0 as usize == oracle_index);
-
-            if !is_involved {
-                continue;
-            }
-
-            if ik_idx >= world_matrices.len() || tb_idx >= world_matrices.len() {
-                continue;
-            }
-
-            // Runtime world translations
-            let rt_ik = Vec3A::new(
-                world_matrices[ik_idx].w_axis.x,
-                world_matrices[ik_idx].w_axis.y,
-                world_matrices[ik_idx].w_axis.z,
-            );
-            let rt_tb = Vec3A::new(
-                world_matrices[tb_idx].w_axis.x,
-                world_matrices[tb_idx].w_axis.y,
-                world_matrices[tb_idx].w_axis.z,
-            );
-            let runtime_distance = (rt_ik - rt_tb).length();
-
-            // Oracle world translations (if both bones exist in the oracle model)
-            let oracle_distance = {
-                let or_ik = model0
-                    .bones
-                    .iter()
-                    .find(|b| b.index == solver.ik_bone.0 as i32);
-                let or_tb = model0
-                    .bones
-                    .iter()
-                    .find(|b| b.index == solver.target_bone.0 as i32);
-                match (or_ik, or_tb) {
-                    (Some(ik), Some(tb)) => {
-                        let oi = Vec3A::new(
-                            ik.world_matrix[12],
-                            ik.world_matrix[13],
-                            ik.world_matrix[14],
-                        );
-                        let ot = Vec3A::new(
-                            tb.world_matrix[12],
-                            tb.world_matrix[13],
-                            tb.world_matrix[14],
-                        );
-                        Some((oi - ot).length())
-                    }
-                    _ => None,
-                }
+        for residual in compute_ik_solver_residuals(
+            ik_solvers,
+            &model_import.bone_names,
+            ik_enabled,
+            world_matrices,
+            model0,
+            Some(oracle_index),
+        ) {
+            let (oracle_display, delta_display) = match residual.oracle_residual {
+                Some(oracle) => (
+                    format!("{oracle:.6}"),
+                    format!("{:.6}", residual.runtime_residual - oracle),
+                ),
+                None => ("N/A".to_owned(), "N/A".to_owned()),
             };
-
-            let (oracle_display, delta_display) = match oracle_distance {
-                Some(od) => (format!("{od:.6}"), format!("{:.6}", runtime_distance - od)),
-                None => ("N/A".to_string(), "N/A".to_string()),
-            };
-
-            let ik_name = if solver.ik_bone.as_usize() < model_import.bone_names.len() {
-                &model_import.bone_names[solver.ik_bone.as_usize()]
-            } else {
-                "?"
-            };
-            let tb_name = if solver.target_bone.as_usize() < model_import.bone_names.len() {
-                &model_import.bone_names[solver.target_bone.as_usize()]
-            } else {
-                "?"
-            };
-
             println!(
                 "    solver[{}]: ikBone={}({}) targetBone={}({}) runtimeDistance={:.6} oracleDistance={} delta={}",
-                solver_idx,
-                ik_name,
-                solver.ik_bone.0,
-                tb_name,
-                solver.target_bone.0,
-                runtime_distance,
+                residual.solver_index,
+                residual.ik_bone,
+                residual.ik_bone_index,
+                residual.target_bone,
+                residual.target_bone_index,
+                residual.runtime_residual,
                 oracle_display,
                 delta_display,
             );

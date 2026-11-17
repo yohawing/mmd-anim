@@ -944,14 +944,12 @@ fn build_dcc_channel_plans(
                 .raw_translation_defaults
                 .map(|value| canonical_dcc_scalar(value, 0.0));
             for axis in 0..3 {
-                let rotation_values = plan.rotation_values[axis].clone();
-                let translation_values = plan.translation_values[axis].clone();
                 plan.rotation_channels[axis] = Some(full_dcc_channel(
                     reduced,
                     bone,
                     axis,
                     true,
-                    &rotation_values,
+                    &plan.rotation_values[axis],
                     options,
                     0.0,
                 )?);
@@ -960,7 +958,7 @@ fn build_dcc_channel_plans(
                     bone,
                     axis,
                     false,
-                    &translation_values,
+                    &plan.translation_values[axis],
                     options,
                     0.0,
                 )?);
@@ -1515,8 +1513,8 @@ impl FbxAnimationData {
         }
         let channel_plans = build_dcc_channel_plans(reduced, options)?;
         let mut tracks = Vec::new();
-        for (bone_index, track) in reduced.bone_tracks().iter().enumerate() {
-            let plan = &channel_plans[bone_index];
+        for (bone_index, plan) in channel_plans.into_iter().enumerate() {
+            let track = &reduced.bone_tracks()[bone_index];
             if plan.rotation_channels.iter().all(Option::is_none)
                 && plan.translation_channels.iter().all(Option::is_none)
             {
@@ -1532,12 +1530,12 @@ impl FbxAnimationData {
                     .iter()
                     .map(|key| reduced_key_time(reduced, key.sample_index))
                     .collect::<Result<Vec<_>, _>>()?,
-                rotation_values: plan.rotation_values.clone(),
-                translation_values: plan.translation_values.clone(),
+                rotation_values: plan.rotation_values,
+                translation_values: plan.translation_values,
                 rotation_attributes: [None, None, None],
                 translation_attributes: [None, None, None],
-                rotation_channels: plan.rotation_channels.clone(),
-                translation_channels: plan.translation_channels.clone(),
+                rotation_channels: plan.rotation_channels,
+                translation_channels: plan.translation_channels,
             });
         }
 

@@ -3786,6 +3786,7 @@ fn remap_pmx_material_split_morphs(
     }
 
     let mut morphs = Vec::with_capacity(morph_remap.len());
+    let mut morph_index_map = Vec::with_capacity(morph_remap.len());
     for (original_index, morph) in model.morphs.iter().enumerate() {
         if !morph_remap.contains_key(&original_index) {
             continue;
@@ -3794,23 +3795,12 @@ fn remap_pmx_material_split_morphs(
             Some(remapped) => remapped,
             None => remap_reference_pmx_material_split_morph(morph, &morph_remap),
         };
-        morphs.push((original_index, remapped));
+        morph_index_map.push(PmxMaterialSplitMorphIndexMap {
+            original_index,
+            local_index: morphs.len(),
+        });
+        morphs.push(remapped);
     }
-
-    let morph_index_map = morphs
-        .iter()
-        .enumerate()
-        .map(
-            |(local_index, (original_index, _))| PmxMaterialSplitMorphIndexMap {
-                original_index: *original_index,
-                local_index,
-            },
-        )
-        .collect();
-    let morphs = morphs
-        .into_iter()
-        .map(|(_, morph)| morph)
-        .collect::<Vec<_>>();
 
     (morphs, morph_index_map, diagnostics)
 }

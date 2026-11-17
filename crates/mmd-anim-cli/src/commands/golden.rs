@@ -886,10 +886,6 @@ pub(crate) fn golden_ik_compare(
     let mut worst_case_name = String::new();
     let mut worst_frame: i32 = 0;
 
-    let mut per_case_errors: Vec<(String, f32, String)> = Vec::new();
-    let mut per_case_diagnostics: Vec<Vec<GoldenRootMotionDiagnostic>> = Vec::new();
-    let mut all_lag_matches: Vec<GoldenRootMotionOracleLagMatch> = Vec::new();
-
     // Solver-focused tracking (excludes root/control-dominated frames)
     let mut solver_compared_bones: usize = 0;
     let mut solver_skipped_bones: usize = 0;
@@ -1096,11 +1092,7 @@ pub(crate) fn golden_ik_compare(
             compared_frames += 1;
         }
 
-        per_case_errors.push((case.name.clone(), case_max_error, case_worst.clone()));
-        per_case_diagnostics.push(case_diagnostics.clone());
-
         let case_lag = compute_root_motion_oracle_lag(&case.name, &case_diagnostics);
-        all_lag_matches.extend(case_lag.matches.iter().cloned());
 
         per_case_entries.push(GoldenIkCompareCaseEntry::Compared(
             GoldenIkComparePerCaseEntry {
@@ -1117,19 +1109,24 @@ pub(crate) fn golden_ik_compare(
     }
 
     // --- Summary classification: worst diagnostic tracking ---
-    let diagnostics_total: usize = per_case_diagnostics.iter().map(|d| d.len()).sum();
+    let compared_entries = per_case_entries.iter().filter_map(|entry| match entry {
+        GoldenIkCompareCaseEntry::Compared(case) => Some(case),
+        GoldenIkCompareCaseEntry::Unsupported(_) => None,
+    });
+    let diagnostics_total: usize = compared_entries
+        .clone()
+        .map(|case| case.diagnostics.len())
+        .sum();
 
     // Find the diagnostic entry at the same case+frame as the worst matrix error,
     // picking the one with the largest maxAbsError if multiple match.
     let worst_diagnostic = {
-        let mut result: Option<GoldenRootMotionDiagnostic> = None;
-        for ((name, _error, _worst_bone), case_diags) in
-            per_case_errors.iter().zip(per_case_diagnostics.iter())
-        {
-            if *name != worst_case_name {
+        let mut result: Option<&GoldenRootMotionDiagnostic> = None;
+        for case in compared_entries.clone() {
+            if case.name != worst_case_name {
                 continue;
             }
-            for diag in case_diags {
+            for diag in &case.diagnostics {
                 if diag.frame != worst_frame {
                     continue;
                 }
@@ -1138,12 +1135,12 @@ pub(crate) fn golden_ik_compare(
                     Some(best) => diag.max_abs_error > best.max_abs_error,
                 };
                 if larger {
-                    result = Some(diag.clone());
+                    result = Some(diag);
                 }
             }
             break;
         }
-        result
+        result.cloned()
     };
 
     let worst_likely_root_control_dominated = worst_diagnostic
@@ -1151,9 +1148,11 @@ pub(crate) fn golden_ik_compare(
         .map(|d| f64::from(d.max_abs_error))
         .map(|err| err >= max_abs_error as f64 * 0.5)
         .unwrap_or(false);
-    let summary_lag_total = all_lag_matches.len();
-    let summary_lag_worst = all_lag_matches
-        .iter()
+    let lag_matches = compared_entries
+        .clone()
+        .flat_map(|case| &case.root_motion_oracle_lag.matches);
+    let summary_lag_total = lag_matches.clone().count();
+    let summary_lag_worst = lag_matches
         .max_by(|a, b| {
             a.max_abs_error
                 .partial_cmp(&b.max_abs_error)
@@ -1241,10 +1240,10 @@ pub(crate) fn golden_ik_compare(
             worst_component, translation_error, worst_case_max_error
         );
 
-        for (case_name, error, worst_bone) in &per_case_errors {
+        for case in compared_entries {
             println!(
                 "  case {}: maxAbsError={:.6} worst={}",
-                case_name, error, worst_bone
+                case.name, case.max_abs_error, case.worst
             );
         }
     }

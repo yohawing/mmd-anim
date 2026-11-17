@@ -87,11 +87,24 @@ pub(crate) struct ImportVerboseAppendDiagnostics {
     pub details: Vec<ImportVerboseAppendDetail>,
 }
 
-pub(crate) fn import_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(path)?;
-    let imported = mmd_anim_format::import_pmx_runtime(&data).map_err(|error| {
+fn load_pmx_runtime(
+    path: &Path,
+) -> Result<mmd_anim_format::PmxRuntimeImport, Box<dyn std::error::Error>> {
+    mmd_anim_format::import_pmx_runtime(&read_file(path)?).map_err(|error| {
         import_failure_error("import", path, mmd_anim_format::MmdFormatKind::Pmx, error)
-    })?;
+    })
+}
+
+fn load_vmd_motion(
+    path: &Path,
+) -> Result<mmd_anim_format::VmdImportResult, Box<dyn std::error::Error>> {
+    mmd_anim_format::import_vmd_motion(&read_file(path)?).map_err(|error| {
+        import_failure_error("import", path, mmd_anim_format::MmdFormatKind::Vmd, error)
+    })
+}
+
+pub(crate) fn import_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let imported = load_pmx_runtime(path)?;
     println!(
         "PMX runtime import: bones={} append={} fixedAxis={} ik={} boneNames={} morphNames={} ikNameMap={}",
         imported.model.bone_count(),
@@ -106,10 +119,7 @@ pub(crate) fn import_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::e
 }
 
 pub(crate) fn import_pmx_ik_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(path)?;
-    let imported = mmd_anim_format::import_pmx_runtime(&data).map_err(|error| {
-        import_failure_error("import", path, mmd_anim_format::MmdFormatKind::Pmx, error)
-    })?;
+    let imported = load_pmx_runtime(path)?;
     let solvers = imported.model.ik_solvers();
     let max_iterations = solvers
         .iter()
@@ -175,10 +185,7 @@ pub(crate) fn import_pmd_summary(path: &Path) -> Result<ExitCode, Box<dyn std::e
 }
 
 pub(crate) fn import_vmd_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(path)?;
-    let imported = mmd_anim_format::import_vmd_motion(&data).map_err(|error| {
-        import_failure_error("import", path, mmd_anim_format::MmdFormatKind::Vmd, error)
-    })?;
+    let imported = load_vmd_motion(path)?;
     let property_ik_entries: usize = imported
         .property_ik_frames
         .iter()
@@ -198,22 +205,8 @@ pub(crate) fn import_pair_summary(
     pmx_path: &Path,
     vmd_path: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let pmx = mmd_anim_format::import_pmx_runtime(&read_file(pmx_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            pmx_path,
-            mmd_anim_format::MmdFormatKind::Pmx,
-            error,
-        )
-    })?;
-    let vmd = mmd_anim_format::import_vmd_motion(&read_file(vmd_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            vmd_path,
-            mmd_anim_format::MmdFormatKind::Vmd,
-            error,
-        )
-    })?;
+    let pmx = load_pmx_runtime(pmx_path)?;
+    let vmd = load_vmd_motion(vmd_path)?;
 
     let matched_bone_keys = vmd
         .bone_keyframes
@@ -286,22 +279,8 @@ pub(crate) fn import_pair_clip_summary(
     pmx_path: &Path,
     vmd_path: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let pmx = mmd_anim_format::import_pmx_runtime(&read_file(pmx_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            pmx_path,
-            mmd_anim_format::MmdFormatKind::Pmx,
-            error,
-        )
-    })?;
-    let vmd = mmd_anim_format::import_vmd_motion(&read_file(vmd_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            vmd_path,
-            mmd_anim_format::MmdFormatKind::Vmd,
-            error,
-        )
-    })?;
+    let pmx = load_pmx_runtime(pmx_path)?;
+    let vmd = load_vmd_motion(vmd_path)?;
 
     let solver_count = pmx.model.ik_count();
     let clip = mmd_anim_format::build_mmd_registered_pair_clip(
@@ -692,22 +671,8 @@ pub(crate) fn build_pair_runtime_context(
     pmx_path: &Path,
     vmd_path: &Path,
 ) -> Result<PairRuntimeContext, Box<dyn std::error::Error>> {
-    let pmx = mmd_anim_format::import_pmx_runtime(&read_file(pmx_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            pmx_path,
-            mmd_anim_format::MmdFormatKind::Pmx,
-            error,
-        )
-    })?;
-    let vmd = mmd_anim_format::import_vmd_motion(&read_file(vmd_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            vmd_path,
-            mmd_anim_format::MmdFormatKind::Vmd,
-            error,
-        )
-    })?;
+    let pmx = load_pmx_runtime(pmx_path)?;
+    let vmd = load_vmd_motion(vmd_path)?;
 
     let bone_count = pmx.model.bone_count();
     let solver_count = pmx.model.ik_count();

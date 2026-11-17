@@ -152,7 +152,8 @@ pub(crate) fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::er
     Ok(ExitCode::SUCCESS)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct GoldenParserSummaryMetrics {
     pub(crate) cases: usize,
     pub(crate) skipped_unsupported: usize,
@@ -169,12 +170,8 @@ pub(crate) struct GoldenParserSummaryJsonReport {
     command: &'static str,
     mode: &'static str,
     root: String,
-    cases: usize,
-    skipped_unsupported: usize,
-    matched_bones: usize,
-    missing_bones: usize,
-    matched_morphs: usize,
-    missing_morphs: usize,
+    #[serde(flatten)]
+    metrics: GoldenParserSummaryMetrics,
 }
 
 pub(crate) fn golden_parser_summary_json_report(
@@ -186,12 +183,7 @@ pub(crate) fn golden_parser_summary_json_report(
         command: "verify",
         mode: "parser",
         root: root.to_string_lossy().into_owned(),
-        cases: metrics.cases,
-        skipped_unsupported: metrics.skipped_unsupported,
-        matched_bones: metrics.matched_bones,
-        missing_bones: metrics.missing_bones,
-        matched_morphs: metrics.matched_morphs,
-        missing_morphs: metrics.missing_morphs,
+        metrics,
     }
 }
 

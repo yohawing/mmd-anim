@@ -617,9 +617,9 @@ fn parse_x_mesh_summaries(text: &str) -> Vec<AccessoryMeshSummary> {
             index += 1;
             continue;
         }
-        let (block, next_index) = collect_x_block(&lines, index);
+        let (block, next_index) = x_block_lines(&lines, index);
         index = next_index;
-        if let Some(mut summary) = parse_x_mesh_summary_block(&block) {
+        if let Some(mut summary) = parse_x_mesh_summary_block(block) {
             summary.material_start_index = material_start_index;
             material_start_index += summary.material_count;
             summaries.push(summary);
@@ -628,12 +628,11 @@ fn parse_x_mesh_summaries(text: &str) -> Vec<AccessoryMeshSummary> {
     summaries
 }
 
-fn parse_x_mesh_summary_block(block: &str) -> Option<AccessoryMeshSummary> {
-    let lines = block.lines().collect::<Vec<_>>();
-    let (vertex_count, mut index) = next_usize_line(&lines, 1)?;
+fn parse_x_mesh_summary_block(lines: &[&str]) -> Option<AccessoryMeshSummary> {
+    let (vertex_count, mut index) = next_usize_line(lines, 1)?;
     let mut positions = Vec::with_capacity(vertex_count);
     for _ in 0..vertex_count {
-        index = next_non_empty_after(&lines, index);
+        index = next_non_empty_after(lines, index);
         if index >= lines.len() {
             break;
         }
@@ -642,11 +641,11 @@ fn parse_x_mesh_summary_block(block: &str) -> Option<AccessoryMeshSummary> {
         }
         index += 1;
     }
-    let (face_count, next_index) = next_usize_line(&lines, index)?;
+    let (face_count, next_index) = next_usize_line(lines, index)?;
     index = next_index;
     let mut face_indices = Vec::with_capacity(face_count);
     for _ in 0..face_count {
-        index = next_non_empty_after(&lines, index);
+        index = next_non_empty_after(lines, index);
         if index >= lines.len() {
             break;
         }
@@ -664,26 +663,26 @@ fn parse_x_mesh_summary_block(block: &str) -> Option<AccessoryMeshSummary> {
     while index < lines.len() {
         let line = lines[index].trim_start();
         if is_x_block_start(line, "MeshNormals") {
-            let (parsed_normals, parsed_faces, next_index) = parse_x_mesh_normals(&lines, index);
+            let (parsed_normals, parsed_faces, next_index) = parse_x_mesh_normals(lines, index);
             normals = parsed_normals;
             normal_face_indices = parsed_faces;
             index = next_index;
             continue;
         }
         if is_x_block_start(line, "MeshTextureCoords") {
-            let (coords, next_index) = parse_x_mesh_texture_coords(&lines, index);
+            let (coords, next_index) = parse_x_mesh_texture_coords(lines, index);
             texture_coordinates = coords;
             index = next_index;
             continue;
         }
         if is_x_block_start(line, "MeshVertexColors") {
-            let (colors, next_index) = parse_x_mesh_vertex_colors(&lines, index);
+            let (colors, next_index) = parse_x_mesh_vertex_colors(lines, index);
             vertex_colors = colors;
             index = next_index;
             continue;
         }
         if is_x_block_start(line, "MeshMaterialList") {
-            let (count, indices, next_index) = parse_x_mesh_material_list(&lines, index);
+            let (count, indices, next_index) = parse_x_mesh_material_list(lines, index);
             material_count = count;
             material_indices = indices;
             index = next_index;
@@ -731,14 +730,13 @@ fn parse_x_face_indices(line: &str) -> Option<Vec<u32>> {
 }
 
 fn parse_x_mesh_normals(lines: &[&str], start: usize) -> (Vec<[f32; 3]>, Vec<Vec<u32>>, usize) {
-    let (block, next_index) = collect_x_block(lines, start);
-    let block_lines = block.lines().collect::<Vec<_>>();
-    let Some((normal_count, mut index)) = next_usize_line(&block_lines, 1) else {
+    let (block_lines, next_index) = x_block_lines(lines, start);
+    let Some((normal_count, mut index)) = next_usize_line(block_lines, 1) else {
         return (Vec::new(), Vec::new(), next_index);
     };
     let mut normals = Vec::with_capacity(normal_count);
     for _ in 0..normal_count {
-        index = next_non_empty_after(&block_lines, index);
+        index = next_non_empty_after(block_lines, index);
         if index >= block_lines.len() {
             break;
         }
@@ -747,13 +745,13 @@ fn parse_x_mesh_normals(lines: &[&str], start: usize) -> (Vec<[f32; 3]>, Vec<Vec
         }
         index += 1;
     }
-    let Some((face_count, next_line)) = next_usize_line(&block_lines, index) else {
+    let Some((face_count, next_line)) = next_usize_line(block_lines, index) else {
         return (normals, Vec::new(), next_index);
     };
     index = next_line;
     let mut face_indices = Vec::with_capacity(face_count);
     for _ in 0..face_count {
-        index = next_non_empty_after(&block_lines, index);
+        index = next_non_empty_after(block_lines, index);
         if index >= block_lines.len() {
             break;
         }
@@ -766,14 +764,13 @@ fn parse_x_mesh_normals(lines: &[&str], start: usize) -> (Vec<[f32; 3]>, Vec<Vec
 }
 
 fn parse_x_mesh_texture_coords(lines: &[&str], start: usize) -> (Vec<[f32; 2]>, usize) {
-    let (block, next_index) = collect_x_block(lines, start);
-    let block_lines = block.lines().collect::<Vec<_>>();
-    let Some((coord_count, mut index)) = next_usize_line(&block_lines, 1) else {
+    let (block_lines, next_index) = x_block_lines(lines, start);
+    let Some((coord_count, mut index)) = next_usize_line(block_lines, 1) else {
         return (Vec::new(), next_index);
     };
     let mut coords = Vec::with_capacity(coord_count);
     for _ in 0..coord_count {
-        index = next_non_empty_after(&block_lines, index);
+        index = next_non_empty_after(block_lines, index);
         if index >= block_lines.len() {
             break;
         }
@@ -786,14 +783,13 @@ fn parse_x_mesh_texture_coords(lines: &[&str], start: usize) -> (Vec<[f32; 2]>, 
 }
 
 fn parse_x_mesh_vertex_colors(lines: &[&str], start: usize) -> (Vec<AccessoryVertexColor>, usize) {
-    let (block, next_index) = collect_x_block(lines, start);
-    let block_lines = block.lines().collect::<Vec<_>>();
-    let Some((color_count, mut index)) = next_usize_line(&block_lines, 1) else {
+    let (block_lines, next_index) = x_block_lines(lines, start);
+    let Some((color_count, mut index)) = next_usize_line(block_lines, 1) else {
         return (Vec::new(), next_index);
     };
     let mut colors = Vec::with_capacity(color_count);
     for _ in 0..color_count {
-        index = next_non_empty_after(&block_lines, index);
+        index = next_non_empty_after(block_lines, index);
         if index >= block_lines.len() {
             break;
         }
@@ -833,17 +829,16 @@ fn parse_x_texture_coordinate(line: &str) -> Option<[f32; 2]> {
 }
 
 fn parse_x_mesh_material_list(lines: &[&str], start: usize) -> (usize, Vec<u32>, usize) {
-    let (block, next_index) = collect_x_block(lines, start);
-    let block_lines = block.lines().collect::<Vec<_>>();
-    let Some((material_count, index)) = next_usize_line(&block_lines, 1) else {
+    let (block_lines, next_index) = x_block_lines(lines, start);
+    let Some((material_count, index)) = next_usize_line(block_lines, 1) else {
         return (0, Vec::new(), next_index);
     };
-    let Some((face_count, mut index)) = next_usize_line(&block_lines, index) else {
+    let Some((face_count, mut index)) = next_usize_line(block_lines, index) else {
         return (material_count, Vec::new(), next_index);
     };
     let mut indices = Vec::with_capacity(face_count);
     for _ in 0..face_count {
-        let Some((material_index, next_line)) = next_usize_line(&block_lines, index) else {
+        let Some((material_index, next_line)) = next_usize_line(block_lines, index) else {
             break;
         };
         indices.push(material_index as u32);
@@ -862,17 +857,16 @@ fn parse_x_materials(text: &str) -> Vec<AccessoryMaterial> {
             index += 1;
             continue;
         }
-        let (block, next_index) = collect_x_block(&lines, index);
+        let (block, next_index) = x_block_lines(&lines, index);
         index = next_index;
-        if let Some(material) = parse_x_material_block(&block) {
+        if let Some(material) = parse_x_material_block(&block.join("\n")) {
             materials.push(material);
         }
     }
     materials
 }
 
-fn collect_x_block(lines: &[&str], start: usize) -> (String, usize) {
-    let mut block = String::new();
+fn x_block_lines<'a, 'text>(lines: &'a [&'text str], start: usize) -> (&'a [&'text str], usize) {
     let mut depth = 0i32;
     let mut saw_open = false;
     let mut index = start;
@@ -890,14 +884,12 @@ fn collect_x_block(lines: &[&str], start: usize) -> (String, usize) {
                 _ => {}
             }
         }
-        block.push_str(line);
-        block.push('\n');
         index += 1;
         if saw_open && depth <= 0 {
             break;
         }
     }
-    (block, index)
+    (&lines[start..index], index)
 }
 
 fn parse_x_material_block(block: &str) -> Option<AccessoryMaterial> {

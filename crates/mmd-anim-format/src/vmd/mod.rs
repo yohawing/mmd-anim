@@ -274,13 +274,13 @@ pub fn parse_vmd_summary(data: &[u8]) -> Result<VmdSharedContextSummary, VmdSumm
 pub fn read_header(data: &[u8]) -> Result<(VmdHeader, usize), ImportError> {
     let mut r = Reader::new(data);
 
-    let magic = r.read_slice(30)?;
+    let magic = r.read_bytes(30)?;
     if magic != VMD_MAGIC && !magic.starts_with(VMD_MAGIC_PREFIX) {
         return Err(ImportError::InvalidVmdMagic);
     }
 
     let model_name_bytes: [u8; 20] = r
-        .read_slice(20)?
+        .read_bytes(20)?
         .try_into()
         .map_err(|_| ImportError::InvalidVmdModelName)?;
 
@@ -921,7 +921,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
     });
     let mut bone_frames = options.build_parsed.then(|| Vec::with_capacity(bone_count));
     for _ in 0..bone_count {
-        let bone_name_field = r.read_slice(15)?;
+        let bone_name_field = r.read_bytes(15)?;
         if let Some(summary) = summary.as_mut() {
             summary.record_bone(trim_fixed_bytes(bone_name_field))?;
         }
@@ -943,7 +943,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         }
         let position = read_vmd_vec3(&mut r, options.build_summary, "bone translation")?;
         let rotation = read_vmd_quat(&mut r, options.build_summary, "bone rotation")?;
-        let interpolation: [u8; 64] = r.read_slice(64)?.try_into().unwrap();
+        let interpolation: [u8; 64] = r.read_bytes(64)?.try_into().unwrap();
         if let Some(raw) = raw.as_mut() {
             raw.bone_keyframes.push(VmdBoneKeyframeRaw {
                 bone_mode: VmdBoneImportMode::ByName(
@@ -997,7 +997,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         .build_parsed
         .then(|| Vec::with_capacity(morph_count));
     for _ in 0..morph_count {
-        let morph_name_field = r.read_slice(15)?;
+        let morph_name_field = r.read_bytes(15)?;
         if let Some(summary) = summary.as_mut() {
             summary.record_morph(trim_fixed_bytes(morph_name_field))?;
         }
@@ -1263,7 +1263,7 @@ fn read_camera_frames(
         let distance = read_vmd_f32(r, summary.is_some(), "camera distance")?;
         let position = read_vmd_vec3(r, summary.is_some(), "camera position")?;
         let rotation = read_vmd_vec3(r, summary.is_some(), "camera rotation")?;
-        let interpolation: [u8; 24] = r.read_slice(24)?.try_into().unwrap();
+        let interpolation: [u8; 24] = r.read_bytes(24)?.try_into().unwrap();
         let fov = r.read_u32_le()?;
         let perspective = r.read_u8()? == 0;
         if let Some(summary) = summary.as_mut() {
@@ -1375,7 +1375,7 @@ fn read_property_frames(
         let mut raw_ik_entries = options.build_raw.then(|| Vec::with_capacity(ik_count));
         let mut ik_states = options.build_parsed.then(|| Vec::with_capacity(ik_count));
         for _ in 0..ik_count {
-            let name_field = r.read_slice(20)?;
+            let name_field = r.read_bytes(20)?;
             if options.build_summary {
                 validate_summary_name(trim_fixed_bytes(name_field), "empty property IK name")?;
             }

@@ -814,7 +814,7 @@ fn read_bones_with_local_axes(
 /// Adapt the host-independent descriptor into the historical low-level
 /// `PmxBoneImport` shape.  Runtime model construction must use the descriptor
 /// compiler; this adapter exists only for callers of the parser-facing API.
-fn legacy_bone_import(read: &PmxBoneRead) -> PmxBoneImport {
+fn legacy_bone_import(read: PmxBoneRead) -> PmxBoneImport {
     let bones = read
         .descriptor
         .bones
@@ -875,8 +875,8 @@ fn legacy_bone_import(read: &PmxBoneRead) -> PmxBoneImport {
         bones,
         ik_solvers,
         append_transforms,
-        bone_name_bytes: read.bone_name_bytes.clone(),
-        bone_names: read.bone_names.clone(),
+        bone_name_bytes: read.bone_name_bytes,
+        bone_names: read.bone_names,
     }
 }
 
@@ -886,7 +886,7 @@ pub fn read_bones(
     pos: usize,
 ) -> Result<(PmxBoneImport, usize), ImportError> {
     let (bone_read, pos) = read_bones_with_local_axes(data, header, pos)?;
-    Ok((legacy_bone_import(&bone_read), pos))
+    Ok((legacy_bone_import(bone_read), pos))
 }
 
 fn read_texture_section_start(data: &[u8]) -> Result<(PmxHeader, usize), ImportError> {
@@ -5795,7 +5795,7 @@ mod tests {
             .iter()
             .map(|bone| bone.local_axis)
             .collect::<Vec<_>>();
-        let legacy_import = legacy_bone_import(&bone_read);
+        let legacy_import = legacy_bone_import(bone_read);
         let (_, morph, _) = read_morph_offsets(data, &header, pos).unwrap();
         let legacy_model = ModelArena::new_with_morphs(
             legacy_import.bones,

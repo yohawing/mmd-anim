@@ -1185,91 +1185,43 @@ fn dcc_plans_failing_bones(
         for &bone in &order {
             let plan = &plans[bone];
             let baseline = &raw_full_plans[bone];
-            let baseline_translation = [
+            let baseline_translation = std::array::from_fn(|axis| {
                 sample_dcc_channel(
                     reduced,
-                    &baseline.translation_channels[0],
+                    &baseline.translation_channels[axis],
                     frame,
-                    baseline.translation_defaults[0],
-                ),
+                    baseline.translation_defaults[axis],
+                )
+            });
+            let baseline_euler = std::array::from_fn(|axis| {
                 sample_dcc_channel(
                     reduced,
-                    &baseline.translation_channels[1],
+                    &baseline.rotation_channels[axis],
                     frame,
-                    baseline.translation_defaults[1],
-                ),
-                sample_dcc_channel(
-                    reduced,
-                    &baseline.translation_channels[2],
-                    frame,
-                    baseline.translation_defaults[2],
-                ),
-            ];
-            let baseline_euler = [
-                sample_dcc_channel(
-                    reduced,
-                    &baseline.rotation_channels[0],
-                    frame,
-                    baseline.rotation_defaults[0],
-                ),
-                sample_dcc_channel(
-                    reduced,
-                    &baseline.rotation_channels[1],
-                    frame,
-                    baseline.rotation_defaults[1],
-                ),
-                sample_dcc_channel(
-                    reduced,
-                    &baseline.rotation_channels[2],
-                    frame,
-                    baseline.rotation_defaults[2],
-                ),
-            ];
+                    baseline.rotation_defaults[axis],
+                )
+            });
             let baseline_q = euler_xyz_to_quat(baseline_euler);
             let baseline_local = Mat4::from_rotation_translation(
                 baseline_q,
                 glam::Vec3::from_array(baseline_translation),
             );
-            let candidate_translation = [
+            let candidate_translation = std::array::from_fn(|axis| {
                 sample_dcc_channel(
                     reduced,
-                    &plan.translation_channels[0],
+                    &plan.translation_channels[axis],
                     frame,
-                    plan.translation_defaults[0],
-                ),
+                    plan.translation_defaults[axis],
+                )
+            });
+            let candidate_euler = std::array::from_fn(|axis| {
                 sample_dcc_channel(
                     reduced,
-                    &plan.translation_channels[1],
+                    &plan.rotation_channels[axis],
                     frame,
-                    plan.translation_defaults[1],
-                ),
-                sample_dcc_channel(
-                    reduced,
-                    &plan.translation_channels[2],
-                    frame,
-                    plan.translation_defaults[2],
-                ),
-            ];
-            let candidate_euler = [
-                sample_dcc_channel(
-                    reduced,
-                    &plan.rotation_channels[0],
-                    frame,
-                    plan.rotation_defaults[0],
-                ),
-                sample_dcc_channel(
-                    reduced,
-                    &plan.rotation_channels[1],
-                    frame,
-                    plan.rotation_defaults[1],
-                ),
-                sample_dcc_channel(
-                    reduced,
-                    &plan.rotation_channels[2],
-                    frame,
-                    plan.rotation_defaults[2],
-                ),
-            ];
+                    plan.rotation_defaults[axis],
+                )
+            });
             let candidate_q = euler_xyz_to_quat(candidate_euler);
             let candidate_local = Mat4::from_rotation_translation(
                 candidate_q,

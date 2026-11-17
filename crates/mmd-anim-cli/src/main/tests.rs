@@ -3067,21 +3067,20 @@ fn patch_pmm_scene_frame_range_updates_fields_and_preserves_length() {
     let _ = fs::create_dir_all(&out_dir);
     let out_path = out_dir.join(format!("patched-scene-frame-range-{}.pmm", nanos));
 
-    let options = vec![
-        "--current-frame".to_string(),
-        "99".to_string(),
-        "--current-frame-text".to_string(),
-        "77".to_string(),
-        "--begin-frame-enabled".to_string(),
-        "true".to_string(),
-        "--end-frame-enabled".to_string(),
-        "false".to_string(),
-        "--begin-frame".to_string(),
-        "10".to_string(),
-        "--end-frame".to_string(),
-        "240".to_string(),
-    ];
-    let result = patch::patch_pmm_scene_frame_range(&pmm_path, &out_path, &options, false);
+    let result = dispatch_patch(
+        &pmm_path,
+        false,
+        None,
+        Some(out_path.clone()),
+        PmmFrameRangeArgs {
+            current_frame: Some(99),
+            current_frame_text: Some(77),
+            begin_frame: Some(10),
+            end_frame: Some(240),
+            begin_frame_enabled: Some("true".to_owned()),
+            end_frame_enabled: Some("false".to_owned()),
+        },
+    );
     assert!(
         result.is_ok(),
         "patch_pmm_scene_frame_range on repo-local fixture must succeed: {:?}",
@@ -3114,41 +3113,49 @@ fn patch_pmm_scene_frame_range_updates_fields_and_preserves_length() {
 }
 
 #[test]
-fn parse_pmm_scene_frame_range_patch_options_requires_at_least_one_option() {
-    let err = patch::parse_pmm_scene_frame_range_patch_options(&[]).unwrap_err();
-    assert!(
-        err.contains("at least one patch option is required"),
-        "unexpected error: {err}"
-    );
+fn dispatch_patch_frame_range_requires_at_least_one_option() {
+    let result = dispatch_patch(
+        Path::new("scene.pmm"),
+        false,
+        None,
+        Some(PathBuf::from("out.pmm")),
+        PmmFrameRangeArgs::default(),
+    )
+    .unwrap();
+    assert_eq!(result, ExitCode::from(2));
 }
 
 #[test]
-fn parse_pmm_scene_frame_range_patch_options_rejects_unknown_and_invalid_values() {
-    let unknown = patch::parse_pmm_scene_frame_range_patch_options(&[
-        "--unknown".to_string(),
-        "1".to_string(),
-    ])
+fn patch_cli_rejects_unknown_missing_and_invalid_values() {
+    for option in ["--unknown", "--begin-frame"] {
+        let error = Cli::try_parse_from([
+            "mmd-anim",
+            "patch",
+            "scene.pmm",
+            "--frame-range",
+            "out.pmm",
+            option,
+        ])
+        .err()
+        .expect("unknown options and missing values must fail CLI parsing");
+        assert!(error.to_string().contains(option), "{error}");
+    }
+
+    let invalid_bool = dispatch_patch(
+        Path::new("scene.pmm"),
+        false,
+        None,
+        Some(PathBuf::from("out.pmm")),
+        PmmFrameRangeArgs {
+            begin_frame_enabled: Some("maybe".to_owned()),
+            ..Default::default()
+        },
+    )
     .unwrap_err();
     assert!(
-        unknown.contains("unknown option"),
-        "unexpected unknown-option error: {unknown}"
-    );
-
-    let missing_value =
-        patch::parse_pmm_scene_frame_range_patch_options(&["--begin-frame".to_string()])
-            .unwrap_err();
-    assert!(
-        missing_value.contains("missing value"),
-        "unexpected missing-value error: {missing_value}"
-    );
-
-    let invalid_bool = patch::parse_pmm_scene_frame_range_patch_options(&[
-        "--begin-frame-enabled".to_string(),
-        "maybe".to_string(),
-    ])
-    .unwrap_err();
-    assert!(
-        invalid_bool.contains("invalid --begin-frame-enabled"),
+        invalid_bool
+            .to_string()
+            .contains("invalid --begin-frame-enabled"),
         "unexpected invalid-bool error: {invalid_bool}"
     );
 }

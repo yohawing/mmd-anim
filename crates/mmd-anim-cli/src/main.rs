@@ -7,6 +7,8 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use commands::patch::PmmFrameRangeArgs;
+
 mod commands;
 mod mmd_dumper_oracle;
 mod schema;
@@ -1136,55 +1138,6 @@ fn dispatch_ik_diagnose(
     commands::golden::golden_ik_diagnose(root, &case_name, frame, &bone_name, offset)
 }
 
-struct PmmFrameRangeArgs {
-    current_frame: Option<i32>,
-    current_frame_text: Option<i32>,
-    begin_frame: Option<i32>,
-    end_frame: Option<i32>,
-    begin_frame_enabled: Option<String>,
-    end_frame_enabled: Option<String>,
-}
-
-impl PmmFrameRangeArgs {
-    fn has_any(&self) -> bool {
-        self.current_frame.is_some()
-            || self.current_frame_text.is_some()
-            || self.begin_frame.is_some()
-            || self.end_frame.is_some()
-            || self.begin_frame_enabled.is_some()
-            || self.end_frame_enabled.is_some()
-    }
-
-    fn to_option_args(&self) -> Vec<String> {
-        let mut args = Vec::new();
-        if let Some(value) = self.current_frame {
-            args.push("--current-frame".to_owned());
-            args.push(value.to_string());
-        }
-        if let Some(value) = self.current_frame_text {
-            args.push("--current-frame-text".to_owned());
-            args.push(value.to_string());
-        }
-        if let Some(value) = self.begin_frame {
-            args.push("--begin-frame".to_owned());
-            args.push(value.to_string());
-        }
-        if let Some(value) = self.end_frame {
-            args.push("--end-frame".to_owned());
-            args.push(value.to_string());
-        }
-        if let Some(value) = &self.begin_frame_enabled {
-            args.push("--begin-frame-enabled".to_owned());
-            args.push(value.clone());
-        }
-        if let Some(value) = &self.end_frame_enabled {
-            args.push("--end-frame-enabled".to_owned());
-            args.push(value.clone());
-        }
-        args
-    }
-}
-
 fn dispatch_patch(
     input: &Path,
     use_json: bool,
@@ -1215,7 +1168,7 @@ fn dispatch_patch(
             commands::patch::patch_pmm_scene_frame_range(
                 input,
                 &output,
-                &frame_args.to_option_args(),
+                &frame_args.to_patch()?,
                 use_json,
             )
         }

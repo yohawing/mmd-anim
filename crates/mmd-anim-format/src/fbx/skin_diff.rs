@@ -50,13 +50,13 @@ pub fn read_fbx_skin_clusters(bytes: &[u8]) -> Result<Vec<FbxSkinClusterData>, F
         return Ok(Vec::new());
     };
 
-    let mut model_names: HashMap<i64, String> = HashMap::new();
+    let mut model_names: HashMap<i64, &str> = HashMap::new();
     for model in objects.children_by_name("Model") {
         let attrs = model.attributes();
         let id = attrs.first().and_then(AttributeValue::get_i64);
         let raw_name = attrs.get(1).and_then(AttributeValue::get_string);
         if let (Some(id), Some(raw_name)) = (id, raw_name) {
-            model_names.insert(id, fbx_object_name(raw_name).to_owned());
+            model_names.insert(id, fbx_object_name(raw_name));
         }
     }
 
@@ -93,14 +93,18 @@ pub fn read_fbx_skin_clusters(bytes: &[u8]) -> Result<Vec<FbxSkinClusterData>, F
         let bone_name = cluster_to_model
             .get(&cluster_id)
             .and_then(|model_id| model_names.get(model_id))
-            .cloned()
+            .map(|name| (*name).to_owned())
             .unwrap_or_else(|| format!("<unresolved-cluster-{cluster_id}>"));
-        let indices = arr_i32_child(deformer, "Indexes").unwrap_or_default();
-        let weights = arr_f64_child(deformer, "Weights").unwrap_or_default();
+        let indices = arr_i32_child(deformer, "Indexes")
+            .unwrap_or_default()
+            .to_vec();
+        let weights = arr_f64_child(deformer, "Weights")
+            .unwrap_or_default()
+            .to_vec();
         let transform = arr_f64_child(deformer, "Transform")
-            .and_then(|values| <[f64; 16]>::try_from(values.as_slice()).ok());
+            .and_then(|values| <[f64; 16]>::try_from(values).ok());
         let transform_link = arr_f64_child(deformer, "TransformLink")
-            .and_then(|values| <[f64; 16]>::try_from(values.as_slice()).ok());
+            .and_then(|values| <[f64; 16]>::try_from(values).ok());
         clusters.push(FbxSkinClusterData {
             cluster_id,
             bone_name,
@@ -114,18 +118,16 @@ pub fn read_fbx_skin_clusters(bytes: &[u8]) -> Result<Vec<FbxSkinClusterData>, F
     Ok(clusters)
 }
 
-fn arr_i32_child(node: NodeHandle<'_>, name: &str) -> Option<Vec<i32>> {
+fn arr_i32_child<'a>(node: NodeHandle<'a>, name: &str) -> Option<&'a [i32]> {
     node.first_child_by_name(name)
         .and_then(|child| child.attributes().first())
         .and_then(AttributeValue::get_arr_i32)
-        .map(|values| values.to_vec())
 }
 
-fn arr_f64_child(node: NodeHandle<'_>, name: &str) -> Option<Vec<f64>> {
+fn arr_f64_child<'a>(node: NodeHandle<'a>, name: &str) -> Option<&'a [f64]> {
     node.first_child_by_name(name)
         .and_then(|child| child.attributes().first())
         .and_then(AttributeValue::get_arr_f64)
-        .map(|values| values.to_vec())
 }
 
 /// FBX binary object names are stored as `"<name>\u{0}\u{1}<class>"`. Splits

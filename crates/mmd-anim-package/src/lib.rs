@@ -1402,34 +1402,26 @@ fn ktx2_range<'a>(
         .ok_or_else(|| MmdPackageError::InvalidKtx2(format!("KTX2 {name} is outside the payload")))
 }
 
-fn ktx2_u16(bytes: &[u8], offset: usize, name: &'static str) -> Result<u16> {
+fn ktx2_field<const N: usize>(bytes: &[u8], offset: usize, name: &'static str) -> Result<[u8; N]> {
     let end = offset
-        .checked_add(2)
+        .checked_add(N)
         .ok_or(MmdPackageError::IntegerOverflow("KTX2 field end"))?;
     let bytes = bytes
         .get(offset..end)
         .ok_or_else(|| MmdPackageError::InvalidKtx2(format!("KTX2 {name} is truncated")))?;
-    Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
+    Ok(bytes.try_into().unwrap())
+}
+
+fn ktx2_u16(bytes: &[u8], offset: usize, name: &'static str) -> Result<u16> {
+    Ok(u16::from_le_bytes(ktx2_field(bytes, offset, name)?))
 }
 
 fn ktx2_u32(bytes: &[u8], offset: usize, name: &'static str) -> Result<u32> {
-    let end = offset
-        .checked_add(4)
-        .ok_or(MmdPackageError::IntegerOverflow("KTX2 field end"))?;
-    let bytes = bytes
-        .get(offset..end)
-        .ok_or_else(|| MmdPackageError::InvalidKtx2(format!("KTX2 {name} is truncated")))?;
-    Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+    Ok(u32::from_le_bytes(ktx2_field(bytes, offset, name)?))
 }
 
 fn ktx2_u64(bytes: &[u8], offset: usize, name: &'static str) -> Result<u64> {
-    let end = offset
-        .checked_add(8)
-        .ok_or(MmdPackageError::IntegerOverflow("KTX2 field end"))?;
-    let bytes = bytes
-        .get(offset..end)
-        .ok_or_else(|| MmdPackageError::InvalidKtx2(format!("KTX2 {name} is truncated")))?;
-    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+    Ok(u64::from_le_bytes(ktx2_field(bytes, offset, name)?))
 }
 
 fn invalid_ktx2<T>(message: impl Into<String>) -> Result<T> {

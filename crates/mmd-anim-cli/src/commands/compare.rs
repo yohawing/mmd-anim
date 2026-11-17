@@ -3076,14 +3076,14 @@ fn describe_active_bone_morphs(
 fn morph_names_for_index(
     morph_name_to_index: &HashMap<Vec<u8>, MorphIndex>,
     target_index: MorphIndex,
-) -> Vec<String> {
-    let mut names: Vec<String> = morph_name_to_index
+) -> Vec<&str> {
+    let mut names: Vec<&str> = morph_name_to_index
         .iter()
         .filter_map(|(name, index)| {
             if *index != target_index {
                 return None;
             }
-            String::from_utf8(name.clone()).ok()
+            std::str::from_utf8(name).ok()
         })
         .collect();
     names.sort();

@@ -177,15 +177,14 @@ pub fn build_ik_solvers_from_flat_iter(
                 .get(solver.link_offset..link_end)
                 .ok_or(FlatModelInputError::RangeOutOfBounds)?
                 .iter()
-                .map(|link| {
-                    let mut init = IkLinkInit::new(BoneIndex(link.bone_index));
-                    if link.has_angle_limit {
-                        init = init.with_angle_limit(IkAngleLimit::new(
+                .map(|link| IkLinkInit {
+                    bone: BoneIndex(link.bone_index),
+                    angle_limit: link.has_angle_limit.then(|| {
+                        IkAngleLimit::new(
                             glam::Vec3A::from_array(link.angle_limit_min_xyz),
                             glam::Vec3A::from_array(link.angle_limit_max_xyz),
-                        ));
-                    }
-                    init
+                        )
+                    }),
                 })
                 .collect();
 
@@ -276,22 +275,13 @@ pub fn build_append_transforms_from_flat_iter(
 ) -> Vec<AppendTransformInit> {
     append_transforms
         .into_iter()
-        .map(|append| {
-            let mut init = AppendTransformInit::new(
-                BoneIndex(append.target_bone_index),
-                BoneIndex(append.source_bone_index),
-                append.ratio,
-            );
-            if append.affect_rotation {
-                init = init.with_rotation();
-            }
-            if append.affect_translation {
-                init = init.with_translation();
-            }
-            if append.local {
-                init = init.with_local();
-            }
-            init
+        .map(|append| AppendTransformInit {
+            target_bone: BoneIndex(append.target_bone_index),
+            source_bone: BoneIndex(append.source_bone_index),
+            ratio: append.ratio,
+            affect_rotation: append.affect_rotation,
+            affect_translation: append.affect_translation,
+            local: append.local,
         })
         .collect()
 }

@@ -10,8 +10,6 @@ use serde_json::json;
 use crate::support::summarize_ik_runtime_stats;
 use crate::{copy_world_matrices_to_f32, f32_checksum, read_file, translation_checksum};
 
-pub(crate) const BENCH_PAIR_USAGE: &str = "usage: mmd-anim bench-pair <model.pmx> <motion.vmd> [start-frame] [frame-count] [step] [--instances <count>] [--no-ik] [--ik-tolerance <value>] [--ik-max-iterations-cap <count>] [--json]";
-
 #[derive(Debug)]
 pub(crate) struct BenchPairConfig {
     pub(crate) pmx_path: PathBuf,
@@ -707,6 +705,8 @@ pub(crate) fn parse_bench_synthetic_args(
 }
 
 pub(crate) fn parse_bench_pair_args(
+    pmx_path: PathBuf,
+    vmd_path: PathBuf,
     args: &mut impl Iterator<Item = String>,
 ) -> Result<BenchPairConfig, Box<dyn std::error::Error>> {
     let raw: Vec<String> = args.collect();
@@ -747,8 +747,6 @@ pub(crate) fn parse_bench_pair_args(
     }
 
     let mut pos_iter = positional.into_iter();
-    let pmx_path = PathBuf::from(pos_iter.next().ok_or(BENCH_PAIR_USAGE)?);
-    let vmd_path = PathBuf::from(pos_iter.next().ok_or(BENCH_PAIR_USAGE)?);
     let start_frame = optional_f32_parse_arg(&mut pos_iter, 0.0, "start-frame")?;
     let frame_count = optional_positive_usize_arg(&mut pos_iter, 1000, "frame-count")?;
     let step = optional_f32_parse_arg(&mut pos_iter, 1.0, "step")?;

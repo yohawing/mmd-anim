@@ -159,6 +159,35 @@ fn verify_ik_rejects_invalid_arguments_at_the_cli_boundary() {
 }
 
 #[test]
+fn bench_pair_preserves_literal_model_and_motion_paths() {
+    let root = unique_temp_path("bench-paths");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("--json"),
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("--no-ik"),
+        include_bytes!("../../mmd-anim-format/fixtures/vmd/ik_multi_bone_nondefault.vmd"),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mmd-anim"))
+        .current_dir(&root)
+        .args(["bench", "--", "--json", "--no-ik", "0", "1", "1", "--json"])
+        .output()
+        .expect("pair benchmark should run");
+    fs::remove_dir_all(root).unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_text(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["model"], "--json");
+    assert_eq!(report["motion"], "--no-ik");
+    assert_eq!(report["config"]["frameCount"], 1);
+    assert_eq!(report["config"]["solveIk"], true);
+}
+
+#[test]
 fn detected_format_parse_error_reports_path_and_format() {
     let malformed = unique_temp_path("malformed.pmx");
     fs::write(&malformed, b"PMX ").expect("malformed PMX fixture should be written");

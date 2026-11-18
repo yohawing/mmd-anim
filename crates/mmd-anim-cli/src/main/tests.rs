@@ -391,13 +391,9 @@ fn bench_synthetic_args_reject_extra_values() {
 
 #[test]
 fn bench_pair_args_json_flag() {
-    let mut args = vec![
-        "model.pmx".to_owned(),
-        "motion.vmd".to_owned(),
-        "--json".to_owned(),
-    ]
-    .into_iter();
-    let cfg = bench::parse_bench_pair_args(&mut args).unwrap();
+    let mut args = vec!["--json".to_owned()].into_iter();
+    let cfg =
+        bench::parse_bench_pair_args("model.pmx".into(), "motion.vmd".into(), &mut args).unwrap();
     assert_eq!(cfg.pmx_path, PathBuf::from("model.pmx"));
     assert_eq!(cfg.vmd_path, PathBuf::from("motion.vmd"));
     assert_eq!(cfg.start_frame, 0.0);
@@ -411,8 +407,6 @@ fn bench_pair_args_json_flag() {
 #[test]
 fn bench_pair_args_json_with_positional_and_flags() {
     let mut args = vec![
-        "model.pmx".to_owned(),
-        "motion.vmd".to_owned(),
         "10".to_owned(),
         "--json".to_owned(),
         "120".to_owned(),
@@ -422,7 +416,8 @@ fn bench_pair_args_json_with_positional_and_flags() {
         "0.001".to_owned(),
     ]
     .into_iter();
-    let cfg = bench::parse_bench_pair_args(&mut args).unwrap();
+    let cfg =
+        bench::parse_bench_pair_args("model.pmx".into(), "motion.vmd".into(), &mut args).unwrap();
     assert_eq!(cfg.start_frame, 10.0);
     assert_eq!(cfg.frame_count, 120);
     assert_eq!(cfg.step, 2.0);
@@ -435,40 +430,30 @@ fn bench_pair_args_json_with_positional_and_flags() {
 #[test]
 fn bench_pair_args_instances_flag() {
     let mut args = vec![
-        "model.pmx".to_owned(),
-        "motion.vmd".to_owned(),
         "--instances".to_owned(),
         "30".to_owned(),
         "--json".to_owned(),
     ]
     .into_iter();
-    let cfg = bench::parse_bench_pair_args(&mut args).unwrap();
+    let cfg =
+        bench::parse_bench_pair_args("model.pmx".into(), "motion.vmd".into(), &mut args).unwrap();
     assert_eq!(cfg.instances, 30);
     assert!(cfg.use_json);
 }
 
 #[test]
 fn bench_pair_args_reject_zero_instances() {
-    let mut args = vec![
-        "model.pmx".to_owned(),
-        "motion.vmd".to_owned(),
-        "--instances".to_owned(),
-        "0".to_owned(),
-    ]
-    .into_iter();
-    let error = bench::parse_bench_pair_args(&mut args).unwrap_err();
+    let mut args = vec!["--instances".to_owned(), "0".to_owned()].into_iter();
+    let error = bench::parse_bench_pair_args("model.pmx".into(), "motion.vmd".into(), &mut args)
+        .unwrap_err();
     assert!(error.to_string().contains("instances must be positive"));
 }
 
 #[test]
 fn bench_pair_args_reject_unknown_flag() {
-    let mut args = vec![
-        "model.pmx".to_owned(),
-        "motion.vmd".to_owned(),
-        "--unknown".to_owned(),
-    ]
-    .into_iter();
-    let error = bench::parse_bench_pair_args(&mut args).unwrap_err();
+    let mut args = vec!["--unknown".to_owned()].into_iter();
+    let error = bench::parse_bench_pair_args("model.pmx".into(), "motion.vmd".into(), &mut args)
+        .unwrap_err();
     assert!(error.to_string().contains("unknown flag"));
 }
 

@@ -899,13 +899,8 @@ fn dispatch_bench(
         let Some(motion) = motion else {
             return usage_error("bench requires <model> <motion> unless --synthetic is set");
         };
-        let mut raw = vec![
-            model.to_string_lossy().into_owned(),
-            motion.to_string_lossy().into_owned(),
-        ];
-        raw.extend(extra_args);
-        let mut iter = raw.into_iter();
-        let cfg = match commands::bench::parse_bench_pair_args(&mut iter) {
+        let mut iter = extra_args.into_iter();
+        let cfg = match commands::bench::parse_bench_pair_args(model, motion, &mut iter) {
             Ok(cfg) => cfg,
             Err(error) => return usage_error(error.to_string()),
         };

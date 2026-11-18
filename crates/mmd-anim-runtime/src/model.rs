@@ -520,10 +520,6 @@ impl ModelArena {
         let mut fixed_axis_flags = Vec::with_capacity(bone_count);
         let mut fixed_axis_constraint_flags = Vec::with_capacity(bone_count);
         let mut fixed_axes = Vec::with_capacity(bone_count);
-        let mut local_axis_flags = Vec::with_capacity(bone_count);
-        let mut local_axis_x = Vec::with_capacity(bone_count);
-        let mut local_axis_z = Vec::with_capacity(bone_count);
-        let mut local_axis_basis = Vec::with_capacity(bone_count);
 
         for (bone_index, bone) in bones.iter().enumerate() {
             let parent = match bone.parent {
@@ -554,12 +550,6 @@ impl ModelArena {
                     fixed_axes.push(Vec3A::X);
                 }
             }
-            // Local axes are applied via `with_local_axes` so existing BoneInit
-            // struct literals stay source-compatible (no new required fields).
-            local_axis_flags.push(0);
-            local_axis_x.push(Vec3A::X);
-            local_axis_z.push(Vec3A::Z);
-            local_axis_basis.push(Quat::IDENTITY);
         }
 
         let eval_order = build_eval_order(&parent_indices, &transform_orders)?;
@@ -603,10 +593,12 @@ impl ModelArena {
             fixed_axis_flags: fixed_axis_flags.into_boxed_slice(),
             fixed_axis_constraint_flags: fixed_axis_constraint_flags.into_boxed_slice(),
             fixed_axes: fixed_axes.into_boxed_slice(),
-            local_axis_flags: local_axis_flags.into_boxed_slice(),
-            local_axis_x: local_axis_x.into_boxed_slice(),
-            local_axis_z: local_axis_z.into_boxed_slice(),
-            local_axis_basis: local_axis_basis.into_boxed_slice(),
+            // Local axes are applied via `with_local_axes` so existing BoneInit
+            // struct literals stay source-compatible (no new required fields).
+            local_axis_flags: vec![0; bone_count].into_boxed_slice(),
+            local_axis_x: vec![Vec3A::X; bone_count].into_boxed_slice(),
+            local_axis_z: vec![Vec3A::Z; bone_count].into_boxed_slice(),
+            local_axis_basis: vec![Quat::IDENTITY; bone_count].into_boxed_slice(),
             transform_after_physics_flags: transform_after_physics_flags.into_boxed_slice(),
             eval_order,
             eval_order_before_physics,

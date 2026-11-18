@@ -140,109 +140,39 @@ def _compare_penetration_summary(
     failures: list[RegressionFailure],
 ) -> None:
     _require_numeric_fields(current, "summary", PENETRATION_SUMMARY_FIELDS, failures)
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "maxPenetrationDepth",
-        PENETRATION_SUMMARY_FIELDS["maxPenetrationDepth"],
-        tolerances.penetration_max_depth_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "maxBulletPenetrationDepth",
-        PENETRATION_SUMMARY_FIELDS["maxBulletPenetrationDepth"],
-        tolerances.bullet_penetration_max_depth_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "penetratingPairCount",
-        PENETRATION_SUMMARY_FIELDS["penetratingPairCount"],
-        tolerances.penetrating_pair_count_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "severePairCount",
-        PENETRATION_SUMMARY_FIELDS["severePairCount"],
-        tolerances.severe_pair_count_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "unconnectedPenetratingPairCount",
-        PENETRATION_SUMMARY_FIELDS["unconnectedPenetratingPairCount"],
-        0,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "unconnectedSeverePairCount",
-        PENETRATION_SUMMARY_FIELDS["unconnectedSeverePairCount"],
-        0,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "penetratingContactCount",
-        PENETRATION_SUMMARY_FIELDS["penetratingContactCount"],
-        tolerances.penetrating_contact_count_tolerance,
-        failures,
-    )
-    _compare_not_above_limit(
-        current,
-        "summary",
-        "maxPenetrationDepth",
-        PENETRATION_SUMMARY_FIELDS["maxPenetrationDepth"],
-        options.max_allowed_penetration_depth,
-        failures,
-    )
-    _compare_not_above_limit(
-        current,
-        "summary",
-        "maxBulletPenetrationDepth",
-        PENETRATION_SUMMARY_FIELDS["maxBulletPenetrationDepth"],
-        options.max_allowed_bullet_penetration_depth,
-        failures,
-    )
-    _compare_not_above_limit(
-        current,
-        "summary",
-        "penetratingPairCount",
-        PENETRATION_SUMMARY_FIELDS["penetratingPairCount"],
-        options.max_allowed_penetrating_pair_count,
-        failures,
-    )
-    _compare_not_above_limit(
-        current,
-        "summary",
-        "severePairCount",
-        PENETRATION_SUMMARY_FIELDS["severePairCount"],
-        options.max_allowed_severe_pair_count,
-        failures,
-    )
-    _compare_not_above_limit(
-        current,
-        "summary",
-        "penetratingContactCount",
-        PENETRATION_SUMMARY_FIELDS["penetratingContactCount"],
-        options.max_allowed_penetrating_contact_count,
-        failures,
-    )
+    for field, tolerance in (
+        ("maxPenetrationDepth", tolerances.penetration_max_depth_tolerance),
+        ("maxBulletPenetrationDepth", tolerances.bullet_penetration_max_depth_tolerance),
+        ("penetratingPairCount", tolerances.penetrating_pair_count_tolerance),
+        ("severePairCount", tolerances.severe_pair_count_tolerance),
+        ("unconnectedPenetratingPairCount", 0),
+        ("unconnectedSeverePairCount", 0),
+        ("penetratingContactCount", tolerances.penetrating_contact_count_tolerance),
+    ):
+        _compare_not_greater(
+            baseline,
+            current,
+            "summary",
+            field,
+            PENETRATION_SUMMARY_FIELDS[field],
+            tolerance,
+            failures,
+        )
+    for field, limit in (
+        ("maxPenetrationDepth", options.max_allowed_penetration_depth),
+        ("maxBulletPenetrationDepth", options.max_allowed_bullet_penetration_depth),
+        ("penetratingPairCount", options.max_allowed_penetrating_pair_count),
+        ("severePairCount", options.max_allowed_severe_pair_count),
+        ("penetratingContactCount", options.max_allowed_penetrating_contact_count),
+    ):
+        _compare_not_above_limit(
+            current,
+            "summary",
+            field,
+            PENETRATION_SUMMARY_FIELDS[field],
+            limit,
+            failures,
+        )
 
 
 def _compare_penetration_rigid_bodies(

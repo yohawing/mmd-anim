@@ -9,6 +9,7 @@ use std::{
 use crate::schema::{
     DEFAULT_FOCUSED_IK_BONE_NAMES, MmdDumperOracleBone, MmdDumperOracleDump, MmdDumperOracleModel,
 };
+use crate::support::resolve_maybe_absolute as resolve_manifest_path;
 use mmd_anim_format::vmd::VmdBoneKeyframeRaw;
 #[cfg(feature = "physics-bullet-native")]
 use mmd_anim_physics_bullet::{RuntimePhysicsBridgeExt, build_bullet_world_from_pmx};
@@ -3217,15 +3218,6 @@ fn numeric_case_frames(case: &serde_json::Value) -> Result<Vec<i32>, Box<dyn std
                 .ok_or_else(|| "numeric compare frame must be an i32".into())
         })
         .collect()
-}
-
-pub(crate) fn resolve_manifest_path(manifest_dir: &Path, value: &str) -> PathBuf {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        path
-    } else {
-        manifest_dir.join(path)
-    }
 }
 
 fn resolve_camera_vmd_path(

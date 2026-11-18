@@ -56,14 +56,7 @@ def run_numeric_verify(config: GoldenGateConfig) -> dict[str, Any]:
 
 def _command(config: GoldenGateConfig) -> list[str]:
     if config.mmd_anim_bin is not None:
-        command = [
-            str(config.mmd_anim_bin),
-            "verify",
-            str(config.manifest),
-            "--mode",
-            "numeric",
-            "--json",
-        ]
+        command = [str(config.mmd_anim_bin)]
     else:
         command = [
             "cargo",
@@ -72,12 +65,8 @@ def _command(config: GoldenGateConfig) -> list[str]:
             "-p",
             "mmd-anim-cli",
             "--",
-            "verify",
-            str(config.manifest),
-            "--mode",
-            "numeric",
-            "--json",
         ]
+    command.extend(["verify", str(config.manifest), "--mode", "numeric", "--json"])
     if config.physics_penetration:
         if config.diagnose_case is None or config.diagnose_frame is None:
             raise RunnerError("physics penetration report requires diagnose_case and diagnose_frame")

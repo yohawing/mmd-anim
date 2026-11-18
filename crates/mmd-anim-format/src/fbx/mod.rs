@@ -2457,12 +2457,7 @@ fn write_definitions<W: Write + Seek>(
         1 + (1 + bone_count) + bone_count + mesh_object_count + animation_object_count;
     write_i32_node(writer, "Count", object_count as i32)?;
 
-    begin_node(writer, "ObjectType", |attrs| {
-        attrs.append_string_direct("GlobalSettings")?;
-        Ok(())
-    })?;
-    write_i32_node(writer, "Count", 1)?;
-    writer.close_node()?;
+    write_simple_object_type(writer, "GlobalSettings", 1)?;
 
     write_model_object_type(writer, bone_count as i32)?;
     if include_mesh_assets {
@@ -2475,8 +2470,12 @@ fn write_definitions<W: Write + Seek>(
     }
     write_node_attribute_object_type(writer, bone_count as i32)?;
     if include_mesh_assets {
-        write_deformer_object_type(writer, bone_count as i32, vertex_morph_count as i32)?;
-        write_pose_object_type(writer)?;
+        write_simple_object_type(
+            writer,
+            "Deformer",
+            1 + bone_count as i32 + vertex_morph_count as i32 * 2,
+        )?;
+        write_simple_object_type(writer, "Pose", 1)?;
     }
     if animation.is_some() {
         write_animation_object_types(
@@ -2610,30 +2609,6 @@ fn write_material_object_type<W: Write + Seek>(
     write_property_f64(writer, "ReflectionFactor", "Number", "", "A", 1.0)?;
     writer.close_node()?;
     writer.close_node()?;
-    writer.close_node()?;
-    Ok(())
-}
-
-fn write_deformer_object_type<W: Write + Seek>(
-    writer: &mut Writer<W>,
-    bone_count: i32,
-    vertex_morph_count: i32,
-) -> Result<(), FbxExportError> {
-    begin_node(writer, "ObjectType", |attrs| {
-        attrs.append_string_direct("Deformer")?;
-        Ok(())
-    })?;
-    write_i32_node(writer, "Count", 1 + bone_count + vertex_morph_count * 2)?;
-    writer.close_node()?;
-    Ok(())
-}
-
-fn write_pose_object_type<W: Write + Seek>(writer: &mut Writer<W>) -> Result<(), FbxExportError> {
-    begin_node(writer, "ObjectType", |attrs| {
-        attrs.append_string_direct("Pose")?;
-        Ok(())
-    })?;
-    write_i32_node(writer, "Count", 1)?;
     writer.close_node()?;
     Ok(())
 }

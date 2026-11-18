@@ -2177,23 +2177,25 @@ pub fn export_pmm_manifest(manifest: &PmmParsedManifest) -> Vec<u8> {
     out.push(document_model_count);
     out.push(manifest.display_state.accessory_slot_count.unwrap_or(0));
 
-    let mut emitted_paths = Vec::<String>::new();
+    let mut emitted_paths = Vec::<&str>::new();
     for slot in &manifest.model_slots {
         push_pmm_len_prefixed_sjis(&mut out, &slot.name, &slot.name_bytes);
         push_pmm_len_prefixed_sjis(&mut out, &slot.english_name, &slot.english_name_bytes);
         push_pmm_sjis_string(&mut out, &slot.model_path, None);
         out.push(0);
-        emitted_paths.push(slot.normalized_path.to_ascii_lowercase());
+        emitted_paths.push(&slot.normalized_path);
     }
 
     for reference in &manifest.asset_references {
-        let normalized = reference.normalized_path.to_ascii_lowercase();
-        if emitted_paths.iter().any(|path| path == &normalized) {
+        if emitted_paths
+            .iter()
+            .any(|path| path.eq_ignore_ascii_case(&reference.normalized_path))
+        {
             continue;
         }
         push_pmm_sjis_string(&mut out, &reference.path, None);
         out.push(0);
-        emitted_paths.push(normalized);
+        emitted_paths.push(&reference.normalized_path);
     }
 
     out

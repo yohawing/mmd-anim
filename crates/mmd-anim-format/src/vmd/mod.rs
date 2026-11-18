@@ -3708,16 +3708,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn japanese_vmd_name_matches_pmx_utf8_name_via_normalization() {
-        let sjis_name: &[u8] = &[0x8D, 0xB6, 0x91, 0xAB];
-        let utf8_name: &[u8] = &[0xE5, 0xB7, 0xA6, 0xE8, 0xB6, 0xB3];
-
+    fn single_bone_pmx_bytes(encoding: u8, encoded_name: &[u8]) -> Vec<u8> {
         let mut pmx_buf = Vec::new();
         pmx_buf.extend_from_slice(b"PMX ");
         pmx_buf.extend_from_slice(&2.0f32.to_le_bytes());
         pmx_buf.push(8);
-        pmx_buf.push(1);
+        pmx_buf.push(encoding);
         pmx_buf.push(0);
         pmx_buf.push(4);
         pmx_buf.push(1);
@@ -3733,8 +3729,8 @@ mod tests {
         pmx_buf.extend_from_slice(&0i32.to_le_bytes());
         pmx_buf.extend_from_slice(&0i32.to_le_bytes());
         pmx_buf.extend_from_slice(&1i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&(utf8_name.len() as i32).to_le_bytes());
-        pmx_buf.extend_from_slice(utf8_name);
+        pmx_buf.extend_from_slice(&(encoded_name.len() as i32).to_le_bytes());
+        pmx_buf.extend_from_slice(encoded_name);
         pmx_buf.extend_from_slice(&0i32.to_le_bytes());
         pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
         pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
@@ -3746,6 +3742,15 @@ mod tests {
         pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
         pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
         pmx_buf.extend_from_slice(&0i32.to_le_bytes());
+        pmx_buf
+    }
+
+    #[test]
+    fn japanese_vmd_name_matches_pmx_utf8_name_via_normalization() {
+        let sjis_name: &[u8] = &[0x8D, 0xB6, 0x91, 0xAB];
+        let utf8_name: &[u8] = &[0xE5, 0xB7, 0xA6, 0xE8, 0xB6, 0xB3];
+
+        let pmx_buf = single_bone_pmx_bytes(1, utf8_name);
 
         let pmx = crate::pmx::import_pmx_runtime(&pmx_buf).unwrap();
 
@@ -3801,39 +3806,7 @@ mod tests {
             .flat_map(u16::to_le_bytes)
             .collect();
 
-        let mut pmx_buf = Vec::new();
-        pmx_buf.extend_from_slice(b"PMX ");
-        pmx_buf.extend_from_slice(&2.0f32.to_le_bytes());
-        pmx_buf.push(8);
-        pmx_buf.push(0);
-        pmx_buf.push(0);
-        pmx_buf.push(4);
-        pmx_buf.push(1);
-        pmx_buf.push(1);
-        pmx_buf.push(2);
-        pmx_buf.push(1);
-        pmx_buf.push(1);
-        for _ in 0..4 {
-            pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        }
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&1i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&(utf16le_name.len() as i32).to_le_bytes());
-        pmx_buf.extend_from_slice(&utf16le_name);
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&(-1i16).to_le_bytes());
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0u16.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
+        let pmx_buf = single_bone_pmx_bytes(0, &utf16le_name);
 
         let pmx = crate::pmx::import_pmx_runtime(&pmx_buf).unwrap();
 

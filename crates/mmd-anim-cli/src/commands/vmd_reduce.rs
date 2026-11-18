@@ -185,31 +185,31 @@ pub(crate) fn reduce_vmd(
     })?;
     write_file(output, &bytes)?;
 
-    let value = json!({
-        "status": "ok",
-        "command": "reduce-vmd",
-        "curveMode": match options.curve_mode {
-            VmdReductionCurveMode::Linear => "linear",
-            VmdReductionCurveMode::VmdBezier => "vmd-bezier",
-        },
-        "input": input.display().to_string(),
-        "output": output.display().to_string(),
-        "bytesIn": data.len(),
-        "bytesOut": bytes.len(),
-        "maxFrame": animation.metadata.max_frame,
-        "sourceBoneKeys": source_bone_keys,
-        "reducedBoneKeys": reduced_bone_keys,
-        "sourceMorphKeys": source_morph_keys,
-        "reducedMorphKeys": reduced_morph_keys,
-        "maxLocalPositionError": report.max_local_position_error,
-        "maxLocalRotationErrorRadians": report.max_local_rotation_error_radians,
-        "maxMorphWeightError": report.max_morph_weight_error,
-        "preservedCameraKeys": animation.camera_frames.len(),
-        "preservedLightKeys": animation.light_frames.len(),
-        "preservedSelfShadowKeys": animation.self_shadow_frames.len(),
-        "preservedPropertyKeys": animation.property_frames.len(),
-    });
     if options.use_json {
+        let value = json!({
+            "status": "ok",
+            "command": "reduce-vmd",
+            "curveMode": match options.curve_mode {
+                VmdReductionCurveMode::Linear => "linear",
+                VmdReductionCurveMode::VmdBezier => "vmd-bezier",
+            },
+            "input": input.display().to_string(),
+            "output": output.display().to_string(),
+            "bytesIn": data.len(),
+            "bytesOut": bytes.len(),
+            "maxFrame": animation.metadata.max_frame,
+            "sourceBoneKeys": source_bone_keys,
+            "reducedBoneKeys": reduced_bone_keys,
+            "sourceMorphKeys": source_morph_keys,
+            "reducedMorphKeys": reduced_morph_keys,
+            "maxLocalPositionError": report.max_local_position_error,
+            "maxLocalRotationErrorRadians": report.max_local_rotation_error_radians,
+            "maxMorphWeightError": report.max_morph_weight_error,
+            "preservedCameraKeys": animation.camera_frames.len(),
+            "preservedLightKeys": animation.light_frames.len(),
+            "preservedSelfShadowKeys": animation.self_shadow_frames.len(),
+            "preservedPropertyKeys": animation.property_frames.len(),
+        });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!(

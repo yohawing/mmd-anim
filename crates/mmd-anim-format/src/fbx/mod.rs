@@ -5488,11 +5488,11 @@ mod tests {
             .and_then(AttributeValue::get_string)
     }
 
-    #[test]
-    fn fbx_export_writes_vertex_morph_blendshape() {
-        use crate::pmx::{PmxParsedMorph, PmxParsedVertexMorphOffset};
+    fn vertex_morph_test_model() -> PmxParsedModel {
+        use crate::pmx::PmxParsedVertexMorphOffset;
 
-        let (mut model, _fbx) = runtime_baked_fixture_fbx();
+        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
+        let mut model = crate::parse_pmx_model(pmx_data).expect("PMX fixture should parse");
         model.geometry.positions = vec![
             0.0, 0.0, 0.0, //
             1.0, 0.0, 0.0, //
@@ -5505,39 +5505,44 @@ mod tests {
         model.geometry.skin_weights = vec![1.0; 12];
         model.metadata.counts.vertices = 3;
         model.metadata.counts.faces = 1;
-        model.morphs = vec![
-            PmxParsedMorph {
-                name: "Smile".to_owned(),
-                english_name: "smile".to_owned(),
-                panel: "mouth".to_owned(),
-                kind: "vertex".to_owned(),
-                vertex_offsets: vec![PmxParsedVertexMorphOffset {
-                    vertex_index: 1,
-                    position: [0.0, 0.5, 0.25],
-                }],
-                group_offsets: Vec::new(),
-                bone_offsets: Vec::new(),
-                uv_offsets: Vec::new(),
-                additional_uv_offsets: Vec::new(),
-                material_offsets: Vec::new(),
-                flip_offsets: Vec::new(),
-                impulse_offsets: Vec::new(),
-            },
-            PmxParsedMorph {
-                name: "BoneMorph".to_owned(),
-                english_name: "bone".to_owned(),
-                panel: "other".to_owned(),
-                kind: "bone".to_owned(),
-                vertex_offsets: Vec::new(),
-                group_offsets: Vec::new(),
-                bone_offsets: Vec::new(),
-                uv_offsets: Vec::new(),
-                additional_uv_offsets: Vec::new(),
-                material_offsets: Vec::new(),
-                flip_offsets: Vec::new(),
-                impulse_offsets: Vec::new(),
-            },
-        ];
+        model.morphs = vec![PmxParsedMorph {
+            name: "Smile".to_owned(),
+            english_name: "smile".to_owned(),
+            panel: "mouth".to_owned(),
+            kind: "vertex".to_owned(),
+            vertex_offsets: vec![PmxParsedVertexMorphOffset {
+                vertex_index: 1,
+                position: [0.0, 0.5, 0.25],
+            }],
+            group_offsets: Vec::new(),
+            bone_offsets: Vec::new(),
+            uv_offsets: Vec::new(),
+            additional_uv_offsets: Vec::new(),
+            material_offsets: Vec::new(),
+            flip_offsets: Vec::new(),
+            impulse_offsets: Vec::new(),
+        }];
+        model.metadata.counts.morphs = model.morphs.len();
+        model
+    }
+
+    #[test]
+    fn fbx_export_writes_vertex_morph_blendshape() {
+        let mut model = vertex_morph_test_model();
+        model.morphs.push(PmxParsedMorph {
+            name: "BoneMorph".to_owned(),
+            english_name: "bone".to_owned(),
+            panel: "other".to_owned(),
+            kind: "bone".to_owned(),
+            vertex_offsets: Vec::new(),
+            group_offsets: Vec::new(),
+            bone_offsets: Vec::new(),
+            uv_offsets: Vec::new(),
+            additional_uv_offsets: Vec::new(),
+            material_offsets: Vec::new(),
+            flip_offsets: Vec::new(),
+            impulse_offsets: Vec::new(),
+        });
         model.metadata.counts.morphs = model.morphs.len();
 
         let fbx =
@@ -5626,43 +5631,11 @@ mod tests {
 
     #[test]
     fn vmd_export_writes_vertex_morph_weight_animation() {
-        use crate::pmx::{PmxParsedMorph, PmxParsedVertexMorphOffset};
         use crate::vmd::{
             VmdParsedAnimation, VmdParsedCounts, VmdParsedMetadata, VmdParsedMorphFrame,
         };
 
-        let (mut model, _fbx) = runtime_baked_fixture_fbx();
-        model.geometry.positions = vec![
-            0.0, 0.0, 0.0, //
-            1.0, 0.0, 0.0, //
-            0.0, 1.0, 0.0,
-        ];
-        model.geometry.normals = vec![0.0; 9];
-        model.geometry.uvs = vec![0.0; 6];
-        model.geometry.indices = vec![0, 1, 2];
-        model.geometry.skin_indices = vec![0; 12];
-        model.geometry.skin_weights = vec![1.0; 12];
-        model.metadata.counts.vertices = 3;
-        model.metadata.counts.faces = 1;
-        model.morphs = vec![PmxParsedMorph {
-            name: "Smile".to_owned(),
-            english_name: "smile".to_owned(),
-            panel: "mouth".to_owned(),
-            kind: "vertex".to_owned(),
-            vertex_offsets: vec![PmxParsedVertexMorphOffset {
-                vertex_index: 1,
-                position: [0.0, 0.5, 0.25],
-            }],
-            group_offsets: Vec::new(),
-            bone_offsets: Vec::new(),
-            uv_offsets: Vec::new(),
-            additional_uv_offsets: Vec::new(),
-            material_offsets: Vec::new(),
-            flip_offsets: Vec::new(),
-            impulse_offsets: Vec::new(),
-        }];
-        model.metadata.counts.morphs = model.morphs.len();
-
+        let model = vertex_morph_test_model();
         let vmd = VmdParsedAnimation {
             kind: "vmd",
             metadata: VmdParsedMetadata {
@@ -5753,14 +5726,12 @@ mod tests {
 
     #[test]
     fn runtime_bake_export_writes_vertex_morph_weight_animation() {
-        use crate::pmx::{PmxParsedMorph, PmxParsedVertexMorphOffset};
         use mmd_anim_runtime::{
             AnimationClip, BoneInit, MorphAnimationBinding, MorphIndex, MorphInit, MorphKeyframe,
             MorphOffsetSpan, MorphTrack,
         };
 
-        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
-        let mut model = crate::parse_pmx_model(pmx_data).expect("PMX fixture should parse");
+        let model = vertex_morph_test_model();
         let runtime_model = mmd_anim_runtime::ModelArena::new_with_morphs(
             vec![BoneInit::new(None, glam::Vec3A::ZERO)],
             Vec::new(),
@@ -5774,37 +5745,6 @@ mod tests {
             },
         )
         .expect("runtime model with one morph slot should build");
-
-        model.geometry.positions = vec![
-            0.0, 0.0, 0.0, //
-            1.0, 0.0, 0.0, //
-            0.0, 1.0, 0.0,
-        ];
-        model.geometry.normals = vec![0.0; 9];
-        model.geometry.uvs = vec![0.0; 6];
-        model.geometry.indices = vec![0, 1, 2];
-        model.geometry.skin_indices = vec![0; 12];
-        model.geometry.skin_weights = vec![1.0; 12];
-        model.metadata.counts.vertices = 3;
-        model.metadata.counts.faces = 1;
-        model.morphs = vec![PmxParsedMorph {
-            name: "Smile".to_owned(),
-            english_name: "smile".to_owned(),
-            panel: "mouth".to_owned(),
-            kind: "vertex".to_owned(),
-            vertex_offsets: vec![PmxParsedVertexMorphOffset {
-                vertex_index: 1,
-                position: [0.0, 0.5, 0.25],
-            }],
-            group_offsets: Vec::new(),
-            bone_offsets: Vec::new(),
-            uv_offsets: Vec::new(),
-            additional_uv_offsets: Vec::new(),
-            material_offsets: Vec::new(),
-            flip_offsets: Vec::new(),
-            impulse_offsets: Vec::new(),
-        }];
-        model.metadata.counts.morphs = model.morphs.len();
 
         let clip = AnimationClip::new_full(
             Vec::new(),

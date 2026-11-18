@@ -368,58 +368,14 @@ pub fn skip_morphs(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize,
         r.skip_string()?; // Name.
         r.skip_string()?; // English name.
         r.skip(1)?;
-        let _morph_type = r.read_u8()?;
-        let _offset_count = r.read_i32_le()?;
-        match _morph_type {
-            0 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.morph_index_size)?;
-                    r.skip(4)?;
-                }
+        let morph_type = r.read_u8()?;
+        let offset_count = r.read_i32_le()?;
+        let (index_size, field_sizes) = morph_offset_layout(header, morph_type)?;
+        for _ in 0..offset_count {
+            r.read_sized_index(index_size)?;
+            for &field_size in field_sizes {
+                r.skip(field_size)?;
             }
-            1 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.vertex_index_size)?;
-                    r.skip(12)?;
-                }
-            }
-            2 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.bone_index_size)?;
-                    r.skip(12)?;
-                    r.skip(16)?;
-                }
-            }
-            3..=7 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.vertex_index_size)?;
-                    r.skip(16)?;
-                }
-            }
-            8 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.material_index_size)?;
-                    r.skip(1)?;
-                    r.skip(16)?;
-                    r.skip(12)?;
-                    r.skip(4)?;
-                    r.skip(12)?;
-                    r.skip(16)?;
-                    r.skip(4)?;
-                    r.skip(16)?;
-                    r.skip(16)?;
-                    r.skip(16)?;
-                }
-            }
-            9 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.rigidbody_index_size)?;
-                    r.skip(1)?;
-                    r.skip(12)?;
-                    r.skip(12)?;
-                }
-            }
-            _ => return Err(ImportError::SectionOverflow),
         }
     }
     Ok(r.pos)
@@ -429,6 +385,29 @@ pub fn skip_morphs(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize,
 pub struct PmxMorphNames {
     pub name_bytes: Vec<Vec<u8>>,
     pub names: Vec<String>,
+}
+
+fn morph_offset_layout(
+    header: &PmxHeader,
+    morph_type: u8,
+) -> Result<(u8, &'static [usize]), ImportError> {
+    Ok(match morph_type {
+        0 | 9 => (header.morph_index_size, &[4]),
+        1 => (header.vertex_index_size, &[12]),
+        2 => (header.bone_index_size, &[12, 16]),
+        3..=7 => (header.vertex_index_size, &[16]),
+        8 => (
+            header.material_index_size,
+            &[1, 16, 12, 4, 12, 16, 4, 16, 16, 16],
+        ),
+        10 => (header.rigidbody_index_size, &[1, 12, 12]),
+        _ => return Err(ImportError::SectionOverflow),
+    })
+}
+
+fn morph_offset_size(header: &PmxHeader, morph_type: u8) -> Result<usize, ImportError> {
+    let (index_size, field_sizes) = morph_offset_layout(header, morph_type)?;
+    Ok(index_size as usize + field_sizes.iter().sum::<usize>())
 }
 
 pub fn read_morph_names(
@@ -461,15 +440,7 @@ pub fn read_morph_names(
         }
         let offset_count = offset_count as usize;
 
-        let per_offset = match morph_type {
-            0 => header.morph_index_size as usize + 4,
-            1 => header.vertex_index_size as usize + 12,
-            2 => header.bone_index_size as usize + 12 + 16,
-            3..=7 => header.vertex_index_size as usize + 16,
-            8 => header.material_index_size as usize + 1 + 16 + 12 + 4 + 12 + 16 + 4 + 16 + 16 + 16,
-            9 => header.rigidbody_index_size as usize + 1 + 12 + 12,
-            _ => return Err(ImportError::SectionOverflow),
-        };
+        let per_offset = morph_offset_size(header, morph_type)?;
         r.skip(
             offset_count
                 .checked_mul(per_offset)
@@ -481,9 +452,8 @@ pub fn read_morph_names(
 }
 
 /// Parse morph names and the runtime-relevant bone/group offset payload.
-/// Unsupported morph types (vertex, UV, material, flip) have their payload
-/// skipped, while the descriptor compiler remains the only production
-/// normalization/validation point.
+/// Other morph types are skipped. The descriptor compiler remains the only
+/// production normalization/validation point.
 fn read_runtime_morph_descriptor(
     data: &[u8],
     header: &PmxHeader,
@@ -552,25 +522,7 @@ fn read_runtime_morph_descriptor(
                 }
             }
             _ => {
-                let per_offset = match morph_type {
-                    1 => header.vertex_index_size as usize + 12,
-                    3..=7 => header.vertex_index_size as usize + 16,
-                    8 => {
-                        header.material_index_size as usize
-                            + 1
-                            + 16
-                            + 12
-                            + 4
-                            + 12
-                            + 16
-                            + 4
-                            + 16
-                            + 16
-                            + 16
-                    }
-                    9 => header.rigidbody_index_size as usize + 1 + 12 + 12,
-                    _ => return Err(ImportError::SectionOverflow),
-                };
+                let per_offset = morph_offset_size(header, morph_type)?;
                 r.skip(
                     offset_count
                         .checked_mul(per_offset)
@@ -6235,6 +6187,101 @@ mod tests {
         assert_eq!(&morphs.name_bytes[0][..], b"Blink");
         assert_eq!(morphs.names[0], "Blink");
         assert_eq!(new_pos, buf.len());
+    }
+
+    #[test]
+    fn pmx21_morph_readers_preserve_flip_and_impulse_payload_boundaries() {
+        let (mut header, _) =
+            read_header(&build_small_pmx_header_bytes(4, TextEncoding::Utf8)).unwrap();
+        header.version = 2.1;
+        header.morph_index_size = 2;
+        header.rigidbody_index_size = 4;
+
+        let mut flip = 1i16.to_le_bytes().to_vec();
+        flip.extend_from_slice(&0.5f32.to_le_bytes());
+        let mut impulse = 0i32.to_le_bytes().to_vec();
+        impulse.push(1);
+        for value in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0] {
+            impulse.extend_from_slice(&value.to_le_bytes());
+        }
+        let vertex = vec![0u8; 4 + 12];
+        let mut data = 3i32.to_le_bytes().to_vec();
+        let mut payload_ends = Vec::new();
+        for (name, kind, payload) in [
+            ("Flip", 9, flip),
+            ("Impulse", 10, impulse),
+            ("Tail", 1, vertex),
+        ] {
+            data.extend_from_slice(&build_morph_name_bytes(name));
+            data.extend_from_slice(&build_morph_name_bytes(""));
+            data.extend_from_slice(&[4, kind]);
+            data.extend_from_slice(&1i32.to_le_bytes());
+            data.extend_from_slice(&payload);
+            payload_ends.push(data.len());
+        }
+
+        let skipped = skip_morphs(&data, &header, 0);
+        let names = read_morph_names(&data, &header, 0);
+        let runtime = read_runtime_morph_descriptor(&data, &header, 0);
+        assert!(skipped.is_ok(), "skip_morphs: {skipped:?}");
+        assert!(names.is_ok(), "read_morph_names: {names:?}");
+        assert!(runtime.is_ok(), "runtime morph reader: {runtime:?}");
+        assert_eq!(skipped.unwrap(), data.len());
+        let (names, end) = names.unwrap();
+        assert_eq!(names.names, ["Flip", "Impulse", "Tail"]);
+        assert_eq!(end, data.len());
+        let (runtime_names, descriptor, end) = runtime.unwrap();
+        assert_eq!(runtime_names.names, names.names);
+        assert_eq!(descriptor.morph_count, 3);
+        assert!(descriptor.bone_offsets.is_empty());
+        assert!(descriptor.group_offsets.is_empty());
+        assert_eq!(end, data.len());
+
+        for end in payload_ends {
+            let truncated = &data[..end - 1];
+            assert!(skip_morphs(truncated, &header, 0).is_err());
+            assert!(read_morph_names(truncated, &header, 0).is_err());
+            assert!(read_runtime_morph_descriptor(truncated, &header, 0).is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_import_skips_pmx21_morphs_and_keeps_following_name_indices() {
+        let mut model = parsed_pmx_fixture();
+        model.metadata.version = 2.1;
+        let mut flip = model.morphs[0].clone();
+        flip.name = "Flip".to_owned();
+        flip.kind = "flip".to_owned();
+        flip.vertex_offsets.clear();
+        flip.flip_offsets.push(PmxParsedGroupMorphOffset {
+            morph_index: 2,
+            weight: 0.5,
+        });
+        let mut impulse = model.morphs[0].clone();
+        impulse.name = "Impulse".to_owned();
+        impulse.kind = "impulse".to_owned();
+        impulse.vertex_offsets.clear();
+        impulse.impulse_offsets.push(PmxParsedImpulseMorphOffset {
+            rigid_body_index: 0,
+            local: true,
+            velocity: [1.0, 2.0, 3.0],
+            torque: [4.0, 5.0, 6.0],
+        });
+        model.morphs.insert(0, impulse);
+        model.morphs.insert(0, flip);
+        let data = export_pmx_model(&model);
+        let parsed = parse_pmx_model(&data).unwrap();
+        assert_eq!(parsed.morphs[0].kind, "flip");
+        assert_eq!(parsed.morphs[1].kind, "impulse");
+
+        let imported = import_pmx_runtime(&data).unwrap();
+        for (index, name) in ["Flip", "Impulse", "Smile"].into_iter().enumerate() {
+            assert_eq!(
+                imported.morph_name_to_index.get(name.as_bytes()),
+                Some(&MorphIndex(index as u32))
+            );
+        }
+        assert_eq!(imported.model.morph_count(), 3);
     }
 
     #[test]

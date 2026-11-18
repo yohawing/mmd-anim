@@ -1734,28 +1734,7 @@ pub fn build_clip_from_import(
         })
         .collect();
 
-    let mut morph_tracks_map: std::collections::BTreeMap<u32, Vec<MorphKeyframe>> =
-        std::collections::BTreeMap::new();
-
-    for (morph_name, frame, weight) in result.morph_keyframes {
-        let morph_name_normalized = normalize_vmd_name(&morph_name);
-        let morph_index = match morph_name_to_index(vmd_registration_name(&morph_name_normalized)) {
-            Some(idx) => idx,
-            None => continue,
-        };
-        morph_tracks_map
-            .entry(morph_index.0)
-            .or_default()
-            .push(MorphKeyframe::new(frame, weight));
-    }
-
-    let morph_tracks: Vec<MorphAnimationBinding> = morph_tracks_map
-        .into_iter()
-        .map(|(morph_idx, kfs)| MorphAnimationBinding {
-            morph: MorphIndex(morph_idx),
-            track: MorphTrack::from_keyframes(last_vmd_keys_per_frame(kfs, |key| key.frame)),
-        })
-        .collect();
+    let morph_tracks = build_morph_tracks(&result.morph_keyframes, morph_name_to_index);
 
     let property_track = if result.property_keyframes.is_empty() {
         None
@@ -1766,6 +1745,31 @@ pub fn build_clip_from_import(
     };
 
     AnimationClip::new_full(bone_tracks, morph_tracks, property_track)
+}
+
+fn build_morph_tracks(
+    keyframes: &[(Vec<u8>, u32, f32)],
+    morph_name_to_index: &dyn Fn(&[u8]) -> Option<MorphIndex>,
+) -> Vec<MorphAnimationBinding> {
+    let mut tracks: std::collections::BTreeMap<u32, Vec<MorphKeyframe>> =
+        std::collections::BTreeMap::new();
+    for (name, frame, weight) in keyframes {
+        let normalized_name = normalize_vmd_name(name);
+        let Some(index) = morph_name_to_index(vmd_registration_name(&normalized_name)) else {
+            continue;
+        };
+        tracks
+            .entry(index.0)
+            .or_default()
+            .push(MorphKeyframe::new(*frame, *weight));
+    }
+    tracks
+        .into_iter()
+        .map(|(index, keys)| MorphAnimationBinding {
+            morph: MorphIndex(index),
+            track: MorphTrack::from_keyframes(last_vmd_keys_per_frame(keys, |key| key.frame)),
+        })
+        .collect()
 }
 
 pub fn build_property_binding_with_ik_resolver(
@@ -1977,29 +1981,9 @@ fn build_pair_clip_with_registration_policy(
         })
         .collect();
 
-    let mut morph_tracks_map: std::collections::BTreeMap<u32, Vec<MorphKeyframe>> =
-        std::collections::BTreeMap::new();
-
-    for (morph_name, frame, weight) in &result.morph_keyframes {
-        let morph_name_normalized = normalize_vmd_name(morph_name);
-        let morph_index =
-            match morph_name_to_index.get(vmd_registration_name(&morph_name_normalized)) {
-                Some(idx) => *idx,
-                None => continue,
-            };
-        morph_tracks_map
-            .entry(morph_index.0)
-            .or_default()
-            .push(MorphKeyframe::new(*frame, *weight));
-    }
-
-    let morph_tracks: Vec<MorphAnimationBinding> = morph_tracks_map
-        .into_iter()
-        .map(|(morph_idx, kfs)| MorphAnimationBinding {
-            morph: MorphIndex(morph_idx),
-            track: MorphTrack::from_keyframes(last_vmd_keys_per_frame(kfs, |key| key.frame)),
-        })
-        .collect();
+    let morph_tracks = build_morph_tracks(&result.morph_keyframes, &|name| {
+        morph_name_to_index.get(name).copied()
+    });
 
     let property_track = if options.honor_property_ik {
         build_property_binding_with_ik_resolver(

@@ -6117,12 +6117,9 @@ mod tests {
         assert_eq!(result.bone_names[0], "Hips");
         assert_eq!(result.bone_names[1], "Spine");
 
-        let bone_map: HashMap<Vec<u8>, BoneIndex> = result
-            .bone_name_bytes
-            .iter()
-            .enumerate()
-            .map(|(i, b)| (b.clone(), BoneIndex(i as u32)))
-            .collect();
+        buf.extend_from_slice(&0i32.to_le_bytes()); // morph count
+        let runtime = import_pmx_runtime(&buf).unwrap();
+        let bone_map = &runtime.bone_name_to_index;
 
         assert_eq!(bone_map.get(b"Hips".as_slice()), Some(&BoneIndex(0)));
         assert_eq!(bone_map.get(b"Spine".as_slice()), Some(&BoneIndex(1)));
@@ -6187,19 +6184,9 @@ mod tests {
             "LeftLegIK"
         );
 
-        let ik_name_map: HashMap<Vec<u8>, usize> = bone_import
-            .ik_solvers
-            .iter()
-            .enumerate()
-            .filter_map(|(solver_idx, solver)| {
-                let bone_idx = solver.ik_bone.as_usize();
-                if bone_idx < bone_import.bone_name_bytes.len() {
-                    Some((bone_import.bone_name_bytes[bone_idx].clone(), solver_idx))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        buf.extend_from_slice(&0i32.to_le_bytes()); // morph count
+        let runtime = import_pmx_runtime(&buf).unwrap();
+        let ik_name_map = &runtime.ik_solver_bone_name_to_index;
 
         assert_eq!(ik_name_map.get(b"LeftLegIK".as_slice()), Some(&0));
     }

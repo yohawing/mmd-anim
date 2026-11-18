@@ -2154,7 +2154,7 @@ fn export_json_format_writes_full_vmd_dto_workflow() {
     .unwrap();
 
     export::export_json_format(&input, &output, false).unwrap();
-    export::export_roundtrip_summary(&output).unwrap();
+    export::export_roundtrip(&output, false).unwrap();
 
     let reparsed = mmd_anim_format::parse_vmd_animation(&fs::read(&output).unwrap()).unwrap();
     assert_eq!(reparsed.metadata.model_name, "cli-dto");
@@ -2835,13 +2835,13 @@ fn pmm_parse_export_parse_lossless_roundtrip_via_helpers() {
 }
 
 #[test]
-fn export_roundtrip_summary_calls_pmm_lossless_branch_successfully() {
+fn export_roundtrip_text_calls_pmm_lossless_branch_successfully() {
     let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
     let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
-    let result = export::export_roundtrip_summary(&pmm_path);
+    let result = export::export_roundtrip(&pmm_path, false);
     assert!(
         result.is_ok(),
-        "export_roundtrip_summary on repo-local PMM fixture must succeed (lossless branch)"
+        "export_roundtrip_text on repo-local PMM fixture must succeed (lossless branch)"
     );
     let code = result.unwrap();
     assert_eq!(code, ExitCode::SUCCESS);
@@ -2851,7 +2851,7 @@ fn export_roundtrip_summary_calls_pmm_lossless_branch_successfully() {
 fn export_roundtrip_json_calls_pmm_lossless_branch_successfully() {
     let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
     let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
-    let result = export::export_roundtrip_json(&pmm_path);
+    let result = export::export_roundtrip(&pmm_path, true);
     assert!(
         result.is_ok(),
         "export_roundtrip_json on repo-local PMM fixture must succeed (lossless branch)"
@@ -2861,12 +2861,12 @@ fn export_roundtrip_json_calls_pmm_lossless_branch_successfully() {
 }
 
 #[test]
-fn export_json_roundtrip_summary_rejects_pmm_as_unsupported() {
+fn export_json_roundtrip_text_rejects_pmm_as_unsupported() {
     let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
     let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
-    let result = export::export_json_roundtrip_summary(&pmm_path);
+    let result = export::export_json_roundtrip(&pmm_path, false);
     let err =
-        result.expect_err("export_json_roundtrip_summary on PMM fixture must remain unsupported");
+        result.expect_err("export_json_roundtrip_text on PMM fixture must remain unsupported");
     let msg = err.to_string();
     assert!(
         msg.contains("roundtrip:") && msg.contains("PMM"),

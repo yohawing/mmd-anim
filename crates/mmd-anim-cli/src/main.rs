@@ -863,11 +863,10 @@ fn dispatch_roundtrip(
     use_json: bool,
     via_json: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    match (via_json, use_json) {
-        (true, true) => commands::export::export_json_roundtrip_json(asset),
-        (true, false) => commands::export::export_json_roundtrip_summary(asset),
-        (false, true) => commands::export::export_roundtrip_json(asset),
-        (false, false) => commands::export::export_roundtrip_summary(asset),
+    if via_json {
+        commands::export::export_json_roundtrip(asset, use_json)
+    } else {
+        commands::export::export_roundtrip(asset, use_json)
     }
 }
 

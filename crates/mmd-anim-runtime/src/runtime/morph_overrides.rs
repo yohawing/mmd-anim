@@ -1,31 +1,17 @@
 use super::{IkSolveOptions, RuntimeInstance};
 use crate::{AnimationClip, MorphIndex};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MorphOverrideError {
+    #[error("morph override indices and weights must have equal lengths")]
     LengthMismatch,
+    #[error("morph override index {0} is out of range")]
     InvalidIndex(u32),
+    #[error("morph override weight {0} must be finite")]
     NonFiniteWeight(usize),
+    #[error("morph override frame must be finite")]
     NonFiniteFrame,
 }
-
-impl std::fmt::Display for MorphOverrideError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::LengthMismatch => write!(
-                f,
-                "morph override indices and weights must have equal lengths"
-            ),
-            Self::InvalidIndex(index) => write!(f, "morph override index {index} is out of range"),
-            Self::NonFiniteWeight(index) => {
-                write!(f, "morph override weight {index} must be finite")
-            }
-            Self::NonFiniteFrame => write!(f, "morph override frame must be finite"),
-        }
-    }
-}
-
-impl std::error::Error for MorphOverrideError {}
 
 impl RuntimeInstance {
     /// Evaluate a fresh clip (or rest) pose with sparse direct morph overrides.

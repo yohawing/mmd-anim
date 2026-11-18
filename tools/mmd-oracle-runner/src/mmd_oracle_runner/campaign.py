@@ -572,16 +572,32 @@ def _mmd_executable_hash(recorded: dict[str, Any]) -> tuple[str | None, str | No
 
 def _build_snapshot(config: CampaignConfig, state: dict[str, Any], provenance: dict[str, str]) -> dict[str, Any]:
     entries = list(state["cases"].values())
-    funnel = {"discovered": config.discovered, "selected": len(config.cases), "prepared": sum(entry.get("prepared") is True for entry in entries), "recorded": sum(entry.get("recorded") is True for entry in entries), "compared": sum(entry.get("compared") is True for entry in entries), "passed": sum(entry.get("passed") is True for entry in entries)}
+    funnel = {
+        "discovered": config.discovered,
+        "selected": len(config.cases),
+        "prepared": sum(entry.get("prepared") is True for entry in entries),
+        "recorded": sum(entry.get("recorded") is True for entry in entries),
+        "compared": sum(entry.get("compared") is True for entry in entries),
+        "passed": sum(entry.get("passed") is True for entry in entries),
+    }
     failures: dict[str, int] = {}
     for entry in entries:
         for failure in entry.get("failures", []):
             failures[failure] = failures.get(failure, 0) + 1
     metrics: dict[str, dict[str, float]] = {}
     for metric in _METRIC_NAMES:
-        values = sorted(float(entry["metrics"][metric]) for entry in entries if entry.get("compared") and metric in entry.get("metrics", {}))
+        values = sorted(
+            float(entry["metrics"][metric])
+            for entry in entries
+            if entry.get("compared") and metric in entry.get("metrics", {})
+        )
         if values:
-            metrics[metric] = {"p50": _nearest_rank(values, .50), "p95": _nearest_rank(values, .95), "p99": _nearest_rank(values, .99), "max": values[-1]}
+            metrics[metric] = {
+                "p50": _nearest_rank(values, 0.50),
+                "p95": _nearest_rank(values, 0.95),
+                "p99": _nearest_rank(values, 0.99),
+                "max": values[-1],
+            }
     features = _tag_summaries(config.cases, entries, "features")
     categories = _tag_summaries(config.cases, entries, "categories")
     worst: list[dict[str, Any]] = []
@@ -589,11 +605,22 @@ def _build_snapshot(config: CampaignConfig, state: dict[str, Any], provenance: d
     for entry in entries:
         if not entry.get("compared"):
             continue
-        category = case_by_id[entry["caseId"]].categories[0] if case_by_id[entry["caseId"]].categories else "uncategorized"
+        category = (
+            case_by_id[entry["caseId"]].categories[0] if case_by_id[entry["caseId"]].categories else "uncategorized"
+        )
         for metric, value in entry.get("metrics", {}).items():
             threshold = config.thresholds[metric]
             ratio = math.inf if threshold == 0 and value > 0 else (0 if threshold == 0 else value / threshold)
-            worst.append({"caseId": entry["caseId"], "category": category, "metric": metric, "value": value, "result": "pass" if value <= threshold else "fail", "_ratio": ratio})
+            worst.append(
+                {
+                    "caseId": entry["caseId"],
+                    "category": category,
+                    "metric": metric,
+                    "value": value,
+                    "result": "pass" if value <= threshold else "fail",
+                    "_ratio": ratio,
+                }
+            )
     worst.sort(key=lambda item: (-item["_ratio"], -item["value"], item["caseId"], item["metric"]))
     for item in worst:
         item.pop("_ratio", None)
@@ -614,10 +641,34 @@ def _build_snapshot(config: CampaignConfig, state: dict[str, Any], provenance: d
             "failures": list(entry.get("failures", [])),
         }
         applied_motion_keyframes = entry.get("appliedMotionKeyframes")
-        if isinstance(applied_motion_keyframes, int) and not isinstance(applied_motion_keyframes, bool) and applied_motion_keyframes >= 0:
+        if (
+            isinstance(applied_motion_keyframes, int)
+            and not isinstance(applied_motion_keyframes, bool)
+            and applied_motion_keyframes >= 0
+        ):
             case_result["appliedMotionKeyframes"] = applied_motion_keyframes
         case_results.append(case_result)
-    return {"schemaVersion": 1, "run": {**config.run, "commitSha": provenance["commitSha"], "repositoryState": provenance["repositoryState"], "mmdVersionSource": "config-self-reported", "dumperVersionSource": "config-self-reported", "manifestHash": config.config_hash, "mmdExecutableSha256": observed}, "funnel": funnel, "thresholds": dict(config.thresholds), "metrics": metrics, "failures": failures, "features": features, "categories": categories, "cases": case_results, "worstCases": worst[:20], "rawArtifacts": {"retained": False}}
+    return {
+        "schemaVersion": 1,
+        "run": {
+            **config.run,
+            "commitSha": provenance["commitSha"],
+            "repositoryState": provenance["repositoryState"],
+            "mmdVersionSource": "config-self-reported",
+            "dumperVersionSource": "config-self-reported",
+            "manifestHash": config.config_hash,
+            "mmdExecutableSha256": observed,
+        },
+        "funnel": funnel,
+        "thresholds": dict(config.thresholds),
+        "metrics": metrics,
+        "failures": failures,
+        "features": features,
+        "categories": categories,
+        "cases": case_results,
+        "worstCases": worst[:20],
+        "rawArtifacts": {"retained": False},
+    }
 
 
 def _case_result(entry: dict[str, Any]) -> str:

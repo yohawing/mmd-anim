@@ -555,7 +555,16 @@ fn compare_camera_current_dump_case(
         .and_then(|value| value.as_f64())
         .unwrap_or(default_epsilon);
     let mut case_stats = CameraNumericCompareStats::default();
-    collect_unsupported_camera_targets(case, &mut case_stats.skipped_targets);
+    collect_unsupported_targets(
+        case,
+        &mut case_stats.skipped_targets,
+        &[
+            "camera.current",
+            "camera.current.distance",
+            "camera.current.position",
+            "camera.current.rotation",
+        ],
+    );
     let oracle_path = resolve_camera_oracle_path(case, manifest_dir, case_dir)?;
     let oracle_text = fs::read_to_string(&oracle_path).map_err(|error| {
         format!(
@@ -861,7 +870,7 @@ fn compare_motion_numeric_case(
     let eval_frame_offset = json_f32(case, "/compare/evalFrameOffset")
         .or_else(|| json_f32(case, "/metadata/evalFrameOffset"))
         .unwrap_or(defaults.eval_frame_offset);
-    collect_unsupported_targets(case, &mut case_stats.skipped_targets);
+    collect_unsupported_targets(case, &mut case_stats.skipped_targets, &["bones"]);
 
     let mut missing_paths = Vec::<String>::new();
     let model_path = match case
@@ -3173,26 +3182,10 @@ pub(crate) fn json_bool(value: &serde_json::Value, pointer: &str) -> Option<bool
     value.pointer(pointer)?.as_bool()
 }
 
-fn collect_unsupported_targets(case: &serde_json::Value, skipped_targets: &mut HashSet<String>) {
-    let Some(targets) = case
-        .pointer("/compare/targets")
-        .and_then(|value| value.as_array())
-    else {
-        return;
-    };
-    for target in targets {
-        let Some(target) = target.as_str() else {
-            continue;
-        };
-        if !matches!(target, "bones") {
-            skipped_targets.insert(target.to_owned());
-        }
-    }
-}
-
-fn collect_unsupported_camera_targets(
+fn collect_unsupported_targets(
     case: &serde_json::Value,
     skipped_targets: &mut HashSet<String>,
+    supported_targets: &[&str],
 ) {
     let Some(targets) = case
         .pointer("/compare/targets")
@@ -3204,13 +3197,7 @@ fn collect_unsupported_camera_targets(
         let Some(target) = target.as_str() else {
             continue;
         };
-        if !matches!(
-            target,
-            "camera.current"
-                | "camera.current.distance"
-                | "camera.current.position"
-                | "camera.current.rotation"
-        ) {
+        if !supported_targets.contains(&target) {
             skipped_targets.insert(target.to_owned());
         }
     }

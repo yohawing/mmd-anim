@@ -116,6 +116,49 @@ fn execution_error_exits_with_one_and_reports_input_path() {
 }
 
 #[test]
+fn verify_ik_preserves_literal_root_names_and_typed_offsets() {
+    let parent = unique_temp_path("ik-roots");
+    let mut outputs = Vec::new();
+    for name in ["golden", "--json", "--root"] {
+        let root = parent.join(name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("oracle-batch.json"), r#"{"cases":[]}"#).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_mmd-anim"))
+            .current_dir(&parent)
+            .args([
+                "verify",
+                "--mode",
+                "ik",
+                "--json",
+                "--sample-frame-offset=-0.25",
+                "--",
+                name,
+            ])
+            .output()
+            .expect("IK comparison should run");
+        outputs.push((name, output));
+    }
+    fs::remove_dir_all(parent).unwrap();
+
+    for (name, output) in outputs {
+        assert_eq!(output.status.code(), Some(0), "{}", stderr_text(&output));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["root"], name);
+        assert_eq!(report["sampleFrameOffset"], -0.25);
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn verify_ik_rejects_invalid_arguments_at_the_cli_boundary() {
+    for invalid in ["--sample-frame-offset=nope", "--bad", "extra"] {
+        let output = run_cli(&["verify", "root", "--mode", "ik", invalid]);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr_text(&output));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
 fn detected_format_parse_error_reports_path_and_format() {
     let malformed = unique_temp_path("malformed.pmx");
     fs::write(&malformed, b"PMX ").expect("malformed PMX fixture should be written");

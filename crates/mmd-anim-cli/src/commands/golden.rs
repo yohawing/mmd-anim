@@ -15,9 +15,6 @@ use mmd_anim_format::VmdClipBuildOptions;
 use mmd_anim_runtime::{BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance};
 use serde::Serialize;
 
-pub(crate) const GOLDEN_IK_COMPARE_USAGE: &str =
-    "usage: mmd-anim golden-ik-compare <golden-ik-oracle-root> [sample-frame-offset]";
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GoldenImportDiagnostic {
@@ -34,46 +31,6 @@ pub(crate) struct RuntimeModelImport {
     pub(crate) morph_name_to_index: HashMap<Vec<u8>, MorphIndex>,
     pub(crate) ik_solver_bone_name_to_index: HashMap<Vec<u8>, usize>,
     pub(crate) diagnostics: Vec<GoldenImportDiagnostic>,
-}
-
-pub(crate) fn parse_golden_ik_compare_args(
-    args: &mut impl Iterator<Item = String>,
-) -> Result<(String, f32, bool), String> {
-    let raw: Vec<String> = args.collect();
-    let mut use_json = false;
-    let mut positional = Vec::new();
-
-    for token in &raw {
-        if token == "--json" {
-            use_json = true;
-        } else if token.starts_with("--") {
-            return Err(format!("unknown flag: {token}"));
-        } else {
-            positional.push(token.clone());
-        }
-    }
-
-    let mut pos_iter = positional.into_iter();
-    let root = match pos_iter.next() {
-        Some(value) => value,
-        None => {
-            return Err(GOLDEN_IK_COMPARE_USAGE.to_owned());
-        }
-    };
-    let offset = match pos_iter.next() {
-        Some(value) => match value.parse::<f32>() {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                return Err(format!("invalid sample-frame-offset: {value}"));
-            }
-        },
-        None => 0.0,
-    };
-    if let Some(extra) = pos_iter.next() {
-        return Err(format!("unexpected extra argument: {extra}"));
-    }
-
-    Ok((root, offset, use_json))
 }
 
 pub(crate) fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {

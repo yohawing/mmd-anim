@@ -1097,23 +1097,11 @@ fn dispatch_verify_ik(
     }
 
     if compare || use_json || sample_frame_offset.is_some() {
-        let mut raw = vec![root.to_string_lossy().into_owned()];
-        if let Some(offset) = sample_frame_offset {
-            raw.push(offset.to_string());
-        }
-        if use_json {
-            raw.push("--json".to_owned());
-        }
-        let mut iter = raw.into_iter();
-        return match commands::golden::parse_golden_ik_compare_args(&mut iter) {
-            Ok((root, offset, use_json)) => {
-                commands::golden::golden_ik_compare(Path::new(&root), offset, use_json)
-            }
-            Err(error) => {
-                eprintln!("{error}");
-                Ok(ExitCode::from(2))
-            }
-        };
+        return commands::golden::golden_ik_compare(
+            root,
+            sample_frame_offset.unwrap_or(0.0),
+            use_json,
+        );
     }
 
     commands::golden::golden_ik_summary(root)

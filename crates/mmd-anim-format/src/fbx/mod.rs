@@ -5350,14 +5350,8 @@ mod tests {
             bones_only: true,
             ..FbxExportOptions::default()
         };
-        let fbx = export_fbx_with_runtime_bake(
-            &model,
-            runtime_model,
-            &clip,
-            last_frame,
-            &options,
-        )
-        .expect("bones-only runtime-baked FBX should export");
+        let fbx = export_fbx_with_runtime_bake(&model, runtime_model, &clip, last_frame, &options)
+            .expect("bones-only runtime-baked FBX should export");
         let tree = load_tree(&fbx);
         let root = tree.root();
         let definitions = root

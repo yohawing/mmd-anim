@@ -4318,10 +4318,14 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    fn runtime_baked_fixture_fbx() -> (PmxParsedModel, Vec<u8>) {
+    fn fixture_model() -> PmxParsedModel {
+        crate::parse_pmx_model(include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx"))
+            .expect("PMX fixture should parse")
+    }
+
+    fn runtime_bake_fixture() -> (Arc<ModelArena>, AnimationClip, u32) {
         let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
         let vmd_data = include_bytes!("../../fixtures/vmd/ik_multi_bone_nondefault.vmd");
-        let model = crate::parse_pmx_model(pmx_data).expect("PMX fixture should parse");
         let runtime_import =
             crate::import_pmx_runtime(pmx_data).expect("PMX runtime fixture should import");
         let runtime_motion =
@@ -4342,9 +4346,15 @@ mod tests {
             .map(|frame| frame.frame)
             .max()
             .unwrap_or(0);
+        (Arc::new(runtime_import.model), clip, last_frame)
+    }
+
+    fn runtime_baked_fixture_fbx() -> (PmxParsedModel, Vec<u8>) {
+        let model = fixture_model();
+        let (runtime_model, clip, last_frame) = runtime_bake_fixture();
         let fbx = export_fbx_with_runtime_bake(
             &model,
-            Arc::new(runtime_import.model),
+            runtime_model,
             &clip,
             last_frame,
             &FbxExportOptions::default(),
@@ -4968,8 +4978,7 @@ mod tests {
             }
         }
 
-        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
-        let mut model = crate::parse_pmx_model(pmx_data).unwrap();
+        let mut model = fixture_model();
         model.skeleton.bones.truncate(1);
         let runtime_model = Arc::new(
             ModelArena::new(vec![
@@ -5266,7 +5275,7 @@ mod tests {
 
     #[test]
     fn bones_only_export_omits_mesh_skin_material_pose_and_morphs() {
-        let (model, _fbx) = runtime_baked_fixture_fbx();
+        let model = fixture_model();
         let options = FbxExportOptions {
             bones_only: true,
             ..FbxExportOptions::default()
@@ -5335,36 +5344,15 @@ mod tests {
 
     #[test]
     fn bones_only_runtime_bake_keeps_bone_animation_without_morph_curves() {
-        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
-        let vmd_data = include_bytes!("../../fixtures/vmd/ik_multi_bone_nondefault.vmd");
-        let model = crate::parse_pmx_model(pmx_data).expect("PMX fixture should parse");
-        let runtime_import =
-            crate::import_pmx_runtime(pmx_data).expect("PMX runtime fixture should import");
-        let runtime_motion =
-            crate::import_vmd_motion(vmd_data).expect("VMD runtime fixture should import");
-        let parsed_motion = crate::parse_vmd_animation(vmd_data).expect("VMD fixture should parse");
-        let clip = crate::build_mmd_registered_pair_clip(
-            &runtime_import.model,
-            &runtime_motion,
-            &runtime_import.bone_name_to_index,
-            &runtime_import.morph_name_to_index,
-            &runtime_import.ik_solver_bone_name_to_index,
-            runtime_import.model.ik_count(),
-        )
-        .expect("MMD-registered VMD clip should build");
-        let last_frame = parsed_motion
-            .bone_frames
-            .iter()
-            .map(|frame| frame.frame)
-            .max()
-            .unwrap_or(0);
+        let model = fixture_model();
+        let (runtime_model, clip, last_frame) = runtime_bake_fixture();
         let options = FbxExportOptions {
             bones_only: true,
             ..FbxExportOptions::default()
         };
         let fbx = export_fbx_with_runtime_bake(
             &model,
-            Arc::new(runtime_import.model),
+            runtime_model,
             &clip,
             last_frame,
             &options,
@@ -5414,7 +5402,7 @@ mod tests {
 
     #[test]
     fn fbx_export_writes_diffuse_texture_references() {
-        let (mut model, _fbx) = runtime_baked_fixture_fbx();
+        let mut model = fixture_model();
         model.materials[0].texture_path = "textures/diffuse.png".to_owned();
         let fbx =
             export_fbx(&model, None, &FbxExportOptions::default()).expect("FBX should export");
@@ -5491,8 +5479,7 @@ mod tests {
     fn vertex_morph_test_model() -> PmxParsedModel {
         use crate::pmx::PmxParsedVertexMorphOffset;
 
-        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
-        let mut model = crate::parse_pmx_model(pmx_data).expect("PMX fixture should parse");
+        let mut model = fixture_model();
         model.geometry.positions = vec![
             0.0, 0.0, 0.0, //
             1.0, 0.0, 0.0, //
@@ -5939,7 +5926,7 @@ mod tests {
 
     #[test]
     fn readable_bone_name_policy_writes_readable_fbx_joint_names() {
-        let (mut model, _) = runtime_baked_fixture_fbx();
+        let mut model = fixture_model();
         model.skeleton.bones[0].name = "センター".to_owned();
         model.skeleton.bones[0].english_name.clear();
 
@@ -6110,34 +6097,12 @@ mod tests {
 
     #[test]
     fn readable_bone_name_policy_preserves_runtime_baked_structure_and_animation_ids() {
-        let (mut model, _) = runtime_baked_fixture_fbx();
+        let mut model = fixture_model();
         model.skeleton.bones[0].name = "センター".to_owned();
         model.skeleton.bones[0].english_name.clear();
 
-        let pmx_data = include_bytes!("../../fixtures/pmx/ik_multi_axis_limit.pmx");
-        let vmd_data = include_bytes!("../../fixtures/vmd/ik_multi_bone_nondefault.vmd");
-        let runtime_import =
-            crate::import_pmx_runtime(pmx_data).expect("PMX runtime fixture should import");
-        let runtime_motion =
-            crate::import_vmd_motion(vmd_data).expect("VMD runtime fixture should import");
-        let parsed_motion = crate::parse_vmd_animation(vmd_data).expect("VMD fixture should parse");
-        let clip = crate::build_mmd_registered_pair_clip(
-            &runtime_import.model,
-            &runtime_motion,
-            &runtime_import.bone_name_to_index,
-            &runtime_import.morph_name_to_index,
-            &runtime_import.ik_solver_bone_name_to_index,
-            runtime_import.model.ik_count(),
-        )
-        .expect("MMD-registered VMD clip should build");
-        let last_frame = parsed_motion
-            .bone_frames
-            .iter()
-            .map(|frame| frame.frame)
-            .max()
-            .unwrap_or(0);
+        let (runtime_model, clip, last_frame) = runtime_bake_fixture();
 
-        let runtime_model = Arc::new(runtime_import.model);
         let legacy_fbx = export_fbx_with_runtime_bake(
             &model,
             Arc::clone(&runtime_model),

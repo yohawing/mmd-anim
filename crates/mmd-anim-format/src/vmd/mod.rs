@@ -2053,8 +2053,6 @@ fn project_rotation_to_fixed_axis(rotation: Quat, axis: Vec3A) -> Quat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[allow(unused_imports)]
-    use serde_json;
 
     #[test]
     fn vmd_parts_preserves_soa_order_interpolation_and_all_sections() {

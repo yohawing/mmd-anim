@@ -466,6 +466,8 @@ pub struct ReductionWorkStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValidationMode {
     Incremental,
+    // Used by tests to compare incremental validation with a full rescan.
+    #[cfg_attr(not(test), allow(dead_code))]
     FullScan,
 }
 

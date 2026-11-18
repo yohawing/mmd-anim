@@ -255,11 +255,7 @@ pub fn skip_model_info(data: &[u8], _header: &PmxHeader, pos: usize) -> Result<u
 
 pub fn skip_vertices(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
-    let count = count as usize;
+    let count = read_section_count(&mut r)?;
 
     for _ in 0..count {
         r.skip(12)?;
@@ -300,11 +296,7 @@ pub fn skip_vertices(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usiz
 
 pub fn skip_faces(data: &[u8], vertex_index_size: u8, pos: usize) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
-    let count = count as usize;
+    let count = read_section_count(&mut r)?;
     let bytes = count
         .checked_mul(vertex_index_size as usize)
         .ok_or(ImportError::SectionOverflow)?;
@@ -318,10 +310,7 @@ pub fn skip_textures(
     pos: usize,
 ) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
+    let count = read_section_count(&mut r)?;
     for _ in 0..count {
         r.skip_string()?; // Path.
     }
@@ -330,10 +319,7 @@ pub fn skip_textures(
 
 pub fn skip_materials(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
+    let count = read_section_count(&mut r)?;
     for _ in 0..count {
         r.skip_string()?; // Name.
         r.skip_string()?; // English name.
@@ -360,10 +346,7 @@ pub fn skip_materials(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usi
 
 pub fn skip_morphs(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
+    let count = read_section_count(&mut r)?;
     for _ in 0..count {
         r.skip_string()?; // Name.
         r.skip_string()?; // English name.
@@ -416,12 +399,7 @@ pub fn read_morph_names(
     pos: usize,
 ) -> Result<(PmxMorphNames, usize), ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
-    let count = count as usize;
-    r.require_record_bytes(count, 1)?;
+    let count = read_section_count_with_min_record(&mut r, 1)?;
 
     let mut name_bytes = Vec::with_capacity(count);
     let mut names = Vec::with_capacity(count);
@@ -434,11 +412,7 @@ pub fn read_morph_names(
 
         r.skip(1)?;
         let morph_type = r.read_u8()?;
-        let offset_count = r.read_i32_le()?;
-        if offset_count < 0 {
-            return Err(ImportError::SectionOverflow);
-        }
-        let offset_count = offset_count as usize;
+        let offset_count = read_section_count(&mut r)?;
 
         let per_offset = morph_offset_size(header, morph_type)?;
         r.skip(
@@ -460,12 +434,7 @@ fn read_runtime_morph_descriptor(
     pos: usize,
 ) -> Result<(PmxMorphNames, RuntimeMorphDescriptorV1, usize), ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
-    let count = count as usize;
-    r.require_record_bytes(count, 1)?;
+    let count = read_section_count_with_min_record(&mut r, 1)?;
 
     let mut name_bytes = Vec::with_capacity(count);
     let mut names = Vec::with_capacity(count);
@@ -481,11 +450,7 @@ fn read_runtime_morph_descriptor(
 
         r.skip(1)?;
         let morph_type = r.read_u8()?;
-        let offset_count = r.read_i32_le()?;
-        if offset_count < 0 {
-            return Err(ImportError::SectionOverflow);
-        }
-        let offset_count = offset_count as usize;
+        let offset_count = read_section_count(&mut r)?;
 
         match morph_type {
             0 => {
@@ -608,12 +573,7 @@ fn read_bones_with_local_axes(
     pos: usize,
 ) -> Result<(PmxBoneRead, usize), ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
-    let count = count as usize;
-    r.require_record_bytes(count, 1)?;
+    let count = read_section_count_with_min_record(&mut r, 1)?;
 
     let mut bones = Vec::with_capacity(count);
     let mut ik_solvers = Vec::new();
@@ -685,13 +645,10 @@ fn read_bones_with_local_axes(
             let ik_target = r.read_bone_index(header)?;
             let ik_loop_count = r.read_i32_le()?;
             let ik_limit_angle = r.read_f32_le()?;
-            let link_count = r.read_i32_le()?;
-            if link_count < 0 {
-                return Err(ImportError::SectionOverflow);
-            }
-            r.require_record_bytes(link_count as usize, header.bone_index_size as usize + 1)?;
+            let link_count =
+                read_section_count_with_min_record(&mut r, header.bone_index_size as usize + 1)?;
 
-            let mut links = Vec::with_capacity(link_count as usize);
+            let mut links = Vec::with_capacity(link_count);
             for _ in 0..link_count {
                 // Match the legacy importer for malformed optional IK links.
                 // Bone 0 is the historical fallback and keeps such PMX files

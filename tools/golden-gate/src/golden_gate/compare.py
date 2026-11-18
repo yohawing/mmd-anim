@@ -320,78 +320,9 @@ def _compare_summary(
             },
             failures,
         )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "maxAbsError",
-        SUMMARY_NUMERIC_FIELDS["maxAbsError"],
-        tolerances.max_abs_error_tolerance,
-        failures,
-    )
-    if has_physics_cases:
-        _compare_not_greater(
-            baseline,
-            current,
-            "summary",
-            "translationMaxError",
-            SUMMARY_NUMERIC_FIELDS["translationMaxError"],
-            tolerances.translation_max_error_tolerance,
-            failures,
-        )
-        _compare_not_greater(
-            baseline,
-            current,
-            "summary",
-            "translationRmsError",
-            SUMMARY_NUMERIC_FIELDS["translationRmsError"],
-            tolerances.translation_rms_error_tolerance,
-            failures,
-        )
-        _compare_not_greater(
-            baseline,
-            current,
-            "summary",
-            "rotationMaxAngleRad",
-            SUMMARY_NUMERIC_FIELDS["rotationMaxAngleRad"],
-            tolerances.rotation_max_angle_rad_tolerance,
-            failures,
-        )
-        _compare_not_greater(
-            baseline,
-            current,
-            "summary",
-            "rotationRmsAngleRad",
-            SUMMARY_NUMERIC_FIELDS["rotationRmsAngleRad"],
-            tolerances.rotation_rms_angle_rad_tolerance,
-            failures,
-        )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "mismatchCount",
-        SUMMARY_NUMERIC_FIELDS["mismatchCount"],
-        tolerances.mismatch_count_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "missing",
-        SUMMARY_NUMERIC_FIELDS["missing"],
-        tolerances.missing_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "importErrors",
-        SUMMARY_NUMERIC_FIELDS["importErrors"],
-        tolerances.import_error_tolerance,
-        failures,
+    _compare_numeric_metrics(
+        baseline, current, "summary", SUMMARY_NUMERIC_FIELDS,
+        tolerances, has_physics_cases, failures,
     )
     for field, aliases in COVERAGE_FIELDS.items():
         _compare_not_lower(baseline, current, "summary", field, aliases, failures)
@@ -472,84 +403,43 @@ def _compare_cases(
                 },
                 failures,
             )
-        _compare_not_greater(
-            baseline,
-            current,
-            prefix,
-            "maxAbsError",
-            CASE_NUMERIC_FIELDS["maxAbsError"],
-            tolerances.max_abs_error_tolerance,
-            failures,
-        )
-        if is_physics_case:
-            _compare_not_greater(
-                baseline,
-                current,
-                prefix,
-                "translationMaxError",
-                CASE_NUMERIC_FIELDS["translationMaxError"],
-                tolerances.translation_max_error_tolerance,
-                failures,
-            )
-            _compare_not_greater(
-                baseline,
-                current,
-                prefix,
-                "translationRmsError",
-                CASE_NUMERIC_FIELDS["translationRmsError"],
-                tolerances.translation_rms_error_tolerance,
-                failures,
-            )
-            _compare_not_greater(
-                baseline,
-                current,
-                prefix,
-                "rotationMaxAngleRad",
-                CASE_NUMERIC_FIELDS["rotationMaxAngleRad"],
-                tolerances.rotation_max_angle_rad_tolerance,
-                failures,
-            )
-            _compare_not_greater(
-                baseline,
-                current,
-                prefix,
-                "rotationRmsAngleRad",
-                CASE_NUMERIC_FIELDS["rotationRmsAngleRad"],
-                tolerances.rotation_rms_angle_rad_tolerance,
-                failures,
-            )
-        _compare_not_greater(
-            baseline,
-            current,
-            prefix,
-            "mismatchCount",
-            CASE_NUMERIC_FIELDS["mismatchCount"],
-            tolerances.mismatch_count_tolerance,
-            failures,
-        )
-        _compare_not_greater(
-            baseline,
-            current,
-            prefix,
-            "missing",
-            CASE_NUMERIC_FIELDS["missing"],
-            tolerances.missing_tolerance,
-            failures,
-        )
-        _compare_not_greater(
-            baseline,
-            current,
-            prefix,
-            "importErrors",
-            CASE_NUMERIC_FIELDS["importErrors"],
-            tolerances.import_error_tolerance,
-            failures,
+        _compare_numeric_metrics(
+            baseline, current, prefix, CASE_NUMERIC_FIELDS,
+            tolerances, is_physics_case, failures,
         )
         _compare_required_physics_backend(baseline, current, prefix, options, failures)
         for field, aliases in COVERAGE_FIELDS.items():
             _compare_not_lower(baseline, current, prefix, field, aliases, failures)
         if not options.allow_skipped_target_changes:
             _compare_set_equal(baseline, current, prefix, "skippedTargets", (), failures)
+
+
+def _compare_numeric_metrics(
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+    prefix: str,
+    field_aliases: dict[str, tuple[str, ...]],
+    tolerances: Tolerances,
+    include_physics: bool,
+    failures: list[RegressionFailure],
+) -> None:
+    metrics = [("maxAbsError", tolerances.max_abs_error_tolerance)]
+    if include_physics:
+        metrics.extend((
+            ("translationMaxError", tolerances.translation_max_error_tolerance),
+            ("translationRmsError", tolerances.translation_rms_error_tolerance),
+            ("rotationMaxAngleRad", tolerances.rotation_max_angle_rad_tolerance),
+            ("rotationRmsAngleRad", tolerances.rotation_rms_angle_rad_tolerance),
+        ))
+    metrics.extend((
+        ("mismatchCount", tolerances.mismatch_count_tolerance),
+        ("missing", tolerances.missing_tolerance),
+        ("importErrors", tolerances.import_error_tolerance),
+    ))
+    for field, tolerance in metrics:
+        _compare_not_greater(
+            baseline, current, prefix, field, field_aliases[field], tolerance, failures,
+        )
 
 
 def _compare_status(

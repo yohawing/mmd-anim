@@ -327,10 +327,7 @@ fn count_keyframe_bundle(
     match oneof_payload {
         Some((1, bytes)) => {
             counts.accessory += 1;
-            let frames = read_len_messages(bytes, 2)?
-                .into_iter()
-                .map(parse_accessory_keyframe)
-                .collect::<Result<Vec<_>, _>>()?;
+            let frames = parse_len_messages(bytes, 2, parse_accessory_keyframe)?;
             payload.accessory_keyframes += frames.len();
             payload.accessory_frames.extend(frames);
         }
@@ -340,28 +337,19 @@ fn count_keyframe_bundle(
         }
         Some((3, bytes)) => {
             counts.camera += 1;
-            let frames = read_len_messages(bytes, 2)?
-                .into_iter()
-                .map(parse_camera_keyframe)
-                .collect::<Result<Vec<_>, _>>()?;
+            let frames = parse_len_messages(bytes, 2, parse_camera_keyframe)?;
             payload.camera_keyframes += frames.len();
             payload.camera_frames.extend(frames);
         }
         Some((5, bytes)) => {
             counts.light += 1;
-            let frames = read_len_messages(bytes, 2)?
-                .into_iter()
-                .map(parse_light_keyframe)
-                .collect::<Result<Vec<_>, _>>()?;
+            let frames = parse_len_messages(bytes, 2, parse_light_keyframe)?;
             payload.light_keyframes += frames.len();
             payload.light_frames.extend(frames);
         }
         Some((6, bytes)) => {
             counts.model += 1;
-            let frames = read_len_messages(bytes, 2)?
-                .into_iter()
-                .map(parse_model_keyframe)
-                .collect::<Result<Vec<_>, _>>()?;
+            let frames = parse_len_messages(bytes, 2, parse_model_keyframe)?;
             payload.model_keyframes += frames.len();
             payload.model_frames.extend(frames);
         }
@@ -371,10 +359,7 @@ fn count_keyframe_bundle(
         }
         Some((9, bytes)) => {
             counts.self_shadow += 1;
-            let frames = read_len_messages(bytes, 2)?
-                .into_iter()
-                .map(parse_self_shadow_keyframe)
-                .collect::<Result<Vec<_>, _>>()?;
+            let frames = parse_len_messages(bytes, 2, parse_self_shadow_keyframe)?;
             payload.self_shadow_keyframes += frames.len();
             payload.self_shadow_frames.extend(frames);
         }
@@ -388,10 +373,7 @@ fn count_bone_bundle_payload(
     payload: &mut NmdPayloadSummary,
 ) -> Result<(), ImportError> {
     payload.bone_local_tracks += count_len_field(data, 2)?;
-    let frames = read_len_messages(data, 3)?
-        .into_iter()
-        .map(parse_bone_keyframe)
-        .collect::<Result<Vec<_>, _>>()?;
+    let frames = parse_len_messages(data, 3, parse_bone_keyframe)?;
     payload.bone_keyframes += frames.len();
     payload.bone_frames.extend(frames);
     Ok(())
@@ -402,10 +384,7 @@ fn count_morph_bundle_payload(
     payload: &mut NmdPayloadSummary,
 ) -> Result<(), ImportError> {
     payload.morph_local_tracks += count_len_field(data, 2)?;
-    let frames = read_len_messages(data, 3)?
-        .into_iter()
-        .map(parse_morph_keyframe)
-        .collect::<Result<Vec<_>, _>>()?;
+    let frames = parse_len_messages(data, 3, parse_morph_keyframe)?;
     payload.morph_keyframes += frames.len();
     payload.morph_frames.extend(frames);
     Ok(())
@@ -423,7 +402,11 @@ fn count_len_field(data: &[u8], target_field: u32) -> Result<usize, ImportError>
     Ok(count)
 }
 
-fn read_len_messages(data: &[u8], target_field: u32) -> Result<Vec<&[u8]>, ImportError> {
+fn parse_len_messages<T>(
+    data: &[u8],
+    target_field: u32,
+    parse: impl FnMut(&[u8]) -> Result<T, ImportError>,
+) -> Result<Vec<T>, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut messages = Vec::new();
     while let Some((field, wire_type)) = r.read_key()? {
@@ -433,7 +416,8 @@ fn read_len_messages(data: &[u8], target_field: u32) -> Result<Vec<&[u8]>, Impor
             r.skip_value(wire_type)?;
         }
     }
-    Ok(messages)
+    // Validate the complete envelope before decoding its payloads.
+    messages.into_iter().map(parse).collect()
 }
 
 fn parse_common(data: &[u8]) -> Result<NmdKeyframeCommon, ImportError> {

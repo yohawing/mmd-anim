@@ -203,18 +203,10 @@ pub(crate) struct IkRuntimeStatsSummary {
 }
 
 pub(crate) fn summarize_ik_runtime_stats(stats: &[IkSolverRuntimeStats]) -> IkRuntimeStatsSummary {
-    let solver_evaluations = stats
-        .iter()
-        .map(|stats| stats.solver_evaluations)
-        .sum::<u64>();
-    let configured_iterations = stats
-        .iter()
-        .map(|stats| stats.configured_iterations)
-        .sum::<u64>();
-    let executed_iterations = stats
-        .iter()
-        .map(|stats| stats.executed_iterations)
-        .sum::<u64>();
+    let sum = |field: fn(&IkSolverRuntimeStats) -> u64| stats.iter().map(field).sum::<u64>();
+    let solver_evaluations = sum(|stats| stats.solver_evaluations);
+    let configured_iterations = sum(|stats| stats.configured_iterations);
+    let executed_iterations = sum(|stats| stats.executed_iterations);
     let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
     let skipped_ratio = if configured_iterations == 0 {
         0.0
@@ -228,21 +220,12 @@ pub(crate) fn summarize_ik_runtime_stats(stats: &[IkSolverRuntimeStats]) -> IkRu
         executed_iterations,
         skipped_iterations,
         skipped_ratio,
-        tolerance_precheck_breaks: stats
-            .iter()
-            .map(|stats| stats.tolerance_precheck_breaks)
-            .sum(),
-        tolerance_post_iteration_breaks: stats
-            .iter()
-            .map(|stats| stats.tolerance_post_iteration_breaks)
-            .sum(),
-        rollback_breaks: stats.iter().map(|stats| stats.rollback_breaks).sum(),
-        max_iteration_exhaustions: stats
-            .iter()
-            .map(|stats| stats.max_iteration_exhaustions)
-            .sum(),
-        link_visits: stats.iter().map(|stats| stats.link_visits).sum(),
-        link_steps: stats.iter().map(|stats| stats.link_steps).sum(),
+        tolerance_precheck_breaks: sum(|stats| stats.tolerance_precheck_breaks),
+        tolerance_post_iteration_breaks: sum(|stats| stats.tolerance_post_iteration_breaks),
+        rollback_breaks: sum(|stats| stats.rollback_breaks),
+        max_iteration_exhaustions: sum(|stats| stats.max_iteration_exhaustions),
+        link_visits: sum(|stats| stats.link_visits),
+        link_steps: sum(|stats| stats.link_steps),
     }
 }
 

@@ -264,24 +264,16 @@ pub fn skip_vertices(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usiz
         r.skip(header.extra_uv_count as usize * 16)?;
         let vertex_deform_type = r.read_u8()?;
 
-        let bone_indices: usize = match vertex_deform_type {
-            0 => 1,
-            1 => 2,
-            2 | 4 => 4,
-            3 => 2,
+        let (bone_indices, weight_count) = match vertex_deform_type {
+            0 => (1, 0),
+            1 | 3 => (2, 1),
+            2 | 4 => (4, 4),
             _ => return Err(ImportError::SectionOverflow),
         };
         for _ in 0..bone_indices {
             r.read_sized_index(header.bone_index_size)?;
         }
 
-        let weight_count: usize = match vertex_deform_type {
-            0 => 0,
-            1 => 1,
-            2 | 4 => 4,
-            3 => 1,
-            _ => return Err(ImportError::SectionOverflow),
-        };
         r.skip(weight_count * 4)?;
 
         if vertex_deform_type == 3 {

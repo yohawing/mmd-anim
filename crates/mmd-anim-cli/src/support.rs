@@ -8,33 +8,23 @@ use mmd_anim_format::MmdFormatKind;
 use mmd_anim_runtime::IkSolverRuntimeStats;
 
 pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>> {
-    fs::read(path).map_err(|error| {
-        anyhow!(
-            "failed to read {}: {}",
-            path.display(),
-            io_error_label(error.kind())
-        )
-    })
+    fs::read(path).map_err(|error| file_operation_error("read", path, error))
 }
 
 pub(crate) fn read_text_file(path: &Path) -> Result<String> {
-    fs::read_to_string(path).map_err(|error| {
-        anyhow!(
-            "failed to read {}: {}",
-            path.display(),
-            io_error_label(error.kind())
-        )
-    })
+    fs::read_to_string(path).map_err(|error| file_operation_error("read", path, error))
 }
 
 pub(crate) fn write_file(path: &Path, data: impl AsRef<[u8]>) -> Result<()> {
-    fs::write(path, data).map_err(|error| {
-        anyhow!(
-            "failed to write {}: {}",
-            path.display(),
-            io_error_label(error.kind())
-        )
-    })
+    fs::write(path, data).map_err(|error| file_operation_error("write", path, error))
+}
+
+fn file_operation_error(operation: &str, path: &Path, error: io::Error) -> anyhow::Error {
+    anyhow!(
+        "failed to {operation} {}: {}",
+        path.display(),
+        io_error_label(error.kind())
+    )
 }
 
 pub(crate) fn diagnostics_suffix(count: usize) -> String {

@@ -807,11 +807,19 @@ pub fn build_pmm_document_model_clip(
         }
     }
 
-    let additional_bones = indexed_bone_keyframes(model)?;
+    let additional_bones = indexed_keyframes(
+        &model.bone_keyframe_summaries,
+        model.bone_count,
+        "bone",
+        |summary| summary.index,
+    )?;
     let mut bone_tracks = Vec::with_capacity(model.bone_count);
     let mut consumed_bone_keyframes = HashSet::with_capacity(additional_bones.len());
     for (bone_index, initial) in model.initial_bone_keyframe_summaries.iter().enumerate() {
-        let summaries = collect_bone_keyframe_chain(initial, &additional_bones, bone_index)?;
+        let summaries =
+            collect_keyframe_chain(initial, &additional_bones, "bone", bone_index, |summary| {
+                (summary.previous_keyframe_index, summary.next_keyframe_index)
+            })?;
         let mut keyframes = Vec::with_capacity(summaries.len());
         let mut frames = HashSet::with_capacity(summaries.len());
         for summary in summaries {
@@ -873,11 +881,22 @@ pub fn build_pmm_document_model_clip(
         )));
     }
 
-    let additional_morphs = indexed_morph_keyframes(model)?;
+    let additional_morphs = indexed_keyframes(
+        &model.morph_keyframe_summaries,
+        model.morph_count,
+        "morph",
+        |summary| summary.index,
+    )?;
     let mut morph_tracks = Vec::with_capacity(model.morph_count);
     let mut consumed_morph_keyframes = HashSet::with_capacity(additional_morphs.len());
     for (morph_index, initial) in model.initial_morph_keyframe_summaries.iter().enumerate() {
-        let summaries = collect_morph_keyframe_chain(initial, &additional_morphs, morph_index)?;
+        let summaries = collect_keyframe_chain(
+            initial,
+            &additional_morphs,
+            "morph",
+            morph_index,
+            |summary| (summary.previous_keyframe_index, summary.next_keyframe_index),
+        )?;
         let mut keyframes = Vec::with_capacity(summaries.len());
         let mut frames = HashSet::with_capacity(summaries.len());
         for summary in summaries {
@@ -922,124 +941,69 @@ pub fn build_pmm_document_model_clip(
     Ok(AnimationClip::new_full(bone_tracks, morph_tracks, None))
 }
 
-fn indexed_bone_keyframes(
-    model: &PmmDocumentModelSummary,
-) -> Result<HashMap<i32, &PmmDocumentBoneKeyframeSummary>, PmmDocumentClipBuildError> {
-    let mut indexed = HashMap::with_capacity(model.bone_keyframe_summaries.len());
-    for summary in &model.bone_keyframe_summaries {
-        let index = summary.index.ok_or_else(|| {
-            PmmDocumentClipBuildError::new("PMM additional bone keyframe is missing its index")
+fn indexed_keyframes<'a, T>(
+    summaries: &'a [T],
+    track_count: usize,
+    track_kind: &str,
+    get_index: impl Fn(&T) -> Option<i32>,
+) -> Result<HashMap<i32, &'a T>, PmmDocumentClipBuildError> {
+    let mut indexed = HashMap::with_capacity(summaries.len());
+    for summary in summaries {
+        let index = get_index(summary).ok_or_else(|| {
+            PmmDocumentClipBuildError::new(format!(
+                "PMM additional {track_kind} keyframe is missing its index"
+            ))
         })?;
         if index < 0 {
             return Err(PmmDocumentClipBuildError::new(format!(
-                "PMM additional bone keyframe index {index} must be non-negative"
+                "PMM additional {track_kind} keyframe index {index} must be non-negative"
             )));
         }
-        if (index as usize) < model.bone_count {
+        if (index as usize) < track_count {
             return Err(PmmDocumentClipBuildError::new(format!(
-                "PMM additional bone keyframe index {index} overlaps initial bone track index namespace; expected index >= {}",
-                model.bone_count
+                "PMM additional {track_kind} keyframe index {index} overlaps initial {track_kind} track index namespace; expected index >= {track_count}"
             )));
         }
         if indexed.insert(index, summary).is_some() {
             return Err(PmmDocumentClipBuildError::new(format!(
-                "PMM duplicate additional bone keyframe index {index}"
+                "PMM duplicate additional {track_kind} keyframe index {index}"
             )));
         }
     }
     Ok(indexed)
 }
 
-fn indexed_morph_keyframes(
-    model: &PmmDocumentModelSummary,
-) -> Result<HashMap<i32, &PmmDocumentMorphKeyframeSummary>, PmmDocumentClipBuildError> {
-    let mut indexed = HashMap::with_capacity(model.morph_keyframe_summaries.len());
-    for summary in &model.morph_keyframe_summaries {
-        let index = summary.index.ok_or_else(|| {
-            PmmDocumentClipBuildError::new("PMM additional morph keyframe is missing its index")
-        })?;
-        if index < 0 {
-            return Err(PmmDocumentClipBuildError::new(format!(
-                "PMM additional morph keyframe index {index} must be non-negative"
-            )));
-        }
-        if (index as usize) < model.morph_count {
-            return Err(PmmDocumentClipBuildError::new(format!(
-                "PMM additional morph keyframe index {index} overlaps initial morph track index namespace; expected index >= {}",
-                model.morph_count
-            )));
-        }
-        if indexed.insert(index, summary).is_some() {
-            return Err(PmmDocumentClipBuildError::new(format!(
-                "PMM duplicate additional morph keyframe index {index}"
-            )));
-        }
-    }
-    Ok(indexed)
-}
-
-fn collect_bone_keyframe_chain<'a>(
-    initial: &'a PmmDocumentBoneKeyframeSummary,
-    indexed: &HashMap<i32, &'a PmmDocumentBoneKeyframeSummary>,
-    bone_index: usize,
-) -> Result<Vec<&'a PmmDocumentBoneKeyframeSummary>, PmmDocumentClipBuildError> {
+fn collect_keyframe_chain<'a, T>(
+    initial: &'a T,
+    indexed: &HashMap<i32, &'a T>,
+    track_kind: &str,
+    track_index: usize,
+    links: impl Fn(&T) -> (i32, i32),
+) -> Result<Vec<&'a T>, PmmDocumentClipBuildError> {
     let mut result = vec![initial];
     let mut visited = HashSet::new();
-    let mut next_index = initial.next_keyframe_index;
-    let mut expected_previous_index = bone_index as i32;
+    let mut next_index = links(initial).1;
+    let mut expected_previous_index = track_index as i32;
     while next_index != 0 {
         let summary = indexed.get(&next_index).copied().ok_or_else(|| {
             PmmDocumentClipBuildError::new(format!(
-                "PMM bone {bone_index} keyframe chain references missing index {next_index}"
+                "PMM {track_kind} {track_index} keyframe chain references missing index {next_index}"
             ))
         })?;
         if !visited.insert(next_index) {
             return Err(PmmDocumentClipBuildError::new(format!(
-                "PMM bone {bone_index} keyframe chain contains a cycle at index {next_index}"
+                "PMM {track_kind} {track_index} keyframe chain contains a cycle at index {next_index}"
             )));
         }
-        if summary.previous_keyframe_index != expected_previous_index {
+        let (previous_index, following_index) = links(summary);
+        if previous_index != expected_previous_index {
             return Err(PmmDocumentClipBuildError::new(format!(
-                "PMM bone {bone_index} keyframe index {next_index} has previous index {}; expected {expected_previous_index}",
-                summary.previous_keyframe_index
+                "PMM {track_kind} {track_index} keyframe index {next_index} has previous index {previous_index}; expected {expected_previous_index}"
             )));
         }
         result.push(summary);
         expected_previous_index = next_index;
-        next_index = summary.next_keyframe_index;
-    }
-    Ok(result)
-}
-
-fn collect_morph_keyframe_chain<'a>(
-    initial: &'a PmmDocumentMorphKeyframeSummary,
-    indexed: &HashMap<i32, &'a PmmDocumentMorphKeyframeSummary>,
-    morph_index: usize,
-) -> Result<Vec<&'a PmmDocumentMorphKeyframeSummary>, PmmDocumentClipBuildError> {
-    let mut result = vec![initial];
-    let mut visited = HashSet::new();
-    let mut next_index = initial.next_keyframe_index;
-    let mut expected_previous_index = morph_index as i32;
-    while next_index != 0 {
-        let summary = indexed.get(&next_index).copied().ok_or_else(|| {
-            PmmDocumentClipBuildError::new(format!(
-                "PMM morph {morph_index} keyframe chain references missing index {next_index}"
-            ))
-        })?;
-        if !visited.insert(next_index) {
-            return Err(PmmDocumentClipBuildError::new(format!(
-                "PMM morph {morph_index} keyframe chain contains a cycle at index {next_index}"
-            )));
-        }
-        if summary.previous_keyframe_index != expected_previous_index {
-            return Err(PmmDocumentClipBuildError::new(format!(
-                "PMM morph {morph_index} keyframe index {next_index} has previous index {}; expected {expected_previous_index}",
-                summary.previous_keyframe_index
-            )));
-        }
-        result.push(summary);
-        expected_previous_index = next_index;
-        next_index = summary.next_keyframe_index;
+        next_index = following_index;
     }
     Ok(result)
 }

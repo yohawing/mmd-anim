@@ -2895,12 +2895,7 @@ fn push_document_bone_keyframe(
     translation: [f32; 3],
     rotation: [f32; 4],
 ) {
-    if let Some(index) = index {
-        push_i32(out, index);
-    }
-    push_i32(out, frame);
-    push_i32(out, previous);
-    push_i32(out, next);
+    push_document_base_keyframe(out, index, frame, previous, next);
     out.extend_from_slice(&interpolation);
     for value in translation {
         push_f32(out, value);
@@ -2920,12 +2915,7 @@ fn push_document_morph_keyframe(
     next: i32,
     weight: f32,
 ) {
-    if let Some(index) = index {
-        push_i32(out, index);
-    }
-    push_i32(out, frame);
-    push_i32(out, previous);
-    push_i32(out, next);
+    push_document_base_keyframe(out, index, frame, previous, next);
     push_f32(out, weight);
     out.push(0);
 }
@@ -2942,12 +2932,7 @@ fn push_document_model_keyframe(
     outside_parent_indices: &[(i32, i32)],
     self_shadow_enabled: bool,
 ) {
-    if let Some(index) = index {
-        push_i32(out, index);
-    }
-    push_i32(out, frame);
-    push_i32(out, previous);
-    push_i32(out, next);
+    push_document_base_keyframe(out, index, frame, previous, next);
     out.push(u8::from(visible));
     for &enabled in constraint_states {
         out.push(u8::from(enabled));

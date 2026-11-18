@@ -116,6 +116,34 @@ fn execution_error_exits_with_one_and_reports_input_path() {
 }
 
 #[test]
+#[cfg(windows)]
+fn verify_oracle_reads_non_unicode_file_paths() {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    let mut path = unique_temp_path("oracle").into_os_string();
+    path.push(OsString::from_wide(&[0xd800]));
+    let path = PathBuf::from(path);
+    let guard = TempFileGuard::new(path.clone());
+    fs::write(
+        &path,
+        r#"{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"test"},"frame":0.0,"models":[]}"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mmd-anim"))
+        .arg("verify")
+        .arg(&path)
+        .arg("--json")
+        .output()
+        .expect("oracle summary should run");
+    guard.cleanup();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_text(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["frames"], 1);
+    assert_eq!(report["input"], path.to_string_lossy().as_ref());
+}
+
+#[test]
 fn verify_ik_preserves_literal_root_names_and_typed_offsets() {
     let parent = unique_temp_path("ik-roots");
     let mut outputs = Vec::new();

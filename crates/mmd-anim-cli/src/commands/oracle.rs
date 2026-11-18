@@ -1,4 +1,4 @@
-use std::{fs, process::ExitCode};
+use std::{fs, path::Path, process::ExitCode};
 
 use crate::schema::MmdDumperOracleDump;
 use serde::Serialize;
@@ -73,7 +73,7 @@ pub(crate) fn oracle_summary_json_report<'a>(
 }
 
 pub(crate) fn oracle_summary(
-    path: &str,
+    path: &Path,
     use_json: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
@@ -82,7 +82,7 @@ pub(crate) fn oracle_summary(
     if use_json {
         println!(
             "{}",
-            serde_json::to_string(&oracle_summary_json_report(path, &dump))?
+            serde_json::to_string(&oracle_summary_json_report(&path.to_string_lossy(), &dump))?
         );
     } else {
         let metrics = oracle_summary_metrics(&dump);

@@ -927,7 +927,7 @@ fn dispatch_verify(
         {
             return usage_error("verify without --mode only supports oracle summary files");
         }
-        return commands::oracle::oracle_summary(&target.to_string_lossy(), use_json);
+        return commands::oracle::oracle_summary(target, use_json);
     };
 
     match mode {

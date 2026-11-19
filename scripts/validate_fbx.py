@@ -31,13 +31,10 @@ def validate(fbx_path: str, cmds) -> dict:
 
     # -- Meshes --
     meshes = cmds.ls(type="mesh", long=True) or []
-    transforms = []
     mesh_details = []
     for m in meshes:
         parent = cmds.listRelatives(m, parent=True, fullPath=True)
         t = parent[0] if parent else m
-        if t not in transforms:
-            transforms.append(t)
         vcount = cmds.polyEvaluate(m, vertex=True)
         fcount = cmds.polyEvaluate(m, face=True)
         tcount = cmds.polyEvaluate(m, triangle=True)

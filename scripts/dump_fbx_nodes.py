@@ -7,24 +7,24 @@ import struct
 import sys
 from pathlib import Path
 
+_SCALAR_FORMATS = {
+    "Y": ("<h", 2),
+    "C": ("<B", 1),
+    "I": ("<i", 4),
+    "F": ("<f", 4),
+    "D": ("<d", 8),
+    "L": ("<q", 8),
+}
+
 
 def read_property(f):
     type_code = f.read(1)
     if not type_code:
         return None, None
     tc = chr(type_code[0])
-    if tc == "Y":
-        return tc, struct.unpack("<h", f.read(2))[0]
-    elif tc == "C":
-        return tc, struct.unpack("<B", f.read(1))[0]
-    elif tc == "I":
-        return tc, struct.unpack("<i", f.read(4))[0]
-    elif tc == "F":
-        return tc, struct.unpack("<f", f.read(4))[0]
-    elif tc == "D":
-        return tc, struct.unpack("<d", f.read(8))[0]
-    elif tc == "L":
-        return tc, struct.unpack("<q", f.read(8))[0]
+    if tc in _SCALAR_FORMATS:
+        scalar_format, size = _SCALAR_FORMATS[tc]
+        return tc, struct.unpack(scalar_format, f.read(size))[0]
     elif tc == "S":
         length = struct.unpack("<I", f.read(4))[0]
         return tc, f.read(length)
@@ -33,7 +33,7 @@ def read_property(f):
         f.read(length)
         return tc, f"<{length} bytes>"
     elif tc in ("f", "d", "l", "i", "b"):
-        count, encoding, comp_len = struct.unpack("<III", f.read(12))
+        count, _encoding, comp_len = struct.unpack("<III", f.read(12))
         f.read(comp_len)
         names = {"f": "f32", "d": "f64", "l": "i64", "i": "i32", "b": "bool"}
         return tc, f"[{names.get(tc, tc)}; {count}]"
@@ -56,7 +56,6 @@ def fmt(tc, val):
 
 def dump_nodes(f, end_offset, use64, depth=0, max_depth=4):
     while f.tell() < end_offset:
-        pos = f.tell()
         if use64:
             header = f.read(25)
             if len(header) < 25:
@@ -75,7 +74,6 @@ def dump_nodes(f, end_offset, use64, depth=0, max_depth=4):
 
         name = f.read(name_len).decode("ascii", errors="replace")
 
-        prop_start = f.tell()
         props = []
         for _ in range(num_props):
             tc, val = read_property(f)

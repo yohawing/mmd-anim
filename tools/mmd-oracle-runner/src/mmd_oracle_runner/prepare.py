@@ -222,14 +222,7 @@ def _input_inventory(case: OracleCase) -> dict[str, dict[str, Any]]:
     fields = {"caseFile": case.source_path, "pmx": case.pmx, "bodyVmd": case.body_vmd}
     if case.camera_vmd is not None:
         fields["cameraVmd"] = case.camera_vmd
-    inventory = {}
-    for field, path in fields.items():
-        digest = hashlib.sha256(); size = 0
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                size += len(chunk); digest.update(chunk)
-        inventory[field] = {"path": str(path), "size": size, "sha256": digest.hexdigest()}
-    return inventory
+    return {field: {"path": str(path), **artifacts.file_identity(path)} for field, path in fields.items()}
 
 
 def _check_artifacts(result: dict[str, Any]) -> None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import zipfile
@@ -8,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import artifacts
+from .artifacts import file_identity as artifact_identity
 from .case import OracleCase
 
 LEGACY_TEMPORARY_ARTIFACT_KEYS = ("fixtureTemp", "outputTemp", "doneTemp", "proxyLogTemp")
@@ -600,16 +600,6 @@ def _promotion_artifacts(marker: dict[str, Any]) -> tuple[dict[str, Any], dict[s
             ):
                 raise ValueError(f"promotion journal has invalid {label}.{key} identity")
     return prior, candidate
-
-
-def artifact_identity(path: Path) -> dict[str, Any]:
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            size += len(chunk)
-            digest.update(chunk)
-    return {"size": size, "sha256": digest.hexdigest()}
 
 
 def _validate_prepared_fixture(fixture: dict[str, Any], case: OracleCase, artifact_paths: dict[str, Path]) -> None:

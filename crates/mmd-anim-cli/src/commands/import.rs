@@ -581,17 +581,7 @@ pub(crate) fn parse_import_frame_range(text: &str) -> Result<ImportFrameSpec, St
     let mut index = 0usize;
     loop {
         let frame = start + index as f32 * step;
-        if frame > end {
-            if frames.last().copied() != Some(end) {
-                frames.push(end);
-                if frames.len() > MAX_IMPORT_BATCH_FRAMES {
-                    return Err(format!(
-                        "import batch frame count exceeds limit {MAX_IMPORT_BATCH_FRAMES}"
-                    ));
-                }
-            }
-            break;
-        }
+        let frame = if frame > end { end } else { frame };
         frames.push(frame);
         if frames.len() > MAX_IMPORT_BATCH_FRAMES {
             return Err(format!(

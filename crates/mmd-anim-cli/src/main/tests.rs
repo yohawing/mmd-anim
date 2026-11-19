@@ -836,11 +836,37 @@ fn import_frames_list_parser_preserves_order() {
 
 #[test]
 fn import_frame_range_parser_is_inclusive() {
-    let spec = import::parse_import_frame_range("0:10:5").unwrap();
-    let import::ImportFrameSpec::Range(frames) = spec else {
-        panic!("expected range frame spec");
-    };
-    assert_eq!(frames, vec![0.0, 5.0, 10.0]);
+    for (input, expected) in [
+        ("0:10:5", vec![0.0, 5.0, 10.0]),
+        ("0:10:6", vec![0.0, 6.0, 10.0]),
+        ("5:5:1", vec![5.0]),
+        ("-3e38:3e38:3e38", vec![-3e38, 0.0, 3e38]),
+    ] {
+        let spec = import::parse_import_frame_range(input).unwrap();
+        let import::ImportFrameSpec::Range(frames) = spec else {
+            panic!("expected range frame spec");
+        };
+        assert_eq!(frames, expected, "{input}");
+    }
+}
+
+#[test]
+fn import_frame_range_limit_includes_supplemented_end() {
+    for input in ["0:9999:1", "0:9998.5:1"] {
+        let import::ImportFrameSpec::Range(frames) =
+            import::parse_import_frame_range(input).unwrap()
+        else {
+            panic!("expected range frame spec");
+        };
+        assert_eq!(frames.len(), 10_000, "{input}");
+    }
+    for input in ["0:10000:1", "0:9999.5:1", "0:1:1e-45"] {
+        assert_eq!(
+            import::parse_import_frame_range(input).unwrap_err(),
+            "import batch frame count exceeds limit 10000",
+            "{input}"
+        );
+    }
 }
 
 #[test]

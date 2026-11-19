@@ -1686,7 +1686,7 @@ fn vmd_registration_name(name: &[u8]) -> &[u8] {
 
 // MMD registers records in file order, replacing an existing key at the same
 // frame. Apply this after name resolution so aliases share the same track.
-fn last_vmd_keys_per_frame<T>(mut keys: Vec<T>, frame: impl Fn(&T) -> u32) -> Vec<T> {
+pub(crate) fn last_vmd_keys_per_frame<T>(mut keys: Vec<T>, frame: impl Fn(&T) -> u32) -> Vec<T> {
     keys.reverse();
     keys.sort_by_key(&frame); // stable: the last file record is now first
     keys.dedup_by_key(|key| frame(key));

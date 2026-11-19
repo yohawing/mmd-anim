@@ -20,7 +20,7 @@ use mmd_anim_runtime::{
 
 use crate::{
     pmx::{PmxParsedBone, PmxParsedMaterial, PmxParsedModel, PmxParsedMorph},
-    vmd::{VmdParsedAnimation, VmdParsedBoneFrame, VmdParsedMorphFrame},
+    vmd::{VmdParsedAnimation, VmdParsedBoneFrame, VmdParsedMorphFrame, last_vmd_keys_per_frame},
 };
 
 mod skin_diff;
@@ -1976,23 +1976,12 @@ fn collect_bone_tracks(model: &PmxParsedModel, vmd: &VmdParsedAnimation) -> Vec<
 
     grouped_frames
         .into_iter()
-        .map(|(bone_index, mut frames)| {
-            frames.sort_by_key(|frame| frame.frame);
-            let mut keyframes = Vec::<SortedKeyframe>::with_capacity(frames.len());
-            for frame in frames {
-                let keyframe = sorted_keyframe_from_vmd(frame);
-                if keyframes
-                    .last()
-                    .is_some_and(|previous| previous.frame == keyframe.frame)
-                {
-                    keyframes.pop();
-                }
-                keyframes.push(keyframe);
-            }
-            BoneTrack {
-                bone_index,
-                keyframes,
-            }
+        .map(|(bone_index, frames)| BoneTrack {
+            bone_index,
+            keyframes: last_vmd_keys_per_frame(frames, |frame| frame.frame)
+                .into_iter()
+                .map(sorted_keyframe_from_vmd)
+                .collect(),
         })
         .filter(|track| !track.keyframes.is_empty())
         .collect()
@@ -2100,18 +2089,8 @@ fn collect_vmd_morph_tracks(
     }
 
     let mut morph_tracks = Vec::with_capacity(grouped_frames.len());
-    for (export_index, mut frames) in grouped_frames {
-        frames.sort_by_key(|frame| frame.frame);
-        let mut keyframes = Vec::<&VmdParsedMorphFrame>::with_capacity(frames.len());
-        for frame in frames {
-            if keyframes
-                .last()
-                .is_some_and(|previous| previous.frame == frame.frame)
-            {
-                keyframes.pop();
-            }
-            keyframes.push(frame);
-        }
+    for (export_index, frames) in grouped_frames {
+        let keyframes = last_vmd_keys_per_frame(frames, |frame| frame.frame);
 
         let frame_times: Vec<i64> = keyframes
             .iter()
@@ -5583,6 +5562,55 @@ mod tests {
                 && attrs.get(2).and_then(AttributeValue::get_i64) == Some(parent_id)
                 && attrs.get(3).and_then(AttributeValue::get_string) == Some(property)
         })
+    }
+
+    #[test]
+    fn vmd_tracks_keep_last_key_after_name_resolution() {
+        let mut model = vertex_morph_test_model();
+        model.skeleton.bones[0].english_name = "root-alias".to_owned();
+        let mut motion = crate::parse_vmd_animation(include_bytes!(
+            "../../fixtures/vmd/ik_multi_bone_nondefault.vmd"
+        ))
+        .unwrap();
+        let bone_template = motion.bone_frames[0].clone();
+        motion.bone_frames.clear();
+        motion.morph_frames.clear();
+        for (index, (frame, weight)) in [(30, 0.25), (0, 0.5), (30, 0.75), (0, 1.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut bone = bone_template.clone();
+            bone.bone_name = if index < 2 {
+                model.skeleton.bones[0].name.clone()
+            } else {
+                "root-alias".to_owned()
+            };
+            bone.frame = frame;
+            bone.translation = [weight * 4.0, 0.0, 0.0];
+            motion.bone_frames.push(bone);
+            motion.morph_frames.push(VmdParsedMorphFrame {
+                morph_name: if index < 2 { "Smile" } else { "smile" }.to_owned(),
+                morph_name_bytes: Vec::new(),
+                frame,
+                weight,
+            });
+        }
+
+        let bones = collect_bone_tracks(&model, &motion);
+        assert_eq!(bones.len(), 1);
+        assert_eq!(bones[0].bone_index, 0);
+        let keys: Vec<_> = bones[0]
+            .keyframes
+            .iter()
+            .map(|key| (key.frame, key.translation[0]))
+            .collect();
+        assert_eq!(keys, [(0, 4.0), (30, 3.0)]);
+
+        let morphs = collect_vmd_morph_tracks(&model, &motion);
+        assert_eq!(morphs.len(), 1);
+        assert_eq!(morphs[0].export_index, 0);
+        assert_eq!(morphs[0].frame_times, [0, 30 * FBX_FRAME_DURATION]);
+        assert_eq!(morphs[0].weight_values, [100.0, 75.0]);
     }
 
     #[test]

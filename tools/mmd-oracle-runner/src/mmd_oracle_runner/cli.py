@@ -16,21 +16,12 @@ from .report import ReportValidationError, write_report
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.command == "prepare-batch":
+    if args.command in ("prepare-batch", "record-batch"):
+        action = prepare_case if args.command == "prepare-batch" else lambda case: record_case(case, args.mmd_exe)
         summary = run_batch(
             args.case,
-            action=prepare_case,
-            action_name="prepare",
-            case_loader=load_case,
-        )
-        summary["command"] = args.command
-        _print_json(summary)
-        return 0 if summary["ok"] else 1
-    if args.command == "record-batch":
-        summary = run_batch(
-            args.case,
-            action=lambda case: record_case(case, args.mmd_exe),
-            action_name="record",
+            action=action,
+            action_name=args.command.removesuffix("-batch"),
             case_loader=load_case,
         )
         summary["command"] = args.command

@@ -2098,29 +2098,27 @@ pub fn export_pmm_manifest_with_scene_media_path_patch(
 
     let mut patched = manifest.source_bytes.clone();
 
-    if let Some(ref p) = patch.audio_path {
-        let off = settings.audio_path_offset;
-        if off + 256 > patched.len() {
-            return Err("audio path field offset exceeds source byte length".to_owned());
+    for (path, offset, label) in [
+        (&patch.audio_path, settings.audio_path_offset, "audio"),
+        (
+            &patch.background_video_path,
+            settings.background_video_path_offset,
+            "background video",
+        ),
+        (
+            &patch.background_image_path,
+            settings.background_image_path_offset,
+            "background image",
+        ),
+    ] {
+        if let Some(path) = path {
+            if offset + 256 > patched.len() {
+                return Err(format!(
+                    "{label} path field offset exceeds source byte length"
+                ));
+            }
+            write_pmm_fixed_sjis_to_slice(&mut patched[offset..offset + 256], path)?;
         }
-        let field = &mut patched[off..off + 256];
-        write_pmm_fixed_sjis_to_slice(field, p)?;
-    }
-    if let Some(ref p) = patch.background_video_path {
-        let off = settings.background_video_path_offset;
-        if off + 256 > patched.len() {
-            return Err("background video path field offset exceeds source byte length".to_owned());
-        }
-        let field = &mut patched[off..off + 256];
-        write_pmm_fixed_sjis_to_slice(field, p)?;
-    }
-    if let Some(ref p) = patch.background_image_path {
-        let off = settings.background_image_path_offset;
-        if off + 256 > patched.len() {
-            return Err("background image path field offset exceeds source byte length".to_owned());
-        }
-        let field = &mut patched[off..off + 256];
-        write_pmm_fixed_sjis_to_slice(field, p)?;
     }
 
     Ok(patched)

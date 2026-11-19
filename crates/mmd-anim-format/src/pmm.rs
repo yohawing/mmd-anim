@@ -1097,39 +1097,14 @@ pub struct PmmParserDiagnostic {
     pub message: String,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn make_keyframe_reference(
-    scope: &'static str,
-    track_kind: &'static str,
-    owner_index: Option<usize>,
-    document_index: Option<u8>,
-    owner_name: Option<String>,
-    initial: bool,
-    keyframe_index: Option<i32>,
-    frame_index: i32,
-    previous_keyframe_index: i32,
-    next_keyframe_index: i32,
-    offset: usize,
-    byte_length: usize,
-    payload_offset: usize,
-    payload_byte_length: usize,
-) -> PmmProjectKeyframeReference {
-    PmmProjectKeyframeReference {
-        scope,
-        track_kind,
-        owner_index,
-        document_index,
-        owner_name,
-        initial,
-        keyframe_index,
-        frame_index,
-        previous_keyframe_index,
-        next_keyframe_index,
-        offset,
-        byte_length,
-        payload_offset,
-        payload_byte_length,
-    }
+fn initial_and_additional_keyframes<'a, T>(
+    initial: &'a [T],
+    additional: &'a [T],
+) -> impl Iterator<Item = (bool, &'a T)> {
+    initial
+        .iter()
+        .map(|keyframe| (true, keyframe))
+        .chain(additional.iter().map(|keyframe| (false, keyframe)))
 }
 
 fn make_global_track_ref(
@@ -1164,8 +1139,11 @@ fn append_global_keyframe_refs(
     track: &PmmDocumentTrackSummary,
     kind: &'static str,
 ) {
-    if let Some(kf) = &track.initial_keyframe {
-        let (index, frame, prev, next, off, blen, poff, plen) = match kf {
+    for (initial, keyframe) in initial_and_additional_keyframes(
+        track.initial_keyframe.as_slice(),
+        &track.keyframe_summaries,
+    ) {
+        match keyframe {
             PmmDocumentKeyframeSummary::Camera {
                 index,
                 frame_index,
@@ -1176,17 +1154,8 @@ fn append_global_keyframe_refs(
                 payload_offset,
                 payload_byte_length,
                 ..
-            } => (
-                *index,
-                *frame_index,
-                *previous_keyframe_index,
-                *next_keyframe_index,
-                *offset,
-                *byte_length,
-                *payload_offset,
-                *payload_byte_length,
-            ),
-            PmmDocumentKeyframeSummary::Light {
+            }
+            | PmmDocumentKeyframeSummary::Light {
                 index,
                 frame_index,
                 previous_keyframe_index,
@@ -1196,17 +1165,8 @@ fn append_global_keyframe_refs(
                 payload_offset,
                 payload_byte_length,
                 ..
-            } => (
-                *index,
-                *frame_index,
-                *previous_keyframe_index,
-                *next_keyframe_index,
-                *offset,
-                *byte_length,
-                *payload_offset,
-                *payload_byte_length,
-            ),
-            PmmDocumentKeyframeSummary::Gravity {
+            }
+            | PmmDocumentKeyframeSummary::Gravity {
                 index,
                 frame_index,
                 previous_keyframe_index,
@@ -1216,17 +1176,8 @@ fn append_global_keyframe_refs(
                 payload_offset,
                 payload_byte_length,
                 ..
-            } => (
-                *index,
-                *frame_index,
-                *previous_keyframe_index,
-                *next_keyframe_index,
-                *offset,
-                *byte_length,
-                *payload_offset,
-                *payload_byte_length,
-            ),
-            PmmDocumentKeyframeSummary::SelfShadow {
+            }
+            | PmmDocumentKeyframeSummary::SelfShadow {
                 index,
                 frame_index,
                 previous_keyframe_index,
@@ -1236,108 +1187,23 @@ fn append_global_keyframe_refs(
                 payload_offset,
                 payload_byte_length,
                 ..
-            } => (
-                *index,
-                *frame_index,
-                *previous_keyframe_index,
-                *next_keyframe_index,
-                *offset,
-                *byte_length,
-                *payload_offset,
-                *payload_byte_length,
-            ),
-        };
-        refs.push(make_keyframe_reference(
-            "global", kind, None, None, None, true, index, frame, prev, next, off, blen, poff, plen,
-        ));
-    }
-    for kf in &track.keyframe_summaries {
-        let (index, frame, prev, next, off, blen, poff, plen) = match kf {
-            PmmDocumentKeyframeSummary::Camera {
-                index,
-                frame_index,
-                previous_keyframe_index,
-                next_keyframe_index,
-                offset,
-                byte_length,
-                payload_offset,
-                payload_byte_length,
-                ..
-            } => (
-                *index,
-                *frame_index,
-                *previous_keyframe_index,
-                *next_keyframe_index,
-                *offset,
-                *byte_length,
-                *payload_offset,
-                *payload_byte_length,
-            ),
-            PmmDocumentKeyframeSummary::Light {
-                index,
-                frame_index,
-                previous_keyframe_index,
-                next_keyframe_index,
-                offset,
-                byte_length,
-                payload_offset,
-                payload_byte_length,
-                ..
-            } => (
-                *index,
-                *frame_index,
-                *previous_keyframe_index,
-                *next_keyframe_index,
-                *offset,
-                *byte_length,
-                *payload_offset,
-                *payload_byte_length,
-            ),
-            PmmDocumentKeyframeSummary::Gravity {
-                index,
-                frame_index,
-                previous_keyframe_index,
-                next_keyframe_index,
-                offset,
-                byte_length,
-                payload_offset,
-                payload_byte_length,
-                ..
-            } => (
-                *index,
-                *frame_index,
-                *previous_keyframe_index,
-                *next_keyframe_index,
-                *offset,
-                *byte_length,
-                *payload_offset,
-                *payload_byte_length,
-            ),
-            PmmDocumentKeyframeSummary::SelfShadow {
-                index,
-                frame_index,
-                previous_keyframe_index,
-                next_keyframe_index,
-                offset,
-                byte_length,
-                payload_offset,
-                payload_byte_length,
-                ..
-            } => (
-                *index,
-                *frame_index,
-                *previous_keyframe_index,
-                *next_keyframe_index,
-                *offset,
-                *byte_length,
-                *payload_offset,
-                *payload_byte_length,
-            ),
-        };
-        refs.push(make_keyframe_reference(
-            "global", kind, None, None, None, false, index, frame, prev, next, off, blen, poff,
-            plen,
-        ));
+            } => refs.push(PmmProjectKeyframeReference {
+                scope: "global",
+                track_kind: kind,
+                owner_index: None,
+                document_index: None,
+                owner_name: None,
+                initial,
+                keyframe_index: *index,
+                frame_index: *frame_index,
+                previous_keyframe_index: *previous_keyframe_index,
+                next_keyframe_index: *next_keyframe_index,
+                offset: *offset,
+                byte_length: *byte_length,
+                payload_offset: *payload_offset,
+                payload_byte_length: *payload_byte_length,
+            }),
+        }
     }
 }
 
@@ -1439,168 +1305,102 @@ fn build_project_keyframe_references(
     doc: &PmmDocumentSummary,
     glob: &PmmDocumentGlobalSummary,
 ) -> Vec<PmmProjectKeyframeReference> {
-    // Build keyframeReferences inventory derived only from already-decoded summaries.
-    // This is a graph index slice; no new parsing, no payload bytes duplication.
-    let mut keyframe_references: Vec<PmmProjectKeyframeReference> = Vec::new();
-
-    // per document model: initial + additional for bone, morph, model
+    // Derive the inventory from decoded summaries without copying payload bytes.
+    let mut keyframe_references = Vec::new();
     for model in &doc.models {
-        // bone keyframes (initial + additional)
-        for kf in &model.initial_bone_keyframe_summaries {
-            keyframe_references.push(make_keyframe_reference(
-                "model",
-                "bone",
-                Some(model.slot_index),
-                Some(model.document_model_index),
-                Some(model.name.clone()),
-                true,
-                kf.index,
-                kf.frame_index,
-                kf.previous_keyframe_index,
-                kf.next_keyframe_index,
-                kf.offset,
-                kf.byte_length,
-                kf.payload_offset,
-                kf.payload_byte_length,
-            ));
+        for (initial, keyframe) in initial_and_additional_keyframes(
+            &model.initial_bone_keyframe_summaries,
+            &model.bone_keyframe_summaries,
+        ) {
+            keyframe_references.push(PmmProjectKeyframeReference {
+                scope: "model",
+                track_kind: "bone",
+                owner_index: Some(model.slot_index),
+                document_index: Some(model.document_model_index),
+                owner_name: Some(model.name.clone()),
+                initial,
+                keyframe_index: keyframe.index,
+                frame_index: keyframe.frame_index,
+                previous_keyframe_index: keyframe.previous_keyframe_index,
+                next_keyframe_index: keyframe.next_keyframe_index,
+                offset: keyframe.offset,
+                byte_length: keyframe.byte_length,
+                payload_offset: keyframe.payload_offset,
+                payload_byte_length: keyframe.payload_byte_length,
+            });
         }
-        for kf in &model.bone_keyframe_summaries {
-            keyframe_references.push(make_keyframe_reference(
-                "model",
-                "bone",
-                Some(model.slot_index),
-                Some(model.document_model_index),
-                Some(model.name.clone()),
-                false,
-                kf.index,
-                kf.frame_index,
-                kf.previous_keyframe_index,
-                kf.next_keyframe_index,
-                kf.offset,
-                kf.byte_length,
-                kf.payload_offset,
-                kf.payload_byte_length,
-            ));
+        for (initial, keyframe) in initial_and_additional_keyframes(
+            &model.initial_morph_keyframe_summaries,
+            &model.morph_keyframe_summaries,
+        ) {
+            keyframe_references.push(PmmProjectKeyframeReference {
+                scope: "model",
+                track_kind: "morph",
+                owner_index: Some(model.slot_index),
+                document_index: Some(model.document_model_index),
+                owner_name: Some(model.name.clone()),
+                initial,
+                keyframe_index: keyframe.index,
+                frame_index: keyframe.frame_index,
+                previous_keyframe_index: keyframe.previous_keyframe_index,
+                next_keyframe_index: keyframe.next_keyframe_index,
+                offset: keyframe.offset,
+                byte_length: keyframe.byte_length,
+                payload_offset: keyframe.payload_offset,
+                payload_byte_length: keyframe.payload_byte_length,
+            });
         }
-        // morph keyframes (initial + additional)
-        for kf in &model.initial_morph_keyframe_summaries {
-            keyframe_references.push(make_keyframe_reference(
-                "model",
-                "morph",
-                Some(model.slot_index),
-                Some(model.document_model_index),
-                Some(model.name.clone()),
-                true,
-                kf.index,
-                kf.frame_index,
-                kf.previous_keyframe_index,
-                kf.next_keyframe_index,
-                kf.offset,
-                kf.byte_length,
-                kf.payload_offset,
-                kf.payload_byte_length,
-            ));
-        }
-        for kf in &model.morph_keyframe_summaries {
-            keyframe_references.push(make_keyframe_reference(
-                "model",
-                "morph",
-                Some(model.slot_index),
-                Some(model.document_model_index),
-                Some(model.name.clone()),
-                false,
-                kf.index,
-                kf.frame_index,
-                kf.previous_keyframe_index,
-                kf.next_keyframe_index,
-                kf.offset,
-                kf.byte_length,
-                kf.payload_offset,
-                kf.payload_byte_length,
-            ));
-        }
-        // model keyframes: initial is singular, additional in vec
-        keyframe_references.push(make_keyframe_reference(
-            "model",
-            "model",
-            Some(model.slot_index),
-            Some(model.document_model_index),
-            Some(model.name.clone()),
-            true,
-            model.initial_model_keyframe.index,
-            model.initial_model_keyframe.frame_index,
-            model.initial_model_keyframe.previous_keyframe_index,
-            model.initial_model_keyframe.next_keyframe_index,
-            model.initial_model_keyframe.offset,
-            model.initial_model_keyframe.byte_length,
-            model.initial_model_keyframe.payload_offset,
-            model.initial_model_keyframe.payload_byte_length,
-        ));
-        for kf in &model.model_keyframe_summaries {
-            keyframe_references.push(make_keyframe_reference(
-                "model",
-                "model",
-                Some(model.slot_index),
-                Some(model.document_model_index),
-                Some(model.name.clone()),
-                false,
-                kf.index,
-                kf.frame_index,
-                kf.previous_keyframe_index,
-                kf.next_keyframe_index,
-                kf.offset,
-                kf.byte_length,
-                kf.payload_offset,
-                kf.payload_byte_length,
-            ));
+        for (initial, keyframe) in initial_and_additional_keyframes(
+            std::slice::from_ref(&model.initial_model_keyframe),
+            &model.model_keyframe_summaries,
+        ) {
+            keyframe_references.push(PmmProjectKeyframeReference {
+                scope: "model",
+                track_kind: "model",
+                owner_index: Some(model.slot_index),
+                document_index: Some(model.document_model_index),
+                owner_name: Some(model.name.clone()),
+                initial,
+                keyframe_index: keyframe.index,
+                frame_index: keyframe.frame_index,
+                previous_keyframe_index: keyframe.previous_keyframe_index,
+                next_keyframe_index: keyframe.next_keyframe_index,
+                offset: keyframe.offset,
+                byte_length: keyframe.byte_length,
+                payload_offset: keyframe.payload_offset,
+                payload_byte_length: keyframe.payload_byte_length,
+            });
         }
     }
 
-    // global: initial + additional for camera, light, gravity, selfShadow
-    // helper to append from PmmDocumentTrackSummary + variant kind (uses existing summaries only)
     append_global_keyframe_refs(&mut keyframe_references, &glob.camera, "camera");
     append_global_keyframe_refs(&mut keyframe_references, &glob.light, "light");
     append_global_keyframe_refs(&mut keyframe_references, &glob.gravity, "gravity");
     append_global_keyframe_refs(&mut keyframe_references, &glob.self_shadow, "selfShadow");
 
-    // per decoded accessory: initial + additional accessory keyframes
-    for acc in &glob.accessories.accessories {
-        keyframe_references.push(make_keyframe_reference(
-            "accessory",
-            "accessory",
-            Some(acc.slot_index),
-            Some(acc.document_accessory_index),
-            Some(acc.name.clone()),
-            true,
-            acc.initial_keyframe.index,
-            acc.initial_keyframe.frame_index,
-            acc.initial_keyframe.previous_keyframe_index,
-            acc.initial_keyframe.next_keyframe_index,
-            acc.initial_keyframe.offset,
-            acc.initial_keyframe.byte_length,
-            acc.initial_keyframe.payload_offset,
-            acc.initial_keyframe.payload_byte_length,
-        ));
-        for kf in &acc.keyframe_summaries {
-            keyframe_references.push(make_keyframe_reference(
-                "accessory",
-                "accessory",
-                Some(acc.slot_index),
-                Some(acc.document_accessory_index),
-                Some(acc.name.clone()),
-                false,
-                kf.index,
-                kf.frame_index,
-                kf.previous_keyframe_index,
-                kf.next_keyframe_index,
-                kf.offset,
-                kf.byte_length,
-                kf.payload_offset,
-                kf.payload_byte_length,
-            ));
+    for accessory in &glob.accessories.accessories {
+        for (initial, keyframe) in initial_and_additional_keyframes(
+            std::slice::from_ref(&accessory.initial_keyframe),
+            &accessory.keyframe_summaries,
+        ) {
+            keyframe_references.push(PmmProjectKeyframeReference {
+                scope: "accessory",
+                track_kind: "accessory",
+                owner_index: Some(accessory.slot_index),
+                document_index: Some(accessory.document_accessory_index),
+                owner_name: Some(accessory.name.clone()),
+                initial,
+                keyframe_index: keyframe.index,
+                frame_index: keyframe.frame_index,
+                previous_keyframe_index: keyframe.previous_keyframe_index,
+                next_keyframe_index: keyframe.next_keyframe_index,
+                offset: keyframe.offset,
+                byte_length: keyframe.byte_length,
+                payload_offset: keyframe.payload_offset,
+                payload_byte_length: keyframe.payload_byte_length,
+            });
         }
     }
-
     keyframe_references
 }
 

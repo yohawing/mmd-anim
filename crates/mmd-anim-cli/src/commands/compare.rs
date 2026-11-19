@@ -1654,30 +1654,30 @@ fn build_physics_coarse_evaluator(
     Ok(None)
 }
 
-pub(crate) fn diagnose_numeric_bones(
-    manifest_path: &Path,
+fn find_numeric_diagnostic_case<'a>(
+    manifest: &'a serde_json::Value,
     case_name: &str,
-    oracle_frame_number: f32,
-    eval_frame: f32,
-    bone_names: &[String],
-) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
+) -> Result<&'a serde_json::Value, Box<dyn std::error::Error>> {
     let cases = manifest
         .get("cases")
         .and_then(|value| value.as_array())
         .ok_or("numeric manifest is missing cases")?;
-    let case = cases
+    cases
         .iter()
         .find(|case| case.get("name").and_then(|value| value.as_str()) == Some(case_name))
-        .ok_or_else(|| format!("numeric manifest has no case named {case_name}"))?;
+        .ok_or_else(|| format!("numeric manifest has no case named {case_name}").into())
+}
 
+fn numeric_diagnostic_motion_paths(
+    case: &serde_json::Value,
+    manifest_dir: &Path,
+) -> Result<(PathBuf, NumericMotionSource, PathBuf), Box<dyn std::error::Error>> {
     let model_path = case
         .pointer("/assets/model")
         .and_then(|value| value.as_str())
         .map(|value| resolve_manifest_path(manifest_dir, value))
         .ok_or("case is missing assets.model")?;
-    let motion_source = NumericMotionSource::from_case(case).map_err(|error| error.to_owned())?;
+    let motion_source = NumericMotionSource::from_case(case)?;
     let motion_path = resolve_numeric_motion_source_path(case, manifest_dir, motion_source)
         .ok_or_else(|| {
             format!(
@@ -1688,6 +1688,22 @@ pub(crate) fn diagnose_numeric_bones(
                     .replace('/', ".")
             )
         })?;
+    Ok((model_path, motion_source, motion_path))
+}
+
+pub(crate) fn diagnose_numeric_bones(
+    manifest_path: &Path,
+    case_name: &str,
+    oracle_frame_number: f32,
+    eval_frame: f32,
+    bone_names: &[String],
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
+    let case = find_numeric_diagnostic_case(&manifest, case_name)?;
+
+    let (model_path, motion_source, motion_path) =
+        numeric_diagnostic_motion_paths(case, manifest_dir)?;
     let oracle_path = case
         .pointer("/oracle/path")
         .and_then(|value| value.as_str())
@@ -2033,34 +2049,13 @@ pub(crate) fn diagnose_numeric_physics_penetration(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
-    let cases = manifest
-        .get("cases")
-        .and_then(|value| value.as_array())
-        .ok_or("numeric manifest is missing cases")?;
-    let case = cases
-        .iter()
-        .find(|case| case.get("name").and_then(|value| value.as_str()) == Some(case_name))
-        .ok_or_else(|| format!("numeric manifest has no case named {case_name}"))?;
+    let case = find_numeric_diagnostic_case(&manifest, case_name)?;
     if case.get("kind").and_then(|value| value.as_str()) != Some("physics-coarse") {
         return Err("physics penetration diagnosis requires a physics-coarse case".into());
     }
 
-    let model_path = case
-        .pointer("/assets/model")
-        .and_then(|value| value.as_str())
-        .map(|value| resolve_manifest_path(manifest_dir, value))
-        .ok_or("case is missing assets.model")?;
-    let motion_source = NumericMotionSource::from_case(case).map_err(|error| error.to_owned())?;
-    let motion_path = resolve_numeric_motion_source_path(case, manifest_dir, motion_source)
-        .ok_or_else(|| {
-            format!(
-                "case is missing {}",
-                motion_source
-                    .asset_pointer()
-                    .trim_start_matches('/')
-                    .replace('/', ".")
-            )
-        })?;
+    let (model_path, motion_source, motion_path) =
+        numeric_diagnostic_motion_paths(case, manifest_dir)?;
     let model_bytes = fs::read(&model_path)?;
     let parsed_pmx = mmd_anim_format::parse_pmx_model(&model_bytes)?;
     let model_import = golden::import_golden_runtime_model(&model_path, &model_bytes)?;

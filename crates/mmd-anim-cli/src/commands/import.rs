@@ -4,7 +4,7 @@ use glam::{Quat, Vec3A};
 use mmd_anim_runtime::{AnimationClip, RuntimeInstance};
 use serde::Serialize;
 
-use crate::support::{IkRuntimeStatsSummary, summarize_ik_runtime_stats};
+use crate::support::{IkRuntimeStatsSummary, registered_morph_count, summarize_ik_runtime_stats};
 use crate::{
     diagnostics_suffix, f32_checksum, import_failure_error, read_file, translation_checksum,
 };
@@ -666,12 +666,7 @@ pub(crate) fn build_pair_runtime_context(
 
     let bone_count = pmx.model.bone_count();
     let solver_count = pmx.model.ik_count();
-    let morph_count = pmx
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
+    let morph_count = registered_morph_count(&pmx.morph_name_to_index);
 
     let clip = mmd_anim_format::build_mmd_registered_pair_clip(
         &pmx.model,

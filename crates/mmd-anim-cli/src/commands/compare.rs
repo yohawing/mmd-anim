@@ -9,6 +9,7 @@ use std::{
 use crate::schema::{
     DEFAULT_FOCUSED_IK_BONE_NAMES, MmdDumperOracleBone, MmdDumperOracleDump, MmdDumperOracleModel,
 };
+use crate::support::registered_morph_count;
 use crate::support::resolve_maybe_absolute as resolve_manifest_path;
 use mmd_anim_format::vmd::VmdBoneKeyframeRaw;
 #[cfg(feature = "physics-bullet-native")]
@@ -1004,19 +1005,13 @@ fn compare_motion_numeric_case(
         }
     };
     let solver_count = model_import.model.ik_count();
-    let morph_count = model_import
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
+    let morph_count = registered_morph_count(&model_import.morph_name_to_index);
     let clip = match build_numeric_motion_clip(
         case,
         motion_source,
         &motion_path,
         &model_import,
         morph_count,
-        solver_count,
     ) {
         Ok(clip) => clip,
         Err(error) => {
@@ -1146,25 +1141,15 @@ fn build_numeric_motion_clip(
     motion_path: &Path,
     model_import: &golden::RuntimeModelImport,
     morph_count: usize,
-    solver_count: usize,
 ) -> Result<AnimationClip, String> {
     match motion_source {
         NumericMotionSource::Vmd => {
             let bytes = fs::read(motion_path).map_err(|error| error.to_string())?;
             let vmd =
                 mmd_anim_format::import_vmd_motion(&bytes).map_err(|error| error.to_string())?;
-            mmd_anim_format::build_mmd_registered_pair_clip_with_options(
-                &model_import.model,
-                &vmd,
-                &model_import.bone_name_to_index,
-                &model_import.morph_name_to_index,
-                &model_import.ik_solver_bone_name_to_index,
-                solver_count,
-                mmd_anim_format::VmdClipBuildOptions {
-                    honor_property_ik: false,
-                },
-            )
-            .map_err(|error| error.to_string())
+            model_import
+                .build_registered_vmd_clip(&vmd)
+                .map_err(|error| error.to_string())
         }
         NumericMotionSource::PmmDocument => {
             let bytes = fs::read(motion_path).map_err(|error| error.to_string())?;
@@ -1685,19 +1670,13 @@ pub(crate) fn diagnose_numeric_bones(
     let model_import = golden::import_golden_runtime_model(&model_path, &model_bytes)?;
     let solver_count = model_import.model.ik_count();
 
-    let morph_count = model_import
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
+    let morph_count = registered_morph_count(&model_import.morph_name_to_index);
     let clip = build_numeric_motion_clip(
         case,
         motion_source,
         &motion_path,
         &model_import,
         morph_count,
-        solver_count,
     )
     .map_err(|error| format!("{}: {}", motion_path.display(), error))?;
     let vmd = match motion_source {
@@ -2021,19 +2000,13 @@ pub(crate) fn diagnose_numeric_physics_penetration(
     let parsed_pmx = mmd_anim_format::parse_pmx_model(&model_bytes)?;
     let model_import = golden::import_golden_runtime_model(&model_path, &model_bytes)?;
     let solver_count = model_import.model.ik_count();
-    let morph_count = model_import
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
+    let morph_count = registered_morph_count(&model_import.morph_name_to_index);
     let clip = build_numeric_motion_clip(
         case,
         motion_source,
         &motion_path,
         &model_import,
         morph_count,
-        solver_count,
     )
     .map_err(|error| format!("{}: {}", motion_path.display(), error))?;
     let model = Arc::new(model_import.model);

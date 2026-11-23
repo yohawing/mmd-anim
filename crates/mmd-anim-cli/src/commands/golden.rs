@@ -10,9 +10,12 @@ use crate::schema::{
     DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
     MmdDumperOracleModel,
 };
+use crate::support::registered_morph_count;
 use glam::Vec3A;
 use mmd_anim_format::VmdClipBuildOptions;
-use mmd_anim_runtime::{BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance};
+use mmd_anim_runtime::{
+    AnimationClip, BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance,
+};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -31,6 +34,27 @@ pub(crate) struct RuntimeModelImport {
     pub(crate) morph_name_to_index: HashMap<Vec<u8>, MorphIndex>,
     pub(crate) ik_solver_bone_name_to_index: HashMap<Vec<u8>, usize>,
     pub(crate) diagnostics: Vec<GoldenImportDiagnostic>,
+}
+
+impl RuntimeModelImport {
+    /// Builds a VMD clip in MMD registration order with property IK ignored, matching how
+    /// golden oracles were recorded.
+    pub(crate) fn build_registered_vmd_clip(
+        &self,
+        vmd: &mmd_anim_format::VmdImportResult,
+    ) -> Result<AnimationClip, mmd_anim_format::VmdClipBuildError> {
+        mmd_anim_format::build_mmd_registered_pair_clip_with_options(
+            &self.model,
+            vmd,
+            &self.bone_name_to_index,
+            &self.morph_name_to_index,
+            &self.ik_solver_bone_name_to_index,
+            self.model.ik_count(),
+            VmdClipBuildOptions {
+                honor_property_ik: false,
+            },
+        )
+    }
 }
 
 pub(crate) fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -908,26 +932,12 @@ pub(crate) fn golden_ik_compare(
         };
 
         let solver_count = model_import.model.ik_count();
-        let clip = mmd_anim_format::build_mmd_registered_pair_clip_with_options(
-            &model_import.model,
-            &vmd,
-            &model_import.bone_name_to_index,
-            &model_import.morph_name_to_index,
-            &model_import.ik_solver_bone_name_to_index,
-            solver_count,
-            VmdClipBuildOptions {
-                honor_property_ik: false,
-            },
-        )
-        .map_err(|error| format!("MMD-registered VMD clip build failed: {error}"))?;
+        let clip = model_import
+            .build_registered_vmd_clip(&vmd)
+            .map_err(|error| format!("MMD-registered VMD clip build failed: {error}"))?;
 
         let model = Arc::new(model_import.model);
-        let morph_count = model_import
-            .morph_name_to_index
-            .values()
-            .map(|index| index.as_usize() + 1)
-            .max()
-            .unwrap_or(0);
+        let morph_count = registered_morph_count(&model_import.morph_name_to_index);
         let mut runtime =
             RuntimeInstance::new_with_counts(Arc::clone(&model), morph_count, solver_count);
 
@@ -1263,25 +1273,11 @@ pub(crate) fn golden_ik_diagnose(
         mmd_anim_format::import_vmd_motion(&vmd_bytes).map_err(|e| format!("import error: {e}"))?;
 
     let solver_count = model_import.model.ik_count();
-    let clip = mmd_anim_format::build_mmd_registered_pair_clip_with_options(
-        &model_import.model,
-        &vmd,
-        &model_import.bone_name_to_index,
-        &model_import.morph_name_to_index,
-        &model_import.ik_solver_bone_name_to_index,
-        solver_count,
-        VmdClipBuildOptions {
-            honor_property_ik: false,
-        },
-    )
-    .map_err(|error| format!("MMD-registered VMD clip build failed: {error}"))?;
+    let clip = model_import
+        .build_registered_vmd_clip(&vmd)
+        .map_err(|error| format!("MMD-registered VMD clip build failed: {error}"))?;
 
-    let morph_count = model_import
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
+    let morph_count = registered_morph_count(&model_import.morph_name_to_index);
     let model = Arc::new(model_import.model);
     let mut pre_ik_runtime =
         RuntimeInstance::new_with_counts(Arc::clone(&model), morph_count, solver_count);

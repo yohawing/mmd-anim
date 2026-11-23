@@ -7,7 +7,7 @@ use mmd_anim_runtime::{
 };
 use serde_json::json;
 
-use crate::support::summarize_ik_runtime_stats;
+use crate::support::{registered_morph_count, summarize_ik_runtime_stats};
 use crate::{copy_world_matrices_to_f32, f32_checksum, read_file, translation_checksum};
 
 #[derive(Debug)]
@@ -279,12 +279,7 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
             links: solver.links.len(),
         })
         .collect::<Vec<_>>();
-    let morph_count = pmx
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
+    let morph_count = registered_morph_count(&pmx.morph_name_to_index);
 
     let clip_start = Instant::now();
     let clip = mmd_anim_format::build_mmd_registered_pair_clip(

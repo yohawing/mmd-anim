@@ -1,11 +1,12 @@
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Result, anyhow};
 use mmd_anim_format::MmdFormatKind;
-use mmd_anim_runtime::IkSolverRuntimeStats;
+use mmd_anim_runtime::{IkSolverRuntimeStats, MorphIndex};
 
 pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).map_err(|error| file_operation_error("read", path, error))
@@ -145,6 +146,15 @@ pub(crate) fn resolve_maybe_absolute(root: &Path, path: &str) -> PathBuf {
     } else {
         root.join(path)
     }
+}
+
+/// Number of morph weight slots needed to cover every registered morph index.
+pub(crate) fn registered_morph_count<K>(morph_name_to_index: &HashMap<K, MorphIndex>) -> usize {
+    morph_name_to_index
+        .values()
+        .map(|index| index.as_usize() + 1)
+        .max()
+        .unwrap_or(0)
 }
 
 pub(crate) fn translation_checksum(matrices: &[glam::Mat4]) -> u32 {

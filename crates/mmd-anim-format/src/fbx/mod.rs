@@ -2318,14 +2318,13 @@ fn write_fbx_header_extension<W: Write + Seek>(
 }
 
 fn write_top_level_fields<W: Write + Seek>(writer: &mut Writer<W>) -> Result<(), FbxExportError> {
-    begin_node(writer, "FileId", |attrs| {
+    write_leaf_node(writer, "FileId", |attrs| {
         attrs.append_binary_direct(&[
             0x28, 0xb3, 0x2a, 0xeb, 0xb6, 0x24, 0xcc, 0xc2, 0xbf, 0xc8, 0xb0, 0x2a, 0xa9, 0x2b,
             0xfc, 0xf1,
         ])?;
         Ok(())
     })?;
-    writer.close_node()?;
     write_string_node(writer, "CreationTime", "1970-01-01 10:00:00:000")?;
     write_string_node(writer, "Creator", "mmd-anim fbx exporter")?;
     Ok(())
@@ -3483,12 +3482,11 @@ fn write_cluster_deformer<W: Write + Seek>(
         Ok(())
     })?;
     write_i32_node(writer, "Version", 100)?;
-    begin_node(writer, "UserData", |attrs| {
+    write_leaf_node(writer, "UserData", |attrs| {
         attrs.append_string_direct("")?;
         attrs.append_string_direct("")?;
         Ok(())
     })?;
-    writer.close_node()?;
     if !indices.is_empty() {
         write_arr_i32_node(writer, "Indexes", &indices)?;
         write_arr_f64_node(writer, "Weights", &weights)?;
@@ -3836,12 +3834,11 @@ fn write_time_span_node<W: Write + Seek>(
     name: &str,
     last_time: i64,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, name, |attrs| {
+    write_leaf_node(writer, name, |attrs| {
         attrs.append_i64(0)?;
         attrs.append_i64(last_time)?;
         Ok(())
     })?;
-    writer.close_node()?;
     Ok(())
 }
 
@@ -3946,13 +3943,12 @@ fn write_oo_connection<W: Write + Seek>(
     child_id: i64,
     parent_id: i64,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, "C", |attrs| {
+    write_leaf_node(writer, "C", |attrs| {
         attrs.append_string_direct("OO")?;
         attrs.append_i64(child_id)?;
         attrs.append_i64(parent_id)?;
         Ok(())
     })?;
-    writer.close_node()?;
     Ok(())
 }
 
@@ -3962,14 +3958,13 @@ fn write_op_connection<W: Write + Seek>(
     parent_id: i64,
     property: &str,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, "C", |attrs| {
+    write_leaf_node(writer, "C", |attrs| {
         attrs.append_string_direct("OP")?;
         attrs.append_i64(child_id)?;
         attrs.append_i64(parent_id)?;
         attrs.append_string_direct(property)?;
         Ok(())
     })?;
-    writer.close_node()?;
     Ok(())
 }
 
@@ -3989,17 +3984,27 @@ where
     Ok(())
 }
 
+/// Writes a node that has attributes but no children.
+fn write_leaf_node<W, F>(
+    writer: &mut Writer<W>,
+    name: &str,
+    append_attrs: F,
+) -> Result<(), FbxExportError>
+where
+    W: Write + Seek,
+    F: FnOnce(&mut AttributesWriter<'_, W>) -> Result<(), FbxExportError>,
+{
+    begin_node(writer, name, append_attrs)?;
+    writer.close_node()?;
+    Ok(())
+}
+
 fn write_bool_node<W: Write + Seek>(
     writer: &mut Writer<W>,
     name: &str,
     value: bool,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, name, |attrs| {
-        attrs.append_bool(value)?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_leaf_node(writer, name, |attrs| Ok(attrs.append_bool(value)?))
 }
 
 fn write_i32_node<W: Write + Seek>(
@@ -4007,12 +4012,7 @@ fn write_i32_node<W: Write + Seek>(
     name: &str,
     value: i32,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, name, |attrs| {
-        attrs.append_i32(value)?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_leaf_node(writer, name, |attrs| Ok(attrs.append_i32(value)?))
 }
 
 fn write_i64_node<W: Write + Seek>(
@@ -4020,12 +4020,7 @@ fn write_i64_node<W: Write + Seek>(
     name: &str,
     value: i64,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, name, |attrs| {
-        attrs.append_i64(value)?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_leaf_node(writer, name, |attrs| Ok(attrs.append_i64(value)?))
 }
 
 fn write_f64_node<W: Write + Seek>(
@@ -4033,12 +4028,7 @@ fn write_f64_node<W: Write + Seek>(
     name: &str,
     value: f64,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, name, |attrs| {
-        attrs.append_f64(value)?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_leaf_node(writer, name, |attrs| Ok(attrs.append_f64(value)?))
 }
 
 fn write_string_node<W: Write + Seek>(
@@ -4046,12 +4036,7 @@ fn write_string_node<W: Write + Seek>(
     name: &str,
     value: &str,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, name, |attrs| {
-        attrs.append_string_direct(value)?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_leaf_node(writer, name, |attrs| Ok(attrs.append_string_direct(value)?))
 }
 
 fn write_arr_i32_node<W: Write + Seek>(
@@ -4059,13 +4044,10 @@ fn write_arr_i32_node<W: Write + Seek>(
     name: &str,
     values: &[i32],
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, name, |attrs| {
-        attrs
-            .append_arr_i32_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_leaf_node(writer, name, |attrs| {
+        Ok(attrs
+            .append_arr_i32_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?)
+    })
 }
 
 fn write_arr_i64_node<W: Write + Seek>(
@@ -4073,13 +4055,10 @@ fn write_arr_i64_node<W: Write + Seek>(
     name: &str,
     values: &[i64],
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, name, |attrs| {
-        attrs
-            .append_arr_i64_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_leaf_node(writer, name, |attrs| {
+        Ok(attrs
+            .append_arr_i64_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?)
+    })
 }
 
 fn write_arr_f32_node<W: Write + Seek>(
@@ -4087,13 +4066,10 @@ fn write_arr_f32_node<W: Write + Seek>(
     name: &str,
     values: &[f32],
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, name, |attrs| {
-        attrs
-            .append_arr_f32_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_leaf_node(writer, name, |attrs| {
+        Ok(attrs
+            .append_arr_f32_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?)
+    })
 }
 
 fn write_arr_f64_node<W: Write + Seek>(
@@ -4101,13 +4077,28 @@ fn write_arr_f64_node<W: Write + Seek>(
     name: &str,
     values: &[f64],
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, name, |attrs| {
-        attrs
-            .append_arr_f64_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_leaf_node(writer, name, |attrs| {
+        Ok(attrs
+            .append_arr_f64_from_iter(Some(ArrayAttributeEncoding::Zlib), values.iter().copied())?)
+    })
+}
+
+/// Writes a `P` property node: its four header strings followed by `append_value`.
+fn write_property<W, F>(
+    writer: &mut Writer<W>,
+    header: [&str; 4],
+    append_value: F,
+) -> Result<(), FbxExportError>
+where
+    W: Write + Seek,
+    F: FnOnce(&mut AttributesWriter<'_, W>) -> Result<(), FbxExportError>,
+{
+    write_leaf_node(writer, "P", |attrs| {
+        for text in header {
+            attrs.append_string_direct(text)?;
+        }
+        append_value(attrs)
+    })
 }
 
 fn write_property_i32<W: Write + Seek>(
@@ -4118,16 +4109,9 @@ fn write_property_i32<W: Write + Seek>(
     flags: &str,
     value: i32,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, "P", |attrs| {
-        attrs.append_string_direct(name)?;
-        attrs.append_string_direct(type_name)?;
-        attrs.append_string_direct(label)?;
-        attrs.append_string_direct(flags)?;
-        attrs.append_i32(value)?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_property(writer, [name, type_name, label, flags], |attrs| {
+        Ok(attrs.append_i32(value)?)
+    })
 }
 
 fn write_property_i64<W: Write + Seek>(
@@ -4138,16 +4122,9 @@ fn write_property_i64<W: Write + Seek>(
     flags: &str,
     value: i64,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, "P", |attrs| {
-        attrs.append_string_direct(name)?;
-        attrs.append_string_direct(type_name)?;
-        attrs.append_string_direct(label)?;
-        attrs.append_string_direct(flags)?;
-        attrs.append_i64(value)?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_property(writer, [name, type_name, label, flags], |attrs| {
+        Ok(attrs.append_i64(value)?)
+    })
 }
 
 fn write_property_f64<W: Write + Seek>(
@@ -4158,16 +4135,9 @@ fn write_property_f64<W: Write + Seek>(
     flags: &str,
     value: f64,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, "P", |attrs| {
-        attrs.append_string_direct(name)?;
-        attrs.append_string_direct(type_name)?;
-        attrs.append_string_direct(label)?;
-        attrs.append_string_direct(flags)?;
-        attrs.append_f64(value)?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_property(writer, [name, type_name, label, flags], |attrs| {
+        Ok(attrs.append_f64(value)?)
+    })
 }
 
 fn write_property_compound<W: Write + Seek>(
@@ -4177,15 +4147,7 @@ fn write_property_compound<W: Write + Seek>(
     label: &str,
     flags: &str,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, "P", |attrs| {
-        attrs.append_string_direct(name)?;
-        attrs.append_string_direct(type_name)?;
-        attrs.append_string_direct(label)?;
-        attrs.append_string_direct(flags)?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_property(writer, [name, type_name, label, flags], |_| Ok(()))
 }
 
 fn write_property_string<W: Write + Seek>(
@@ -4195,16 +4157,9 @@ fn write_property_string<W: Write + Seek>(
     label: &str,
     value: &str,
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, "P", |attrs| {
-        attrs.append_string_direct(name)?;
-        attrs.append_string_direct(type_name)?;
-        attrs.append_string_direct(label)?;
-        attrs.append_string_direct("")?;
-        attrs.append_string_direct(value)?;
-        Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    write_property(writer, [name, type_name, label, ""], |attrs| {
+        Ok(attrs.append_string_direct(value)?)
+    })
 }
 
 fn write_property_vec3<W: Write + Seek>(
@@ -4215,18 +4170,12 @@ fn write_property_vec3<W: Write + Seek>(
     flags: &str,
     value: [f64; 3],
 ) -> Result<(), FbxExportError> {
-    begin_node(writer, "P", |attrs| {
-        attrs.append_string_direct(name)?;
-        attrs.append_string_direct(type_name)?;
-        attrs.append_string_direct(label)?;
-        attrs.append_string_direct(flags)?;
-        attrs.append_f64(value[0])?;
-        attrs.append_f64(value[1])?;
-        attrs.append_f64(value[2])?;
+    write_property(writer, [name, type_name, label, flags], |attrs| {
+        for component in value {
+            attrs.append_f64(component)?;
+        }
         Ok(())
-    })?;
-    writer.close_node()?;
-    Ok(())
+    })
 }
 
 fn write_property_color<W: Write + Seek>(

@@ -2641,57 +2641,21 @@ fn sample_bone_track(
     if target == ReductionTarget::DccCubic {
         let duration = sample_frames[right.sample_index] - sample_frames[left.sample_index];
         let segment = right.dcc_segment;
-        let translation = Vec3A::new(
-            sample_hermite(
-                left.translation.x,
-                right.translation.x,
-                segment.translation_out_tangent.x,
-                segment.translation_in_tangent.x,
-                duration,
-                amount,
-            ),
-            sample_hermite(
-                left.translation.y,
-                right.translation.y,
-                segment.translation_out_tangent.y,
-                segment.translation_in_tangent.y,
-                duration,
-                amount,
-            ),
-            sample_hermite(
-                left.translation.z,
-                right.translation.z,
-                segment.translation_out_tangent.z,
-                segment.translation_in_tangent.z,
-                duration,
-                amount,
-            ),
+        let translation = sample_dcc_vec3(
+            left.translation,
+            right.translation,
+            segment.translation_out_tangent,
+            segment.translation_in_tangent,
+            duration,
+            amount,
         );
-        let euler = Vec3A::new(
-            sample_hermite(
-                segment.rotation_start_euler_xyz.x,
-                segment.rotation_end_euler_xyz.x,
-                segment.rotation_out_tangent.x,
-                segment.rotation_in_tangent.x,
-                duration,
-                amount,
-            ),
-            sample_hermite(
-                segment.rotation_start_euler_xyz.y,
-                segment.rotation_end_euler_xyz.y,
-                segment.rotation_out_tangent.y,
-                segment.rotation_in_tangent.y,
-                duration,
-                amount,
-            ),
-            sample_hermite(
-                segment.rotation_start_euler_xyz.z,
-                segment.rotation_end_euler_xyz.z,
-                segment.rotation_out_tangent.z,
-                segment.rotation_in_tangent.z,
-                duration,
-                amount,
-            ),
+        let euler = sample_dcc_vec3(
+            segment.rotation_start_euler_xyz,
+            segment.rotation_end_euler_xyz,
+            segment.rotation_out_tangent,
+            segment.rotation_in_tangent,
+            duration,
+            amount,
         );
         return (
             translation,

@@ -1637,6 +1637,35 @@ fn numeric_diagnostic_motion_paths(
     Ok((model_path, motion_source, motion_path))
 }
 
+/// Runtime model and clip shared by the numeric diagnosis commands.
+struct NumericDiagnosticModel {
+    model_import: golden::RuntimeModelImport,
+    clip: AnimationClip,
+    morph_count: usize,
+    solver_count: usize,
+}
+
+fn load_numeric_diagnostic_model(
+    case: &serde_json::Value,
+    model_path: &Path,
+    model_bytes: &[u8],
+    motion_source: NumericMotionSource,
+    motion_path: &Path,
+) -> Result<NumericDiagnosticModel, Box<dyn std::error::Error>> {
+    let model_import = golden::import_golden_runtime_model(model_path, model_bytes)?;
+    let solver_count = model_import.model.ik_count();
+    let morph_count = registered_morph_count(&model_import.morph_name_to_index);
+    let clip =
+        build_numeric_motion_clip(case, motion_source, motion_path, &model_import, morph_count)
+            .map_err(|error| format!("{}: {}", motion_path.display(), error))?;
+    Ok(NumericDiagnosticModel {
+        model_import,
+        clip,
+        morph_count,
+        solver_count,
+    })
+}
+
 pub(crate) fn diagnose_numeric_bones(
     manifest_path: &Path,
     case_name: &str,
@@ -1667,18 +1696,18 @@ pub(crate) fn diagnose_numeric_bones(
         .ok_or_else(|| format!("oracle frame {target_frame} has no model"))?;
 
     let model_bytes = fs::read(&model_path)?;
-    let model_import = golden::import_golden_runtime_model(&model_path, &model_bytes)?;
-    let solver_count = model_import.model.ik_count();
-
-    let morph_count = registered_morph_count(&model_import.morph_name_to_index);
-    let clip = build_numeric_motion_clip(
+    let NumericDiagnosticModel {
+        model_import,
+        clip,
+        morph_count,
+        solver_count,
+    } = load_numeric_diagnostic_model(
         case,
+        &model_path,
+        &model_bytes,
         motion_source,
         &motion_path,
-        &model_import,
-        morph_count,
-    )
-    .map_err(|error| format!("{}: {}", motion_path.display(), error))?;
+    )?;
     let vmd = match motion_source {
         NumericMotionSource::Vmd => Some(mmd_anim_format::import_vmd_motion(&fs::read(
             &motion_path,
@@ -1998,17 +2027,18 @@ pub(crate) fn diagnose_numeric_physics_penetration(
         numeric_diagnostic_motion_paths(case, manifest_dir)?;
     let model_bytes = fs::read(&model_path)?;
     let parsed_pmx = mmd_anim_format::parse_pmx_model(&model_bytes)?;
-    let model_import = golden::import_golden_runtime_model(&model_path, &model_bytes)?;
-    let solver_count = model_import.model.ik_count();
-    let morph_count = registered_morph_count(&model_import.morph_name_to_index);
-    let clip = build_numeric_motion_clip(
+    let NumericDiagnosticModel {
+        model_import,
+        clip,
+        morph_count,
+        solver_count,
+    } = load_numeric_diagnostic_model(
         case,
+        &model_path,
+        &model_bytes,
         motion_source,
         &motion_path,
-        &model_import,
-        morph_count,
-    )
-    .map_err(|error| format!("{}: {}", motion_path.display(), error))?;
+    )?;
     let model = Arc::new(model_import.model);
     let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, solver_count);
     let mut physics_evaluator = build_physics_coarse_evaluator(PhysicsCoarseBuildInput {

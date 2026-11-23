@@ -65,18 +65,40 @@ fn parse_bool_option(value: &str, label: &str) -> Result<bool, String> {
     }
 }
 
-fn count_pmm_scene_frame_range_patch_fields(patch: &PmmSceneFrameRangePatch) -> usize {
-    [
-        patch.current_frame_index.is_some(),
-        patch.current_frame_index_in_text_field.is_some(),
-        patch.begin_frame_index.is_some(),
-        patch.end_frame_index.is_some(),
-        patch.begin_frame_index_enabled.is_some(),
-        patch.end_frame_index_enabled.is_some(),
-    ]
-    .into_iter()
-    .filter(|present| *present)
-    .count()
+/// JSON fields for the scene frame range values the patch sets.
+fn scene_frame_range_patch_fields(
+    patch: &PmmSceneFrameRangePatch,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut patch_fields = serde_json::Map::new();
+    if let Some(value) = patch.current_frame_index {
+        patch_fields.insert("currentFrame".to_owned(), json!(value));
+    }
+    if let Some(value) = patch.current_frame_index_in_text_field {
+        patch_fields.insert("currentFrameText".to_owned(), json!(value));
+    }
+    if let Some(value) = patch.begin_frame_index {
+        patch_fields.insert("beginFrame".to_owned(), json!(value));
+    }
+    if let Some(value) = patch.end_frame_index {
+        patch_fields.insert("endFrame".to_owned(), json!(value));
+    }
+    if let Some(value) = patch.begin_frame_index_enabled {
+        patch_fields.insert("beginFrameEnabled".to_owned(), json!(value));
+    }
+    if let Some(value) = patch.end_frame_index_enabled {
+        patch_fields.insert("endFrameEnabled".to_owned(), json!(value));
+    }
+    patch_fields
+}
+
+fn read_pmm_for_patch(
+    input: &Path,
+) -> Result<(usize, mmd_anim_format::PmmParsedManifest), Box<dyn std::error::Error>> {
+    let data = read_file(input)?;
+    let parsed = mmd_anim_format::parse_pmm_manifest(&data).map_err(|error| {
+        parse_failure_error("patch", input, mmd_anim_format::MmdFormatKind::Pmm, error)
+    })?;
+    Ok((data.len(), parsed))
 }
 
 pub(crate) fn patch_document_model_path_json(
@@ -107,25 +129,7 @@ pub(crate) fn patch_scene_frame_range_json(
     bytes_in: usize,
     bytes_out: usize,
 ) -> serde_json::Value {
-    let mut patch_fields = serde_json::Map::new();
-    if let Some(value) = patch.current_frame_index {
-        patch_fields.insert("currentFrame".to_owned(), json!(value));
-    }
-    if let Some(value) = patch.current_frame_index_in_text_field {
-        patch_fields.insert("currentFrameText".to_owned(), json!(value));
-    }
-    if let Some(value) = patch.begin_frame_index {
-        patch_fields.insert("beginFrame".to_owned(), json!(value));
-    }
-    if let Some(value) = patch.end_frame_index {
-        patch_fields.insert("endFrame".to_owned(), json!(value));
-    }
-    if let Some(value) = patch.begin_frame_index_enabled {
-        patch_fields.insert("beginFrameEnabled".to_owned(), json!(value));
-    }
-    if let Some(value) = patch.end_frame_index_enabled {
-        patch_fields.insert("endFrameEnabled".to_owned(), json!(value));
-    }
+    let patch_fields = scene_frame_range_patch_fields(patch);
     json!({
         "status": "ok",
         "command": "patch",
@@ -145,11 +149,7 @@ pub(crate) fn patch_pmm_scene_frame_range(
     patch: &PmmSceneFrameRangePatch,
     use_json: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(input)?;
-    let bytes_in = data.len();
-    let parsed = mmd_anim_format::parse_pmm_manifest(&data).map_err(|error| {
-        parse_failure_error("patch", input, mmd_anim_format::MmdFormatKind::Pmm, error)
-    })?;
+    let (bytes_in, parsed) = read_pmm_for_patch(input)?;
     let exported =
         mmd_anim_format::pmm::export_pmm_manifest_with_scene_frame_range_patch(&parsed, patch)
             .map_err(|e| format!("PMM scene frame range patch failed: {e}"))?;
@@ -159,7 +159,7 @@ pub(crate) fn patch_pmm_scene_frame_range(
         let report = patch_scene_frame_range_json(input, output, patch, bytes_in, bytes_out);
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        let changed_fields = count_pmm_scene_frame_range_patch_fields(patch);
+        let changed_fields = scene_frame_range_patch_fields(patch).len();
         println!(
             "PMM scene frame range patch: ok bytesIn={} bytesOut={} changedFields={} output={}",
             bytes_in,
@@ -178,11 +178,7 @@ pub(crate) fn patch_pmm_document_model_path(
     output: &Path,
     use_json: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(input)?;
-    let bytes_in = data.len();
-    let parsed = mmd_anim_format::parse_pmm_manifest(&data).map_err(|error| {
-        parse_failure_error("patch", input, mmd_anim_format::MmdFormatKind::Pmm, error)
-    })?;
+    let (bytes_in, parsed) = read_pmm_for_patch(input)?;
     let index: u8 = document_model_index.parse().map_err(|_| {
         format!(
             "invalid document-model-index {:?}: expected u8 (0-255)",

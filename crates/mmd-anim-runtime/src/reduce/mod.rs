@@ -1152,6 +1152,51 @@ fn validate_finite_matrix(
     }
 }
 
+/// Recursively splits `[0, frame_count - 1]` at the worst interior frame until every
+/// segment's worst normalized error is within tolerance (`<= 1.0`).
+///
+/// `worst_in_segment(start, end)` returns the worst `(normalized_error, frame)` among the
+/// interior frames of `start..=end`. Returns the number of newly inserted keys.
+fn split_track_at_worst_frames(
+    keys: &mut Vec<usize>,
+    frame_count: usize,
+    mut worst_in_segment: impl FnMut(usize, usize) -> Option<(f32, usize)>,
+) -> usize {
+    if frame_count <= 2 {
+        return 0;
+    }
+    let mut key_additions = 0;
+    let mut stack = vec![(0usize, frame_count - 1)];
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+        if let Some((_, frame)) = worst_in_segment(start, end).filter(|value| value.0 > 1.0) {
+            key_additions += usize::from(insert_key(keys, frame));
+            stack.push((frame, end));
+            stack.push((start, frame));
+        }
+    }
+    key_additions
+}
+
+/// Returns the interior frame of `start..=end` with the largest normalized error, preferring
+/// the earliest frame on ties.
+fn worst_interior_frame(
+    start: usize,
+    end: usize,
+    mut normalized_error_at: impl FnMut(usize) -> f32,
+) -> Option<(f32, usize)> {
+    let mut worst: Option<(f32, usize)> = None;
+    for frame in start + 1..end {
+        let normalized = normalized_error_at(frame);
+        if is_worse(worst, normalized, frame) {
+            worst = Some((normalized, frame));
+        }
+    }
+    worst
+}
+
 fn split_bone_track(
     keys: &mut Vec<usize>,
     input: DensePoseSequenceView<'_>,
@@ -1164,15 +1209,10 @@ fn split_bone_track(
         return;
     }
     let bone_count = translations.len() / input.frame_count;
-    let mut stack = vec![(0usize, input.frame_count - 1)];
-    while let Some((start, end)) = stack.pop() {
-        if end <= start + 1 {
-            continue;
-        }
+    split_track_at_worst_frames(keys, input.frame_count, |start, end| {
         let start_index = start * bone_count + bone;
         let end_index = end * bone_count + bone;
-        let mut worst: Option<(f32, usize)> = None;
-        for frame in start + 1..end {
+        worst_interior_frame(start, end, |frame| {
             let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
             let index = frame * bone_count + bone;
             let position_error = translations[index]
@@ -1181,20 +1221,12 @@ fn split_bone_track(
                 rotations[index],
                 rotations[start_index].slerp(rotations[end_index], amount),
             );
-            let normalized = normalized_error(position_error, tolerances.local_position).max(
-                normalized_error(rotation_error, tolerances.local_rotation_radians),
-            );
-            if is_worse(worst, normalized, frame) {
-                worst = Some((normalized, frame));
-            }
-        }
-        if let Some((normalized, frame)) = worst.filter(|value| value.0 > 1.0) {
-            let _ = normalized;
-            insert_key(keys, frame);
-            stack.push((frame, end));
-            stack.push((start, frame));
-        }
-    }
+            normalized_error(position_error, tolerances.local_position).max(normalized_error(
+                rotation_error,
+                tolerances.local_rotation_radians,
+            ))
+        })
+    });
 }
 
 #[derive(Default)]
@@ -1213,23 +1245,15 @@ fn split_dcc_bone_track(
     euler_xyz: &[Vec3A],
     tolerances: ReductionTolerances,
 ) -> LocalPrefitStats {
-    if input.frame_count <= 2 {
-        return LocalPrefitStats::default();
-    }
     let bone_count = input.bone_count;
     let mut stats = LocalPrefitStats::default();
-    let mut stack = vec![(0usize, input.frame_count - 1)];
-    while let Some((start, end)) = stack.pop() {
-        if end <= start + 1 {
-            continue;
-        }
+    stats.key_additions = split_track_at_worst_frames(keys, input.frame_count, |start, end| {
         let segment = fit_dcc_bone_segment(input, bone, start, end, translations, euler_xyz);
         stats.segment_fits += 1;
         let start_index = start * bone_count + bone;
         let end_index = end * bone_count + bone;
         let duration = input.sample_frame(end) - input.sample_frame(start);
-        let mut worst: Option<(f32, usize)> = None;
-        for frame in start + 1..end {
+        worst_interior_frame(start, end, |frame| {
             stats.samples += 1;
             let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
             let translation = sample_dcc_vec3(
@@ -1251,24 +1275,16 @@ fn split_dcc_bone_track(
             let rotation =
                 normalize_quat(Quat::from_euler(EulerRot::XYZ, euler.x, euler.y, euler.z));
             let index = frame * bone_count + bone;
-            let normalized = normalized_error(
+            normalized_error(
                 translations[index].distance(translation),
                 tolerances.local_position,
             )
             .max(normalized_error(
                 quat_angle(rotations[index], rotation),
                 tolerances.local_rotation_radians,
-            ));
-            if is_worse(worst, normalized, frame) {
-                worst = Some((normalized, frame));
-            }
-        }
-        if let Some((_, frame)) = worst.filter(|value| value.0 > 1.0) {
-            stats.key_additions += usize::from(insert_key(keys, frame));
-            stack.push((frame, end));
-            stack.push((start, frame));
-        }
-    }
+            ))
+        })
+    });
     stats
 }
 
@@ -1278,15 +1294,8 @@ fn split_dcc_morph_track(
     morph: usize,
     tolerance: f32,
 ) -> LocalPrefitStats {
-    if input.frame_count <= 2 {
-        return LocalPrefitStats::default();
-    }
     let mut stats = LocalPrefitStats::default();
-    let mut stack = vec![(0usize, input.frame_count - 1)];
-    while let Some((start, end)) = stack.pop() {
-        if end <= start + 1 {
-            continue;
-        }
+    stats.key_additions = split_track_at_worst_frames(keys, input.frame_count, |start, end| {
         let segment = fit_dcc_scalar_segment(
             start,
             end,
@@ -1295,8 +1304,7 @@ fn split_dcc_morph_track(
         );
         stats.segment_fits += 1;
         let duration = input.sample_frame(end) - input.sample_frame(start);
-        let mut worst: Option<(f32, usize)> = None;
-        for frame in start + 1..end {
+        worst_interior_frame(start, end, |frame| {
             stats.samples += 1;
             let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
             let expected = sample_hermite(
@@ -1307,20 +1315,12 @@ fn split_dcc_morph_track(
                 duration,
                 amount,
             );
-            let normalized = normalized_error(
+            normalized_error(
                 (input.morph_weight(frame, morph) - expected).abs(),
                 tolerance,
-            );
-            if is_worse(worst, normalized, frame) {
-                worst = Some((normalized, frame));
-            }
-        }
-        if let Some((_, frame)) = worst.filter(|value| value.0 > 1.0) {
-            stats.key_additions += usize::from(insert_key(keys, frame));
-            stack.push((frame, end));
-            stack.push((start, frame));
-        }
-    }
+            )
+        })
+    });
     stats
 }
 
@@ -1330,33 +1330,17 @@ fn split_morph_track(
     morph: usize,
     tolerance: f32,
 ) {
-    if input.frame_count <= 2 {
-        return;
-    }
-    let mut stack = vec![(0usize, input.frame_count - 1)];
-    while let Some((start, end)) = stack.pop() {
-        if end <= start + 1 {
-            continue;
-        }
-        let mut worst: Option<(f32, usize)> = None;
-        for frame in start + 1..end {
+    split_track_at_worst_frames(keys, input.frame_count, |start, end| {
+        worst_interior_frame(start, end, |frame| {
             let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
             let expected = input.morph_weight(start, morph)
                 + (input.morph_weight(end, morph) - input.morph_weight(start, morph)) * amount;
-            let normalized = normalized_error(
+            normalized_error(
                 (input.morph_weight(frame, morph) - expected).abs(),
                 tolerance,
-            );
-            if is_worse(worst, normalized, frame) {
-                worst = Some((normalized, frame));
-            }
-        }
-        if let Some((_, frame)) = worst.filter(|value| value.0 > 1.0) {
-            insert_key(keys, frame);
-            stack.push((frame, end));
-            stack.push((start, frame));
-        }
-    }
+            )
+        })
+    });
 }
 
 fn insert_key(keys: &mut Vec<usize>, frame: usize) -> bool {

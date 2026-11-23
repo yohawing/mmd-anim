@@ -1727,6 +1727,59 @@ fn is_descendant_or_self(snapshot: &SkeletonSnapshot, mut bone: usize, root: usi
     }
 }
 
+/// Identifies one bone of a subtree rebuilt while trying a candidate local pose for `bone`.
+#[derive(Clone, Copy)]
+struct SubtreeRebuild {
+    bone_count: usize,
+    frame: usize,
+    bone: usize,
+    current: usize,
+    bone_local: (Vec3A, Quat),
+}
+
+/// Recomputes the world transform of `rebuild.current` inside the subtree rooted at
+/// `rebuild.bone`. The root uses the candidate local pose, other subtree bones use the
+/// cached locals, and parents outside the subtree reuse cached world matrices.
+#[inline]
+fn rebuild_subtree_world(
+    sequence: &ReducedPoseSequence,
+    cache: &ValidationCache,
+    subtree_worlds: &mut [Mat4],
+    rebuild: SubtreeRebuild,
+    work_stats: &mut ReductionWorkStats,
+) -> Result<(Mat4, Quat), PoseReductionError> {
+    let SubtreeRebuild {
+        bone_count,
+        frame,
+        bone,
+        current,
+        bone_local,
+    } = rebuild;
+    let current_index = frame * bone_count + current;
+    let (local_translation, local_rotation) = if current == bone {
+        bone_local
+    } else {
+        (
+            cache.local_translations[current_index],
+            cache.local_rotations[current_index],
+        )
+    };
+    let local = Mat4::from_rotation_translation(local_rotation, local_translation.into());
+    let parent = sequence.snapshot.parent_indices[current];
+    let world = if parent < 0 {
+        local
+    } else if is_descendant_or_self(&sequence.snapshot, parent as usize, bone) {
+        subtree_worlds[parent as usize] * local
+    } else {
+        cache.world_matrices[frame * bone_count + parent as usize] * local
+    };
+    subtree_worlds[current] = world;
+    let world_rotation = decompose_rigid(world, frame, current)?.1;
+    work_stats.world_bone_recomputes += 1;
+    work_stats.world_rotation_decompositions += 1;
+    Ok((world, world_rotation))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_ancestor_prune_candidate(
     sequence: &ReducedPoseSequence,
@@ -1758,27 +1811,19 @@ fn validate_ancestor_prune_candidate(
 
         for &current in subtree {
             let current_index = frame * input.bone_count + current;
-            let (local_translation, local_rotation) = if current == bone {
-                (translation, rotation)
-            } else {
-                (
-                    cache.local_translations[current_index],
-                    cache.local_rotations[current_index],
-                )
-            };
-            let local = Mat4::from_rotation_translation(local_rotation, local_translation.into());
-            let parent = sequence.snapshot.parent_indices[current];
-            let world = if parent < 0 {
-                local
-            } else if is_descendant_or_self(&sequence.snapshot, parent as usize, bone) {
-                subtree_worlds[parent as usize] * local
-            } else {
-                cache.world_matrices[frame * input.bone_count + parent as usize] * local
-            };
-            subtree_worlds[current] = world;
-            let world_rotation = decompose_rigid(world, frame, current)?.1;
-            work_stats.world_bone_recomputes += 1;
-            work_stats.world_rotation_decompositions += 1;
+            let (world, world_rotation) = rebuild_subtree_world(
+                sequence,
+                cache,
+                subtree_worlds,
+                SubtreeRebuild {
+                    bone_count: input.bone_count,
+                    frame,
+                    bone,
+                    current,
+                    bone_local: (translation, rotation),
+                },
+                work_stats,
+            )?;
             if dense.world_positions[current_index].distance(Vec3A::from(world.w_axis.truncate()))
                 > tolerances.world_position
                 || quat_angle(dense.world_rotations[current_index], world_rotation)
@@ -1820,27 +1865,19 @@ fn apply_ancestor_prune_candidate(
 
         for &current in subtree {
             let current_index = frame * input.bone_count + current;
-            let (local_translation, local_rotation) = if current == bone {
-                (translation, rotation)
-            } else {
-                (
-                    cache.local_translations[current_index],
-                    cache.local_rotations[current_index],
-                )
-            };
-            let local = Mat4::from_rotation_translation(local_rotation, local_translation.into());
-            let parent = sequence.snapshot.parent_indices[current];
-            let world = if parent < 0 {
-                local
-            } else if is_descendant_or_self(&sequence.snapshot, parent as usize, bone) {
-                subtree_worlds[parent as usize] * local
-            } else {
-                cache.world_matrices[frame * input.bone_count + parent as usize] * local
-            };
-            subtree_worlds[current] = world;
-            let world_rotation = decompose_rigid(world, frame, current)?.1;
-            work_stats.world_bone_recomputes += 1;
-            work_stats.world_rotation_decompositions += 1;
+            let (world, world_rotation) = rebuild_subtree_world(
+                sequence,
+                cache,
+                subtree_worlds,
+                SubtreeRebuild {
+                    bone_count: input.bone_count,
+                    frame,
+                    bone,
+                    current,
+                    bone_local: (translation, rotation),
+                },
+                work_stats,
+            )?;
             cache.world_matrices[current_index] = world;
             cache.world_rotations[current_index] = world_rotation;
             cache.bone_errors[current_index].world_position =

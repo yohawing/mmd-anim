@@ -13,6 +13,7 @@ use crate::binary::{
 };
 use crate::error::ImportError;
 use crate::normalize::normalize_vmd_name;
+use crate::rigid_body_codes;
 use crate::sjis::{decode_sjis_fixed_trimmed, encode_sjis, encode_sjis_prefix_fit};
 
 type Reader<'a> = ByteReader<'a>;
@@ -697,12 +698,7 @@ pub fn export_pmd_model(model: &PmdParsedModel) -> Vec<u8> {
             write_index_u16(&mut out, body.bone_index);
             out.push(body.group);
             write_u16(&mut out, body.mask);
-            out.push(match body.shape.as_str() {
-                "sphere" => 0,
-                "box" => 1,
-                "capsule" => 2,
-                _ => 0,
-            });
+            out.push(rigid_body_codes::shape_code(&body.shape));
             write_vec3(&mut out, body.size);
             write_vec3(&mut out, body.position);
             write_vec3(&mut out, body.rotation);
@@ -711,12 +707,7 @@ pub fn export_pmd_model(model: &PmdParsedModel) -> Vec<u8> {
             write_f32(&mut out, body.angular_damping);
             write_f32(&mut out, body.restitution);
             write_f32(&mut out, body.friction);
-            out.push(match body.mode.as_str() {
-                "static" => 0,
-                "dynamic" => 1,
-                "dynamicBone" => 2,
-                _ => 0,
-            });
+            out.push(rigid_body_codes::mode_code(&body.mode));
         }
 
         write_u32(&mut out, model.joints.len() as u32);
@@ -915,13 +906,7 @@ fn read_rigid_bodies(r: &mut Reader<'_>) -> Result<Vec<PmdParsedRigidBody>, Impo
             bone_index: normalize_index(r.u16()?),
             group: r.u8()?,
             mask: r.u16()?,
-            shape: match r.u8()? {
-                0 => "sphere",
-                1 => "box",
-                2 => "capsule",
-                _ => "unknown",
-            }
-            .to_owned(),
+            shape: rigid_body_codes::shape_name(r.u8()?).to_owned(),
             size: r.vec3()?,
             position: r.vec3()?,
             rotation: r.vec3()?,
@@ -930,13 +915,7 @@ fn read_rigid_bodies(r: &mut Reader<'_>) -> Result<Vec<PmdParsedRigidBody>, Impo
             angular_damping: r.f32()?,
             restitution: r.f32()?,
             friction: r.f32()?,
-            mode: match r.u8()? {
-                0 => "static",
-                1 => "dynamic",
-                2 => "dynamicBone",
-                _ => "unknown",
-            }
-            .to_owned(),
+            mode: rigid_body_codes::mode_name(r.u8()?).to_owned(),
         });
     }
     Ok(bodies)

@@ -17,6 +17,7 @@ use crate::binary::{
     write_i32_le as write_i32, write_u16_le as write_u16,
 };
 use crate::error::ImportError;
+use crate::rigid_body_codes;
 use crate::sjis::encode_sjis;
 
 type Reader<'a> = ByteReader<'a>;
@@ -3139,11 +3140,7 @@ pub fn export_pmx_model(model: &PmxParsedModel) -> Vec<u8> {
         write_sized_index(&mut out, body.bone_index, model.metadata.index_sizes.bone);
         out.push(body.group);
         write_u16(&mut out, body.mask);
-        out.push(match body.shape.as_str() {
-            "box" => 1,
-            "capsule" => 2,
-            _ => 0,
-        });
+        out.push(rigid_body_codes::shape_code(&body.shape));
         write_f32_slice(&mut out, &body.size);
         write_f32_slice(&mut out, &body.position);
         write_f32_slice(&mut out, &body.rotation);
@@ -3152,11 +3149,7 @@ pub fn export_pmx_model(model: &PmxParsedModel) -> Vec<u8> {
         write_f32(&mut out, body.angular_damping);
         write_f32(&mut out, body.restitution);
         write_f32(&mut out, body.friction);
-        out.push(match body.mode.as_str() {
-            "dynamic" => 1,
-            "dynamicBone" => 2,
-            _ => 0,
-        });
+        out.push(rigid_body_codes::mode_code(&body.mode));
     }
 
     write_i32(&mut out, model.joints.len() as i32);
@@ -4549,13 +4542,7 @@ fn read_parsed_rigid_bodies(
             bone_index: r.read_sized_index(header.bone_index_size)?,
             group: r.read_u8()?,
             mask: r.read_u16_le()?,
-            shape: match r.read_u8()? {
-                0 => "sphere",
-                1 => "box",
-                2 => "capsule",
-                _ => "unknown",
-            }
-            .to_owned(),
+            shape: rigid_body_codes::shape_name(r.read_u8()?).to_owned(),
             size: r.read_vec3_array()?,
             position: r.read_vec3_array()?,
             rotation: r.read_vec3_array()?,
@@ -4564,13 +4551,7 @@ fn read_parsed_rigid_bodies(
             angular_damping: r.read_f32_le()?,
             restitution: r.read_f32_le()?,
             friction: r.read_f32_le()?,
-            mode: match r.read_u8()? {
-                0 => "static",
-                1 => "dynamic",
-                2 => "dynamicBone",
-                _ => "unknown",
-            }
-            .to_owned(),
+            mode: rigid_body_codes::mode_name(r.read_u8()?).to_owned(),
         });
     }
     Ok(bodies)

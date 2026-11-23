@@ -348,10 +348,7 @@ pub(crate) fn build_numeric_compare_report(
     let mut per_case = Vec::new();
 
     for case in cases {
-        let name = case
-            .get("name")
-            .and_then(|value| value.as_str())
-            .ok_or("numeric compare case is missing name")?;
+        let name = numeric_case_name(case)?;
         let kind = case
             .get("kind")
             .and_then(|value| value.as_str())
@@ -440,14 +437,8 @@ fn compare_camera_numeric_case(
     stats: &mut CameraNumericCompareStats,
     emit_diagnostics: bool,
 ) -> Result<NumericCompareCaseReport, Box<dyn std::error::Error>> {
-    let name = case
-        .get("name")
-        .and_then(|value| value.as_str())
-        .ok_or("numeric compare case is missing name")?;
-    let epsilon = case
-        .pointer("/compare/epsilon")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(default_epsilon);
+    let name = numeric_case_name(case)?;
+    let epsilon = numeric_case_epsilon(case, default_epsilon);
     let mut case_stats = CameraNumericCompareStats::default();
     let oracle_path = resolve_camera_oracle_path(case, manifest_dir, case_dir)?;
     let oracle_bytes = fs::read(&oracle_path).map_err(|error| {
@@ -459,16 +450,7 @@ fn compare_camera_numeric_case(
         )
     })?;
     let oracle: serde_json::Value = serde_json::from_slice(&oracle_bytes)?;
-    let camera_vmd = resolve_camera_vmd_path(case, manifest_dir, case_dir)?;
-    let camera_vmd_bytes = fs::read(&camera_vmd).map_err(|error| {
-        format!(
-            "failed to read camera VMD for case {} at {}: {}",
-            name,
-            camera_vmd.display(),
-            error
-        )
-    })?;
-    let parsed = mmd_anim_format::parse_vmd_animation(&camera_vmd_bytes)?;
+    let (camera_vmd, parsed) = read_camera_vmd_animation(case, manifest_dir, case_dir, name)?;
     let frames = oracle
         .get("frames")
         .and_then(|value| value.as_array())
@@ -547,14 +529,8 @@ fn compare_camera_current_dump_case(
     stats: &mut CameraNumericCompareStats,
     emit_diagnostics: bool,
 ) -> Result<NumericCompareCaseReport, Box<dyn std::error::Error>> {
-    let name = case
-        .get("name")
-        .and_then(|value| value.as_str())
-        .ok_or("numeric compare case is missing name")?;
-    let epsilon = case
-        .pointer("/compare/epsilon")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(default_epsilon);
+    let name = numeric_case_name(case)?;
+    let epsilon = numeric_case_epsilon(case, default_epsilon);
     let mut case_stats = CameraNumericCompareStats::default();
     collect_unsupported_targets(
         case,
@@ -575,16 +551,7 @@ fn compare_camera_current_dump_case(
             error
         )
     })?;
-    let camera_vmd = resolve_camera_vmd_path(case, manifest_dir, case_dir)?;
-    let camera_vmd_bytes = fs::read(&camera_vmd).map_err(|error| {
-        format!(
-            "failed to read camera VMD for case {} at {}: {}",
-            name,
-            camera_vmd.display(),
-            error
-        )
-    })?;
-    let parsed = mmd_anim_format::parse_vmd_animation(&camera_vmd_bytes)?;
+    let (camera_vmd, parsed) = read_camera_vmd_animation(case, manifest_dir, case_dir, name)?;
 
     case_stats.compared_cases += 1;
     for (line_index, line) in oracle_text.lines().enumerate() {
@@ -860,14 +827,8 @@ fn compare_motion_numeric_case(
         worst: String::from("none"),
         ..MotionNumericCompareStats::default()
     };
-    let name = case
-        .get("name")
-        .and_then(|value| value.as_str())
-        .ok_or("numeric compare case is missing name")?;
-    let epsilon = case
-        .pointer("/compare/epsilon")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(defaults.epsilon) as f32;
+    let name = numeric_case_name(case)?;
+    let epsilon = numeric_case_epsilon(case, defaults.epsilon) as f32;
     let eval_frame_offset = json_f32(case, "/compare/evalFrameOffset")
         .or_else(|| json_f32(case, "/metadata/evalFrameOffset"))
         .unwrap_or(defaults.eval_frame_offset);
@@ -3213,6 +3174,38 @@ fn numeric_case_frames(case: &serde_json::Value) -> Result<Vec<i32>, Box<dyn std
                 .ok_or_else(|| "numeric compare frame must be an i32".into())
         })
         .collect()
+}
+
+fn numeric_case_name(case: &serde_json::Value) -> Result<&str, Box<dyn std::error::Error>> {
+    Ok(case
+        .get("name")
+        .and_then(|value| value.as_str())
+        .ok_or("numeric compare case is missing name")?)
+}
+
+fn numeric_case_epsilon(case: &serde_json::Value, default_epsilon: f64) -> f64 {
+    case.pointer("/compare/epsilon")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(default_epsilon)
+}
+
+fn read_camera_vmd_animation(
+    case: &serde_json::Value,
+    manifest_dir: &Path,
+    case_dir: Option<&Path>,
+    name: &str,
+) -> Result<(PathBuf, mmd_anim_format::VmdParsedAnimation), Box<dyn std::error::Error>> {
+    let camera_vmd = resolve_camera_vmd_path(case, manifest_dir, case_dir)?;
+    let camera_vmd_bytes = fs::read(&camera_vmd).map_err(|error| {
+        format!(
+            "failed to read camera VMD for case {} at {}: {}",
+            name,
+            camera_vmd.display(),
+            error
+        )
+    })?;
+    let parsed = mmd_anim_format::parse_vmd_animation(&camera_vmd_bytes)?;
+    Ok((camera_vmd, parsed))
 }
 
 fn resolve_camera_vmd_path(

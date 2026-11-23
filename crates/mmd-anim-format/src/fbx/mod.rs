@@ -1004,6 +1004,23 @@ fn dcc_channel(
             tangents,
         });
     }
+    Some(canonical_dcc_channel(
+        sample_indices.to_vec(),
+        frame_times.to_vec(),
+        values,
+        tangents,
+        epsilon,
+    ))
+}
+
+/// Builds a DCC channel with values and tangents snapped to canonical scalars.
+fn canonical_dcc_channel(
+    sample_indices: Vec<usize>,
+    frame_times: Vec<i64>,
+    values: &[f32],
+    tangents: &[SegmentTangents],
+    epsilon: f32,
+) -> FbxAnimationChannel {
     let tangents = tangents
         .iter()
         .map(|tangent| SegmentTangents {
@@ -1011,17 +1028,16 @@ fn dcc_channel(
             next_in_tangent: canonical_dcc_scalar(tangent.next_in_tangent, epsilon),
         })
         .collect::<Vec<_>>();
-    let values = values
-        .iter()
-        .map(|value| canonical_dcc_scalar(*value, epsilon))
-        .collect::<Vec<_>>();
-    Some(FbxAnimationChannel {
-        sample_indices: sample_indices.to_vec(),
-        frame_times: frame_times.to_vec(),
-        values,
+    FbxAnimationChannel {
+        sample_indices,
+        frame_times,
+        values: values
+            .iter()
+            .map(|value| canonical_dcc_scalar(*value, epsilon))
+            .collect(),
         attributes: Some(curve_attributes(&tangents)),
         tangents,
-    })
+    }
 }
 
 fn full_dcc_channel(
@@ -1054,23 +1070,13 @@ fn full_dcc_channel(
         [1.0, 1.0, if options.flip_z { -1.0 } else { 1.0 }][axis]
     };
     let tangents = bone_segment_tangents(track.keys(), axis, rotation, sign, 30.0);
-    let tangents = tangents
-        .iter()
-        .map(|tangent| SegmentTangents {
-            out_tangent: canonical_dcc_scalar(tangent.out_tangent, epsilon),
-            next_in_tangent: canonical_dcc_scalar(tangent.next_in_tangent, epsilon),
-        })
-        .collect::<Vec<_>>();
-    Ok(FbxAnimationChannel {
+    Ok(canonical_dcc_channel(
         sample_indices,
         frame_times,
-        values: values
-            .iter()
-            .map(|value| canonical_dcc_scalar(*value, epsilon))
-            .collect(),
-        attributes: Some(curve_attributes(&tangents)),
-        tangents,
-    })
+        values,
+        &tangents,
+        epsilon,
+    ))
 }
 
 fn build_raw_full_dcc_plans(

@@ -830,12 +830,59 @@ fn compare_motion_numeric_case(
     };
     let name = numeric_case_name(case)?;
     let epsilon = numeric_case_epsilon(case, defaults.epsilon) as f32;
+    let mut missing_paths = Vec::<String>::new();
+    let (status, error) = evaluate_motion_numeric_case(
+        MotionNumericCaseInput {
+            case,
+            manifest_dir,
+            defaults,
+            name,
+            epsilon,
+            emit_diagnostics,
+        },
+        &mut case_stats,
+        &mut missing_paths,
+    )?;
+    stats.merge(&case_stats);
+    Ok(motion_case_report(
+        name,
+        case,
+        status,
+        epsilon,
+        &case_stats,
+        missing_paths,
+        error,
+    ))
+}
+
+struct MotionNumericCaseInput<'a> {
+    case: &'a serde_json::Value,
+    manifest_dir: &'a Path,
+    defaults: MotionNumericCompareDefaults<'a>,
+    name: &'a str,
+    epsilon: f32,
+    emit_diagnostics: bool,
+}
+
+/// Compares one motion-numeric case and returns its report status and optional error.
+fn evaluate_motion_numeric_case(
+    input: MotionNumericCaseInput<'_>,
+    case_stats: &mut MotionNumericCompareStats,
+    missing_paths: &mut Vec<String>,
+) -> Result<(&'static str, Option<String>), Box<dyn std::error::Error>> {
+    let MotionNumericCaseInput {
+        case,
+        manifest_dir,
+        defaults,
+        name,
+        epsilon,
+        emit_diagnostics,
+    } = input;
     let eval_frame_offset = json_f32(case, "/compare/evalFrameOffset")
         .or_else(|| json_f32(case, "/metadata/evalFrameOffset"))
         .unwrap_or(defaults.eval_frame_offset);
     collect_unsupported_targets(case, &mut case_stats.skipped_targets, &["bones"]);
 
-    let mut missing_paths = Vec::<String>::new();
     let model_path = match case
         .pointer("/assets/model")
         .and_then(|value| value.as_str())
@@ -848,16 +895,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("missing: {name} assets.model");
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "missing",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                None,
-            ));
+            return Ok(("missing", None));
         }
     };
     let motion_source = match NumericMotionSource::from_case(case) {
@@ -867,16 +905,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("import-error: {name}: {error}");
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "import-error",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                Some(error),
-            ));
+            return Ok(("import-error", Some(error)));
         }
     };
     let motion_asset_pointer = motion_source.asset_pointer();
@@ -892,16 +921,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("missing: {name} {motion_asset_pointer}");
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "missing",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                None,
-            ));
+            return Ok(("missing", None));
         }
     };
     let oracle_path = match case
@@ -916,16 +936,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("missing: {name} oracle.path");
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "missing",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                None,
-            ));
+            return Ok(("missing", None));
         }
     };
 
@@ -935,16 +946,7 @@ fn compare_motion_numeric_case(
         if emit_diagnostics {
             eprintln!("skipped unsupported model: {}", model_path.display());
         }
-        stats.merge(&case_stats);
-        return Ok(motion_case_report(
-            name,
-            case,
-            "skipped-unsupported",
-            epsilon,
-            &case_stats,
-            missing_paths,
-            Some(error),
-        ));
+        return Ok(("skipped-unsupported", Some(error)));
     }
     if !model_path.exists() || !motion_path.exists() || !oracle_path.exists() {
         case_stats.missing += 1;
@@ -966,16 +968,7 @@ fn compare_motion_numeric_case(
                 eprintln!("missing: {}", oracle_path.display());
             }
         }
-        stats.merge(&case_stats);
-        return Ok(motion_case_report(
-            name,
-            case,
-            "missing",
-            epsilon,
-            &case_stats,
-            missing_paths,
-            None,
-        ));
+        return Ok(("missing", None));
     }
 
     let frames = numeric_case_frames(case)?;
@@ -992,16 +985,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("import-error: {}", error);
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "import-error",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                Some(error),
-            ));
+            return Ok(("import-error", Some(error)));
         }
     };
     let solver_count = model_import.model.ik_count();
@@ -1020,16 +1004,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("import-error: {}", error);
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "import-error",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                Some(error),
-            ));
+            return Ok(("import-error", Some(error)));
         }
     };
 
@@ -1073,7 +1048,7 @@ fn compare_motion_numeric_case(
             }
             let runtime_matrix = world_matrices[index].to_cols_array();
             record_motion_matrix_diagnostics(
-                &mut case_stats,
+                case_stats,
                 oracle_frame.frame,
                 &oracle_bone.name,
                 &runtime_matrix,
@@ -1123,16 +1098,7 @@ fn compare_motion_numeric_case(
     } else {
         ("mismatch", None)
     };
-    stats.merge(&case_stats);
-    Ok(motion_case_report(
-        name,
-        case,
-        status,
-        epsilon,
-        &case_stats,
-        missing_paths,
-        error,
-    ))
+    Ok((status, error))
 }
 
 fn build_numeric_motion_clip(

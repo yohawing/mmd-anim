@@ -143,17 +143,15 @@ pub(crate) fn bench_pair_report_json(input: BenchPairReportInput<'_>) -> serde_j
 
         let top_solvers = ranked
             .into_iter()
-            .map(|(index, stats)| {
+            .map(|ranked| {
+                let RankedIkSolverStats {
+                    index,
+                    stats,
+                    skipped,
+                    avg_final_distance,
+                    avg_exhausted_final_distance,
+                } = ranked;
                 let summary = &input.ik_solver_summaries[index];
-                let skipped = stats
-                    .configured_iterations
-                    .saturating_sub(stats.executed_iterations);
-                let avg_final_distance =
-                    average_distance(stats.final_distance_sum, stats.solver_evaluations);
-                let avg_exhausted_final_distance = average_distance(
-                    stats.exhausted_final_distance_sum,
-                    stats.max_iteration_exhaustions,
-                );
                 json!({
                     "solver": summary.solver_index,
                     "bone": summary.bone_index,
@@ -196,13 +194,40 @@ pub(crate) fn bench_pair_report_json(input: BenchPairReportInput<'_>) -> serde_j
     root
 }
 
-fn top_ik_solvers(stats: &[IkSolverRuntimeStats]) -> Vec<(usize, &IkSolverRuntimeStats)> {
+/// Per-solver IK stats plus the derived values reported for the busiest solvers.
+struct RankedIkSolverStats<'a> {
+    index: usize,
+    stats: &'a IkSolverRuntimeStats,
+    skipped: u64,
+    avg_final_distance: f64,
+    avg_exhausted_final_distance: f64,
+}
+
+/// Returns the eight solvers with the most executed (then configured) iterations.
+fn top_ik_solvers(stats: &[IkSolverRuntimeStats]) -> Vec<RankedIkSolverStats<'_>> {
     let mut ranked: Vec<_> = stats.iter().enumerate().collect();
     ranked.sort_by_key(|(_, stats)| {
         std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
     });
     ranked.truncate(8);
     ranked
+        .into_iter()
+        .map(|(index, stats)| RankedIkSolverStats {
+            index,
+            stats,
+            skipped: stats
+                .configured_iterations
+                .saturating_sub(stats.executed_iterations),
+            avg_final_distance: average_distance(
+                stats.final_distance_sum,
+                stats.solver_evaluations,
+            ),
+            avg_exhausted_final_distance: average_distance(
+                stats.exhausted_final_distance_sum,
+                stats.max_iteration_exhaustions,
+            ),
+        })
+        .collect()
 }
 
 fn average_distance(total: f64, count: u64) -> f64 {
@@ -527,17 +552,15 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
         );
 
         let ranked = top_ik_solvers(stats);
-        for (index, stats) in ranked {
+        for RankedIkSolverStats {
+            index,
+            stats,
+            skipped,
+            avg_final_distance,
+            avg_exhausted_final_distance,
+        } in ranked
+        {
             let summary = &ik_solver_summaries[index];
-            let skipped = stats
-                .configured_iterations
-                .saturating_sub(stats.executed_iterations);
-            let avg_final_distance =
-                average_distance(stats.final_distance_sum, stats.solver_evaluations);
-            let avg_exhausted_final_distance = average_distance(
-                stats.exhausted_final_distance_sum,
-                stats.max_iteration_exhaustions,
-            );
             println!(
                 "bench-pair-ik-solver: solver={} bone={} name={} maxIterations={} links={} evaluations={} configuredIterations={} executedIterations={} skippedIterations={} precheckBreaks={} postBreaks={} rollbackBreaks={} exhausted={} avgFinalDistance={:.8} maxFinalDistance={:.8} avgExhaustedFinalDistance={:.8} maxExhaustedFinalDistance={:.8}",
                 summary.solver_index,

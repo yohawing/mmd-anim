@@ -768,8 +768,13 @@ impl VmdSummaryAccumulator {
     }
 
     fn record_bone(&mut self, name: &[u8]) -> Result<(), ImportError> {
-        validate_summary_name(name, "empty bone name")?;
-        self.bone_names.insert(name.to_vec());
+        // A name already in the set has passed validation; skip the per-key SJIS
+        // decode and allocation. Blank names are never inserted, so they are
+        // still rejected at the first key that carries one.
+        if !self.bone_names.contains(name) {
+            validate_summary_name(name, "empty bone name")?;
+            self.bone_names.insert(name.to_vec());
+        }
         self.bone_key_count = self
             .bone_key_count
             .checked_add(1)
@@ -778,8 +783,13 @@ impl VmdSummaryAccumulator {
     }
 
     fn record_morph(&mut self, name: &[u8]) -> Result<(), ImportError> {
-        validate_summary_name(name, "empty morph name")?;
-        self.morph_names.insert(name.to_vec());
+        // A name already in the set has passed validation; skip the per-key SJIS
+        // decode and allocation. Blank names are never inserted, so they are
+        // still rejected at the first key that carries one.
+        if !self.morph_names.contains(name) {
+            validate_summary_name(name, "empty morph name")?;
+            self.morph_names.insert(name.to_vec());
+        }
         self.morph_key_count = self
             .morph_key_count
             .checked_add(1)
@@ -3504,6 +3514,56 @@ mod tests {
         assert_eq!(
             parse_vmd_summary(&whitespace_property_ik),
             Err(VmdSummaryError::Invalid("empty property IK name"))
+        );
+    }
+
+    fn summary_name_track_vmd_bytes(bone_names: &[&[u8]], morph_names: &[&[u8]]) -> Vec<u8> {
+        let mut buf = build_vmd_header_bytes();
+        buf.extend_from_slice(&(bone_names.len() as u32).to_le_bytes());
+        for (frame, name) in bone_names.iter().enumerate() {
+            let mut field = [0u8; 15];
+            field[..name.len()].copy_from_slice(name);
+            buf.extend_from_slice(&field);
+            buf.extend_from_slice(&(frame as u32).to_le_bytes());
+            buf.extend_from_slice(&[0u8; 12]); // translation
+            buf.extend_from_slice(&[0u8; 16]); // rotation
+            buf.extend_from_slice(&[0u8; 64]); // interpolation
+        }
+        buf.extend_from_slice(&(morph_names.len() as u32).to_le_bytes());
+        for (frame, name) in morph_names.iter().enumerate() {
+            let mut field = [0u8; 15];
+            field[..name.len()].copy_from_slice(name);
+            buf.extend_from_slice(&field);
+            buf.extend_from_slice(&(frame as u32).to_le_bytes());
+            buf.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+        for _ in 0..4 {
+            buf.extend_from_slice(&0u32.to_le_bytes()); // camera, light, self-shadow, property
+        }
+        buf
+    }
+
+    #[test]
+    fn summary_scanner_counts_repeated_names_as_one_track() {
+        // Bytes after the first NUL are padding, so they must not split a track.
+        let names: [&[u8]; 4] = [b"same", b"same", b"same junk", b"other"];
+        let summary = parse_vmd_summary(&summary_name_track_vmd_bytes(&names, &names)).unwrap();
+        assert_eq!(summary.bones.track_count, 2);
+        assert_eq!(summary.bones.key_count, 4);
+        assert_eq!(summary.morphs.track_count, 2);
+        assert_eq!(summary.morphs.key_count, 4);
+    }
+
+    #[test]
+    fn summary_scanner_rejects_empty_name_after_repeated_valid_names() {
+        let names: [&[u8]; 3] = [b"same", b"same", b""];
+        assert_eq!(
+            parse_vmd_summary(&summary_name_track_vmd_bytes(&names, &[])),
+            Err(VmdSummaryError::Invalid("empty bone name"))
+        );
+        assert_eq!(
+            parse_vmd_summary(&summary_name_track_vmd_bytes(&[], &names)),
+            Err(VmdSummaryError::Invalid("empty morph name"))
         );
     }
 

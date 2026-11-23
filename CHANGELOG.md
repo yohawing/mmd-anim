@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Speed up the VMD summary scan (`parse_vmd_summary` and the shared-context
+  summary) by validating each bone and morph name once instead of decoding it
+  for every key. Results, errors, and the C ABI are unchanged; a 300,000-key
+  VMD scans in about 7 ms instead of 43 ms.
+
 ## 0.5.6 - 2026-11-24
 
 ### Fixed

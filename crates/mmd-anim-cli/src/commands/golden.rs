@@ -7,8 +7,8 @@ use std::{
 };
 
 use crate::schema::{
-    DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
-    MmdDumperOracleModel,
+    DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleBone,
+    MmdDumperOracleDump, MmdDumperOracleModel,
 };
 use crate::support::registered_morph_count;
 use glam::Vec3A;
@@ -835,6 +835,21 @@ pub(crate) fn import_golden_runtime_model(
     }
 }
 
+/// Pairs each focused IK oracle bone with the runtime world matrix at the same index,
+/// skipping bones whose index is negative or outside the runtime skeleton.
+fn focused_ik_bone_matrices<'a>(
+    oracle_model: &'a MmdDumperOracleModel,
+    world_matrices: &'a [glam::Mat4],
+) -> impl Iterator<Item = (usize, [f32; 16], &'a MmdDumperOracleBone)> + 'a {
+    oracle_model
+        .focused_ik_bones(DEFAULT_FOCUSED_IK_BONE_NAMES)
+        .filter_map(|oracle_bone| {
+            let index = usize::try_from(oracle_bone.index).ok()?;
+            let runtime_matrix = world_matrices.get(index)?.to_cols_array();
+            Some((index, runtime_matrix, oracle_bone))
+        })
+}
+
 pub(crate) fn golden_ik_compare(
     root: &Path,
     sample_frame_offset: f32,
@@ -959,23 +974,12 @@ pub(crate) fn golden_ik_compare(
             // Pass 1: compute frame max abs error for domination check
             let mut frame_max_error: f32 = 0.0;
 
-            for oracle_bone in model0.focused_ik_bones(DEFAULT_FOCUSED_IK_BONE_NAMES) {
-                if oracle_bone.index < 0 {
-                    continue;
-                }
-                let index = oracle_bone.index as usize;
-                if index >= world_matrices.len() {
-                    continue;
-                }
-
-                let runtime_matrix = world_matrices[index].to_cols_array();
-                let oracle_matrix = oracle_bone.world_matrix;
-
-                for i in 0..16 {
-                    let abs_error = (runtime_matrix[i] - oracle_matrix[i]).abs();
-                    if abs_error > frame_max_error {
-                        frame_max_error = abs_error;
-                    }
+            for (_, runtime_matrix, oracle_bone) in focused_ik_bone_matrices(model0, world_matrices)
+            {
+                for (runtime_value, oracle_value) in
+                    runtime_matrix.iter().zip(oracle_bone.world_matrix)
+                {
+                    frame_max_error = frame_max_error.max((runtime_value - oracle_value).abs());
                 }
             }
 
@@ -989,18 +993,10 @@ pub(crate) fn golden_ik_compare(
             }
 
             // Pass 2: full comparison with existing + solver-focused tracking
-            for oracle_bone in model0.focused_ik_bones(DEFAULT_FOCUSED_IK_BONE_NAMES) {
-                if oracle_bone.index < 0 {
-                    continue;
-                }
-                let index = oracle_bone.index as usize;
-                if index >= world_matrices.len() {
-                    continue;
-                }
-
-                let runtime_matrix = world_matrices[index].to_cols_array();
+            for (index, runtime_matrix, oracle_bone) in
+                focused_ik_bone_matrices(model0, world_matrices)
+            {
                 let oracle_matrix = oracle_bone.world_matrix;
-
                 for i in 0..16 {
                     let abs_error = (runtime_matrix[i] - oracle_matrix[i]).abs();
                     if abs_error > case_max_error {

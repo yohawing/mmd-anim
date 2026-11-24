@@ -85,8 +85,227 @@ fn parse_accessory_for_command(
         .map_err(|error| parse_failure_error(command, path, kind, error))
 }
 
-pub(crate) fn export_roundtrip_summary(
+/// Sizes reported by a successful export roundtrip, plus the JSON payload size when the
+/// roundtrip went through serde JSON.
+#[derive(Clone, Copy)]
+struct RoundtripSizes {
+    bytes_in: usize,
+    bytes_out: usize,
+    json_bytes: Option<usize>,
+}
+
+impl RoundtripSizes {
+    fn new(bytes_in: usize, bytes_out: usize, json_bytes: Option<usize>) -> Self {
+        Self {
+            bytes_in,
+            bytes_out,
+            json_bytes,
+        }
+    }
+
+    fn mode(self) -> &'static str {
+        if self.json_bytes.is_some() {
+            "parse-json-export-parse"
+        } else {
+            "parse-export-parse"
+        }
+    }
+}
+
+/// Prints either the JSON report or the one-line text summary of a successful roundtrip.
+fn print_roundtrip_result(
+    use_json: bool,
+    report: impl FnOnce() -> serde_json::Value,
+    label: &str,
+    sizes: RoundtripSizes,
+    details: &str,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if use_json {
+        println!("{}", serde_json::to_string_pretty(&report())?);
+    } else {
+        let RoundtripSizes {
+            bytes_in,
+            bytes_out,
+            json_bytes,
+        } = sizes;
+        match json_bytes {
+            Some(json_bytes) => println!(
+                "{label} export JSON roundtrip: ok jsonBytes={json_bytes} bytesIn={bytes_in} bytesOut={bytes_out} {details}"
+            ),
+            None => println!(
+                "{label} export roundtrip: ok bytesIn={bytes_in} bytesOut={bytes_out} {details}"
+            ),
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn report_vmd_roundtrip(
     path: &Path,
+    use_json: bool,
+    sizes: RoundtripSizes,
+    parsed: &mmd_anim_format::VmdParsedAnimation,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let counts = &parsed.metadata.counts;
+    let details = format!(
+        "boneFrames={} morphFrames={} cameraFrames={} lightFrames={} selfShadowFrames={} propertyFrames={} maxFrame={}",
+        counts.bones,
+        counts.morphs,
+        counts.cameras,
+        counts.lights,
+        counts.self_shadows,
+        counts.properties,
+        parsed.metadata.max_frame
+    );
+    print_roundtrip_result(
+        use_json,
+        || {
+            vmd_roundtrip_json(
+                path,
+                sizes.mode(),
+                sizes.bytes_in,
+                sizes.bytes_out,
+                sizes.json_bytes,
+                parsed,
+            )
+        },
+        "VMD",
+        sizes,
+        &details,
+    )
+}
+
+fn report_vpd_roundtrip(
+    path: &Path,
+    use_json: bool,
+    sizes: RoundtripSizes,
+    parsed: &mmd_anim_format::VpdParsedPose,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let details = format!("bones={}", parsed.bone_count);
+    print_roundtrip_result(
+        use_json,
+        || {
+            vpd_roundtrip_json(
+                path,
+                sizes.mode(),
+                sizes.bytes_in,
+                sizes.bytes_out,
+                sizes.json_bytes,
+                parsed,
+            )
+        },
+        "VPD",
+        sizes,
+        &details,
+    )
+}
+
+fn report_pmx_roundtrip(
+    path: &Path,
+    use_json: bool,
+    sizes: RoundtripSizes,
+    parsed: &mmd_anim_format::PmxParsedModel,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let counts = &parsed.metadata.counts;
+    let details = format!(
+        "vertices={} faces={} materials={} bones={} morphs={} displayFrames={} rigidBodies={} joints={} softBodies={}",
+        counts.vertices,
+        counts.faces,
+        counts.materials,
+        counts.bones,
+        counts.morphs,
+        counts.display_frames,
+        counts.rigid_bodies,
+        counts.joints,
+        counts.soft_bodies
+    );
+    print_roundtrip_result(
+        use_json,
+        || {
+            pmx_roundtrip_json(
+                path,
+                sizes.mode(),
+                sizes.bytes_in,
+                sizes.bytes_out,
+                sizes.json_bytes,
+                parsed,
+            )
+        },
+        "PMX",
+        sizes,
+        &details,
+    )
+}
+
+fn report_pmd_roundtrip(
+    path: &Path,
+    use_json: bool,
+    sizes: RoundtripSizes,
+    parsed: &mmd_anim_format::PmdParsedModel,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let counts = &parsed.metadata.counts;
+    let details = format!(
+        "vertices={} faces={} materials={} bones={} ik={} morphs={} displayFrames={} rigidBodies={} joints={}",
+        counts.vertices,
+        counts.faces,
+        counts.materials,
+        counts.bones,
+        counts.ik,
+        counts.morphs,
+        counts.display_frames,
+        counts.rigid_bodies,
+        counts.joints
+    );
+    print_roundtrip_result(
+        use_json,
+        || {
+            pmd_roundtrip_json(
+                path,
+                sizes.mode(),
+                sizes.bytes_in,
+                sizes.bytes_out,
+                sizes.json_bytes,
+                parsed,
+            )
+        },
+        "PMD",
+        sizes,
+        &details,
+    )
+}
+
+fn report_accessory_roundtrip(
+    path: &Path,
+    use_json: bool,
+    sizes: RoundtripSizes,
+    parsed: &mmd_anim_format::AccessoryParsedManifest,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let details = format!(
+        "textures={}{}",
+        parsed.texture_references.len(),
+        diagnostics_suffix(parsed.diagnostics.len())
+    );
+    print_roundtrip_result(
+        use_json,
+        || {
+            accessory_roundtrip_json(
+                path,
+                sizes.mode(),
+                sizes.bytes_in,
+                sizes.bytes_out,
+                sizes.json_bytes,
+                parsed,
+            )
+        },
+        &parsed.format.to_ascii_uppercase(),
+        sizes,
+        &details,
+    )
+}
+
+pub(crate) fn export_roundtrip(
+    path: &Path,
+    use_json: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data = read_file(path)?;
     match mmd_anim_format::detect_mmd_format(&data, path.file_name().and_then(|v| v.to_str())) {
@@ -95,105 +314,69 @@ pub(crate) fn export_roundtrip_summary(
             let exported = mmd_anim_format::export_vmd_animation(&parsed);
             let reparsed = parse_vmd_for_command("roundtrip", path, &exported)?;
             ensure_vmd_roundtrip(&parsed, &reparsed)?;
-            println!(
-                "VMD export roundtrip: ok bytesIn={} bytesOut={} boneFrames={} morphFrames={} cameraFrames={} lightFrames={} selfShadowFrames={} propertyFrames={} maxFrame={}",
-                data.len(),
-                exported.len(),
-                parsed.metadata.counts.bones,
-                parsed.metadata.counts.morphs,
-                parsed.metadata.counts.cameras,
-                parsed.metadata.counts.lights,
-                parsed.metadata.counts.self_shadows,
-                parsed.metadata.counts.properties,
-                parsed.metadata.max_frame
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), None);
+            report_vmd_roundtrip(path, use_json, sizes, &parsed)
         }
         mmd_anim_format::MmdFormatKind::Vpd => {
             let parsed = parse_vpd_for_command("roundtrip", path, &data)?;
             let exported = mmd_anim_format::export_vpd_pose(&parsed);
             let reparsed = parse_vpd_for_command("roundtrip", path, &exported)?;
             ensure_vpd_roundtrip(&parsed, &reparsed)?;
-            println!(
-                "VPD export roundtrip: ok bytesIn={} bytesOut={} bones={}",
-                data.len(),
-                exported.len(),
-                parsed.bone_count
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), None);
+            report_vpd_roundtrip(path, use_json, sizes, &parsed)
         }
         mmd_anim_format::MmdFormatKind::Pmx => {
             let parsed = parse_pmx_for_command("roundtrip", path, &data)?;
             let exported = mmd_anim_format::export_pmx_model(&parsed);
             let reparsed = parse_pmx_for_command("roundtrip", path, &exported)?;
             ensure_pmx_roundtrip(&parsed, &reparsed)?;
-            println!(
-                "PMX export roundtrip: ok bytesIn={} bytesOut={} vertices={} faces={} materials={} bones={} morphs={} displayFrames={} rigidBodies={} joints={} softBodies={}",
-                data.len(),
-                exported.len(),
-                parsed.metadata.counts.vertices,
-                parsed.metadata.counts.faces,
-                parsed.metadata.counts.materials,
-                parsed.metadata.counts.bones,
-                parsed.metadata.counts.morphs,
-                parsed.metadata.counts.display_frames,
-                parsed.metadata.counts.rigid_bodies,
-                parsed.metadata.counts.joints,
-                parsed.metadata.counts.soft_bodies
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), None);
+            report_pmx_roundtrip(path, use_json, sizes, &parsed)
         }
         mmd_anim_format::MmdFormatKind::Pmd => {
             let parsed = parse_pmd_for_command("roundtrip", path, &data)?;
             let exported = mmd_anim_format::export_pmd_model(&parsed);
             let reparsed = parse_pmd_for_command("roundtrip", path, &exported)?;
             ensure_pmd_roundtrip(&parsed, &reparsed)?;
-            println!(
-                "PMD export roundtrip: ok bytesIn={} bytesOut={} vertices={} faces={} materials={} bones={} ik={} morphs={} displayFrames={} rigidBodies={} joints={}",
-                data.len(),
-                exported.len(),
-                parsed.metadata.counts.vertices,
-                parsed.metadata.counts.faces,
-                parsed.metadata.counts.materials,
-                parsed.metadata.counts.bones,
-                parsed.metadata.counts.ik,
-                parsed.metadata.counts.morphs,
-                parsed.metadata.counts.display_frames,
-                parsed.metadata.counts.rigid_bodies,
-                parsed.metadata.counts.joints
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), None);
+            report_pmd_roundtrip(path, use_json, sizes, &parsed)
         }
         mmd_anim_format::MmdFormatKind::Pmm => {
             let parsed = parse_pmm_for_command("roundtrip", path, &data)?;
             let exported = mmd_anim_format::export_pmm_manifest(&parsed);
             let _reparsed = parse_pmm_for_command("roundtrip", path, &exported)?;
             ensure_pmm_lossless_roundtrip(&data, &exported)?;
-            println!(
-                "PMM export roundtrip: ok bytesIn={} bytesOut={} version={} modelReferences={} assetReferences={}{}",
-                data.len(),
-                exported.len(),
-                parsed.version,
-                parsed.model_paths.len(),
-                parsed.asset_summary.reference_count,
-                diagnostics_suffix(parsed.diagnostics.len())
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), None);
+            print_roundtrip_result(
+                use_json,
+                || {
+                    pmm_roundtrip_json(
+                        path,
+                        "parse-export-parse-lossless",
+                        sizes.bytes_in,
+                        sizes.bytes_out,
+                        data == exported,
+                        &parsed,
+                    )
+                },
+                "PMM",
+                sizes,
+                &format!(
+                    "version={} modelReferences={} assetReferences={}{}",
+                    parsed.version,
+                    parsed.model_paths.len(),
+                    parsed.asset_summary.reference_count,
+                    diagnostics_suffix(parsed.diagnostics.len())
+                ),
+            )
         }
         kind @ (mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac) => {
             let parsed = parse_accessory_for_command("roundtrip", path, kind, &data)?;
             let exported = mmd_anim_format::export_accessory_manifest(&parsed);
             let reparsed = parse_accessory_for_command("roundtrip", path, kind, &exported)?;
             ensure_accessory_roundtrip(&parsed, &reparsed)?;
-            println!(
-                "{} export roundtrip: ok bytesIn={} bytesOut={} textures={}{}",
-                parsed.format.to_ascii_uppercase(),
-                data.len(),
-                exported.len(),
-                parsed.texture_references.len(),
-                diagnostics_suffix(parsed.diagnostics.len())
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), None);
+            report_accessory_roundtrip(path, use_json, sizes, &parsed)
         }
         mmd_anim_format::MmdFormatKind::Unknown => Err(unsupported_format_error(
             "roundtrip",
@@ -209,118 +392,9 @@ pub(crate) fn export_roundtrip_summary(
     }
 }
 
-pub(crate) fn export_roundtrip_json(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(path)?;
-    let result = match mmd_anim_format::detect_mmd_format(
-        &data,
-        path.file_name().and_then(|v| v.to_str()),
-    ) {
-        mmd_anim_format::MmdFormatKind::Vmd => {
-            let parsed = parse_vmd_for_command("roundtrip", path, &data)?;
-            let exported = mmd_anim_format::export_vmd_animation(&parsed);
-            let reparsed = parse_vmd_for_command("roundtrip", path, &exported)?;
-            ensure_vmd_roundtrip(&parsed, &reparsed)?;
-            vmd_roundtrip_json(
-                path,
-                "parse-export-parse",
-                data.len(),
-                exported.len(),
-                None,
-                &parsed,
-            )
-        }
-        mmd_anim_format::MmdFormatKind::Vpd => {
-            let parsed = parse_vpd_for_command("roundtrip", path, &data)?;
-            let exported = mmd_anim_format::export_vpd_pose(&parsed);
-            let reparsed = parse_vpd_for_command("roundtrip", path, &exported)?;
-            ensure_vpd_roundtrip(&parsed, &reparsed)?;
-            vpd_roundtrip_json(
-                path,
-                "parse-export-parse",
-                data.len(),
-                exported.len(),
-                None,
-                &parsed,
-            )
-        }
-        mmd_anim_format::MmdFormatKind::Pmx => {
-            let parsed = parse_pmx_for_command("roundtrip", path, &data)?;
-            let exported = mmd_anim_format::export_pmx_model(&parsed);
-            let reparsed = parse_pmx_for_command("roundtrip", path, &exported)?;
-            ensure_pmx_roundtrip(&parsed, &reparsed)?;
-            pmx_roundtrip_json(
-                path,
-                "parse-export-parse",
-                data.len(),
-                exported.len(),
-                None,
-                &parsed,
-            )
-        }
-        mmd_anim_format::MmdFormatKind::Pmd => {
-            let parsed = parse_pmd_for_command("roundtrip", path, &data)?;
-            let exported = mmd_anim_format::export_pmd_model(&parsed);
-            let reparsed = parse_pmd_for_command("roundtrip", path, &exported)?;
-            ensure_pmd_roundtrip(&parsed, &reparsed)?;
-            pmd_roundtrip_json(
-                path,
-                "parse-export-parse",
-                data.len(),
-                exported.len(),
-                None,
-                &parsed,
-            )
-        }
-        mmd_anim_format::MmdFormatKind::Pmm => {
-            let parsed = parse_pmm_for_command("roundtrip", path, &data)?;
-            let exported = mmd_anim_format::export_pmm_manifest(&parsed);
-            let _reparsed = parse_pmm_for_command("roundtrip", path, &exported)?;
-            ensure_pmm_lossless_roundtrip(&data, &exported)?;
-            pmm_roundtrip_json(
-                path,
-                "parse-export-parse-lossless",
-                data.len(),
-                exported.len(),
-                data == exported,
-                &parsed,
-            )
-        }
-        kind @ (mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac) => {
-            let parsed = parse_accessory_for_command("roundtrip", path, kind, &data)?;
-            let exported = mmd_anim_format::export_accessory_manifest(&parsed);
-            let reparsed = parse_accessory_for_command("roundtrip", path, kind, &exported)?;
-            ensure_accessory_roundtrip(&parsed, &reparsed)?;
-            accessory_roundtrip_json(
-                path,
-                "parse-export-parse",
-                data.len(),
-                exported.len(),
-                None,
-                &parsed,
-            )
-        }
-        mmd_anim_format::MmdFormatKind::Unknown => {
-            return Err(unsupported_format_error(
-                "roundtrip",
-                path,
-                mmd_anim_format::MmdFormatKind::Unknown,
-            ));
-        }
-        kind => {
-            return Err(unsupported_format_operation_error(
-                "roundtrip",
-                path,
-                kind,
-                "roundtrip",
-            ));
-        }
-    };
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(ExitCode::SUCCESS)
-}
-
-pub(crate) fn export_json_roundtrip_summary(
+pub(crate) fn export_json_roundtrip(
     path: &Path,
+    use_json: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data = read_file(path)?;
     match mmd_anim_format::detect_mmd_format(&data, path.file_name().and_then(|v| v.to_str())) {
@@ -331,20 +405,8 @@ pub(crate) fn export_json_roundtrip_summary(
             let exported = mmd_anim_format::export_vmd_animation(&from_json);
             let reparsed = parse_vmd_for_command("roundtrip", path, &exported)?;
             ensure_vmd_roundtrip(&parsed, &reparsed)?;
-            println!(
-                "VMD export JSON roundtrip: ok jsonBytes={} bytesIn={} bytesOut={} boneFrames={} morphFrames={} cameraFrames={} lightFrames={} selfShadowFrames={} propertyFrames={} maxFrame={}",
-                json.len(),
-                data.len(),
-                exported.len(),
-                parsed.metadata.counts.bones,
-                parsed.metadata.counts.morphs,
-                parsed.metadata.counts.cameras,
-                parsed.metadata.counts.lights,
-                parsed.metadata.counts.self_shadows,
-                parsed.metadata.counts.properties,
-                parsed.metadata.max_frame
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), Some(json.len()));
+            report_vmd_roundtrip(path, use_json, sizes, &parsed)
         }
         mmd_anim_format::MmdFormatKind::Vpd => {
             let parsed = parse_vpd_for_command("roundtrip", path, &data)?;
@@ -353,14 +415,8 @@ pub(crate) fn export_json_roundtrip_summary(
             let exported = mmd_anim_format::export_vpd_pose(&from_json);
             let reparsed = parse_vpd_for_command("roundtrip", path, &exported)?;
             ensure_vpd_roundtrip(&parsed, &reparsed)?;
-            println!(
-                "VPD export JSON roundtrip: ok jsonBytes={} bytesIn={} bytesOut={} bones={}",
-                json.len(),
-                data.len(),
-                exported.len(),
-                parsed.bone_count
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), Some(json.len()));
+            report_vpd_roundtrip(path, use_json, sizes, &parsed)
         }
         mmd_anim_format::MmdFormatKind::Pmx => {
             let parsed = parse_pmx_for_command("roundtrip", path, &data)?;
@@ -369,22 +425,8 @@ pub(crate) fn export_json_roundtrip_summary(
             let exported = mmd_anim_format::export_pmx_model(&from_json);
             let reparsed = parse_pmx_for_command("roundtrip", path, &exported)?;
             ensure_pmx_roundtrip(&parsed, &reparsed)?;
-            println!(
-                "PMX export JSON roundtrip: ok jsonBytes={} bytesIn={} bytesOut={} vertices={} faces={} materials={} bones={} morphs={} displayFrames={} rigidBodies={} joints={} softBodies={}",
-                json.len(),
-                data.len(),
-                exported.len(),
-                parsed.metadata.counts.vertices,
-                parsed.metadata.counts.faces,
-                parsed.metadata.counts.materials,
-                parsed.metadata.counts.bones,
-                parsed.metadata.counts.morphs,
-                parsed.metadata.counts.display_frames,
-                parsed.metadata.counts.rigid_bodies,
-                parsed.metadata.counts.joints,
-                parsed.metadata.counts.soft_bodies
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), Some(json.len()));
+            report_pmx_roundtrip(path, use_json, sizes, &parsed)
         }
         mmd_anim_format::MmdFormatKind::Pmd => {
             let parsed = parse_pmd_for_command("roundtrip", path, &data)?;
@@ -393,22 +435,8 @@ pub(crate) fn export_json_roundtrip_summary(
             let exported = mmd_anim_format::export_pmd_model(&from_json);
             let reparsed = parse_pmd_for_command("roundtrip", path, &exported)?;
             ensure_pmd_roundtrip(&parsed, &reparsed)?;
-            println!(
-                "PMD export JSON roundtrip: ok jsonBytes={} bytesIn={} bytesOut={} vertices={} faces={} materials={} bones={} ik={} morphs={} displayFrames={} rigidBodies={} joints={}",
-                json.len(),
-                data.len(),
-                exported.len(),
-                parsed.metadata.counts.vertices,
-                parsed.metadata.counts.faces,
-                parsed.metadata.counts.materials,
-                parsed.metadata.counts.bones,
-                parsed.metadata.counts.ik,
-                parsed.metadata.counts.morphs,
-                parsed.metadata.counts.display_frames,
-                parsed.metadata.counts.rigid_bodies,
-                parsed.metadata.counts.joints
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), Some(json.len()));
+            report_pmd_roundtrip(path, use_json, sizes, &parsed)
         }
         kind @ (mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac) => {
             let parsed = parse_accessory_for_command("roundtrip", path, kind, &data)?;
@@ -418,16 +446,8 @@ pub(crate) fn export_json_roundtrip_summary(
             let exported = mmd_anim_format::export_accessory_manifest(&from_json);
             let reparsed = parse_accessory_for_command("roundtrip", path, kind, &exported)?;
             ensure_accessory_roundtrip(&parsed, &reparsed)?;
-            println!(
-                "{} export JSON roundtrip: ok jsonBytes={} bytesIn={} bytesOut={} textures={}{}",
-                parsed.format.to_ascii_uppercase(),
-                json.len(),
-                data.len(),
-                exported.len(),
-                parsed.texture_references.len(),
-                diagnostics_suffix(parsed.diagnostics.len())
-            );
-            Ok(ExitCode::SUCCESS)
+            let sizes = RoundtripSizes::new(data.len(), exported.len(), Some(json.len()));
+            report_accessory_roundtrip(path, use_json, sizes, &parsed)
         }
         mmd_anim_format::MmdFormatKind::Unknown => Err(unsupported_format_error(
             "roundtrip",
@@ -441,115 +461,6 @@ pub(crate) fn export_json_roundtrip_summary(
             "JSON roundtrip",
         )),
     }
-}
-
-pub(crate) fn export_json_roundtrip_json(
-    path: &Path,
-) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(path)?;
-    let result = match mmd_anim_format::detect_mmd_format(
-        &data,
-        path.file_name().and_then(|v| v.to_str()),
-    ) {
-        mmd_anim_format::MmdFormatKind::Vmd => {
-            let parsed = parse_vmd_for_command("roundtrip", path, &data)?;
-            let json = serde_json::to_string(&parsed)?;
-            let from_json: mmd_anim_format::VmdParsedAnimation = serde_json::from_str(&json)?;
-            let exported = mmd_anim_format::export_vmd_animation(&from_json);
-            let reparsed = parse_vmd_for_command("roundtrip", path, &exported)?;
-            ensure_vmd_roundtrip(&parsed, &reparsed)?;
-            vmd_roundtrip_json(
-                path,
-                "parse-json-export-parse",
-                data.len(),
-                exported.len(),
-                Some(json.len()),
-                &parsed,
-            )
-        }
-        mmd_anim_format::MmdFormatKind::Vpd => {
-            let parsed = parse_vpd_for_command("roundtrip", path, &data)?;
-            let json = serde_json::to_string(&parsed)?;
-            let from_json: mmd_anim_format::VpdParsedPose = serde_json::from_str(&json)?;
-            let exported = mmd_anim_format::export_vpd_pose(&from_json);
-            let reparsed = parse_vpd_for_command("roundtrip", path, &exported)?;
-            ensure_vpd_roundtrip(&parsed, &reparsed)?;
-            vpd_roundtrip_json(
-                path,
-                "parse-json-export-parse",
-                data.len(),
-                exported.len(),
-                Some(json.len()),
-                &parsed,
-            )
-        }
-        mmd_anim_format::MmdFormatKind::Pmx => {
-            let parsed = parse_pmx_for_command("roundtrip", path, &data)?;
-            let json = serde_json::to_string(&parsed)?;
-            let from_json: mmd_anim_format::PmxParsedModel = serde_json::from_str(&json)?;
-            let exported = mmd_anim_format::export_pmx_model(&from_json);
-            let reparsed = parse_pmx_for_command("roundtrip", path, &exported)?;
-            ensure_pmx_roundtrip(&parsed, &reparsed)?;
-            pmx_roundtrip_json(
-                path,
-                "parse-json-export-parse",
-                data.len(),
-                exported.len(),
-                Some(json.len()),
-                &parsed,
-            )
-        }
-        mmd_anim_format::MmdFormatKind::Pmd => {
-            let parsed = parse_pmd_for_command("roundtrip", path, &data)?;
-            let json = serde_json::to_string(&parsed)?;
-            let from_json: mmd_anim_format::PmdParsedModel = serde_json::from_str(&json)?;
-            let exported = mmd_anim_format::export_pmd_model(&from_json);
-            let reparsed = parse_pmd_for_command("roundtrip", path, &exported)?;
-            ensure_pmd_roundtrip(&parsed, &reparsed)?;
-            pmd_roundtrip_json(
-                path,
-                "parse-json-export-parse",
-                data.len(),
-                exported.len(),
-                Some(json.len()),
-                &parsed,
-            )
-        }
-        kind @ (mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac) => {
-            let parsed = parse_accessory_for_command("roundtrip", path, kind, &data)?;
-            let json = serde_json::to_string(&parsed)?;
-            let from_json: mmd_anim_format::AccessoryParsedManifest = serde_json::from_str(&json)?;
-            ensure_accessory_json_roundtrip(&parsed, &from_json)?;
-            let exported = mmd_anim_format::export_accessory_manifest(&from_json);
-            let reparsed = parse_accessory_for_command("roundtrip", path, kind, &exported)?;
-            ensure_accessory_roundtrip(&parsed, &reparsed)?;
-            accessory_roundtrip_json(
-                path,
-                "parse-json-export-parse",
-                data.len(),
-                exported.len(),
-                Some(json.len()),
-                &parsed,
-            )
-        }
-        mmd_anim_format::MmdFormatKind::Unknown => {
-            return Err(unsupported_format_error(
-                "roundtrip",
-                path,
-                mmd_anim_format::MmdFormatKind::Unknown,
-            ));
-        }
-        kind => {
-            return Err(unsupported_format_operation_error(
-                "roundtrip",
-                path,
-                kind,
-                "JSON roundtrip",
-            ));
-        }
-    };
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(ExitCode::SUCCESS)
 }
 
 pub(crate) fn export_format_json(

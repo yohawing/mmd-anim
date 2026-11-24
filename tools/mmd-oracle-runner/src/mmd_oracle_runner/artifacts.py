@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,16 @@ from typing import Any
 
 def exists(path: Path) -> bool:
     return path.exists() and path.is_file()
+
+
+def file_identity(path: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
+            digest.update(chunk)
+    return {"size": size, "sha256": digest.hexdigest()}
 
 
 def reject_reparse(*paths: Path) -> None:

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.6 - 2026-11-24
+
+### Fixed
+
+- Skip PMX 2.1 flip (type 9) and impulse (type 10) morph payloads with their
+  correct layouts during runtime import and morph-name scanning. Flip morphs
+  previously used the impulse layout, and impulse morphs were rejected.
+- Preserve the original path when the CLI reads an oracle summary file instead
+  of converting it to a lossy string first.
+
+### Changed
+
+- Remove duplicated logic across the CLI, format readers and writers, FBX
+  export, and runtime pose reduction. CLI text and JSON reports, exported
+  files, and pose-reduction results are unchanged.
+- Build cleanly with Rust 1.100, which reports new clippy lints and treats
+  `ExitCode` as `#[must_use]`.
+
+### Compatibility
+
+- Public Rust API, C ABI, and WASM layouts are unchanged. The minimum supported
+  Rust version remains 1.87.
+
 ## 0.5.5 - 2026-11-06
 
 ### Fixed

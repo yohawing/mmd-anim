@@ -613,7 +613,7 @@ fn validate_entry_metadata(
     manifest: &MmdPackageManifest,
 ) -> Result<HashMap<u32, Ktx2TextureMetadata>> {
     let root_object = strict_json::object(root).expect("manifest root was checked");
-    let license_keys = validate_licenses(root_object)?;
+    let licenses = validate_licenses(root_object)?;
     validate_credits(root_object)?;
     let mut ktx2_metadata = HashMap::new();
 
@@ -677,12 +677,12 @@ fn validate_entry_metadata(
             return invalid_manifest(format!("audio entry {} requires mediaType", entry.id));
         }
 
-        validate_license_refs(object, entry.id, license_keys.as_ref())?;
+        validate_license_refs(object, entry.id, licenses)?;
     }
     Ok(ktx2_metadata)
 }
 
-fn validate_licenses(root: &Map<String, Value>) -> Result<Option<HashSet<String>>> {
+fn validate_licenses(root: &Map<String, Value>) -> Result<Option<&Map<String, Value>>> {
     let Some(value) = root.get("licenses") else {
         return Ok(None);
     };
@@ -690,15 +690,13 @@ fn validate_licenses(root: &Map<String, Value>) -> Result<Option<HashSet<String>
         .as_object()
         .ok_or_else(|| MmdPackageError::InvalidManifest("licenses must be an object".into()))?;
     check_limit("license count", licenses.len() as u64, MAX_LICENSES as u64)?;
-    let mut keys = HashSet::with_capacity(licenses.len());
     for (key, metadata) in licenses {
         if key.is_empty() {
             return invalid_manifest("license key must not be empty");
         }
         validate_license_metadata(metadata, key)?;
-        keys.insert(key.clone());
     }
-    Ok(Some(keys))
+    Ok(Some(licenses))
 }
 
 fn validate_credits(root: &Map<String, Value>) -> Result<()> {
@@ -768,7 +766,7 @@ fn validate_credit_metadata(value: &Value) -> Result<()> {
 fn validate_license_refs(
     object: &Map<String, Value>,
     entry_id: u32,
-    license_keys: Option<&HashSet<String>>,
+    licenses: Option<&Map<String, Value>>,
 ) -> Result<()> {
     let Some(value) = object.get("licenseRefs") else {
         return Ok(());
@@ -795,7 +793,7 @@ fn validate_license_refs(
                 "duplicate license reference {reference:?} for entry {entry_id}"
             ));
         }
-        if !license_keys.is_some_and(|keys| keys.contains(reference)) {
+        if !licenses.is_some_and(|licenses| licenses.contains_key(reference)) {
             return invalid_manifest(format!(
                 "license reference {reference:?} for entry {entry_id} is not declared"
             ));
@@ -1404,34 +1402,26 @@ fn ktx2_range<'a>(
         .ok_or_else(|| MmdPackageError::InvalidKtx2(format!("KTX2 {name} is outside the payload")))
 }
 
-fn ktx2_u16(bytes: &[u8], offset: usize, name: &'static str) -> Result<u16> {
+fn ktx2_field<const N: usize>(bytes: &[u8], offset: usize, name: &'static str) -> Result<[u8; N]> {
     let end = offset
-        .checked_add(2)
+        .checked_add(N)
         .ok_or(MmdPackageError::IntegerOverflow("KTX2 field end"))?;
     let bytes = bytes
         .get(offset..end)
         .ok_or_else(|| MmdPackageError::InvalidKtx2(format!("KTX2 {name} is truncated")))?;
-    Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
+    Ok(bytes.try_into().unwrap())
+}
+
+fn ktx2_u16(bytes: &[u8], offset: usize, name: &'static str) -> Result<u16> {
+    Ok(u16::from_le_bytes(ktx2_field(bytes, offset, name)?))
 }
 
 fn ktx2_u32(bytes: &[u8], offset: usize, name: &'static str) -> Result<u32> {
-    let end = offset
-        .checked_add(4)
-        .ok_or(MmdPackageError::IntegerOverflow("KTX2 field end"))?;
-    let bytes = bytes
-        .get(offset..end)
-        .ok_or_else(|| MmdPackageError::InvalidKtx2(format!("KTX2 {name} is truncated")))?;
-    Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+    Ok(u32::from_le_bytes(ktx2_field(bytes, offset, name)?))
 }
 
 fn ktx2_u64(bytes: &[u8], offset: usize, name: &'static str) -> Result<u64> {
-    let end = offset
-        .checked_add(8)
-        .ok_or(MmdPackageError::IntegerOverflow("KTX2 field end"))?;
-    let bytes = bytes
-        .get(offset..end)
-        .ok_or_else(|| MmdPackageError::InvalidKtx2(format!("KTX2 {name} is truncated")))?;
-    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+    Ok(u64::from_le_bytes(ktx2_field(bytes, offset, name)?))
 }
 
 fn invalid_ktx2<T>(message: impl Into<String>) -> Result<T> {

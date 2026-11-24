@@ -4,9 +4,8 @@ use crate::{
     diagnostics_suffix, parse_failure_error, read_file, unsupported_format_error, write_file,
 };
 
-pub(crate) fn parse_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(path)?;
-    let parsed = mmd_anim_format::parse_pmx_model(&data).map_err(|error| {
+fn parse_pmx_summary(path: &Path, data: &[u8]) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let parsed = mmd_anim_format::parse_pmx_model(data).map_err(|error| {
         parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmx, error)
     })?;
     println!(
@@ -27,12 +26,13 @@ pub(crate) fn parse_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::er
 
 pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data = read_file(path)?;
-    match mmd_anim_format::detect_mmd_format(&data, path.file_name().and_then(|v| v.to_str())) {
-        mmd_anim_format::MmdFormatKind::Pmx => parse_pmx_summary(path),
+    let file_name = path.file_name().and_then(|v| v.to_str());
+    let kind = mmd_anim_format::detect_mmd_format(&data, file_name);
+    let parse_error = |error| parse_failure_error("inspect", path, kind, error);
+    match kind {
+        mmd_anim_format::MmdFormatKind::Pmx => parse_pmx_summary(path, &data),
         mmd_anim_format::MmdFormatKind::Pmd => {
-            let parsed = mmd_anim_format::parse_pmd_model(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmd, error)
-            })?;
+            let parsed = mmd_anim_format::parse_pmd_model(&data).map_err(parse_error)?;
             println!(
                 "PMD parser: vertices={} faces={} materials={} bones={} ik={} morphs={} displayFrames={} rigidBodies={} joints={}",
                 parsed.metadata.counts.vertices,
@@ -48,9 +48,7 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             Ok(ExitCode::SUCCESS)
         }
         mmd_anim_format::MmdFormatKind::Vmd => {
-            let parsed = mmd_anim_format::parse_vmd_animation(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Vmd, error)
-            })?;
+            let parsed = mmd_anim_format::parse_vmd_animation(&data).map_err(parse_error)?;
             println!(
                 "VMD parser: boneFrames={} morphFrames={} cameraFrames={} lightFrames={} selfShadowFrames={} propertyFrames={} maxFrame={}",
                 parsed.metadata.counts.bones,
@@ -64,9 +62,7 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             Ok(ExitCode::SUCCESS)
         }
         mmd_anim_format::MmdFormatKind::Vpd => {
-            let parsed = mmd_anim_format::parse_vpd_pose(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Vpd, error)
-            })?;
+            let parsed = mmd_anim_format::parse_vpd_pose(&data).map_err(parse_error)?;
             println!(
                 "VPD parser: bones={}{}",
                 parsed.bone_count,
@@ -75,9 +71,7 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             Ok(ExitCode::SUCCESS)
         }
         mmd_anim_format::MmdFormatKind::Pmm => {
-            let parsed = mmd_anim_format::parse_pmm_manifest(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmm, error)
-            })?;
+            let parsed = mmd_anim_format::parse_pmm_manifest(&data).map_err(parse_error)?;
             let model_slot_flag_counts = parsed
                 .display_state
                 .model_slot_flag_counts
@@ -99,85 +93,46 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
                 .map(|(extension, count)| format!("{extension}:{count}"))
                 .collect::<Vec<_>>()
                 .join(",");
-            let first_model_slot_padding = parsed
-                .model_slots
-                .first()
-                .map(|slot| slot.trailing_zero_padding_bytes.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let first_model_slot_next_non_zero = parsed
-                .model_slots
-                .first()
-                .and_then(|slot| slot.next_non_zero_offset)
-                .map(|offset| offset.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let document_models = parsed
+            let first_model_slot = parsed.model_slots.first();
+            let first_model_slot_padding =
+                display_or_unknown(first_model_slot.map(|slot| slot.trailing_zero_padding_bytes));
+            let first_model_slot_next_non_zero =
+                display_or_unknown(first_model_slot.and_then(|slot| slot.next_non_zero_offset));
+            let document_counts = parsed
                 .document_summary
                 .as_ref()
-                .map(|document| document.counts.models.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let document_bone_keyframes = parsed
-                .document_summary
-                .as_ref()
-                .map(|document| document.counts.bone_keyframes.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let document_morph_keyframes = parsed
-                .document_summary
-                .as_ref()
-                .map(|document| document.counts.morph_keyframes.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let global_camera_keyframes = parsed
-                .document_global_summary
-                .as_ref()
-                .map(|g| (g.camera.initial_keyframes + g.camera.keyframes).to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let global_light_keyframes = parsed
-                .document_global_summary
-                .as_ref()
-                .map(|g| (g.light.initial_keyframes + g.light.keyframes).to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let global_accessory_count = parsed
-                .document_global_summary
-                .as_ref()
-                .map(|g| g.accessories.accessory_count.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let global_accessory_keyframes = parsed
-                .document_global_summary
-                .as_ref()
-                .map(|g| g.accessories.keyframes.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let global_gravity_keyframes = parsed
-                .document_global_summary
-                .as_ref()
-                .map(|g| (g.gravity.initial_keyframes + g.gravity.keyframes).to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let global_self_shadow_keyframes = parsed
-                .document_global_summary
-                .as_ref()
-                .map(|g| (g.self_shadow.initial_keyframes + g.self_shadow.keyframes).to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let global_audio_path = parsed
-                .document_global_summary
-                .as_ref()
-                .map(|g| (!g.settings.audio_path.is_empty()).to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let global_bg_video_path = parsed
-                .document_global_summary
-                .as_ref()
-                .map(|g| (!g.settings.background_video_path.is_empty()).to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let global_bg_image_path = parsed
-                .document_global_summary
-                .as_ref()
-                .map(|g| (!g.settings.background_image_path.is_empty()).to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
+                .map(|document| &document.counts);
+            let document_models = display_or_unknown(document_counts.map(|counts| counts.models));
+            let document_bone_keyframes =
+                display_or_unknown(document_counts.map(|counts| counts.bone_keyframes));
+            let document_morph_keyframes =
+                display_or_unknown(document_counts.map(|counts| counts.morph_keyframes));
+            let global = parsed.document_global_summary.as_ref();
+            let global_camera_keyframes =
+                display_or_unknown(global.map(|g| g.camera.initial_keyframes + g.camera.keyframes));
+            let global_light_keyframes =
+                display_or_unknown(global.map(|g| g.light.initial_keyframes + g.light.keyframes));
+            let global_accessory_count =
+                display_or_unknown(global.map(|g| g.accessories.accessory_count));
+            let global_accessory_keyframes =
+                display_or_unknown(global.map(|g| g.accessories.keyframes));
+            let global_gravity_keyframes = display_or_unknown(
+                global.map(|g| g.gravity.initial_keyframes + g.gravity.keyframes),
+            );
+            let global_self_shadow_keyframes = display_or_unknown(
+                global.map(|g| g.self_shadow.initial_keyframes + g.self_shadow.keyframes),
+            );
+            let global_audio_path =
+                display_or_unknown(global.map(|g| !g.settings.audio_path.is_empty()));
+            let global_bg_video_path =
+                display_or_unknown(global.map(|g| !g.settings.background_video_path.is_empty()));
+            let global_bg_image_path =
+                display_or_unknown(global.map(|g| !g.settings.background_image_path.is_empty()));
             println!(
                 "PMM parser: references={} version={} parsedVersion={} models={} accessories={} motions={} audio={} images={} videos={} modelAssets={} modelSlots={} firstModelSlotPadding={} firstModelSlotNextNonZeroOffset={} documentModels={} documentBoneKeyframes={} documentMorphKeyframes={} headerTextEntries={} audioAssets={} assetConfidence=high:{} medium:{} low:{} assetKindCounts={} assetExtensionCounts={} screen={}x{} timelineFrames={} timelineRange={}..{} frameRate={} durationSeconds={} displayLayout={} selectedModelIndex={} documentModelCount={} declaredModelSlotCount={} modelSlotCount={} nonZeroModelSlotCount={} modelSlotFlags={} activeModelSlotIndices={} emptyModelSlotIndices={} modelSlotFlagCounts={} accessorySlotCount={} globalCameraKeyframes={} globalLightKeyframes={} globalAccessoryCount={} globalAccessoryKeyframes={} globalGravityKeyframes={} globalSelfShadowKeyframes={} globalAudioPath={} globalBgVideoPath={} globalBgImagePath={}{}",
                 parsed.asset_summary.reference_count,
                 parsed.version,
-                parsed
-                    .parsed_version
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
+                display_or_unknown(parsed.parsed_version),
                 parsed.model_paths.len(),
                 parsed.accessory_paths.len(),
                 parsed.motion_paths.len(),
@@ -198,57 +153,17 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
                 parsed.asset_summary.low_confidence_count,
                 asset_kind_counts,
                 asset_extension_counts,
-                parsed
-                    .project_settings
-                    .screen_width
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
-                parsed
-                    .project_settings
-                    .screen_height
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
-                parsed
-                    .project_settings
-                    .timeline_frame_count
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
-                parsed
-                    .timeline
-                    .start_frame
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
-                parsed
-                    .timeline
-                    .end_frame_exclusive
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
-                parsed
-                    .project_settings
-                    .frame_rate
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
-                parsed
-                    .timeline
-                    .duration_seconds
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
+                display_or_unknown(parsed.project_settings.screen_width),
+                display_or_unknown(parsed.project_settings.screen_height),
+                display_or_unknown(parsed.project_settings.timeline_frame_count),
+                display_or_unknown(parsed.timeline.start_frame),
+                display_or_unknown(parsed.timeline.end_frame_exclusive),
+                display_or_unknown(parsed.project_settings.frame_rate),
+                display_or_unknown(parsed.timeline.duration_seconds),
                 parsed.display_state.layout,
-                parsed
-                    .display_state
-                    .selected_model_index
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
-                parsed
-                    .display_state
-                    .document_model_count
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
-                parsed
-                    .display_state
-                    .declared_model_slot_count
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
+                display_or_unknown(parsed.display_state.selected_model_index),
+                display_or_unknown(parsed.display_state.document_model_count),
+                display_or_unknown(parsed.display_state.declared_model_slot_count),
                 parsed.display_state.model_slot_count,
                 parsed.display_state.non_zero_model_slot_count,
                 parsed
@@ -273,11 +188,7 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
                     .collect::<Vec<_>>()
                     .join(","),
                 model_slot_flag_counts,
-                parsed
-                    .display_state
-                    .accessory_slot_count
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
+                display_or_unknown(parsed.display_state.accessory_slot_count),
                 global_camera_keyframes,
                 global_light_keyframes,
                 global_accessory_count,
@@ -291,12 +202,9 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             );
             Ok(ExitCode::SUCCESS)
         }
-        kind @ (mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac) => {
-            let parsed = mmd_anim_format::parse_accessory_manifest(
-                &data,
-                path.file_name().and_then(|v| v.to_str()),
-            )
-            .map_err(|error| parse_failure_error("inspect", path, kind, error))?;
+        mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac => {
+            let parsed =
+                mmd_anim_format::parse_accessory_manifest(&data, file_name).map_err(parse_error)?;
             println!(
                 "{} parser: byteLength={} meshes={} materials={} textures={}{}",
                 parsed.format.to_uppercase(),
@@ -309,9 +217,7 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             Ok(ExitCode::SUCCESS)
         }
         mmd_anim_format::MmdFormatKind::Nmd => {
-            let parsed = mmd_anim_format::parse_nmd_manifest(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Nmd, error)
-            })?;
+            let parsed = mmd_anim_format::parse_nmd_manifest(&data).map_err(parse_error)?;
             println!(
                 "NMD parser: byteLength={} annotations={} globalTracks={} bundles={{accessory:{}, bone:{}, camera:{}, light:{}, model:{}, morph:{}, selfShadow:{}, unknown:{}}}{}",
                 parsed.byte_length,
@@ -329,12 +235,16 @@ pub(crate) fn parse_format_summary(path: &Path) -> Result<ExitCode, Box<dyn std:
             );
             Ok(ExitCode::SUCCESS)
         }
-        mmd_anim_format::MmdFormatKind::Unknown => Err(unsupported_format_error(
-            "inspect",
-            path,
-            mmd_anim_format::MmdFormatKind::Unknown,
-        )),
+        mmd_anim_format::MmdFormatKind::Unknown => {
+            Err(unsupported_format_error("inspect", path, kind))
+        }
     }
+}
+
+fn display_or_unknown(value: Option<impl std::fmt::Display>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 pub(crate) fn parse_format_json(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -359,55 +269,35 @@ pub(crate) fn parse_format_json_text(path: &Path) -> Result<String, Box<dyn std:
 
 fn parse_format_json_value(path: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let data = read_file(path)?;
-    let value = match mmd_anim_format::detect_mmd_format(
-        &data,
-        path.file_name().and_then(|v| v.to_str()),
-    ) {
+    let file_name = path.file_name().and_then(|v| v.to_str());
+    let kind = mmd_anim_format::detect_mmd_format(&data, file_name);
+    let parse_error = |error| parse_failure_error("inspect", path, kind, error);
+    let value = match kind {
         mmd_anim_format::MmdFormatKind::Pmx => {
-            serde_json::to_value(mmd_anim_format::parse_pmx_model(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmx, error)
-            })?)?
+            serde_json::to_value(mmd_anim_format::parse_pmx_model(&data).map_err(parse_error)?)?
         }
         mmd_anim_format::MmdFormatKind::Pmd => {
-            serde_json::to_value(mmd_anim_format::parse_pmd_model(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmd, error)
-            })?)?
+            serde_json::to_value(mmd_anim_format::parse_pmd_model(&data).map_err(parse_error)?)?
         }
-        mmd_anim_format::MmdFormatKind::Vmd => serde_json::to_value(
-            mmd_anim_format::parse_vmd_animation(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Vmd, error)
-            })?,
-        )?,
+        mmd_anim_format::MmdFormatKind::Vmd => {
+            serde_json::to_value(mmd_anim_format::parse_vmd_animation(&data).map_err(parse_error)?)?
+        }
         mmd_anim_format::MmdFormatKind::Vpd => {
-            serde_json::to_value(mmd_anim_format::parse_vpd_pose(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Vpd, error)
-            })?)?
+            serde_json::to_value(mmd_anim_format::parse_vpd_pose(&data).map_err(parse_error)?)?
         }
         mmd_anim_format::MmdFormatKind::Pmm => {
-            serde_json::to_value(mmd_anim_format::parse_pmm_manifest(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Pmm, error)
-            })?)?
+            serde_json::to_value(mmd_anim_format::parse_pmm_manifest(&data).map_err(parse_error)?)?
         }
-        kind @ (mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac) => {
+        mmd_anim_format::MmdFormatKind::X | mmd_anim_format::MmdFormatKind::Vac => {
             serde_json::to_value(
-                mmd_anim_format::parse_accessory_manifest(
-                    &data,
-                    path.file_name().and_then(|v| v.to_str()),
-                )
-                .map_err(|error| parse_failure_error("inspect", path, kind, error))?,
+                mmd_anim_format::parse_accessory_manifest(&data, file_name).map_err(parse_error)?,
             )?
         }
         mmd_anim_format::MmdFormatKind::Nmd => {
-            serde_json::to_value(mmd_anim_format::parse_nmd_manifest(&data).map_err(|error| {
-                parse_failure_error("inspect", path, mmd_anim_format::MmdFormatKind::Nmd, error)
-            })?)?
+            serde_json::to_value(mmd_anim_format::parse_nmd_manifest(&data).map_err(parse_error)?)?
         }
         mmd_anim_format::MmdFormatKind::Unknown => {
-            return Err(unsupported_format_error(
-                "inspect",
-                path,
-                mmd_anim_format::MmdFormatKind::Unknown,
-            ));
+            return Err(unsupported_format_error("inspect", path, kind));
         }
     };
     Ok(value)

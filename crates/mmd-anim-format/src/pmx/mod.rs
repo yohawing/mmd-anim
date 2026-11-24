@@ -17,6 +17,7 @@ use crate::binary::{
     write_i32_le as write_i32, write_u16_le as write_u16,
 };
 use crate::error::ImportError;
+use crate::rigid_body_codes;
 use crate::sjis::encode_sjis;
 
 type Reader<'a> = ByteReader<'a>;
@@ -244,22 +245,18 @@ pub fn read_header(data: &[u8]) -> Result<(PmxHeader, usize), ImportError> {
     Ok((header, r.pos))
 }
 
-pub fn skip_model_info(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize, ImportError> {
+pub fn skip_model_info(data: &[u8], _header: &PmxHeader, pos: usize) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let _model_name = r.read_string(header.encoding)?;
-    let _english_name = r.read_string(header.encoding)?;
-    let _comment = r.read_string(header.encoding)?;
-    let _english_comment = r.read_string(header.encoding)?;
+    r.skip_string()?; // Model name.
+    r.skip_string()?; // English name.
+    r.skip_string()?; // Comment.
+    r.skip_string()?; // English comment.
     Ok(r.pos)
 }
 
 pub fn skip_vertices(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
-    let count = count as usize;
+    let count = read_section_count(&mut r)?;
 
     for _ in 0..count {
         r.skip(12)?;
@@ -268,24 +265,16 @@ pub fn skip_vertices(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usiz
         r.skip(header.extra_uv_count as usize * 16)?;
         let vertex_deform_type = r.read_u8()?;
 
-        let bone_indices: usize = match vertex_deform_type {
-            0 => 1,
-            1 => 2,
-            2 | 4 => 4,
-            3 => 2,
+        let (bone_indices, weight_count) = match vertex_deform_type {
+            0 => (1, 0),
+            1 | 3 => (2, 1),
+            2 | 4 => (4, 4),
             _ => return Err(ImportError::SectionOverflow),
         };
         for _ in 0..bone_indices {
             r.read_sized_index(header.bone_index_size)?;
         }
 
-        let weight_count: usize = match vertex_deform_type {
-            0 => 0,
-            1 => 1,
-            2 | 4 => 4,
-            3 => 1,
-            _ => return Err(ImportError::SectionOverflow),
-        };
         r.skip(weight_count * 4)?;
 
         if vertex_deform_type == 3 {
@@ -300,11 +289,7 @@ pub fn skip_vertices(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usiz
 
 pub fn skip_faces(data: &[u8], vertex_index_size: u8, pos: usize) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
-    let count = count as usize;
+    let count = read_section_count(&mut r)?;
     let bytes = count
         .checked_mul(vertex_index_size as usize)
         .ok_or(ImportError::SectionOverflow)?;
@@ -314,29 +299,23 @@ pub fn skip_faces(data: &[u8], vertex_index_size: u8, pos: usize) -> Result<usiz
 
 pub fn skip_textures(
     data: &[u8],
-    encoding: TextEncoding,
+    _encoding: TextEncoding,
     pos: usize,
 ) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
+    let count = read_section_count(&mut r)?;
     for _ in 0..count {
-        let _path = r.read_string(encoding)?;
+        r.skip_string()?; // Path.
     }
     Ok(r.pos)
 }
 
 pub fn skip_materials(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
+    let count = read_section_count(&mut r)?;
     for _ in 0..count {
-        let _name = r.read_string(header.encoding)?;
-        let _english_name = r.read_string(header.encoding)?;
+        r.skip_string()?; // Name.
+        r.skip_string()?; // English name.
         r.skip(16)?;
         r.skip(16)?;
         r.skip(12)?;
@@ -352,7 +331,7 @@ pub fn skip_materials(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usi
         } else {
             r.skip(1)?;
         }
-        let _memo = r.read_string(header.encoding)?;
+        r.skip_string()?; // Memo.
         let _face_count = r.read_i32_le()?;
     }
     Ok(r.pos)
@@ -360,66 +339,19 @@ pub fn skip_materials(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usi
 
 pub fn skip_morphs(data: &[u8], header: &PmxHeader, pos: usize) -> Result<usize, ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
+    let count = read_section_count(&mut r)?;
     for _ in 0..count {
-        let _name = r.read_string(header.encoding)?;
-        let _english_name = r.read_string(header.encoding)?;
+        r.skip_string()?; // Name.
+        r.skip_string()?; // English name.
         r.skip(1)?;
-        let _morph_type = r.read_u8()?;
-        let _offset_count = r.read_i32_le()?;
-        match _morph_type {
-            0 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.morph_index_size)?;
-                    r.skip(4)?;
-                }
+        let morph_type = r.read_u8()?;
+        let offset_count = r.read_i32_le()?;
+        let (index_size, field_sizes) = morph_offset_layout(header, morph_type)?;
+        for _ in 0..offset_count {
+            r.read_sized_index(index_size)?;
+            for &field_size in field_sizes {
+                r.skip(field_size)?;
             }
-            1 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.vertex_index_size)?;
-                    r.skip(12)?;
-                }
-            }
-            2 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.bone_index_size)?;
-                    r.skip(12)?;
-                    r.skip(16)?;
-                }
-            }
-            3..=7 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.vertex_index_size)?;
-                    r.skip(16)?;
-                }
-            }
-            8 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.material_index_size)?;
-                    r.skip(1)?;
-                    r.skip(16)?;
-                    r.skip(12)?;
-                    r.skip(4)?;
-                    r.skip(12)?;
-                    r.skip(16)?;
-                    r.skip(4)?;
-                    r.skip(16)?;
-                    r.skip(16)?;
-                    r.skip(16)?;
-                }
-            }
-            9 => {
-                for _ in 0.._offset_count {
-                    r.read_sized_index(header.rigidbody_index_size)?;
-                    r.skip(1)?;
-                    r.skip(12)?;
-                    r.skip(12)?;
-                }
-            }
-            _ => return Err(ImportError::SectionOverflow),
         }
     }
     Ok(r.pos)
@@ -431,45 +363,51 @@ pub struct PmxMorphNames {
     pub names: Vec<String>,
 }
 
+fn morph_offset_layout(
+    header: &PmxHeader,
+    morph_type: u8,
+) -> Result<(u8, &'static [usize]), ImportError> {
+    Ok(match morph_type {
+        0 | 9 => (header.morph_index_size, &[4]),
+        1 => (header.vertex_index_size, &[12]),
+        2 => (header.bone_index_size, &[12, 16]),
+        3..=7 => (header.vertex_index_size, &[16]),
+        8 => (
+            header.material_index_size,
+            &[1, 16, 12, 4, 12, 16, 4, 16, 16, 16],
+        ),
+        10 => (header.rigidbody_index_size, &[1, 12, 12]),
+        _ => return Err(ImportError::SectionOverflow),
+    })
+}
+
+fn morph_offset_size(header: &PmxHeader, morph_type: u8) -> Result<usize, ImportError> {
+    let (index_size, field_sizes) = morph_offset_layout(header, morph_type)?;
+    Ok(index_size as usize + field_sizes.iter().sum::<usize>())
+}
+
 pub fn read_morph_names(
     data: &[u8],
     header: &PmxHeader,
     pos: usize,
 ) -> Result<(PmxMorphNames, usize), ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
-    let count = count as usize;
-    r.require_record_bytes(count, 1)?;
+    let count = read_section_count_with_min_record(&mut r, 1)?;
 
     let mut name_bytes = Vec::with_capacity(count);
     let mut names = Vec::with_capacity(count);
 
     for _ in 0..count {
         let (raw, name) = r.read_string_owned(header.encoding)?;
-        let _english_name = r.read_string(header.encoding)?;
+        r.skip_string()?; // English name.
         name_bytes.push(raw);
         names.push(name);
 
         r.skip(1)?;
         let morph_type = r.read_u8()?;
-        let offset_count = r.read_i32_le()?;
-        if offset_count < 0 {
-            return Err(ImportError::SectionOverflow);
-        }
-        let offset_count = offset_count as usize;
+        let offset_count = read_section_count(&mut r)?;
 
-        let per_offset = match morph_type {
-            0 => header.morph_index_size as usize + 4,
-            1 => header.vertex_index_size as usize + 12,
-            2 => header.bone_index_size as usize + 12 + 16,
-            3..=7 => header.vertex_index_size as usize + 16,
-            8 => header.material_index_size as usize + 1 + 16 + 12 + 4 + 12 + 16 + 4 + 16 + 16 + 16,
-            9 => header.rigidbody_index_size as usize + 1 + 12 + 12,
-            _ => return Err(ImportError::SectionOverflow),
-        };
+        let per_offset = morph_offset_size(header, morph_type)?;
         r.skip(
             offset_count
                 .checked_mul(per_offset)
@@ -481,21 +419,15 @@ pub fn read_morph_names(
 }
 
 /// Parse morph names and the runtime-relevant bone/group offset payload.
-/// Unsupported morph types (vertex, UV, material, flip) have their payload
-/// skipped, while the descriptor compiler remains the only production
-/// normalization/validation point.
+/// Other morph types are skipped. The descriptor compiler remains the only
+/// production normalization/validation point.
 fn read_runtime_morph_descriptor(
     data: &[u8],
     header: &PmxHeader,
     pos: usize,
 ) -> Result<(PmxMorphNames, RuntimeMorphDescriptorV1, usize), ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
-    let count = count as usize;
-    r.require_record_bytes(count, 1)?;
+    let count = read_section_count_with_min_record(&mut r, 1)?;
 
     let mut name_bytes = Vec::with_capacity(count);
     let mut names = Vec::with_capacity(count);
@@ -505,17 +437,13 @@ fn read_runtime_morph_descriptor(
 
     for morph_index in 0..count {
         let (raw, name) = r.read_string_owned(header.encoding)?;
-        let _english_name = r.read_string(header.encoding)?;
+        r.skip_string()?; // English name.
         name_bytes.push(raw);
         names.push(name);
 
         r.skip(1)?;
         let morph_type = r.read_u8()?;
-        let offset_count = r.read_i32_le()?;
-        if offset_count < 0 {
-            return Err(ImportError::SectionOverflow);
-        }
-        let offset_count = offset_count as usize;
+        let offset_count = read_section_count(&mut r)?;
 
         match morph_type {
             0 => {
@@ -552,25 +480,7 @@ fn read_runtime_morph_descriptor(
                 }
             }
             _ => {
-                let per_offset = match morph_type {
-                    1 => header.vertex_index_size as usize + 12,
-                    3..=7 => header.vertex_index_size as usize + 16,
-                    8 => {
-                        header.material_index_size as usize
-                            + 1
-                            + 16
-                            + 12
-                            + 4
-                            + 12
-                            + 16
-                            + 4
-                            + 16
-                            + 16
-                            + 16
-                    }
-                    9 => header.rigidbody_index_size as usize + 1 + 12 + 12,
-                    _ => return Err(ImportError::SectionOverflow),
-                };
+                let per_offset = morph_offset_size(header, morph_type)?;
                 r.skip(
                     offset_count
                         .checked_mul(per_offset)
@@ -656,12 +566,7 @@ fn read_bones_with_local_axes(
     pos: usize,
 ) -> Result<(PmxBoneRead, usize), ImportError> {
     let mut r = Reader { data, pos };
-    let count = r.read_i32_le()?;
-    if count < 0 {
-        return Err(ImportError::SectionOverflow);
-    }
-    let count = count as usize;
-    r.require_record_bytes(count, 1)?;
+    let count = read_section_count_with_min_record(&mut r, 1)?;
 
     let mut bones = Vec::with_capacity(count);
     let mut ik_solvers = Vec::new();
@@ -672,7 +577,7 @@ fn read_bones_with_local_axes(
 
     for _bone_i in 0..count {
         let (name_bytes, name) = r.read_string_owned(header.encoding)?;
-        let _english_name = r.read_string(header.encoding)?;
+        r.skip_string()?; // English name.
         let position = r.read_vec3()?;
         let parent = r.read_bone_index(header)?;
         let transform_order = r.read_i32_le()?;
@@ -733,13 +638,10 @@ fn read_bones_with_local_axes(
             let ik_target = r.read_bone_index(header)?;
             let ik_loop_count = r.read_i32_le()?;
             let ik_limit_angle = r.read_f32_le()?;
-            let link_count = r.read_i32_le()?;
-            if link_count < 0 {
-                return Err(ImportError::SectionOverflow);
-            }
-            r.require_record_bytes(link_count as usize, header.bone_index_size as usize + 1)?;
+            let link_count =
+                read_section_count_with_min_record(&mut r, header.bone_index_size as usize + 1)?;
 
-            let mut links = Vec::with_capacity(link_count as usize);
+            let mut links = Vec::with_capacity(link_count);
             for _ in 0..link_count {
                 // Match the legacy importer for malformed optional IK links.
                 // Bone 0 is the historical fallback and keeps such PMX files
@@ -814,7 +716,7 @@ fn read_bones_with_local_axes(
 /// Adapt the host-independent descriptor into the historical low-level
 /// `PmxBoneImport` shape.  Runtime model construction must use the descriptor
 /// compiler; this adapter exists only for callers of the parser-facing API.
-fn legacy_bone_import(read: &PmxBoneRead) -> PmxBoneImport {
+fn legacy_bone_import(read: PmxBoneRead) -> PmxBoneImport {
     let bones = read
         .descriptor
         .bones
@@ -875,8 +777,8 @@ fn legacy_bone_import(read: &PmxBoneRead) -> PmxBoneImport {
         bones,
         ik_solvers,
         append_transforms,
-        bone_name_bytes: read.bone_name_bytes.clone(),
-        bone_names: read.bone_names.clone(),
+        bone_name_bytes: read.bone_name_bytes,
+        bone_names: read.bone_names,
     }
 }
 
@@ -886,7 +788,7 @@ pub fn read_bones(
     pos: usize,
 ) -> Result<(PmxBoneImport, usize), ImportError> {
     let (bone_read, pos) = read_bones_with_local_axes(data, header, pos)?;
-    Ok((legacy_bone_import(&bone_read), pos))
+    Ok((legacy_bone_import(bone_read), pos))
 }
 
 fn read_texture_section_start(data: &[u8]) -> Result<(PmxHeader, usize), ImportError> {
@@ -3238,11 +3140,7 @@ pub fn export_pmx_model(model: &PmxParsedModel) -> Vec<u8> {
         write_sized_index(&mut out, body.bone_index, model.metadata.index_sizes.bone);
         out.push(body.group);
         write_u16(&mut out, body.mask);
-        out.push(match body.shape.as_str() {
-            "box" => 1,
-            "capsule" => 2,
-            _ => 0,
-        });
+        out.push(rigid_body_codes::shape_code(&body.shape));
         write_f32_slice(&mut out, &body.size);
         write_f32_slice(&mut out, &body.position);
         write_f32_slice(&mut out, &body.rotation);
@@ -3251,11 +3149,7 @@ pub fn export_pmx_model(model: &PmxParsedModel) -> Vec<u8> {
         write_f32(&mut out, body.angular_damping);
         write_f32(&mut out, body.restitution);
         write_f32(&mut out, body.friction);
-        out.push(match body.mode.as_str() {
-            "dynamic" => 1,
-            "dynamicBone" => 2,
-            _ => 0,
-        });
+        out.push(rigid_body_codes::mode_code(&body.mode));
     }
 
     write_i32(&mut out, model.joints.len() as i32);
@@ -3625,18 +3519,18 @@ fn remap_pmx_geometry(
     local_index_count: usize,
 ) -> PmxParsedGeometry {
     PmxParsedGeometry {
-        positions: gather_vertex_f32(&geometry.positions, 3, original_vertex_indices),
-        normals: gather_vertex_f32(&geometry.normals, 3, original_vertex_indices),
-        uvs: gather_vertex_f32(&geometry.uvs, 2, original_vertex_indices),
+        positions: gather_vertex_components(&geometry.positions, 3, original_vertex_indices),
+        normals: gather_vertex_components(&geometry.normals, 3, original_vertex_indices),
+        uvs: gather_vertex_components(&geometry.uvs, 2, original_vertex_indices),
         additional_uvs: geometry
             .additional_uvs
             .iter()
-            .map(|uvs| gather_vertex_f32(uvs, 4, original_vertex_indices))
+            .map(|uvs| gather_vertex_components(uvs, 4, original_vertex_indices))
             .collect(),
         indices,
-        skin_indices: gather_vertex_u32(&geometry.skin_indices, 4, original_vertex_indices),
-        skin_weights: gather_vertex_f32(&geometry.skin_weights, 4, original_vertex_indices),
-        edge_scale: gather_vertex_f32(&geometry.edge_scale, 1, original_vertex_indices),
+        skin_indices: gather_vertex_components(&geometry.skin_indices, 4, original_vertex_indices),
+        skin_weights: gather_vertex_components(&geometry.skin_weights, 4, original_vertex_indices),
+        edge_scale: gather_vertex_components(&geometry.edge_scale, 1, original_vertex_indices),
         material_groups: vec![PmxParsedMaterialGroup {
             start: 0,
             count: local_index_count,
@@ -3647,20 +3541,24 @@ fn remap_pmx_geometry(
                 &geometry.sdef.skinning_modes,
                 original_vertex_indices,
             ),
-            enabled: gather_vertex_f32(&geometry.sdef.enabled, 1, original_vertex_indices),
-            c: gather_vertex_f32(&geometry.sdef.c, 3, original_vertex_indices),
-            r0: gather_vertex_f32(&geometry.sdef.r0, 3, original_vertex_indices),
-            r1: gather_vertex_f32(&geometry.sdef.r1, 3, original_vertex_indices),
-            rw0: gather_vertex_f32(&geometry.sdef.rw0, 3, original_vertex_indices),
-            rw1: gather_vertex_f32(&geometry.sdef.rw1, 3, original_vertex_indices),
+            enabled: gather_vertex_components(&geometry.sdef.enabled, 1, original_vertex_indices),
+            c: gather_vertex_components(&geometry.sdef.c, 3, original_vertex_indices),
+            r0: gather_vertex_components(&geometry.sdef.r0, 3, original_vertex_indices),
+            r1: gather_vertex_components(&geometry.sdef.r1, 3, original_vertex_indices),
+            rw0: gather_vertex_components(&geometry.sdef.rw0, 3, original_vertex_indices),
+            rw1: gather_vertex_components(&geometry.sdef.rw1, 3, original_vertex_indices),
         },
         qdef: PmxParsedQdef {
-            enabled: gather_vertex_f32(&geometry.qdef.enabled, 1, original_vertex_indices),
+            enabled: gather_vertex_components(&geometry.qdef.enabled, 1, original_vertex_indices),
         },
     }
 }
 
-fn gather_vertex_f32(values: &[f32], stride: usize, original_vertex_indices: &[u32]) -> Vec<f32> {
+fn gather_vertex_components<T: Copy>(
+    values: &[T],
+    stride: usize,
+    original_vertex_indices: &[u32],
+) -> Vec<T> {
     let mut out = Vec::with_capacity(original_vertex_indices.len() * stride);
     for &index in original_vertex_indices {
         let start = index as usize * stride;
@@ -3677,18 +3575,6 @@ fn gather_vertex_string(values: &[String], original_vertex_indices: &[u32]) -> V
     for &index in original_vertex_indices {
         if let Some(value) = values.get(index as usize) {
             out.push(value.clone());
-        }
-    }
-    out
-}
-
-fn gather_vertex_u32(values: &[u32], stride: usize, original_vertex_indices: &[u32]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(original_vertex_indices.len() * stride);
-    for &index in original_vertex_indices {
-        let start = index as usize * stride;
-        let end = start + stride;
-        if let Some(slice) = values.get(start..end) {
-            out.extend_from_slice(slice);
         }
     }
     out
@@ -3786,6 +3672,7 @@ fn remap_pmx_material_split_morphs(
     }
 
     let mut morphs = Vec::with_capacity(morph_remap.len());
+    let mut morph_index_map = Vec::with_capacity(morph_remap.len());
     for (original_index, morph) in model.morphs.iter().enumerate() {
         if !morph_remap.contains_key(&original_index) {
             continue;
@@ -3794,23 +3681,12 @@ fn remap_pmx_material_split_morphs(
             Some(remapped) => remapped,
             None => remap_reference_pmx_material_split_morph(morph, &morph_remap),
         };
-        morphs.push((original_index, remapped));
+        morph_index_map.push(PmxMaterialSplitMorphIndexMap {
+            original_index,
+            local_index: morphs.len(),
+        });
+        morphs.push(remapped);
     }
-
-    let morph_index_map = morphs
-        .iter()
-        .enumerate()
-        .map(
-            |(local_index, (original_index, _))| PmxMaterialSplitMorphIndexMap {
-                original_index: *original_index,
-                local_index,
-            },
-        )
-        .collect();
-    let morphs = morphs
-        .into_iter()
-        .map(|(_, morph)| morph)
-        .collect::<Vec<_>>();
 
     (morphs, morph_index_map, diagnostics)
 }
@@ -3999,7 +3875,7 @@ fn read_parsed_materials(
         } else {
             (String::new(), Some(r.read_u8()?))
         };
-        let _memo = r.read_string(header.encoding)?;
+        r.skip_string()?; // Memo.
         let face_count = r.read_i32_le()? / 3;
         materials.push(PmxParsedMaterial {
             name,
@@ -4666,13 +4542,7 @@ fn read_parsed_rigid_bodies(
             bone_index: r.read_sized_index(header.bone_index_size)?,
             group: r.read_u8()?,
             mask: r.read_u16_le()?,
-            shape: match r.read_u8()? {
-                0 => "sphere",
-                1 => "box",
-                2 => "capsule",
-                _ => "unknown",
-            }
-            .to_owned(),
+            shape: rigid_body_codes::shape_name(r.read_u8()?).to_owned(),
             size: r.read_vec3_array()?,
             position: r.read_vec3_array()?,
             rotation: r.read_vec3_array()?,
@@ -4681,13 +4551,7 @@ fn read_parsed_rigid_bodies(
             angular_damping: r.read_f32_le()?,
             restitution: r.read_f32_le()?,
             friction: r.read_f32_le()?,
-            mode: match r.read_u8()? {
-                0 => "static",
-                1 => "dynamic",
-                2 => "dynamicBone",
-                _ => "unknown",
-            }
-            .to_owned(),
+            mode: rigid_body_codes::mode_name(r.read_u8()?).to_owned(),
         });
     }
     Ok(bodies)
@@ -4929,6 +4793,25 @@ mod tests {
     }
 
     #[test]
+    fn skipped_model_text_keeps_tolerant_lengths_and_checks_truncation() {
+        let mut text = Vec::new();
+        text.extend_from_slice(&(-1i32).to_le_bytes());
+        for bytes in [b"\xff\xd8\x00".as_slice(), b"A\0tail", b"end"] {
+            text.extend_from_slice(&(bytes.len() as i32).to_le_bytes());
+            text.extend_from_slice(bytes);
+        }
+        for encoding in [TextEncoding::Utf8, TextEncoding::Utf16Le] {
+            let header_bytes = build_small_pmx_header_bytes(1, encoding);
+            let (header, _) = read_header(&header_bytes).unwrap();
+            assert_eq!(skip_model_info(&text, &header, 0).unwrap(), text.len());
+            assert!(matches!(
+                skip_model_info(&text[..text.len() - 1], &header, 0),
+                Err(ImportError::UnexpectedEof(1))
+            ));
+        }
+    }
+
+    #[test]
     fn rejects_impossible_pmx_vertex_count_before_allocation() {
         let mut buf = build_small_pmx_header_bytes(1, TextEncoding::Utf8);
         buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
@@ -4965,6 +4848,17 @@ mod tests {
     fn build_bone_section_header(count: u32) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&count.to_le_bytes());
+        buf
+    }
+
+    fn build_pmx_bone_section_prefix(bone_index_size: u8, bone_count: u32) -> Vec<u8> {
+        let mut buf = build_small_pmx_header_bytes(bone_index_size, TextEncoding::Utf8);
+        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
+        buf.extend_from_slice(&build_empty_vertex_section());
+        buf.extend_from_slice(&build_empty_face_section());
+        buf.extend_from_slice(&build_empty_texture_section());
+        buf.extend_from_slice(&build_empty_material_section());
+        buf.extend_from_slice(&build_bone_section_header(bone_count));
         buf
     }
 
@@ -5786,7 +5680,7 @@ mod tests {
             .iter()
             .map(|bone| bone.local_axis)
             .collect::<Vec<_>>();
-        let legacy_import = legacy_bone_import(&bone_read);
+        let legacy_import = legacy_bone_import(bone_read);
         let (_, morph, _) = read_morph_offsets(data, &header, pos).unwrap();
         let legacy_model = ModelArena::new_with_morphs(
             legacy_import.bones,
@@ -5879,14 +5773,7 @@ mod tests {
 
     #[test]
     fn reads_single_bone_no_parent() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(4, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(4, 1);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -5915,14 +5802,7 @@ mod tests {
 
     #[test]
     fn reads_bone_with_parent() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -5958,14 +5838,7 @@ mod tests {
 
     #[test]
     fn reads_bone_with_append_transform() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6009,14 +5882,7 @@ mod tests {
 
     #[test]
     fn reads_ik_bone_with_links_and_angle_limits() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(3));
+        let mut buf = build_pmx_bone_section_prefix(2, 3);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6100,14 +5966,7 @@ mod tests {
 
     #[test]
     fn bone_names_retained_and_mapped_to_indices() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Hips"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6140,12 +5999,9 @@ mod tests {
         assert_eq!(result.bone_names[0], "Hips");
         assert_eq!(result.bone_names[1], "Spine");
 
-        let bone_map: HashMap<Vec<u8>, BoneIndex> = result
-            .bone_name_bytes
-            .iter()
-            .enumerate()
-            .map(|(i, b)| (b.clone(), BoneIndex(i as u32)))
-            .collect();
+        buf.extend_from_slice(&0i32.to_le_bytes()); // morph count
+        let runtime = import_pmx_runtime(&buf).unwrap();
+        let bone_map = &runtime.bone_name_to_index;
 
         assert_eq!(bone_map.get(b"Hips".as_slice()), Some(&BoneIndex(0)));
         assert_eq!(bone_map.get(b"Spine".as_slice()), Some(&BoneIndex(1)));
@@ -6154,14 +6010,7 @@ mod tests {
 
     #[test]
     fn ik_solver_name_mapped_to_solver_index() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(3));
+        let mut buf = build_pmx_bone_section_prefix(2, 3);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6217,19 +6066,9 @@ mod tests {
             "LeftLegIK"
         );
 
-        let ik_name_map: HashMap<Vec<u8>, usize> = bone_import
-            .ik_solvers
-            .iter()
-            .enumerate()
-            .filter_map(|(solver_idx, solver)| {
-                let bone_idx = solver.ik_bone.as_usize();
-                if bone_idx < bone_import.bone_name_bytes.len() {
-                    Some((bone_import.bone_name_bytes[bone_idx].clone(), solver_idx))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        buf.extend_from_slice(&0i32.to_le_bytes()); // morph count
+        let runtime = import_pmx_runtime(&buf).unwrap();
+        let ik_name_map = &runtime.ik_solver_bone_name_to_index;
 
         assert_eq!(ik_name_map.get(b"LeftLegIK".as_slice()), Some(&0));
     }
@@ -6281,15 +6120,103 @@ mod tests {
     }
 
     #[test]
+    fn pmx21_morph_readers_preserve_flip_and_impulse_payload_boundaries() {
+        let (mut header, _) =
+            read_header(&build_small_pmx_header_bytes(4, TextEncoding::Utf8)).unwrap();
+        header.version = 2.1;
+        header.morph_index_size = 2;
+        header.rigidbody_index_size = 4;
+
+        let mut flip = 1i16.to_le_bytes().to_vec();
+        flip.extend_from_slice(&0.5f32.to_le_bytes());
+        let mut impulse = 0i32.to_le_bytes().to_vec();
+        impulse.push(1);
+        for value in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0] {
+            impulse.extend_from_slice(&value.to_le_bytes());
+        }
+        let vertex = vec![0u8; 4 + 12];
+        let mut data = 3i32.to_le_bytes().to_vec();
+        let mut payload_ends = Vec::new();
+        for (name, kind, payload) in [
+            ("Flip", 9, flip),
+            ("Impulse", 10, impulse),
+            ("Tail", 1, vertex),
+        ] {
+            data.extend_from_slice(&build_morph_name_bytes(name));
+            data.extend_from_slice(&build_morph_name_bytes(""));
+            data.extend_from_slice(&[4, kind]);
+            data.extend_from_slice(&1i32.to_le_bytes());
+            data.extend_from_slice(&payload);
+            payload_ends.push(data.len());
+        }
+
+        let skipped = skip_morphs(&data, &header, 0);
+        let names = read_morph_names(&data, &header, 0);
+        let runtime = read_runtime_morph_descriptor(&data, &header, 0);
+        assert!(skipped.is_ok(), "skip_morphs: {skipped:?}");
+        assert!(names.is_ok(), "read_morph_names: {names:?}");
+        assert!(runtime.is_ok(), "runtime morph reader: {runtime:?}");
+        assert_eq!(skipped.unwrap(), data.len());
+        let (names, end) = names.unwrap();
+        assert_eq!(names.names, ["Flip", "Impulse", "Tail"]);
+        assert_eq!(end, data.len());
+        let (runtime_names, descriptor, end) = runtime.unwrap();
+        assert_eq!(runtime_names.names, names.names);
+        assert_eq!(descriptor.morph_count, 3);
+        assert!(descriptor.bone_offsets.is_empty());
+        assert!(descriptor.group_offsets.is_empty());
+        assert_eq!(end, data.len());
+
+        for end in payload_ends {
+            let truncated = &data[..end - 1];
+            assert!(skip_morphs(truncated, &header, 0).is_err());
+            assert!(read_morph_names(truncated, &header, 0).is_err());
+            assert!(read_runtime_morph_descriptor(truncated, &header, 0).is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_import_skips_pmx21_morphs_and_keeps_following_name_indices() {
+        let mut model = parsed_pmx_fixture();
+        model.metadata.version = 2.1;
+        let mut flip = model.morphs[0].clone();
+        flip.name = "Flip".to_owned();
+        flip.kind = "flip".to_owned();
+        flip.vertex_offsets.clear();
+        flip.flip_offsets.push(PmxParsedGroupMorphOffset {
+            morph_index: 2,
+            weight: 0.5,
+        });
+        let mut impulse = model.morphs[0].clone();
+        impulse.name = "Impulse".to_owned();
+        impulse.kind = "impulse".to_owned();
+        impulse.vertex_offsets.clear();
+        impulse.impulse_offsets.push(PmxParsedImpulseMorphOffset {
+            rigid_body_index: 0,
+            local: true,
+            velocity: [1.0, 2.0, 3.0],
+            torque: [4.0, 5.0, 6.0],
+        });
+        model.morphs.insert(0, impulse);
+        model.morphs.insert(0, flip);
+        let data = export_pmx_model(&model);
+        let parsed = parse_pmx_model(&data).unwrap();
+        assert_eq!(parsed.morphs[0].kind, "flip");
+        assert_eq!(parsed.morphs[1].kind, "impulse");
+
+        let imported = import_pmx_runtime(&data).unwrap();
+        for (index, name) in ["Flip", "Impulse", "Smile"].into_iter().enumerate() {
+            assert_eq!(
+                imported.morph_name_to_index.get(name.as_bytes()),
+                Some(&MorphIndex(index as u32))
+            );
+        }
+        assert_eq!(imported.model.morph_count(), 3);
+    }
+
+    #[test]
     fn runtime_import_builds_model_arena_with_name_lookup() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Hips"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6333,14 +6260,7 @@ mod tests {
 
     #[test]
     fn parse_pmx_model_exposes_three_loader_shaped_sections() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6767,14 +6687,7 @@ mod tests {
 
     #[test]
     fn exports_parsed_pmx_skeleton_display_roundtrip() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6820,14 +6733,7 @@ mod tests {
 
     #[test]
     fn runtime_import_ik_solver_name_lookup() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(3));
+        let mut buf = build_pmx_bone_section_prefix(2, 3);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6895,14 +6801,7 @@ mod tests {
 
     #[test]
     fn converts_absolute_pmx_positions_to_local_rest_positions() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Parent"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6942,14 +6841,7 @@ mod tests {
 
     #[test]
     fn root_inverse_bind_cancels_rest_world() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -6971,14 +6863,7 @@ mod tests {
 
     #[test]
     fn reads_pmx_fixed_axis_bone_descriptor() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
 
         buf.extend_from_slice(&build_bone_name_bytes("Fixed"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -7002,14 +6887,7 @@ mod tests {
 
     #[test]
     fn reads_pmx_local_axis_bone_descriptor_into_runtime_init() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
 
         buf.extend_from_slice(&build_bone_name_bytes("Local"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -7050,14 +6928,7 @@ mod tests {
 
     #[test]
     fn runtime_import_drops_degenerate_local_axis() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
         buf.extend_from_slice(&build_bone_name_bytes("DegenerateLocal"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
         buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
@@ -7077,14 +6948,7 @@ mod tests {
 
     #[test]
     fn runtime_import_drops_degenerate_fixed_axis() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
         buf.extend_from_slice(&build_bone_name_bytes("DegenerateFixed"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
         buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
@@ -7101,14 +6965,7 @@ mod tests {
 
     #[test]
     fn nil_append_parent_is_sanitized_to_no_append() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(1));
+        let mut buf = build_pmx_bone_section_prefix(2, 1);
         buf.extend_from_slice(&build_bone_name_bytes("NilAppend"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
         buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
@@ -7128,14 +6985,7 @@ mod tests {
     #[test]
     fn non_finite_append_ratio_is_sanitized_to_no_append() {
         for ratio in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-            buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-            buf.extend_from_slice(&build_empty_vertex_section());
-            buf.extend_from_slice(&build_empty_face_section());
-            buf.extend_from_slice(&build_empty_texture_section());
-            buf.extend_from_slice(&build_empty_material_section());
-            buf.extend_from_slice(&build_bone_section_header(1));
+            let mut buf = build_pmx_bone_section_prefix(2, 1);
             buf.extend_from_slice(&build_bone_name_bytes("NonFiniteAppend"));
             buf.extend_from_slice(&build_bone_name_bytes(""));
             buf.extend_from_slice(&[0.0f32, 0.0, 0.0].map(f32::to_le_bytes).concat());
@@ -7155,14 +7005,7 @@ mod tests {
 
     #[test]
     fn pmx_fixed_axis_constrains_ik_end_to_end() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(3));
+        let mut buf = build_pmx_bone_section_prefix(2, 3);
 
         // Link: rest direction is +Y. A +Z target needs an X rotation, so it
         // is reachable without a constraint but impossible for a Z-only link.
@@ -7304,14 +7147,7 @@ mod tests {
 
     #[test]
     fn runtime_import_rejects_non_finite_derived_local_rest_position() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         for (name, position, parent) in [("Parent", f32::MAX, -1i16), ("Child", -f32::MAX, 0i16)] {
             buf.extend_from_slice(&build_bone_name_bytes(name));
@@ -7370,14 +7206,7 @@ mod tests {
         angle_limit_min: [f32; 3],
         angle_limit_max: [f32; 3],
     ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(3));
+        let mut buf = build_pmx_bone_section_prefix(2, 3);
 
         buf.extend_from_slice(&build_bone_name_bytes("link"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -7432,14 +7261,7 @@ mod tests {
 
     #[test]
     fn child_inverse_bind_uses_absolute_not_local_position() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Root"));
         buf.extend_from_slice(&build_bone_name_bytes(""));
@@ -7475,14 +7297,7 @@ mod tests {
 
     #[test]
     fn runtime_rest_pose_skinning_matrices_are_identity() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&build_small_pmx_header_bytes(2, TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_model_info(TextEncoding::Utf8));
-        buf.extend_from_slice(&build_empty_vertex_section());
-        buf.extend_from_slice(&build_empty_face_section());
-        buf.extend_from_slice(&build_empty_texture_section());
-        buf.extend_from_slice(&build_empty_material_section());
-        buf.extend_from_slice(&build_bone_section_header(2));
+        let mut buf = build_pmx_bone_section_prefix(2, 2);
 
         buf.extend_from_slice(&build_bone_name_bytes("Parent"));
         buf.extend_from_slice(&build_bone_name_bytes(""));

@@ -34,10 +34,6 @@ impl<'a> ByteReader<'a> {
         Ok(slice)
     }
 
-    pub(crate) fn read_slice(&mut self, n: usize) -> Result<&'a [u8], ImportError> {
-        self.read_bytes(n)
-    }
-
     pub(crate) fn skip(&mut self, n: usize) -> Result<(), ImportError> {
         self.require(n)?;
         self.pos += n;

@@ -23,7 +23,8 @@ impl VmdSampleKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) enum VmdSampleState {
     Camera(mmd_anim_format::VmdCameraState),
     Light(mmd_anim_format::VmdLightState),
@@ -46,12 +47,8 @@ struct VmdSampleJsonReport<'a> {
     kind: &'static str,
     motion: String,
     frame: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    camera: Option<&'a mmd_anim_format::VmdCameraState>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    light: Option<&'a mmd_anim_format::VmdLightState>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    self_shadow: Option<&'a mmd_anim_format::VmdSelfShadowState>,
+    #[serde(flatten)]
+    state: &'a VmdSampleState,
 }
 
 pub(crate) fn vmd_sample(
@@ -117,18 +114,11 @@ fn print_json(
     frame: f32,
     state: &VmdSampleState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (camera, light, self_shadow) = match state {
-        VmdSampleState::Camera(camera) => (Some(camera), None, None),
-        VmdSampleState::Light(light) => (None, Some(light), None),
-        VmdSampleState::SelfShadow(self_shadow) => (None, None, Some(self_shadow)),
-    };
     let report = VmdSampleJsonReport {
         kind: state.kind().label(),
         motion: motion.display().to_string(),
         frame,
-        camera,
-        light,
-        self_shadow,
+        state,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())

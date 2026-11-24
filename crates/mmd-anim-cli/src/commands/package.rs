@@ -582,14 +582,8 @@ fn validate_logical_paths<'a>(
         path_keys.push((path, key));
     }
     for (path, key) in path_keys {
-        let mut prefix = String::new();
-        let segments: Vec<_> = key.split('/').collect();
-        for segment in segments.iter().take(segments.len().saturating_sub(1)) {
-            if !prefix.is_empty() {
-                prefix.push('/');
-            }
-            prefix.push_str(segment);
-            if full_keys.contains(&prefix) {
+        for (end, _) in key.match_indices('/') {
+            if full_keys.contains(&key[..end]) {
                 return Err(command_error(format!(
                     "{operation} paths have a file/directory prefix collision: {path:?}"
                 )));
@@ -721,7 +715,7 @@ fn create_unpack_staging(output_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
     ))
 }
 
-fn publish_unpack_staging(staging_dir: &Path, output_dir: &Path) -> CommandResult {
+fn publish_unpack_staging(staging_dir: &Path, output_dir: &Path) -> Result<(), Box<dyn Error>> {
     if let Err(error) = fs::create_dir(output_dir) {
         let _ = fs::remove_dir_all(staging_dir);
         return Err(io_error("unpack output", output_dir, error));
@@ -745,7 +739,7 @@ fn publish_unpack_staging(staging_dir: &Path, output_dir: &Path) -> CommandResul
         let _ = fs::remove_dir_all(output_dir);
         return Err(error);
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(())
 }
 
 fn join_logical_path(root: &Path, path: &str) -> PathBuf {
@@ -757,7 +751,7 @@ fn publish_pack_artifacts(
     packed: &mmd_anim_package::MmdPackedPackage,
     output: &Path,
     key_out: &Path,
-) -> CommandResult {
+) -> Result<(), Box<dyn Error>> {
     let output_parent = destination_parent(output);
     let key_parent = destination_parent(key_out);
     let (output_temp, mut output_file) = create_temp_file(output_parent, "package")?;
@@ -800,7 +794,7 @@ fn publish_pack_artifacts(
         let _ = fs::remove_file(output);
         return Err(error);
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(())
 }
 
 fn create_temp_file(parent: &Path, label: &str) -> Result<(PathBuf, File), Box<dyn Error>> {
@@ -1103,12 +1097,26 @@ mod tests {
 
     #[test]
     fn unpack_path_collision_check_handles_case_and_nfd() {
-        let entries = vec![
-            test_manifest_entry("Cafe\u{301}/diffuse.bin", 1),
-            test_manifest_entry("café/diffuse.bin", 2),
-        ];
-        let error = validate_unpack_paths(&entries).unwrap_err().to_string();
-        assert!(error.contains("case/NFD"), "{error}");
+        for (paths, expected) in [
+            (["Cafe\u{301}/diffuse.bin", "café/diffuse.bin"], "case/NFD"),
+            (["Cafe\u{301}", "café/diffuse.bin"], "file/directory prefix"),
+            (
+                ["assets/模型/file.bin", "assets/模型"],
+                "file/directory prefix",
+            ),
+        ] {
+            let entries = [
+                test_manifest_entry(paths[0], 1),
+                test_manifest_entry(paths[1], 2),
+            ];
+            let error = validate_unpack_paths(&entries).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        validate_unpack_paths(&[
+            test_manifest_entry("models/a.pmx", 1),
+            test_manifest_entry("models/b.pmx", 2),
+        ])
+        .unwrap();
     }
 
     #[test]
@@ -1194,11 +1202,11 @@ mod tests {
         let key_path = tempfile_path("roundtrip.key");
         let output_dir = tempfile_path("roundtrip-output");
 
-        pack_package(&root, None, &package_path, &key_path).unwrap();
+        let _ = pack_package(&root, None, &package_path, &key_path).unwrap();
         assert_eq!(fs::read(&key_path).unwrap().len(), 32);
         assert_eq!(read_header(&package_path).unwrap().major, 1);
-        verify_package(&package_path, &key_path, true).unwrap();
-        unpack_package(&package_path, &output_dir, &key_path).unwrap();
+        let _ = verify_package(&package_path, &key_path, true).unwrap();
+        let _ = unpack_package(&package_path, &output_dir, &key_path).unwrap();
         assert_eq!(fs::read(output_dir.join("model/model.pmx")).unwrap(), model);
         assert_eq!(
             fs::read(output_dir.join("texture/diffuse.ktx2")).unwrap(),

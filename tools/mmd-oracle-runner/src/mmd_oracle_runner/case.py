@@ -222,11 +222,11 @@ def _frames(value: Any, issues: list[ValidationIssue]) -> tuple[int, ...]:
     if not isinstance(value, list) or not value:
         issues.append(ValidationIssue("frames", "must be a non-empty array"))
         return ()
-    if any(isinstance(frame, bool) or not isinstance(frame, int) for frame in value):
-        issues.append(ValidationIssue("frames", "each frame must be a non-negative integer"))
-    if any(isinstance(frame, int) and not isinstance(frame, bool) and frame < 0 for frame in value):
-        issues.append(ValidationIssue("frames", "each frame must be non-negative"))
     valid_frames = [frame for frame in value if isinstance(frame, int) and not isinstance(frame, bool)]
+    if len(valid_frames) != len(value):
+        issues.append(ValidationIssue("frames", "each frame must be a non-negative integer"))
+    if any(frame < 0 for frame in valid_frames):
+        issues.append(ValidationIssue("frames", "each frame must be non-negative"))
     if len(set(valid_frames)) != len(valid_frames):
         issues.append(ValidationIssue("frames", "duplicate frame values are not allowed"))
     return tuple(sorted(valid_frames))

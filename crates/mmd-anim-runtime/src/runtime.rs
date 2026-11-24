@@ -138,38 +138,19 @@ pub struct HostPoseView<'a> {
     pub ik_enabled: &'a [u8],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HostPoseError {
+    #[error("bone count mismatch: expected {expected}, got {got}")]
     BoneCountMismatch { expected: usize, got: usize },
+    #[error("morph count mismatch: expected {expected}, got {got}")]
     MorphCountMismatch { expected: usize, got: usize },
+    #[error("ik count mismatch: expected {expected}, got {got}")]
     IkCountMismatch { expected: usize, got: usize },
+    #[error("non-finite value in {field} at index {index}")]
     NonFiniteValue { field: &'static str, index: usize },
+    #[error("non-normalized quaternion at local_rotations[{index}]")]
     NonNormalizedQuaternion { index: usize },
 }
-
-impl std::fmt::Display for HostPoseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HostPoseError::BoneCountMismatch { expected, got } => {
-                write!(f, "bone count mismatch: expected {expected}, got {got}")
-            }
-            HostPoseError::MorphCountMismatch { expected, got } => {
-                write!(f, "morph count mismatch: expected {expected}, got {got}")
-            }
-            HostPoseError::IkCountMismatch { expected, got } => {
-                write!(f, "ik count mismatch: expected {expected}, got {got}")
-            }
-            HostPoseError::NonFiniteValue { field, index } => {
-                write!(f, "non-finite value in {field} at index {index}")
-            }
-            Self::NonNormalizedQuaternion { index } => {
-                write!(f, "non-normalized quaternion at local_rotations[{index}]")
-            }
-        }
-    }
-}
-
-impl std::error::Error for HostPoseError {}
 
 /// Evaluates a model pose, including MMD's retained IK accumulators for links
 /// dependent on IK-sourced append transforms. All evaluation entry points share

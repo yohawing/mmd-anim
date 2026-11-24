@@ -139,112 +139,32 @@ def resolve_config(args: Any) -> GoldenGateConfig:
         None,
     )
 
+    def float_tolerance(key: str) -> float:
+        return _float_value(
+            key, getattr(args, key, None), f"MMD_ANIM_GOLDEN_{key.upper()}", raw_config, 0.0
+        )
+
+    def int_tolerance(key: str) -> int:
+        return _int_value(
+            key, getattr(args, key, None), f"MMD_ANIM_GOLDEN_{key.upper()}", raw_config, 0
+        )
+
     tolerances = Tolerances(
-        max_abs_error_tolerance=_float_value(
-            "max_abs_error_tolerance",
-            getattr(args, "max_abs_error_tolerance", None),
-            "MMD_ANIM_GOLDEN_MAX_ABS_ERROR_TOLERANCE",
-            raw_config,
-            0.0,
-        ),
-        translation_max_error_tolerance=_float_value(
-            "translation_max_error_tolerance",
-            getattr(args, "translation_max_error_tolerance", None),
-            "MMD_ANIM_GOLDEN_TRANSLATION_MAX_ERROR_TOLERANCE",
-            raw_config,
-            0.0,
-        ),
-        translation_rms_error_tolerance=_float_value(
-            "translation_rms_error_tolerance",
-            getattr(args, "translation_rms_error_tolerance", None),
-            "MMD_ANIM_GOLDEN_TRANSLATION_RMS_ERROR_TOLERANCE",
-            raw_config,
-            0.0,
-        ),
-        rotation_max_angle_rad_tolerance=_float_value(
-            "rotation_max_angle_rad_tolerance",
-            getattr(args, "rotation_max_angle_rad_tolerance", None),
-            "MMD_ANIM_GOLDEN_ROTATION_MAX_ANGLE_RAD_TOLERANCE",
-            raw_config,
-            0.0,
-        ),
-        rotation_rms_angle_rad_tolerance=_float_value(
-            "rotation_rms_angle_rad_tolerance",
-            getattr(args, "rotation_rms_angle_rad_tolerance", None),
-            "MMD_ANIM_GOLDEN_ROTATION_RMS_ANGLE_RAD_TOLERANCE",
-            raw_config,
-            0.0,
-        ),
-        penetration_max_depth_tolerance=_float_value(
-            "penetration_max_depth_tolerance",
-            getattr(args, "penetration_max_depth_tolerance", None),
-            "MMD_ANIM_GOLDEN_PENETRATION_MAX_DEPTH_TOLERANCE",
-            raw_config,
-            0.0,
-        ),
-        bullet_penetration_max_depth_tolerance=_float_value(
-            "bullet_penetration_max_depth_tolerance",
-            getattr(args, "bullet_penetration_max_depth_tolerance", None),
-            "MMD_ANIM_GOLDEN_BULLET_PENETRATION_MAX_DEPTH_TOLERANCE",
-            raw_config,
-            0.0,
-        ),
-        penetrating_pair_count_tolerance=_int_value(
-            "penetrating_pair_count_tolerance",
-            getattr(args, "penetrating_pair_count_tolerance", None),
-            "MMD_ANIM_GOLDEN_PENETRATING_PAIR_COUNT_TOLERANCE",
-            raw_config,
-            0,
-        ),
-        severe_pair_count_tolerance=_int_value(
-            "severe_pair_count_tolerance",
-            getattr(args, "severe_pair_count_tolerance", None),
-            "MMD_ANIM_GOLDEN_SEVERE_PAIR_COUNT_TOLERANCE",
-            raw_config,
-            0,
-        ),
-        penetrating_contact_count_tolerance=_int_value(
-            "penetrating_contact_count_tolerance",
-            getattr(args, "penetrating_contact_count_tolerance", None),
-            "MMD_ANIM_GOLDEN_PENETRATING_CONTACT_COUNT_TOLERANCE",
-            raw_config,
-            0,
-        ),
-        rigid_body_position_tolerance=_float_value(
-            "rigid_body_position_tolerance",
-            getattr(args, "rigid_body_position_tolerance", None),
-            "MMD_ANIM_GOLDEN_RIGID_BODY_POSITION_TOLERANCE",
-            raw_config,
-            0.0,
-        ),
-        rigid_body_rotation_tolerance=_float_value(
-            "rigid_body_rotation_tolerance",
-            getattr(args, "rigid_body_rotation_tolerance", None),
-            "MMD_ANIM_GOLDEN_RIGID_BODY_ROTATION_TOLERANCE",
-            raw_config,
-            0.0,
-        ),
-        mismatch_count_tolerance=_int_value(
-            "mismatch_count_tolerance",
-            getattr(args, "mismatch_count_tolerance", None),
-            "MMD_ANIM_GOLDEN_MISMATCH_COUNT_TOLERANCE",
-            raw_config,
-            0,
-        ),
-        missing_tolerance=_int_value(
-            "missing_tolerance",
-            getattr(args, "missing_tolerance", None),
-            "MMD_ANIM_GOLDEN_MISSING_TOLERANCE",
-            raw_config,
-            0,
-        ),
-        import_error_tolerance=_int_value(
-            "import_error_tolerance",
-            getattr(args, "import_error_tolerance", None),
-            "MMD_ANIM_GOLDEN_IMPORT_ERROR_TOLERANCE",
-            raw_config,
-            0,
-        ),
+        max_abs_error_tolerance=float_tolerance("max_abs_error_tolerance"),
+        translation_max_error_tolerance=float_tolerance("translation_max_error_tolerance"),
+        translation_rms_error_tolerance=float_tolerance("translation_rms_error_tolerance"),
+        rotation_max_angle_rad_tolerance=float_tolerance("rotation_max_angle_rad_tolerance"),
+        rotation_rms_angle_rad_tolerance=float_tolerance("rotation_rms_angle_rad_tolerance"),
+        penetration_max_depth_tolerance=float_tolerance("penetration_max_depth_tolerance"),
+        bullet_penetration_max_depth_tolerance=float_tolerance("bullet_penetration_max_depth_tolerance"),
+        penetrating_pair_count_tolerance=int_tolerance("penetrating_pair_count_tolerance"),
+        severe_pair_count_tolerance=int_tolerance("severe_pair_count_tolerance"),
+        penetrating_contact_count_tolerance=int_tolerance("penetrating_contact_count_tolerance"),
+        rigid_body_position_tolerance=float_tolerance("rigid_body_position_tolerance"),
+        rigid_body_rotation_tolerance=float_tolerance("rigid_body_rotation_tolerance"),
+        mismatch_count_tolerance=int_tolerance("mismatch_count_tolerance"),
+        missing_tolerance=int_tolerance("missing_tolerance"),
+        import_error_tolerance=int_tolerance("import_error_tolerance"),
     )
     options = GateOptions(
         allow_count_changes=_bool_value(

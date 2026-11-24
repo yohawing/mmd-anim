@@ -7,16 +7,16 @@ use std::{
 };
 
 use crate::schema::{
-    DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleDump,
-    MmdDumperOracleModel,
+    DEFAULT_FOCUSED_IK_BONE_NAMES, GoldenIkBatchManifest, GoldenIkFixture, MmdDumperOracleBone,
+    MmdDumperOracleDump, MmdDumperOracleModel,
 };
+use crate::support::registered_morph_count;
 use glam::Vec3A;
 use mmd_anim_format::VmdClipBuildOptions;
-use mmd_anim_runtime::{BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance};
+use mmd_anim_runtime::{
+    AnimationClip, BoneIndex, IkSolver, ModelArena, MorphIndex, RuntimeInstance,
+};
 use serde::Serialize;
-
-pub(crate) const GOLDEN_IK_COMPARE_USAGE: &str =
-    "usage: mmd-anim golden-ik-compare <golden-ik-oracle-root> [sample-frame-offset]";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,44 +36,25 @@ pub(crate) struct RuntimeModelImport {
     pub(crate) diagnostics: Vec<GoldenImportDiagnostic>,
 }
 
-pub(crate) fn parse_golden_ik_compare_args(
-    args: &mut impl Iterator<Item = String>,
-) -> Result<(String, f32, bool), String> {
-    let raw: Vec<String> = args.collect();
-    let mut use_json = false;
-    let mut positional = Vec::new();
-
-    for token in &raw {
-        if token == "--json" {
-            use_json = true;
-        } else if token.starts_with("--") {
-            return Err(format!("unknown flag: {token}"));
-        } else {
-            positional.push(token.clone());
-        }
+impl RuntimeModelImport {
+    /// Builds a VMD clip in MMD registration order with property IK ignored, matching how
+    /// golden oracles were recorded.
+    pub(crate) fn build_registered_vmd_clip(
+        &self,
+        vmd: &mmd_anim_format::VmdImportResult,
+    ) -> Result<AnimationClip, mmd_anim_format::VmdClipBuildError> {
+        mmd_anim_format::build_mmd_registered_pair_clip_with_options(
+            &self.model,
+            vmd,
+            &self.bone_name_to_index,
+            &self.morph_name_to_index,
+            &self.ik_solver_bone_name_to_index,
+            self.model.ik_count(),
+            VmdClipBuildOptions {
+                honor_property_ik: false,
+            },
+        )
     }
-
-    let mut pos_iter = positional.into_iter();
-    let root = match pos_iter.next() {
-        Some(value) => value,
-        None => {
-            return Err(GOLDEN_IK_COMPARE_USAGE.to_owned());
-        }
-    };
-    let offset = match pos_iter.next() {
-        Some(value) => match value.parse::<f32>() {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                return Err(format!("invalid sample-frame-offset: {value}"));
-            }
-        },
-        None => 0.0,
-    };
-    if let Some(extra) = pos_iter.next() {
-        return Err(format!("unexpected extra argument: {extra}"));
-    }
-
-    Ok((root, offset, use_json))
 }
 
 pub(crate) fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -152,7 +133,8 @@ pub(crate) fn golden_ik_summary(root: &Path) -> Result<ExitCode, Box<dyn std::er
     Ok(ExitCode::SUCCESS)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct GoldenParserSummaryMetrics {
     pub(crate) cases: usize,
     pub(crate) skipped_unsupported: usize,
@@ -169,12 +151,8 @@ pub(crate) struct GoldenParserSummaryJsonReport {
     command: &'static str,
     mode: &'static str,
     root: String,
-    cases: usize,
-    skipped_unsupported: usize,
-    matched_bones: usize,
-    missing_bones: usize,
-    matched_morphs: usize,
-    missing_morphs: usize,
+    #[serde(flatten)]
+    metrics: GoldenParserSummaryMetrics,
 }
 
 pub(crate) fn golden_parser_summary_json_report(
@@ -186,12 +164,7 @@ pub(crate) fn golden_parser_summary_json_report(
         command: "verify",
         mode: "parser",
         root: root.to_string_lossy().into_owned(),
-        cases: metrics.cases,
-        skipped_unsupported: metrics.skipped_unsupported,
-        matched_bones: metrics.matched_bones,
-        missing_bones: metrics.missing_bones,
-        matched_morphs: metrics.matched_morphs,
-        missing_morphs: metrics.missing_morphs,
+        metrics,
     }
 }
 
@@ -862,6 +835,21 @@ pub(crate) fn import_golden_runtime_model(
     }
 }
 
+/// Pairs each focused IK oracle bone with the runtime world matrix at the same index,
+/// skipping bones whose index is negative or outside the runtime skeleton.
+fn focused_ik_bone_matrices<'a>(
+    oracle_model: &'a MmdDumperOracleModel,
+    world_matrices: &'a [glam::Mat4],
+) -> impl Iterator<Item = (usize, [f32; 16], &'a MmdDumperOracleBone)> + 'a {
+    oracle_model
+        .focused_ik_bones(DEFAULT_FOCUSED_IK_BONE_NAMES)
+        .filter_map(|oracle_bone| {
+            let index = usize::try_from(oracle_bone.index).ok()?;
+            let runtime_matrix = world_matrices.get(index)?.to_cols_array();
+            Some((index, runtime_matrix, oracle_bone))
+        })
+}
+
 pub(crate) fn golden_ik_compare(
     root: &Path,
     sample_frame_offset: f32,
@@ -870,9 +858,7 @@ pub(crate) fn golden_ik_compare(
     let manifest_path = root.join("oracle-batch.json");
     let manifest = GoldenIkBatchManifest::from_json_str(&fs::read_to_string(&manifest_path)?)?;
 
-    let mut cases = 0usize;
-    let mut compared_cases = 0usize;
-    let mut skipped_unsupported = 0usize;
+    let cases = manifest.cases.len();
     let mut skipped_unsupported_cases: Vec<UnsupportedGoldenCaseSummaryEntry> = Vec::new();
     let mut per_case_entries: Vec<GoldenIkCompareCaseEntry> = Vec::new();
     let mut missing = 0usize;
@@ -886,10 +872,6 @@ pub(crate) fn golden_ik_compare(
     let mut worst_case_name = String::new();
     let mut worst_frame: i32 = 0;
 
-    let mut per_case_errors: Vec<(String, f32, String)> = Vec::new();
-    let mut per_case_diagnostics: Vec<Vec<GoldenRootMotionDiagnostic>> = Vec::new();
-    let mut all_lag_matches: Vec<GoldenRootMotionOracleLagMatch> = Vec::new();
-
     // Solver-focused tracking (excludes root/control-dominated frames)
     let mut solver_compared_bones: usize = 0;
     let mut solver_skipped_bones: usize = 0;
@@ -901,13 +883,10 @@ pub(crate) fn golden_ik_compare(
     let mut solver_worst_residuals: Vec<GoldenIkSolverResidual> = Vec::new();
 
     for case in &manifest.cases {
-        cases += 1;
-
         let case_root = root.join(&case.name);
         let pmx_path = case_root.join(&case.pmx);
 
         if !is_supported_golden_model(&pmx_path) {
-            skipped_unsupported += 1;
             let (summary, per_case) = make_unsupported_case_entry(&pmx_path, &case.name);
             skipped_unsupported_cases.push(summary);
             per_case_entries.push(GoldenIkCompareCaseEntry::Unsupported(per_case));
@@ -968,26 +947,12 @@ pub(crate) fn golden_ik_compare(
         };
 
         let solver_count = model_import.model.ik_count();
-        let clip = mmd_anim_format::build_mmd_registered_pair_clip_with_options(
-            &model_import.model,
-            &vmd,
-            &model_import.bone_name_to_index,
-            &model_import.morph_name_to_index,
-            &model_import.ik_solver_bone_name_to_index,
-            solver_count,
-            VmdClipBuildOptions {
-                honor_property_ik: false,
-            },
-        )
-        .map_err(|error| format!("MMD-registered VMD clip build failed: {error}"))?;
+        let clip = model_import
+            .build_registered_vmd_clip(&vmd)
+            .map_err(|error| format!("MMD-registered VMD clip build failed: {error}"))?;
 
         let model = Arc::new(model_import.model);
-        let morph_count = model_import
-            .morph_name_to_index
-            .values()
-            .map(|index| index.as_usize() + 1)
-            .max()
-            .unwrap_or(0);
+        let morph_count = registered_morph_count(&model_import.morph_name_to_index);
         let mut runtime =
             RuntimeInstance::new_with_counts(Arc::clone(&model), morph_count, solver_count);
 
@@ -1009,23 +974,12 @@ pub(crate) fn golden_ik_compare(
             // Pass 1: compute frame max abs error for domination check
             let mut frame_max_error: f32 = 0.0;
 
-            for oracle_bone in model0.focused_ik_bones(DEFAULT_FOCUSED_IK_BONE_NAMES) {
-                if oracle_bone.index < 0 {
-                    continue;
-                }
-                let index = oracle_bone.index as usize;
-                if index >= world_matrices.len() {
-                    continue;
-                }
-
-                let runtime_matrix = world_matrices[index].to_cols_array();
-                let oracle_matrix = oracle_bone.world_matrix;
-
-                for i in 0..16 {
-                    let abs_error = (runtime_matrix[i] - oracle_matrix[i]).abs();
-                    if abs_error > frame_max_error {
-                        frame_max_error = abs_error;
-                    }
+            for (_, runtime_matrix, oracle_bone) in focused_ik_bone_matrices(model0, world_matrices)
+            {
+                for (runtime_value, oracle_value) in
+                    runtime_matrix.iter().zip(oracle_bone.world_matrix)
+                {
+                    frame_max_error = frame_max_error.max((runtime_value - oracle_value).abs());
                 }
             }
 
@@ -1039,18 +993,10 @@ pub(crate) fn golden_ik_compare(
             }
 
             // Pass 2: full comparison with existing + solver-focused tracking
-            for oracle_bone in model0.focused_ik_bones(DEFAULT_FOCUSED_IK_BONE_NAMES) {
-                if oracle_bone.index < 0 {
-                    continue;
-                }
-                let index = oracle_bone.index as usize;
-                if index >= world_matrices.len() {
-                    continue;
-                }
-
-                let runtime_matrix = world_matrices[index].to_cols_array();
+            for (index, runtime_matrix, oracle_bone) in
+                focused_ik_bone_matrices(model0, world_matrices)
+            {
                 let oracle_matrix = oracle_bone.world_matrix;
-
                 for i in 0..16 {
                     let abs_error = (runtime_matrix[i] - oracle_matrix[i]).abs();
                     if abs_error > case_max_error {
@@ -1096,11 +1042,7 @@ pub(crate) fn golden_ik_compare(
             compared_frames += 1;
         }
 
-        per_case_errors.push((case.name.clone(), case_max_error, case_worst.clone()));
-        per_case_diagnostics.push(case_diagnostics.clone());
-
         let case_lag = compute_root_motion_oracle_lag(&case.name, &case_diagnostics);
-        all_lag_matches.extend(case_lag.matches.iter().cloned());
 
         per_case_entries.push(GoldenIkCompareCaseEntry::Compared(
             GoldenIkComparePerCaseEntry {
@@ -1113,23 +1055,29 @@ pub(crate) fn golden_ik_compare(
                 root_motion_oracle_lag: case_lag,
             },
         ));
-        compared_cases += 1;
     }
 
     // --- Summary classification: worst diagnostic tracking ---
-    let diagnostics_total: usize = per_case_diagnostics.iter().map(|d| d.len()).sum();
+    let compared_entries = per_case_entries.iter().filter_map(|entry| match entry {
+        GoldenIkCompareCaseEntry::Compared(case) => Some(case),
+        GoldenIkCompareCaseEntry::Unsupported(_) => None,
+    });
+    let compared_cases = compared_entries.clone().count();
+    let skipped_unsupported = skipped_unsupported_cases.len();
+    let diagnostics_total: usize = compared_entries
+        .clone()
+        .map(|case| case.diagnostics.len())
+        .sum();
 
     // Find the diagnostic entry at the same case+frame as the worst matrix error,
     // picking the one with the largest maxAbsError if multiple match.
     let worst_diagnostic = {
-        let mut result: Option<GoldenRootMotionDiagnostic> = None;
-        for ((name, _error, _worst_bone), case_diags) in
-            per_case_errors.iter().zip(per_case_diagnostics.iter())
-        {
-            if *name != worst_case_name {
+        let mut result: Option<&GoldenRootMotionDiagnostic> = None;
+        for case in compared_entries.clone() {
+            if case.name != worst_case_name {
                 continue;
             }
-            for diag in case_diags {
+            for diag in &case.diagnostics {
                 if diag.frame != worst_frame {
                     continue;
                 }
@@ -1138,12 +1086,12 @@ pub(crate) fn golden_ik_compare(
                     Some(best) => diag.max_abs_error > best.max_abs_error,
                 };
                 if larger {
-                    result = Some(diag.clone());
+                    result = Some(diag);
                 }
             }
             break;
         }
-        result
+        result.cloned()
     };
 
     let worst_likely_root_control_dominated = worst_diagnostic
@@ -1151,9 +1099,11 @@ pub(crate) fn golden_ik_compare(
         .map(|d| f64::from(d.max_abs_error))
         .map(|err| err >= max_abs_error as f64 * 0.5)
         .unwrap_or(false);
-    let summary_lag_total = all_lag_matches.len();
-    let summary_lag_worst = all_lag_matches
-        .iter()
+    let lag_matches = compared_entries
+        .clone()
+        .flat_map(|case| &case.root_motion_oracle_lag.matches);
+    let summary_lag_total = lag_matches.clone().count();
+    let summary_lag_worst = lag_matches
         .max_by(|a, b| {
             a.max_abs_error
                 .partial_cmp(&b.max_abs_error)
@@ -1241,10 +1191,10 @@ pub(crate) fn golden_ik_compare(
             worst_component, translation_error, worst_case_max_error
         );
 
-        for (case_name, error, worst_bone) in &per_case_errors {
+        for case in compared_entries {
             println!(
                 "  case {}: maxAbsError={:.6} worst={}",
-                case_name, error, worst_bone
+                case.name, case.max_abs_error, case.worst
             );
         }
     }
@@ -1319,25 +1269,11 @@ pub(crate) fn golden_ik_diagnose(
         mmd_anim_format::import_vmd_motion(&vmd_bytes).map_err(|e| format!("import error: {e}"))?;
 
     let solver_count = model_import.model.ik_count();
-    let clip = mmd_anim_format::build_mmd_registered_pair_clip_with_options(
-        &model_import.model,
-        &vmd,
-        &model_import.bone_name_to_index,
-        &model_import.morph_name_to_index,
-        &model_import.ik_solver_bone_name_to_index,
-        solver_count,
-        VmdClipBuildOptions {
-            honor_property_ik: false,
-        },
-    )
-    .map_err(|error| format!("MMD-registered VMD clip build failed: {error}"))?;
+    let clip = model_import
+        .build_registered_vmd_clip(&vmd)
+        .map_err(|error| format!("MMD-registered VMD clip build failed: {error}"))?;
 
-    let morph_count = model_import
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
+    let morph_count = registered_morph_count(&model_import.morph_name_to_index);
     let model = Arc::new(model_import.model);
     let mut pre_ik_runtime =
         RuntimeInstance::new_with_counts(Arc::clone(&model), morph_count, solver_count);
@@ -1510,90 +1446,29 @@ pub(crate) fn golden_ik_diagnose(
     // distance between ikBone and targetBone world translations.
     if !ik_roles.is_empty() {
         println!("  IK residuals:");
-        for (solver_idx, solver) in ik_solvers.iter().enumerate() {
-            let ik_idx = solver.ik_bone.0 as usize;
-            let tb_idx = solver.target_bone.0 as usize;
-
-            let is_involved = ik_idx == oracle_index
-                || tb_idx == oracle_index
-                || solver
-                    .links
-                    .iter()
-                    .any(|link| link.bone.0 as usize == oracle_index);
-
-            if !is_involved {
-                continue;
-            }
-
-            if ik_idx >= world_matrices.len() || tb_idx >= world_matrices.len() {
-                continue;
-            }
-
-            // Runtime world translations
-            let rt_ik = Vec3A::new(
-                world_matrices[ik_idx].w_axis.x,
-                world_matrices[ik_idx].w_axis.y,
-                world_matrices[ik_idx].w_axis.z,
-            );
-            let rt_tb = Vec3A::new(
-                world_matrices[tb_idx].w_axis.x,
-                world_matrices[tb_idx].w_axis.y,
-                world_matrices[tb_idx].w_axis.z,
-            );
-            let runtime_distance = (rt_ik - rt_tb).length();
-
-            // Oracle world translations (if both bones exist in the oracle model)
-            let oracle_distance = {
-                let or_ik = model0
-                    .bones
-                    .iter()
-                    .find(|b| b.index == solver.ik_bone.0 as i32);
-                let or_tb = model0
-                    .bones
-                    .iter()
-                    .find(|b| b.index == solver.target_bone.0 as i32);
-                match (or_ik, or_tb) {
-                    (Some(ik), Some(tb)) => {
-                        let oi = Vec3A::new(
-                            ik.world_matrix[12],
-                            ik.world_matrix[13],
-                            ik.world_matrix[14],
-                        );
-                        let ot = Vec3A::new(
-                            tb.world_matrix[12],
-                            tb.world_matrix[13],
-                            tb.world_matrix[14],
-                        );
-                        Some((oi - ot).length())
-                    }
-                    _ => None,
-                }
+        for residual in compute_ik_solver_residuals(
+            ik_solvers,
+            &model_import.bone_names,
+            ik_enabled,
+            world_matrices,
+            model0,
+            Some(oracle_index),
+        ) {
+            let (oracle_display, delta_display) = match residual.oracle_residual {
+                Some(oracle) => (
+                    format!("{oracle:.6}"),
+                    format!("{:.6}", residual.runtime_residual - oracle),
+                ),
+                None => ("N/A".to_owned(), "N/A".to_owned()),
             };
-
-            let (oracle_display, delta_display) = match oracle_distance {
-                Some(od) => (format!("{od:.6}"), format!("{:.6}", runtime_distance - od)),
-                None => ("N/A".to_string(), "N/A".to_string()),
-            };
-
-            let ik_name = if solver.ik_bone.as_usize() < model_import.bone_names.len() {
-                &model_import.bone_names[solver.ik_bone.as_usize()]
-            } else {
-                "?"
-            };
-            let tb_name = if solver.target_bone.as_usize() < model_import.bone_names.len() {
-                &model_import.bone_names[solver.target_bone.as_usize()]
-            } else {
-                "?"
-            };
-
             println!(
                 "    solver[{}]: ikBone={}({}) targetBone={}({}) runtimeDistance={:.6} oracleDistance={} delta={}",
-                solver_idx,
-                ik_name,
-                solver.ik_bone.0,
-                tb_name,
-                solver.target_bone.0,
-                runtime_distance,
+                residual.solver_index,
+                residual.ik_bone,
+                residual.ik_bone_index,
+                residual.target_bone,
+                residual.target_bone_index,
+                residual.runtime_residual,
                 oracle_display,
                 delta_display,
             );

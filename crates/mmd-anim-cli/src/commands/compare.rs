@@ -9,6 +9,8 @@ use std::{
 use crate::schema::{
     DEFAULT_FOCUSED_IK_BONE_NAMES, MmdDumperOracleBone, MmdDumperOracleDump, MmdDumperOracleModel,
 };
+use crate::support::registered_morph_count;
+use crate::support::resolve_maybe_absolute as resolve_manifest_path;
 use mmd_anim_format::vmd::VmdBoneKeyframeRaw;
 #[cfg(feature = "physics-bullet-native")]
 use mmd_anim_physics_bullet::{RuntimePhysicsBridgeExt, build_bullet_world_from_pmx};
@@ -191,9 +193,12 @@ impl NumericCompareReport {
     }
 
     fn skipped_targets_sorted(&self) -> Vec<String> {
-        let mut targets: HashSet<String> = self.motion_stats.skipped_targets.clone();
-        targets.extend(self.camera_stats.skipped_targets.iter().cloned());
-        let mut targets: Vec<_> = targets.into_iter().collect();
+        let mut targets: Vec<_> = self
+            .motion_stats
+            .skipped_targets
+            .union(&self.camera_stats.skipped_targets)
+            .cloned()
+            .collect();
         targets.sort();
         targets
     }
@@ -344,10 +349,7 @@ pub(crate) fn build_numeric_compare_report(
     let mut per_case = Vec::new();
 
     for case in cases {
-        let name = case
-            .get("name")
-            .and_then(|value| value.as_str())
-            .ok_or("numeric compare case is missing name")?;
+        let name = numeric_case_name(case)?;
         let kind = case
             .get("kind")
             .and_then(|value| value.as_str())
@@ -436,14 +438,8 @@ fn compare_camera_numeric_case(
     stats: &mut CameraNumericCompareStats,
     emit_diagnostics: bool,
 ) -> Result<NumericCompareCaseReport, Box<dyn std::error::Error>> {
-    let name = case
-        .get("name")
-        .and_then(|value| value.as_str())
-        .ok_or("numeric compare case is missing name")?;
-    let epsilon = case
-        .pointer("/compare/epsilon")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(default_epsilon);
+    let name = numeric_case_name(case)?;
+    let epsilon = numeric_case_epsilon(case, default_epsilon);
     let mut case_stats = CameraNumericCompareStats::default();
     let oracle_path = resolve_camera_oracle_path(case, manifest_dir, case_dir)?;
     let oracle_bytes = fs::read(&oracle_path).map_err(|error| {
@@ -455,16 +451,7 @@ fn compare_camera_numeric_case(
         )
     })?;
     let oracle: serde_json::Value = serde_json::from_slice(&oracle_bytes)?;
-    let camera_vmd = resolve_camera_vmd_path(case, manifest_dir, case_dir)?;
-    let camera_vmd_bytes = fs::read(&camera_vmd).map_err(|error| {
-        format!(
-            "failed to read camera VMD for case {} at {}: {}",
-            name,
-            camera_vmd.display(),
-            error
-        )
-    })?;
-    let parsed = mmd_anim_format::parse_vmd_animation(&camera_vmd_bytes)?;
+    let (camera_vmd, parsed) = read_camera_vmd_animation(case, manifest_dir, case_dir, name)?;
     let frames = oracle
         .get("frames")
         .and_then(|value| value.as_array())
@@ -543,16 +530,19 @@ fn compare_camera_current_dump_case(
     stats: &mut CameraNumericCompareStats,
     emit_diagnostics: bool,
 ) -> Result<NumericCompareCaseReport, Box<dyn std::error::Error>> {
-    let name = case
-        .get("name")
-        .and_then(|value| value.as_str())
-        .ok_or("numeric compare case is missing name")?;
-    let epsilon = case
-        .pointer("/compare/epsilon")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(default_epsilon);
+    let name = numeric_case_name(case)?;
+    let epsilon = numeric_case_epsilon(case, default_epsilon);
     let mut case_stats = CameraNumericCompareStats::default();
-    collect_unsupported_camera_targets(case, &mut case_stats.skipped_targets);
+    collect_unsupported_targets(
+        case,
+        &mut case_stats.skipped_targets,
+        &[
+            "camera.current",
+            "camera.current.distance",
+            "camera.current.position",
+            "camera.current.rotation",
+        ],
+    );
     let oracle_path = resolve_camera_oracle_path(case, manifest_dir, case_dir)?;
     let oracle_text = fs::read_to_string(&oracle_path).map_err(|error| {
         format!(
@@ -562,16 +552,7 @@ fn compare_camera_current_dump_case(
             error
         )
     })?;
-    let camera_vmd = resolve_camera_vmd_path(case, manifest_dir, case_dir)?;
-    let camera_vmd_bytes = fs::read(&camera_vmd).map_err(|error| {
-        format!(
-            "failed to read camera VMD for case {} at {}: {}",
-            name,
-            camera_vmd.display(),
-            error
-        )
-    })?;
-    let parsed = mmd_anim_format::parse_vmd_animation(&camera_vmd_bytes)?;
+    let (camera_vmd, parsed) = read_camera_vmd_animation(case, manifest_dir, case_dir, name)?;
 
     case_stats.compared_cases += 1;
     for (line_index, line) in oracle_text.lines().enumerate() {
@@ -814,21 +795,23 @@ impl MotionNumericCompareStats {
         }
         if other.max_abs_error > self.max_abs_error {
             self.max_abs_error = other.max_abs_error;
-            self.worst = other.worst.clone();
+            self.worst.clone_from(&other.worst);
             self.worst_frame = other.worst_frame;
-            self.worst_bone = other.worst_bone.clone();
+            self.worst_bone.clone_from(&other.worst_bone);
             self.worst_component = other.worst_component;
         }
         if other.translation_max_error > self.translation_max_error {
             self.translation_max_error = other.translation_max_error;
             self.worst_translation_frame = other.worst_translation_frame;
-            self.worst_translation_bone = other.worst_translation_bone.clone();
+            self.worst_translation_bone
+                .clone_from(&other.worst_translation_bone);
             self.worst_translation_axis = other.worst_translation_axis;
         }
         if other.rotation_max_angle_rad > self.rotation_max_angle_rad {
             self.rotation_max_angle_rad = other.rotation_max_angle_rad;
             self.worst_rotation_frame = other.worst_rotation_frame;
-            self.worst_rotation_bone = other.worst_rotation_bone.clone();
+            self.worst_rotation_bone
+                .clone_from(&other.worst_rotation_bone);
         }
     }
 }
@@ -845,20 +828,61 @@ fn compare_motion_numeric_case(
         worst: String::from("none"),
         ..MotionNumericCompareStats::default()
     };
-    let name = case
-        .get("name")
-        .and_then(|value| value.as_str())
-        .ok_or("numeric compare case is missing name")?;
-    let epsilon = case
-        .pointer("/compare/epsilon")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(defaults.epsilon) as f32;
+    let name = numeric_case_name(case)?;
+    let epsilon = numeric_case_epsilon(case, defaults.epsilon) as f32;
+    let mut missing_paths = Vec::<String>::new();
+    let (status, error) = evaluate_motion_numeric_case(
+        MotionNumericCaseInput {
+            case,
+            manifest_dir,
+            defaults,
+            name,
+            epsilon,
+            emit_diagnostics,
+        },
+        &mut case_stats,
+        &mut missing_paths,
+    )?;
+    stats.merge(&case_stats);
+    Ok(motion_case_report(
+        name,
+        case,
+        status,
+        epsilon,
+        &case_stats,
+        missing_paths,
+        error,
+    ))
+}
+
+struct MotionNumericCaseInput<'a> {
+    case: &'a serde_json::Value,
+    manifest_dir: &'a Path,
+    defaults: MotionNumericCompareDefaults<'a>,
+    name: &'a str,
+    epsilon: f32,
+    emit_diagnostics: bool,
+}
+
+/// Compares one motion-numeric case and returns its report status and optional error.
+fn evaluate_motion_numeric_case(
+    input: MotionNumericCaseInput<'_>,
+    case_stats: &mut MotionNumericCompareStats,
+    missing_paths: &mut Vec<String>,
+) -> Result<(&'static str, Option<String>), Box<dyn std::error::Error>> {
+    let MotionNumericCaseInput {
+        case,
+        manifest_dir,
+        defaults,
+        name,
+        epsilon,
+        emit_diagnostics,
+    } = input;
     let eval_frame_offset = json_f32(case, "/compare/evalFrameOffset")
         .or_else(|| json_f32(case, "/metadata/evalFrameOffset"))
         .unwrap_or(defaults.eval_frame_offset);
-    collect_unsupported_targets(case, &mut case_stats.skipped_targets);
+    collect_unsupported_targets(case, &mut case_stats.skipped_targets, &["bones"]);
 
-    let mut missing_paths = Vec::<String>::new();
     let model_path = match case
         .pointer("/assets/model")
         .and_then(|value| value.as_str())
@@ -871,16 +895,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("missing: {name} assets.model");
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "missing",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                None,
-            ));
+            return Ok(("missing", None));
         }
     };
     let motion_source = match NumericMotionSource::from_case(case) {
@@ -890,16 +905,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("import-error: {name}: {error}");
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "import-error",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                Some(error),
-            ));
+            return Ok(("import-error", Some(error)));
         }
     };
     let motion_asset_pointer = motion_source.asset_pointer();
@@ -915,16 +921,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("missing: {name} {motion_asset_pointer}");
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "missing",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                None,
-            ));
+            return Ok(("missing", None));
         }
     };
     let oracle_path = match case
@@ -939,16 +936,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("missing: {name} oracle.path");
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "missing",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                None,
-            ));
+            return Ok(("missing", None));
         }
     };
 
@@ -958,16 +946,7 @@ fn compare_motion_numeric_case(
         if emit_diagnostics {
             eprintln!("skipped unsupported model: {}", model_path.display());
         }
-        stats.merge(&case_stats);
-        return Ok(motion_case_report(
-            name,
-            case,
-            "skipped-unsupported",
-            epsilon,
-            &case_stats,
-            missing_paths,
-            Some(error),
-        ));
+        return Ok(("skipped-unsupported", Some(error)));
     }
     if !model_path.exists() || !motion_path.exists() || !oracle_path.exists() {
         case_stats.missing += 1;
@@ -989,16 +968,7 @@ fn compare_motion_numeric_case(
                 eprintln!("missing: {}", oracle_path.display());
             }
         }
-        stats.merge(&case_stats);
-        return Ok(motion_case_report(
-            name,
-            case,
-            "missing",
-            epsilon,
-            &case_stats,
-            missing_paths,
-            None,
-        ));
+        return Ok(("missing", None));
     }
 
     let frames = numeric_case_frames(case)?;
@@ -1015,32 +985,17 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("import-error: {}", error);
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "import-error",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                Some(error),
-            ));
+            return Ok(("import-error", Some(error)));
         }
     };
     let solver_count = model_import.model.ik_count();
-    let morph_count = model_import
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
+    let morph_count = registered_morph_count(&model_import.morph_name_to_index);
     let clip = match build_numeric_motion_clip(
         case,
         motion_source,
         &motion_path,
         &model_import,
         morph_count,
-        solver_count,
     ) {
         Ok(clip) => clip,
         Err(error) => {
@@ -1049,16 +1004,7 @@ fn compare_motion_numeric_case(
             if emit_diagnostics {
                 eprintln!("import-error: {}", error);
             }
-            stats.merge(&case_stats);
-            return Ok(motion_case_report(
-                name,
-                case,
-                "import-error",
-                epsilon,
-                &case_stats,
-                missing_paths,
-                Some(error),
-            ));
+            return Ok(("import-error", Some(error)));
         }
     };
 
@@ -1102,7 +1048,7 @@ fn compare_motion_numeric_case(
             }
             let runtime_matrix = world_matrices[index].to_cols_array();
             record_motion_matrix_diagnostics(
-                &mut case_stats,
+                case_stats,
                 oracle_frame.frame,
                 &oracle_bone.name,
                 &runtime_matrix,
@@ -1152,16 +1098,7 @@ fn compare_motion_numeric_case(
     } else {
         ("mismatch", None)
     };
-    stats.merge(&case_stats);
-    Ok(motion_case_report(
-        name,
-        case,
-        status,
-        epsilon,
-        &case_stats,
-        missing_paths,
-        error,
-    ))
+    Ok((status, error))
 }
 
 fn build_numeric_motion_clip(
@@ -1170,25 +1107,15 @@ fn build_numeric_motion_clip(
     motion_path: &Path,
     model_import: &golden::RuntimeModelImport,
     morph_count: usize,
-    solver_count: usize,
 ) -> Result<AnimationClip, String> {
     match motion_source {
         NumericMotionSource::Vmd => {
             let bytes = fs::read(motion_path).map_err(|error| error.to_string())?;
             let vmd =
                 mmd_anim_format::import_vmd_motion(&bytes).map_err(|error| error.to_string())?;
-            mmd_anim_format::build_mmd_registered_pair_clip_with_options(
-                &model_import.model,
-                &vmd,
-                &model_import.bone_name_to_index,
-                &model_import.morph_name_to_index,
-                &model_import.ik_solver_bone_name_to_index,
-                solver_count,
-                mmd_anim_format::VmdClipBuildOptions {
-                    honor_property_ik: false,
-                },
-            )
-            .map_err(|error| error.to_string())
+            model_import
+                .build_registered_vmd_clip(&vmd)
+                .map_err(|error| error.to_string())
         }
         NumericMotionSource::PmmDocument => {
             let bytes = fs::read(motion_path).map_err(|error| error.to_string())?;
@@ -1639,30 +1566,30 @@ fn build_physics_coarse_evaluator(
     Ok(None)
 }
 
-pub(crate) fn diagnose_numeric_bones(
-    manifest_path: &Path,
+fn find_numeric_diagnostic_case<'a>(
+    manifest: &'a serde_json::Value,
     case_name: &str,
-    oracle_frame_number: f32,
-    eval_frame: f32,
-    bone_names: &[String],
-) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
+) -> Result<&'a serde_json::Value, Box<dyn std::error::Error>> {
     let cases = manifest
         .get("cases")
         .and_then(|value| value.as_array())
         .ok_or("numeric manifest is missing cases")?;
-    let case = cases
+    cases
         .iter()
         .find(|case| case.get("name").and_then(|value| value.as_str()) == Some(case_name))
-        .ok_or_else(|| format!("numeric manifest has no case named {case_name}"))?;
+        .ok_or_else(|| format!("numeric manifest has no case named {case_name}").into())
+}
 
+fn numeric_diagnostic_motion_paths(
+    case: &serde_json::Value,
+    manifest_dir: &Path,
+) -> Result<(PathBuf, NumericMotionSource, PathBuf), Box<dyn std::error::Error>> {
     let model_path = case
         .pointer("/assets/model")
         .and_then(|value| value.as_str())
         .map(|value| resolve_manifest_path(manifest_dir, value))
         .ok_or("case is missing assets.model")?;
-    let motion_source = NumericMotionSource::from_case(case).map_err(|error| error.to_owned())?;
+    let motion_source = NumericMotionSource::from_case(case)?;
     let motion_path = resolve_numeric_motion_source_path(case, manifest_dir, motion_source)
         .ok_or_else(|| {
             format!(
@@ -1673,6 +1600,51 @@ pub(crate) fn diagnose_numeric_bones(
                     .replace('/', ".")
             )
         })?;
+    Ok((model_path, motion_source, motion_path))
+}
+
+/// Runtime model and clip shared by the numeric diagnosis commands.
+struct NumericDiagnosticModel {
+    model_import: golden::RuntimeModelImport,
+    clip: AnimationClip,
+    morph_count: usize,
+    solver_count: usize,
+}
+
+fn load_numeric_diagnostic_model(
+    case: &serde_json::Value,
+    model_path: &Path,
+    model_bytes: &[u8],
+    motion_source: NumericMotionSource,
+    motion_path: &Path,
+) -> Result<NumericDiagnosticModel, Box<dyn std::error::Error>> {
+    let model_import = golden::import_golden_runtime_model(model_path, model_bytes)?;
+    let solver_count = model_import.model.ik_count();
+    let morph_count = registered_morph_count(&model_import.morph_name_to_index);
+    let clip =
+        build_numeric_motion_clip(case, motion_source, motion_path, &model_import, morph_count)
+            .map_err(|error| format!("{}: {}", motion_path.display(), error))?;
+    Ok(NumericDiagnosticModel {
+        model_import,
+        clip,
+        morph_count,
+        solver_count,
+    })
+}
+
+pub(crate) fn diagnose_numeric_bones(
+    manifest_path: &Path,
+    case_name: &str,
+    oracle_frame_number: f32,
+    eval_frame: f32,
+    bone_names: &[String],
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
+    let case = find_numeric_diagnostic_case(&manifest, case_name)?;
+
+    let (model_path, motion_source, motion_path) =
+        numeric_diagnostic_motion_paths(case, manifest_dir)?;
     let oracle_path = case
         .pointer("/oracle/path")
         .and_then(|value| value.as_str())
@@ -1690,24 +1662,18 @@ pub(crate) fn diagnose_numeric_bones(
         .ok_or_else(|| format!("oracle frame {target_frame} has no model"))?;
 
     let model_bytes = fs::read(&model_path)?;
-    let model_import = golden::import_golden_runtime_model(&model_path, &model_bytes)?;
-    let solver_count = model_import.model.ik_count();
-
-    let morph_count = model_import
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
-    let clip = build_numeric_motion_clip(
-        case,
-        motion_source,
-        &motion_path,
-        &model_import,
+    let NumericDiagnosticModel {
+        model_import,
+        clip,
         morph_count,
         solver_count,
-    )
-    .map_err(|error| format!("{}: {}", motion_path.display(), error))?;
+    } = load_numeric_diagnostic_model(
+        case,
+        &model_path,
+        &model_bytes,
+        motion_source,
+        &motion_path,
+    )?;
     let vmd = match motion_source {
         NumericMotionSource::Vmd => Some(mmd_anim_format::import_vmd_motion(&fs::read(
             &motion_path,
@@ -2018,53 +1984,27 @@ pub(crate) fn diagnose_numeric_physics_penetration(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
-    let cases = manifest
-        .get("cases")
-        .and_then(|value| value.as_array())
-        .ok_or("numeric manifest is missing cases")?;
-    let case = cases
-        .iter()
-        .find(|case| case.get("name").and_then(|value| value.as_str()) == Some(case_name))
-        .ok_or_else(|| format!("numeric manifest has no case named {case_name}"))?;
+    let case = find_numeric_diagnostic_case(&manifest, case_name)?;
     if case.get("kind").and_then(|value| value.as_str()) != Some("physics-coarse") {
         return Err("physics penetration diagnosis requires a physics-coarse case".into());
     }
 
-    let model_path = case
-        .pointer("/assets/model")
-        .and_then(|value| value.as_str())
-        .map(|value| resolve_manifest_path(manifest_dir, value))
-        .ok_or("case is missing assets.model")?;
-    let motion_source = NumericMotionSource::from_case(case).map_err(|error| error.to_owned())?;
-    let motion_path = resolve_numeric_motion_source_path(case, manifest_dir, motion_source)
-        .ok_or_else(|| {
-            format!(
-                "case is missing {}",
-                motion_source
-                    .asset_pointer()
-                    .trim_start_matches('/')
-                    .replace('/', ".")
-            )
-        })?;
+    let (model_path, motion_source, motion_path) =
+        numeric_diagnostic_motion_paths(case, manifest_dir)?;
     let model_bytes = fs::read(&model_path)?;
     let parsed_pmx = mmd_anim_format::parse_pmx_model(&model_bytes)?;
-    let model_import = golden::import_golden_runtime_model(&model_path, &model_bytes)?;
-    let solver_count = model_import.model.ik_count();
-    let morph_count = model_import
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
-    let clip = build_numeric_motion_clip(
-        case,
-        motion_source,
-        &motion_path,
-        &model_import,
+    let NumericDiagnosticModel {
+        model_import,
+        clip,
         morph_count,
         solver_count,
-    )
-    .map_err(|error| format!("{}: {}", motion_path.display(), error))?;
+    } = load_numeric_diagnostic_model(
+        case,
+        &model_path,
+        &model_bytes,
+        motion_source,
+        &motion_path,
+    )?;
     let model = Arc::new(model_import.model);
     let mut runtime = RuntimeInstance::new_with_counts(model, morph_count, solver_count);
     let mut physics_evaluator = build_physics_coarse_evaluator(PhysicsCoarseBuildInput {
@@ -3071,14 +3011,14 @@ fn describe_active_bone_morphs(
 fn morph_names_for_index(
     morph_name_to_index: &HashMap<Vec<u8>, MorphIndex>,
     target_index: MorphIndex,
-) -> Vec<String> {
-    let mut names: Vec<String> = morph_name_to_index
+) -> Vec<&str> {
+    let mut names: Vec<&str> = morph_name_to_index
         .iter()
         .filter_map(|(name, index)| {
             if *index != target_index {
                 return None;
             }
-            String::from_utf8(name.clone()).ok()
+            std::str::from_utf8(name).ok()
         })
         .collect();
     names.sort();
@@ -3168,26 +3108,10 @@ pub(crate) fn json_bool(value: &serde_json::Value, pointer: &str) -> Option<bool
     value.pointer(pointer)?.as_bool()
 }
 
-fn collect_unsupported_targets(case: &serde_json::Value, skipped_targets: &mut HashSet<String>) {
-    let Some(targets) = case
-        .pointer("/compare/targets")
-        .and_then(|value| value.as_array())
-    else {
-        return;
-    };
-    for target in targets {
-        let Some(target) = target.as_str() else {
-            continue;
-        };
-        if !matches!(target, "bones") {
-            skipped_targets.insert(target.to_owned());
-        }
-    }
-}
-
-fn collect_unsupported_camera_targets(
+fn collect_unsupported_targets(
     case: &serde_json::Value,
     skipped_targets: &mut HashSet<String>,
+    supported_targets: &[&str],
 ) {
     let Some(targets) = case
         .pointer("/compare/targets")
@@ -3199,13 +3123,7 @@ fn collect_unsupported_camera_targets(
         let Some(target) = target.as_str() else {
             continue;
         };
-        if !matches!(
-            target,
-            "camera.current"
-                | "camera.current.distance"
-                | "camera.current.position"
-                | "camera.current.rotation"
-        ) {
+        if !supported_targets.contains(&target) {
             skipped_targets.insert(target.to_owned());
         }
     }
@@ -3227,13 +3145,36 @@ fn numeric_case_frames(case: &serde_json::Value) -> Result<Vec<i32>, Box<dyn std
         .collect()
 }
 
-pub(crate) fn resolve_manifest_path(manifest_dir: &Path, value: &str) -> PathBuf {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        path
-    } else {
-        manifest_dir.join(path)
-    }
+fn numeric_case_name(case: &serde_json::Value) -> Result<&str, Box<dyn std::error::Error>> {
+    Ok(case
+        .get("name")
+        .and_then(|value| value.as_str())
+        .ok_or("numeric compare case is missing name")?)
+}
+
+fn numeric_case_epsilon(case: &serde_json::Value, default_epsilon: f64) -> f64 {
+    case.pointer("/compare/epsilon")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(default_epsilon)
+}
+
+fn read_camera_vmd_animation(
+    case: &serde_json::Value,
+    manifest_dir: &Path,
+    case_dir: Option<&Path>,
+    name: &str,
+) -> Result<(PathBuf, mmd_anim_format::VmdParsedAnimation), Box<dyn std::error::Error>> {
+    let camera_vmd = resolve_camera_vmd_path(case, manifest_dir, case_dir)?;
+    let camera_vmd_bytes = fs::read(&camera_vmd).map_err(|error| {
+        format!(
+            "failed to read camera VMD for case {} at {}: {}",
+            name,
+            camera_vmd.display(),
+            error
+        )
+    })?;
+    let parsed = mmd_anim_format::parse_vmd_animation(&camera_vmd_bytes)?;
+    Ok((camera_vmd, parsed))
 }
 
 fn resolve_camera_vmd_path(

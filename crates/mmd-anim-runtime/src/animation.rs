@@ -155,28 +155,13 @@ impl MovableBoneTrack {
     }
 
     pub fn sample(&self, frame: f32) -> Option<(Vec3A, Quat)> {
-        match self.frame_numbers.len() {
-            0 => None,
-            1 => Some((self.positions[0], self.rotations[0])),
-            _ => {
-                let next_index = self.find_next_keyframe(frame);
-                if next_index == 0 {
-                    return Some((self.positions[0], self.rotations[0]));
-                }
-                if next_index >= self.frame_numbers.len() {
-                    let last = self.frame_numbers.len() - 1;
-                    return Some((self.positions[last], self.rotations[last]));
-                }
-
-                let prev_index = next_index - 1;
-                let prev_frame = self.frame_numbers[prev_index] as f32;
-                let next_frame = self.frame_numbers[next_index] as f32;
-                let frame_t = if next_frame == prev_frame {
-                    0.0
-                } else {
-                    ((frame - prev_frame) / (next_frame - prev_frame)).clamp(0.0, 1.0)
-                };
-
+        match sample_interval(&self.frame_numbers, frame)? {
+            SampleInterval::Key(index) => Some((self.positions[index], self.rotations[index])),
+            SampleInterval::Between {
+                prev_index,
+                next_index,
+                frame_t,
+            } => {
                 let interpolation = self.position_interpolations[next_index];
                 let position = Vec3A::new(
                     lerp(
@@ -203,11 +188,6 @@ impl MovableBoneTrack {
                 Some((position, rotation))
             }
         }
-    }
-
-    fn find_next_keyframe(&self, frame: f32) -> usize {
-        self.frame_numbers
-            .partition_point(|keyframe| (*keyframe as f32) <= frame)
     }
 
     pub fn frame_range(&self) -> Option<(u32, u32)> {
@@ -267,34 +247,17 @@ impl MorphTrack {
     }
 
     pub fn sample(&self, frame: f32) -> Option<f32> {
-        match self.frame_numbers.len() {
-            0 => None,
-            1 => Some(self.weights[0]),
-            _ => {
-                let next_index = self
-                    .frame_numbers
-                    .partition_point(|keyframe| (*keyframe as f32) <= frame);
-                if next_index == 0 {
-                    return Some(self.weights[0]);
-                }
-                if next_index >= self.frame_numbers.len() {
-                    return Some(self.weights[self.weights.len() - 1]);
-                }
-
-                let prev_index = next_index - 1;
-                let prev_frame = self.frame_numbers[prev_index] as f32;
-                let next_frame = self.frame_numbers[next_index] as f32;
-                let frame_t = if next_frame == prev_frame {
-                    0.0
-                } else {
-                    ((frame - prev_frame) / (next_frame - prev_frame)).clamp(0.0, 1.0)
-                };
-                Some(lerp(
-                    self.weights[prev_index],
-                    self.weights[next_index],
-                    frame_t,
-                ))
-            }
+        match sample_interval(&self.frame_numbers, frame)? {
+            SampleInterval::Key(index) => Some(self.weights[index]),
+            SampleInterval::Between {
+                prev_index,
+                next_index,
+                frame_t,
+            } => Some(lerp(
+                self.weights[prev_index],
+                self.weights[next_index],
+                frame_t,
+            )),
         }
     }
 
@@ -369,19 +332,11 @@ impl PropertyAnimationBinding {
     }
 
     pub fn sample(&self, frame: f32) -> Option<&[u8]> {
-        match self.frame_numbers.len() {
-            0 => None,
-            _ => {
-                let next_index = self
-                    .frame_numbers
-                    .partition_point(|keyframe| (*keyframe as f32) <= frame);
-                if next_index == 0 {
-                    None
-                } else {
-                    Some(&self.ik_enabled[next_index - 1])
-                }
-            }
-        }
+        let index = self
+            .frame_numbers
+            .partition_point(|keyframe| (*keyframe as f32) <= frame)
+            .checked_sub(1)?;
+        Some(&self.ik_enabled[index])
     }
 
     pub fn frame_range(&self) -> Option<(u32, u32)> {
@@ -695,6 +650,45 @@ fn merge_frame_range(target: &mut Option<(u32, u32)>, range: Option<(u32, u32)>)
     });
 }
 
+enum SampleInterval {
+    Key(usize),
+    Between {
+        prev_index: usize,
+        next_index: usize,
+        frame_t: f32,
+    },
+}
+
+fn sample_interval(frame_numbers: &[u32], frame: f32) -> Option<SampleInterval> {
+    match frame_numbers.len() {
+        0 => return None,
+        1 => return Some(SampleInterval::Key(0)),
+        _ => {}
+    }
+
+    let next_index = frame_numbers.partition_point(|keyframe| (*keyframe as f32) <= frame);
+    if next_index == 0 {
+        return Some(SampleInterval::Key(0));
+    }
+    if next_index >= frame_numbers.len() {
+        return Some(SampleInterval::Key(frame_numbers.len() - 1));
+    }
+
+    let prev_index = next_index - 1;
+    let prev_frame = frame_numbers[prev_index] as f32;
+    let next_frame = frame_numbers[next_index] as f32;
+    let frame_t = if next_frame == prev_frame {
+        0.0
+    } else {
+        ((frame - prev_frame) / (next_frame - prev_frame)).clamp(0.0, 1.0)
+    };
+    Some(SampleInterval::Between {
+        prev_index,
+        next_index,
+        frame_t,
+    })
+}
+
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
@@ -834,6 +828,42 @@ mod tests {
         ]);
 
         assert_near(track.sample(30.0).unwrap(), 0.5);
+    }
+
+    #[test]
+    fn continuous_tracks_preserve_boundaries_and_duplicate_key_order() {
+        let keys = [(10, 1.0), (10, 2.0), (20, 3.0)];
+        let bone = MovableBoneTrack::from_keyframes(
+            keys.iter()
+                .map(|&(frame, value)| {
+                    MovableBoneKeyframe::new(frame, Vec3A::new(value, 0.0, 0.0), Quat::IDENTITY)
+                })
+                .collect(),
+        );
+        let morph = MorphTrack::from_keyframes(
+            keys.iter()
+                .map(|&(frame, value)| MorphKeyframe::new(frame, value))
+                .collect(),
+        );
+
+        for (frame, expected) in [
+            (f32::NAN, 1.0),
+            (f32::NEG_INFINITY, 1.0),
+            (9.0, 1.0),
+            (10.0, 2.0),
+            (15.0, 2.5),
+            (20.0, 3.0),
+            (f32::INFINITY, 3.0),
+        ] {
+            assert_near(bone.sample(frame).unwrap().0.x, expected);
+            assert_near(morph.sample(frame).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn empty_continuous_tracks_have_no_sample() {
+        assert_eq!(MovableBoneTrack::from_keyframes(vec![]).sample(0.0), None);
+        assert_eq!(MorphTrack::from_keyframes(vec![]).sample(0.0), None);
     }
 
     #[test]

@@ -1,5 +1,3 @@
-use std::fmt;
-
 use crate::{
     AppendTransformInit, BoneIndex, BoneInit, IkAngleLimit, IkLinkInit, IkSolverInit, MorphIndex,
     MorphInit, build_morph_init_from_offsets,
@@ -64,43 +62,29 @@ pub struct FlatMorphInput<'a> {
     pub group_morphs: &'a [FlatGroupMorphInput],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum FlatModelInputError {
+    #[error("model must contain at least one bone")]
     EmptyBoneSet,
+    #[error("rest_positions_xyz must contain bone_count * 3 values")]
     RestPositionsLen,
+    #[error("inverse_bind_matrices must contain bone_count * 16 values")]
     InverseBindMatricesLen,
+    #[error("transform_orders must contain bone_count values")]
     TransformOrdersLen,
+    #[error("parent index must be -1 or non-negative")]
     InvalidParentIndex,
+    #[error("range overflow")]
     RangeOverflow,
+    #[error("track keyframe range is out of bounds")]
     RangeOutOfBounds,
+    #[error("morph_count must be non-zero when morph data is provided")]
     MorphCountZeroWithData,
+    #[error("bone morph index is out of range")]
     BoneMorphIndexOutOfRange,
+    #[error("group morph index is out of range")]
     GroupMorphIndexOutOfRange,
 }
-
-impl fmt::Display for FlatModelInputError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::EmptyBoneSet => "model must contain at least one bone",
-            Self::RestPositionsLen => "rest_positions_xyz must contain bone_count * 3 values",
-            Self::InverseBindMatricesLen => {
-                "inverse_bind_matrices must contain bone_count * 16 values"
-            }
-            Self::TransformOrdersLen => "transform_orders must contain bone_count values",
-            Self::InvalidParentIndex => "parent index must be -1 or non-negative",
-            Self::RangeOverflow => "range overflow",
-            Self::RangeOutOfBounds => "track keyframe range is out of bounds",
-            Self::MorphCountZeroWithData => {
-                "morph_count must be non-zero when morph data is provided"
-            }
-            Self::BoneMorphIndexOutOfRange => "bone morph index is out of range",
-            Self::GroupMorphIndexOutOfRange => "group morph index is out of range",
-        };
-        f.write_str(message)
-    }
-}
-
-impl std::error::Error for FlatModelInputError {}
 
 pub fn build_bones_from_flat(
     input: FlatBoneInput<'_>,
@@ -177,23 +161,14 @@ pub fn build_ik_solvers_from_flat_iter(
                 .get(solver.link_offset..link_end)
                 .ok_or(FlatModelInputError::RangeOutOfBounds)?
                 .iter()
-                .map(|link| {
-                    let mut init = IkLinkInit::new(BoneIndex(link.bone_index));
-                    if link.has_angle_limit {
-                        init = init.with_angle_limit(IkAngleLimit::new(
-                            glam::Vec3A::new(
-                                link.angle_limit_min_xyz[0],
-                                link.angle_limit_min_xyz[1],
-                                link.angle_limit_min_xyz[2],
-                            ),
-                            glam::Vec3A::new(
-                                link.angle_limit_max_xyz[0],
-                                link.angle_limit_max_xyz[1],
-                                link.angle_limit_max_xyz[2],
-                            ),
-                        ));
-                    }
-                    init
+                .map(|link| IkLinkInit {
+                    bone: BoneIndex(link.bone_index),
+                    angle_limit: link.has_angle_limit.then(|| {
+                        IkAngleLimit::new(
+                            glam::Vec3A::from_array(link.angle_limit_min_xyz),
+                            glam::Vec3A::from_array(link.angle_limit_max_xyz),
+                        )
+                    }),
                 })
                 .collect();
 
@@ -223,34 +198,21 @@ pub fn build_morph_init_from_flat_iter(
     bone_morphs: impl IntoIterator<Item = FlatBoneMorphInput>,
     group_morphs: impl IntoIterator<Item = FlatGroupMorphInput>,
 ) -> Result<MorphInit, FlatModelInputError> {
-    let bone_morphs = bone_morphs.into_iter().collect::<Vec<_>>();
-    let group_morphs = group_morphs.into_iter().collect::<Vec<_>>();
-    if morph_count == 0 {
-        if bone_morphs.is_empty() && group_morphs.is_empty() {
-            return Ok(MorphInit::default());
-        }
-        return Err(FlatModelInputError::MorphCountZeroWithData);
-    }
     let bone_offsets = bone_morphs
-        .iter()
+        .into_iter()
         .map(|entry| {
             (
                 MorphIndex(entry.morph_index),
                 crate::BoneMorphOffset {
                     target_bone: BoneIndex(entry.target_bone_index),
                     position_offset: glam::Vec3A::from_array(entry.position_offset_xyz),
-                    rotation_offset: glam::Quat::from_xyzw(
-                        entry.rotation_offset_xyzw[0],
-                        entry.rotation_offset_xyzw[1],
-                        entry.rotation_offset_xyzw[2],
-                        entry.rotation_offset_xyzw[3],
-                    ),
+                    rotation_offset: glam::Quat::from_array(entry.rotation_offset_xyzw),
                 },
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
     let group_offsets = group_morphs
-        .iter()
+        .into_iter()
         .map(|entry| {
             (
                 MorphIndex(entry.morph_index),
@@ -260,7 +222,13 @@ pub fn build_morph_init_from_flat_iter(
                 },
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if morph_count == 0 {
+        if bone_offsets.is_empty() && group_offsets.is_empty() {
+            return Ok(MorphInit::default());
+        }
+        return Err(FlatModelInputError::MorphCountZeroWithData);
+    }
     build_morph_init_from_offsets(morph_count, bone_offsets, group_offsets).map_err(|error| {
         match error {
             crate::ModelBuildError::MorphCountZeroWithData => {
@@ -291,22 +259,13 @@ pub fn build_append_transforms_from_flat_iter(
 ) -> Vec<AppendTransformInit> {
     append_transforms
         .into_iter()
-        .map(|append| {
-            let mut init = AppendTransformInit::new(
-                BoneIndex(append.target_bone_index),
-                BoneIndex(append.source_bone_index),
-                append.ratio,
-            );
-            if append.affect_rotation {
-                init = init.with_rotation();
-            }
-            if append.affect_translation {
-                init = init.with_translation();
-            }
-            if append.local {
-                init = init.with_local();
-            }
-            init
+        .map(|append| AppendTransformInit {
+            target_bone: BoneIndex(append.target_bone_index),
+            source_bone: BoneIndex(append.source_bone_index),
+            ratio: append.ratio,
+            affect_rotation: append.affect_rotation,
+            affect_translation: append.affect_translation,
+            local: append.local,
         })
         .collect()
 }

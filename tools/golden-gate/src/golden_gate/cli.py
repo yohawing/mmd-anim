@@ -72,7 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_common_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", help="local TOML config path")
+    parser.add_argument("--config", help="local JSON config path")
     parser.add_argument("--repo-root", help="mmd-anim repository root")
     parser.add_argument("--manifest", help="NumericMotion manifest path")
     parser.add_argument("--baseline", help="accepted baseline report path")

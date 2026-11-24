@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Small, dependency-free PMX staging helper used by the Python runner.
 
 MMD 9.x expects text fields in PMX files to use UTF-16LE.  The Rust parser is
@@ -7,6 +5,8 @@ encoding agnostic, but the PMM scene is opened by the Windows MMD process, so
 staging has to rewrite every length-prefixed PMX text field rather than only
 changing the header byte.
 """
+
+from __future__ import annotations
 
 import struct
 from pathlib import Path
@@ -74,13 +74,13 @@ def convert_utf8_to_utf16(data: bytes) -> bytes:
     settings_bytes = reader.take(header_size - 1)
     chunks.append(settings_bytes)
     settings = {
-        "additionalUvCount": settings_bytes[0] if len(settings_bytes) > 0 else 0,
-        "vertexIndexSize": settings_bytes[1] if len(settings_bytes) > 1 else 4,
-        "textureIndexSize": settings_bytes[2] if len(settings_bytes) > 2 else 4,
-        "materialIndexSize": settings_bytes[3] if len(settings_bytes) > 3 else 4,
-        "boneIndexSize": settings_bytes[4] if len(settings_bytes) > 4 else 4,
-        "morphIndexSize": settings_bytes[5] if len(settings_bytes) > 5 else 4,
-        "rigidBodyIndexSize": settings_bytes[6] if len(settings_bytes) > 6 else 4,
+        "additionalUvCount": settings_bytes[0],
+        "vertexIndexSize": settings_bytes[1],
+        "textureIndexSize": settings_bytes[2],
+        "materialIndexSize": settings_bytes[3],
+        "boneIndexSize": settings_bytes[4],
+        "morphIndexSize": settings_bytes[5],
+        "rigidBodyIndexSize": settings_bytes[6],
     }
 
     for _ in range(4):
@@ -110,10 +110,7 @@ def _validate_header(data: bytes) -> None:
 
 
 def _copy_counted_fixed(reader: _Reader, chunks: list[bytes], size: int) -> None:
-    count = reader.i32()
-    if count < 0:
-        raise PmxError("negative PMX section count")
-    chunks.append(struct.pack("<i", count))
+    count = _copy_count(reader, chunks)
     chunks.append(reader.take(count * size))
 
 

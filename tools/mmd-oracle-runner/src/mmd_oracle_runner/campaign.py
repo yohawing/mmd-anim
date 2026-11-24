@@ -104,9 +104,8 @@ def load_campaign_config(path: Path) -> CampaignConfig:
     payload = _read_json_object(manifest, "manifest")
     if payload.get("schemaVersion") != CAMPAIGN_SCHEMA_VERSION:
         raise CampaignValidationError("manifest", "schemaVersion must be 1")
-    run_value = {**_DEFAULT_RUN, **(payload.get("run", {}) if isinstance(payload.get("run", {}), dict) else {})}
-    if not isinstance(run_value, dict):
-        raise CampaignValidationError("manifest", "run must be an object")
+    run_overrides = payload.get("run", {})
+    run_value = {**_DEFAULT_RUN, **(run_overrides if isinstance(run_overrides, dict) else {})}
     run: dict[str, str] = {}
     for field in _RUN_FIELDS:
         value = run_value.get(field)
@@ -117,10 +116,9 @@ def load_campaign_config(path: Path) -> CampaignConfig:
     compare = payload.get("compare", {})
     if not isinstance(compare, dict):
         raise CampaignValidationError("manifest", "compare must be an object")
-    focus_bones = tuple(_strings(compare.get("focusBones", []), "compare.focusBones", allow_empty=True))
-    raw_thresholds = {**_DEFAULT_THRESHOLDS, **(compare.get("thresholds", {}) if isinstance(compare.get("thresholds", {}), dict) else {})}
-    if not isinstance(raw_thresholds, dict):
-        raise CampaignValidationError("manifest", "compare.thresholds must be an object")
+    focus_bones = _strings(compare.get("focusBones", []), "compare.focusBones")
+    threshold_overrides = compare.get("thresholds", {})
+    raw_thresholds = {**_DEFAULT_THRESHOLDS, **(threshold_overrides if isinstance(threshold_overrides, dict) else {})}
     thresholds: dict[str, float] = {}
     for name in _METRIC_NAMES:
         value = raw_thresholds.get(name)
@@ -154,12 +152,12 @@ def load_campaign_config(path: Path) -> CampaignConfig:
         camera_vmd = None if camera_raw in (None, "") else _existing_file(camera_raw, f"cases[{index}].cameraVmd")
         frames = _frames(raw_case.get("frames", list(default_frames)), f"cases[{index}].frames")
         output_root = _output_directory(raw_case.get("outputRoot", str(default_output_root)), f"cases[{index}].outputRoot")
-        features = tuple(_strings(raw_case.get("features", []), f"cases[{index}].features", allow_empty=True))
-        categories = tuple(_strings(raw_case.get("categories", []), f"cases[{index}].categories", allow_empty=True))
+        features = _strings(raw_case.get("features", []), f"cases[{index}].features")
+        categories = _strings(raw_case.get("categories", []), f"cases[{index}].categories")
         expectation = raw_case.get("expectation", "numeric-parity")
         if expectation not in _EXPECTATIONS:
             raise CampaignValidationError("manifest", f"cases[{index}].expectation must be one of: {', '.join(_EXPECTATIONS)}")
-        requested = tuple(_strings(raw_case.get("requestedFeatures", []), f"cases[{index}].requestedFeatures", allow_empty=True))
+        requested = _strings(raw_case.get("requestedFeatures", []), f"cases[{index}].requestedFeatures")
         dialog_opt_in = raw_case.get("dialogOptIn", default_dialog_opt_in)
         if not isinstance(dialog_opt_in, bool):
             raise CampaignValidationError("manifest", f"cases[{index}].dialogOptIn must be a boolean")
@@ -183,7 +181,7 @@ def load_campaign_config(path: Path) -> CampaignConfig:
     if isinstance(discovered, bool) or not isinstance(discovered, int) or discovered < len(cases):
         raise CampaignValidationError("manifest", "discovered must be an integer >= cases length")
     digest = hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
-    return CampaignConfig(manifest, run, discovered, tuple(focus_bones), thresholds, tuple(cases), digest)
+    return CampaignConfig(manifest, run, discovered, focus_bones, thresholds, tuple(cases), digest)
 
 
 def run_campaign(
@@ -400,10 +398,10 @@ def _label(value: object, label: str) -> str:
     return value
 
 
-def _strings(value: object, label: str, *, allow_empty: bool) -> list[str]:
-    if not isinstance(value, list) or (not allow_empty and not value) or any(not isinstance(item, str) or not item.strip() for item in value):
+def _strings(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise CampaignValidationError("manifest", f"{label} must be an array of strings")
-    return list(value)
+    return tuple(value)
 
 
 def _frames(value: object, label: str) -> tuple[int, ...]:
@@ -417,11 +415,7 @@ def _number(value: object) -> bool:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return artifacts.file_identity(path)["sha256"]
 
 
 def _canonical(value: object) -> str:
@@ -574,16 +568,32 @@ def _mmd_executable_hash(recorded: dict[str, Any]) -> tuple[str | None, str | No
 
 def _build_snapshot(config: CampaignConfig, state: dict[str, Any], provenance: dict[str, str]) -> dict[str, Any]:
     entries = list(state["cases"].values())
-    funnel = {"discovered": config.discovered, "selected": len(config.cases), "prepared": sum(entry.get("prepared") is True for entry in entries), "recorded": sum(entry.get("recorded") is True for entry in entries), "compared": sum(entry.get("compared") is True for entry in entries), "passed": sum(entry.get("passed") is True for entry in entries)}
+    funnel = {
+        "discovered": config.discovered,
+        "selected": len(config.cases),
+        "prepared": sum(entry.get("prepared") is True for entry in entries),
+        "recorded": sum(entry.get("recorded") is True for entry in entries),
+        "compared": sum(entry.get("compared") is True for entry in entries),
+        "passed": sum(entry.get("passed") is True for entry in entries),
+    }
     failures: dict[str, int] = {}
     for entry in entries:
         for failure in entry.get("failures", []):
             failures[failure] = failures.get(failure, 0) + 1
     metrics: dict[str, dict[str, float]] = {}
     for metric in _METRIC_NAMES:
-        values = sorted(float(entry["metrics"][metric]) for entry in entries if entry.get("compared") and metric in entry.get("metrics", {}))
+        values = sorted(
+            float(entry["metrics"][metric])
+            for entry in entries
+            if entry.get("compared") and metric in entry.get("metrics", {})
+        )
         if values:
-            metrics[metric] = {"p50": _nearest_rank(values, .50), "p95": _nearest_rank(values, .95), "p99": _nearest_rank(values, .99), "max": values[-1]}
+            metrics[metric] = {
+                "p50": _nearest_rank(values, 0.50),
+                "p95": _nearest_rank(values, 0.95),
+                "p99": _nearest_rank(values, 0.99),
+                "max": values[-1],
+            }
     features = _tag_summaries(config.cases, entries, "features")
     categories = _tag_summaries(config.cases, entries, "categories")
     worst: list[dict[str, Any]] = []
@@ -591,11 +601,22 @@ def _build_snapshot(config: CampaignConfig, state: dict[str, Any], provenance: d
     for entry in entries:
         if not entry.get("compared"):
             continue
-        category = case_by_id[entry["caseId"]].categories[0] if case_by_id[entry["caseId"]].categories else "uncategorized"
+        category = (
+            case_by_id[entry["caseId"]].categories[0] if case_by_id[entry["caseId"]].categories else "uncategorized"
+        )
         for metric, value in entry.get("metrics", {}).items():
             threshold = config.thresholds[metric]
             ratio = math.inf if threshold == 0 and value > 0 else (0 if threshold == 0 else value / threshold)
-            worst.append({"caseId": entry["caseId"], "category": category, "metric": metric, "value": value, "result": "pass" if value <= threshold else "fail", "_ratio": ratio})
+            worst.append(
+                {
+                    "caseId": entry["caseId"],
+                    "category": category,
+                    "metric": metric,
+                    "value": value,
+                    "result": "pass" if value <= threshold else "fail",
+                    "_ratio": ratio,
+                }
+            )
     worst.sort(key=lambda item: (-item["_ratio"], -item["value"], item["caseId"], item["metric"]))
     for item in worst:
         item.pop("_ratio", None)
@@ -616,10 +637,34 @@ def _build_snapshot(config: CampaignConfig, state: dict[str, Any], provenance: d
             "failures": list(entry.get("failures", [])),
         }
         applied_motion_keyframes = entry.get("appliedMotionKeyframes")
-        if isinstance(applied_motion_keyframes, int) and not isinstance(applied_motion_keyframes, bool) and applied_motion_keyframes >= 0:
+        if (
+            isinstance(applied_motion_keyframes, int)
+            and not isinstance(applied_motion_keyframes, bool)
+            and applied_motion_keyframes >= 0
+        ):
             case_result["appliedMotionKeyframes"] = applied_motion_keyframes
         case_results.append(case_result)
-    return {"schemaVersion": 1, "run": {**config.run, "commitSha": provenance["commitSha"], "repositoryState": provenance["repositoryState"], "mmdVersionSource": "config-self-reported", "dumperVersionSource": "config-self-reported", "manifestHash": config.config_hash, "mmdExecutableSha256": observed}, "funnel": funnel, "thresholds": dict(config.thresholds), "metrics": metrics, "failures": failures, "features": features, "categories": categories, "cases": case_results, "worstCases": worst[:20], "rawArtifacts": {"retained": False}}
+    return {
+        "schemaVersion": 1,
+        "run": {
+            **config.run,
+            "commitSha": provenance["commitSha"],
+            "repositoryState": provenance["repositoryState"],
+            "mmdVersionSource": "config-self-reported",
+            "dumperVersionSource": "config-self-reported",
+            "manifestHash": config.config_hash,
+            "mmdExecutableSha256": observed,
+        },
+        "funnel": funnel,
+        "thresholds": dict(config.thresholds),
+        "metrics": metrics,
+        "failures": failures,
+        "features": features,
+        "categories": categories,
+        "cases": case_results,
+        "worstCases": worst[:20],
+        "rawArtifacts": {"retained": False},
+    }
 
 
 def _case_result(entry: dict[str, Any]) -> str:

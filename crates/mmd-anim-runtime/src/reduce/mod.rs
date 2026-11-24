@@ -2010,11 +2010,14 @@ fn refresh_full_validation_cache_parallel(
                     chunk
                         .morph_weights
                         .extend_from_slice(&scratch.morph_weights);
-                    for morph in 0..input.morph_count {
-                        chunk.morph_errors.push(
-                            (input.morph_weight(frame, morph) - scratch.morph_weights[morph]).abs(),
-                        );
-                    }
+                    chunk.morph_errors.extend(
+                        scratch.morph_weights[..input.morph_count]
+                            .iter()
+                            .enumerate()
+                            .map(|(morph, weight)| {
+                                (input.morph_weight(frame, morph) - weight).abs()
+                            }),
+                    );
                 }
                 Ok(chunk)
             })

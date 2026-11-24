@@ -2179,8 +2179,8 @@ fn export_json_format_writes_full_vmd_dto_workflow() {
     )
     .unwrap();
 
-    export::export_json_format(&input, &output, false).unwrap();
-    export::export_roundtrip(&output, false).unwrap();
+    let _ = export::export_json_format(&input, &output, false).unwrap();
+    let _ = export::export_roundtrip(&output, false).unwrap();
 
     let reparsed = mmd_anim_format::parse_vmd_animation(&fs::read(&output).unwrap()).unwrap();
     assert_eq!(reparsed.metadata.model_name, "cli-dto");
@@ -2597,7 +2597,7 @@ fn export_pmx_from_parts_manifest_writes_parseable_pmx() {
     )
     .unwrap();
 
-    export::export_pmx_from_parts_manifest(&input, &output, false).unwrap();
+    let _ = export::export_pmx_from_parts_manifest(&input, &output, false).unwrap();
 
     let data = fs::read(&output).unwrap();
     let parsed = mmd_anim_format::parse_pmx_model(&data).unwrap();

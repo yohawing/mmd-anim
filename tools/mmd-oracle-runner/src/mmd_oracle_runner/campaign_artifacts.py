@@ -50,30 +50,16 @@ def cleanup_completed_case_run(run_dir: Path) -> dict[str, Any]:
     A failed result never performs recursive or basename-only cleanup.
     """
 
-    requested_run_dir = Path(run_dir)
-    run_dir = requested_run_dir.resolve()
-    result: dict[str, Any] = {
-        "schemaVersion": CAMPAIGN_CLEANUP_SCHEMA_VERSION,
-        "ok": False,
-        "runDir": str(run_dir),
-        "deleted": [],
-        "removedRunDir": False,
-        "error": None,
-    }
-    try:
-        deleted = _cleanup_owned_run(requested_run_dir, _MARKER_BASENAMES, require_record=True)
-    except _CleanupFailure as error:
-        result["error"] = {"kind": "campaign-cleanup", "code": error.code, "message": error.message}
-        return result
-    result["ok"] = True
-    result["deleted"] = deleted
-    result["removedRunDir"] = True
-    return result
+    return _cleanup_case_run(run_dir, _MARKER_BASENAMES, require_record=True)
 
 
 def cleanup_prepared_case_run(run_dir: Path) -> dict[str, Any]:
     """Remove a prepare-only run after proving ownership from its prepare marker."""
 
+    return _cleanup_case_run(run_dir, frozenset({"prepare-result.json"}), require_record=False)
+
+
+def _cleanup_case_run(run_dir: Path, marker_names: frozenset[str], *, require_record: bool) -> dict[str, Any]:
     requested_run_dir = Path(run_dir)
     result: dict[str, Any] = {
         "schemaVersion": CAMPAIGN_CLEANUP_SCHEMA_VERSION,
@@ -84,7 +70,7 @@ def cleanup_prepared_case_run(run_dir: Path) -> dict[str, Any]:
         "error": None,
     }
     try:
-        deleted = _cleanup_owned_run(requested_run_dir, frozenset({"prepare-result.json"}), require_record=False)
+        deleted = _cleanup_owned_run(requested_run_dir, marker_names, require_record=require_record)
     except _CleanupFailure as error:
         result["error"] = {"kind": "campaign-cleanup", "code": error.code, "message": error.message}
         return result

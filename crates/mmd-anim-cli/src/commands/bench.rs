@@ -7,9 +7,8 @@ use mmd_anim_runtime::{
 };
 use serde_json::json;
 
+use crate::support::{registered_morph_count, summarize_ik_runtime_stats};
 use crate::{copy_world_matrices_to_f32, f32_checksum, read_file, translation_checksum};
-
-pub(crate) const BENCH_PAIR_USAGE: &str = "usage: mmd-anim bench-pair <model.pmx> <motion.vmd> [start-frame] [frame-count] [step] [--instances <count>] [--no-ik] [--ik-tolerance <value>] [--ik-max-iterations-cap <count>] [--json]";
 
 #[derive(Debug)]
 pub(crate) struct BenchPairConfig {
@@ -138,66 +137,21 @@ pub(crate) fn bench_pair_report_json(input: BenchPairReportInput<'_>) -> serde_j
     });
 
     if let Some(stats) = input.ik_stats {
-        let total_evaluations = stats
-            .iter()
-            .map(|stats| stats.solver_evaluations)
-            .sum::<u64>();
-        let configured_iterations = stats
-            .iter()
-            .map(|stats| stats.configured_iterations)
-            .sum::<u64>();
-        let executed_iterations = stats
-            .iter()
-            .map(|stats| stats.executed_iterations)
-            .sum::<u64>();
-        let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
-        let tolerance_precheck_breaks = stats
-            .iter()
-            .map(|stats| stats.tolerance_precheck_breaks)
-            .sum::<u64>();
-        let tolerance_post_iteration_breaks = stats
-            .iter()
-            .map(|stats| stats.tolerance_post_iteration_breaks)
-            .sum::<u64>();
-        let rollback_breaks = stats.iter().map(|stats| stats.rollback_breaks).sum::<u64>();
-        let max_iteration_exhaustions = stats
-            .iter()
-            .map(|stats| stats.max_iteration_exhaustions)
-            .sum::<u64>();
-        let link_steps = stats.iter().map(|stats| stats.link_steps).sum::<u64>();
-        let skip_ratio = if configured_iterations == 0 {
-            0.0
-        } else {
-            skipped_iterations as f64 / configured_iterations as f64
-        };
+        let summary = summarize_ik_runtime_stats(stats);
 
-        let mut ranked = stats
-            .iter()
-            .enumerate()
-            .map(|(index, stats)| (index, *stats))
-            .collect::<Vec<_>>();
-        ranked.sort_by_key(|(_, stats)| {
-            std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
-        });
+        let ranked = top_ik_solvers(stats);
 
         let top_solvers = ranked
             .into_iter()
-            .take(8)
-            .map(|(index, stats)| {
+            .map(|ranked| {
+                let RankedIkSolverStats {
+                    index,
+                    stats,
+                    skipped,
+                    avg_final_distance,
+                    avg_exhausted_final_distance,
+                } = ranked;
                 let summary = &input.ik_solver_summaries[index];
-                let skipped = stats
-                    .configured_iterations
-                    .saturating_sub(stats.executed_iterations);
-                let avg_final_distance = if stats.solver_evaluations == 0 {
-                    0.0
-                } else {
-                    stats.final_distance_sum / stats.solver_evaluations as f64
-                };
-                let avg_exhausted_final_distance = if stats.max_iteration_exhaustions == 0 {
-                    0.0
-                } else {
-                    stats.exhausted_final_distance_sum / stats.max_iteration_exhaustions as f64
-                };
                 json!({
                     "solver": summary.solver_index,
                     "bone": summary.bone_index,
@@ -222,22 +176,66 @@ pub(crate) fn bench_pair_report_json(input: BenchPairReportInput<'_>) -> serde_j
 
         root["ik"] = json!({
             "aggregate": {
-                "solverEvaluations": total_evaluations,
-                "configuredIterations": configured_iterations,
-                "executedIterations": executed_iterations,
-                "skippedIterations": skipped_iterations,
-                "skippedRatio": skip_ratio,
-                "tolerancePrecheckBreaks": tolerance_precheck_breaks,
-                "tolerancePostIterationBreaks": tolerance_post_iteration_breaks,
-                "rollbackBreaks": rollback_breaks,
-                "maxIterationExhaustions": max_iteration_exhaustions,
-                "linkSteps": link_steps,
+                "solverEvaluations": summary.solver_evaluations,
+                "configuredIterations": summary.configured_iterations,
+                "executedIterations": summary.executed_iterations,
+                "skippedIterations": summary.skipped_iterations,
+                "skippedRatio": summary.skipped_ratio,
+                "tolerancePrecheckBreaks": summary.tolerance_precheck_breaks,
+                "tolerancePostIterationBreaks": summary.tolerance_post_iteration_breaks,
+                "rollbackBreaks": summary.rollback_breaks,
+                "maxIterationExhaustions": summary.max_iteration_exhaustions,
+                "linkSteps": summary.link_steps,
             },
             "topSolvers": top_solvers,
         });
     }
 
     root
+}
+
+/// Per-solver IK stats plus the derived values reported for the busiest solvers.
+struct RankedIkSolverStats<'a> {
+    index: usize,
+    stats: &'a IkSolverRuntimeStats,
+    skipped: u64,
+    avg_final_distance: f64,
+    avg_exhausted_final_distance: f64,
+}
+
+/// Returns the eight solvers with the most executed (then configured) iterations.
+fn top_ik_solvers(stats: &[IkSolverRuntimeStats]) -> Vec<RankedIkSolverStats<'_>> {
+    let mut ranked: Vec<_> = stats.iter().enumerate().collect();
+    ranked.sort_by_key(|(_, stats)| {
+        std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
+    });
+    ranked.truncate(8);
+    ranked
+        .into_iter()
+        .map(|(index, stats)| RankedIkSolverStats {
+            index,
+            stats,
+            skipped: stats
+                .configured_iterations
+                .saturating_sub(stats.executed_iterations),
+            avg_final_distance: average_distance(
+                stats.final_distance_sum,
+                stats.solver_evaluations,
+            ),
+            avg_exhausted_final_distance: average_distance(
+                stats.exhausted_final_distance_sum,
+                stats.max_iteration_exhaustions,
+            ),
+        })
+        .collect()
+}
+
+fn average_distance(total: f64, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f64
+    }
 }
 
 pub(crate) fn aggregate_ik_runtime_stats<'a>(
@@ -306,12 +304,7 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
             links: solver.links.len(),
         })
         .collect::<Vec<_>>();
-    let morph_count = pmx
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
+    let morph_count = registered_morph_count(&pmx.morph_name_to_index);
 
     let clip_start = Instant::now();
     let clip = mmd_anim_format::build_mmd_registered_pair_clip(
@@ -543,75 +536,31 @@ pub(crate) fn bench_pair(cfg: BenchPairConfig) -> Result<ExitCode, Box<dyn std::
         morph_checksum,
     );
     if let Some(stats) = aggregated_ik_stats.as_deref() {
-        let total_evaluations = stats
-            .iter()
-            .map(|stats| stats.solver_evaluations)
-            .sum::<u64>();
-        let configured_iterations = stats
-            .iter()
-            .map(|stats| stats.configured_iterations)
-            .sum::<u64>();
-        let executed_iterations = stats
-            .iter()
-            .map(|stats| stats.executed_iterations)
-            .sum::<u64>();
-        let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
-        let tolerance_precheck_breaks = stats
-            .iter()
-            .map(|stats| stats.tolerance_precheck_breaks)
-            .sum::<u64>();
-        let tolerance_post_iteration_breaks = stats
-            .iter()
-            .map(|stats| stats.tolerance_post_iteration_breaks)
-            .sum::<u64>();
-        let rollback_breaks = stats.iter().map(|stats| stats.rollback_breaks).sum::<u64>();
-        let max_iteration_exhaustions = stats
-            .iter()
-            .map(|stats| stats.max_iteration_exhaustions)
-            .sum::<u64>();
-        let link_steps = stats.iter().map(|stats| stats.link_steps).sum::<u64>();
-        let skip_ratio = if configured_iterations == 0 {
-            0.0
-        } else {
-            skipped_iterations as f64 / configured_iterations as f64
-        };
+        let summary = summarize_ik_runtime_stats(stats);
         println!(
             "bench-pair-ik-stats: solverEvaluations={} configuredIterations={} executedIterations={} skippedIterations={} skippedRatio={:.3} tolerancePrecheckBreaks={} tolerancePostIterationBreaks={} rollbackBreaks={} maxIterationExhaustions={} linkSteps={}",
-            total_evaluations,
-            configured_iterations,
-            executed_iterations,
-            skipped_iterations,
-            skip_ratio,
-            tolerance_precheck_breaks,
-            tolerance_post_iteration_breaks,
-            rollback_breaks,
-            max_iteration_exhaustions,
-            link_steps,
+            summary.solver_evaluations,
+            summary.configured_iterations,
+            summary.executed_iterations,
+            summary.skipped_iterations,
+            summary.skipped_ratio,
+            summary.tolerance_precheck_breaks,
+            summary.tolerance_post_iteration_breaks,
+            summary.rollback_breaks,
+            summary.max_iteration_exhaustions,
+            summary.link_steps,
         );
 
-        let mut ranked = stats
-            .iter()
-            .enumerate()
-            .map(|(index, stats)| (index, *stats))
-            .collect::<Vec<_>>();
-        ranked.sort_by_key(|(_, stats)| {
-            std::cmp::Reverse((stats.executed_iterations, stats.configured_iterations))
-        });
-        for (index, stats) in ranked.into_iter().take(8) {
+        let ranked = top_ik_solvers(stats);
+        for RankedIkSolverStats {
+            index,
+            stats,
+            skipped,
+            avg_final_distance,
+            avg_exhausted_final_distance,
+        } in ranked
+        {
             let summary = &ik_solver_summaries[index];
-            let skipped = stats
-                .configured_iterations
-                .saturating_sub(stats.executed_iterations);
-            let avg_final_distance = if stats.solver_evaluations == 0 {
-                0.0
-            } else {
-                stats.final_distance_sum / stats.solver_evaluations as f64
-            };
-            let avg_exhausted_final_distance = if stats.max_iteration_exhaustions == 0 {
-                0.0
-            } else {
-                stats.exhausted_final_distance_sum / stats.max_iteration_exhaustions as f64
-            };
             println!(
                 "bench-pair-ik-solver: solver={} bone={} name={} maxIterations={} links={} evaluations={} configuredIterations={} executedIterations={} skippedIterations={} precheckBreaks={} postBreaks={} rollbackBreaks={} exhausted={} avgFinalDistance={:.8} maxFinalDistance={:.8} avgExhaustedFinalDistance={:.8} maxExhaustedFinalDistance={:.8}",
                 summary.solver_index,
@@ -747,13 +696,13 @@ pub(crate) fn parse_bench_synthetic_args(
     let mut use_json = false;
     let mut positional = Vec::new();
 
-    for token in &raw {
+    for token in raw {
         if token == "--json" {
             use_json = true;
         } else if token.starts_with("--") {
             return Err(format!("unknown flag: {token}").into());
         } else {
-            positional.push(token.clone());
+            positional.push(token);
         }
     }
 
@@ -774,6 +723,8 @@ pub(crate) fn parse_bench_synthetic_args(
 }
 
 pub(crate) fn parse_bench_pair_args(
+    pmx_path: PathBuf,
+    vmd_path: PathBuf,
     args: &mut impl Iterator<Item = String>,
 ) -> Result<BenchPairConfig, Box<dyn std::error::Error>> {
     let raw: Vec<String> = args.collect();
@@ -814,8 +765,6 @@ pub(crate) fn parse_bench_pair_args(
     }
 
     let mut pos_iter = positional.into_iter();
-    let pmx_path = PathBuf::from(pos_iter.next().ok_or(BENCH_PAIR_USAGE)?);
-    let vmd_path = PathBuf::from(pos_iter.next().ok_or(BENCH_PAIR_USAGE)?);
     let start_frame = optional_f32_parse_arg(&mut pos_iter, 0.0, "start-frame")?;
     let frame_count = optional_positive_usize_arg(&mut pos_iter, 1000, "frame-count")?;
     let step = optional_f32_parse_arg(&mut pos_iter, 1.0, "step")?;
@@ -854,13 +803,7 @@ fn optional_positive_usize_arg(
     let Some(value) = args.next() else {
         return Ok(default);
     };
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| format!("invalid {label}: {value}"))?;
-    if parsed == 0 {
-        return Err(format!("{label} must be positive").into());
-    }
-    Ok(parsed)
+    parse_positive_usize(&value, label)
 }
 
 fn optional_positive_u32_arg(
@@ -871,13 +814,7 @@ fn optional_positive_u32_arg(
     let Some(value) = args.next() else {
         return Ok(default);
     };
-    let parsed = value
-        .parse::<u32>()
-        .map_err(|_| format!("invalid {label}: {value}"))?;
-    if parsed == 0 {
-        return Err(format!("{label} must be positive").into());
-    }
-    Ok(parsed)
+    parse_positive_u32(&value, label)
 }
 
 fn parse_positive_usize(value: &str, label: &str) -> Result<usize, Box<dyn std::error::Error>> {
@@ -908,13 +845,7 @@ fn optional_f32_parse_arg(
     let Some(value) = args.next() else {
         return Ok(default);
     };
-    let parsed = value
-        .parse::<f32>()
-        .map_err(|_| format!("invalid {label}: {value}"))?;
-    if !parsed.is_finite() {
-        return Err(format!("{label} must be finite").into());
-    }
-    Ok(parsed)
+    parse_finite_f32(&value, label)
 }
 
 fn parse_finite_f32(value: &str, label: &str) -> Result<f32, Box<dyn std::error::Error>> {

@@ -57,8 +57,18 @@ pub(crate) fn reduce_vmd(
     // applied to this model-independent, zero-IK sampling runtime.
     runtime_import.property_keyframes.clear();
 
-    let (bone_names, bone_indices) = unique_bone_names(&animation);
-    let (morph_names, morph_indices) = unique_morph_names(&animation);
+    let (bone_names, bone_indices) = unique_names(
+        animation
+            .bone_frames
+            .iter()
+            .map(|frame| (frame.bone_name.as_str(), frame.bone_name_bytes.as_slice())),
+    );
+    let (morph_names, morph_indices) = unique_names(
+        animation
+            .morph_frames
+            .iter()
+            .map(|frame| (frame.morph_name.as_str(), frame.morph_name_bytes.as_slice())),
+    );
     if bone_indices.is_empty() && morph_indices.is_empty() {
         return Err("reduce-vmd requires at least one bone or morph keyframe".into());
     }
@@ -72,7 +82,7 @@ pub(crate) fn reduce_vmd(
         BoneInit::new(None, Vec3A::ZERO);
         runtime_bone_count
     ])?);
-    let mut runtime = RuntimeInstance::new_with_morph_count(model.clone(), morph_names.len());
+    let mut runtime = RuntimeInstance::new_with_morph_count(model, morph_names.len());
     let pose_max_frame = animation
         .bone_frames
         .iter()
@@ -144,13 +154,15 @@ pub(crate) fn reduce_vmd(
     let report = reduced.report();
     let source_bone_keys = animation.bone_frames.len();
     let source_morph_keys = animation.morph_frames.len();
-    animation.bone_frames = prefer_smaller_bone_tracks(
-        &animation.bone_frames,
+    animation.bone_frames = prefer_smaller_tracks(
+        animation.bone_frames,
         reduced_bone_frames(&reduced, &bone_names),
+        |frame| (frame.frame, frame.bone_name_bytes.as_slice()),
     );
-    animation.morph_frames = prefer_smaller_morph_tracks(
-        &animation.morph_frames,
+    animation.morph_frames = prefer_smaller_tracks(
+        animation.morph_frames,
         reduced_morph_frames(&reduced, &morph_names),
+        |frame| (frame.frame, frame.morph_name_bytes.as_slice()),
     );
     animation.metadata.counts = VmdParsedCounts {
         bones: animation.bone_frames.len(),
@@ -173,31 +185,31 @@ pub(crate) fn reduce_vmd(
     })?;
     write_file(output, &bytes)?;
 
-    let value = json!({
-        "status": "ok",
-        "command": "reduce-vmd",
-        "curveMode": match options.curve_mode {
-            VmdReductionCurveMode::Linear => "linear",
-            VmdReductionCurveMode::VmdBezier => "vmd-bezier",
-        },
-        "input": input.display().to_string(),
-        "output": output.display().to_string(),
-        "bytesIn": data.len(),
-        "bytesOut": bytes.len(),
-        "maxFrame": animation.metadata.max_frame,
-        "sourceBoneKeys": source_bone_keys,
-        "reducedBoneKeys": reduced_bone_keys,
-        "sourceMorphKeys": source_morph_keys,
-        "reducedMorphKeys": reduced_morph_keys,
-        "maxLocalPositionError": report.max_local_position_error,
-        "maxLocalRotationErrorRadians": report.max_local_rotation_error_radians,
-        "maxMorphWeightError": report.max_morph_weight_error,
-        "preservedCameraKeys": animation.camera_frames.len(),
-        "preservedLightKeys": animation.light_frames.len(),
-        "preservedSelfShadowKeys": animation.self_shadow_frames.len(),
-        "preservedPropertyKeys": animation.property_frames.len(),
-    });
     if options.use_json {
+        let value = json!({
+            "status": "ok",
+            "command": "reduce-vmd",
+            "curveMode": match options.curve_mode {
+                VmdReductionCurveMode::Linear => "linear",
+                VmdReductionCurveMode::VmdBezier => "vmd-bezier",
+            },
+            "input": input.display().to_string(),
+            "output": output.display().to_string(),
+            "bytesIn": data.len(),
+            "bytesOut": bytes.len(),
+            "maxFrame": animation.metadata.max_frame,
+            "sourceBoneKeys": source_bone_keys,
+            "reducedBoneKeys": reduced_bone_keys,
+            "sourceMorphKeys": source_morph_keys,
+            "reducedMorphKeys": reduced_morph_keys,
+            "maxLocalPositionError": report.max_local_position_error,
+            "maxLocalRotationErrorRadians": report.max_local_rotation_error_radians,
+            "maxMorphWeightError": report.max_morph_weight_error,
+            "preservedCameraKeys": animation.camera_frames.len(),
+            "preservedLightKeys": animation.light_frames.len(),
+            "preservedSelfShadowKeys": animation.self_shadow_frames.len(),
+            "preservedPropertyKeys": animation.property_frames.len(),
+        });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!(
@@ -252,7 +264,6 @@ fn reduced_bone_frames(
             });
         }
     }
-    frames.sort_by(|a, b| (a.frame, &a.bone_name_bytes).cmp(&(b.frame, &b.bone_name_bytes)));
     frames
 }
 
@@ -271,25 +282,25 @@ fn reduced_morph_frames(
             });
         }
     }
-    frames.sort_by(|a, b| (a.frame, &a.morph_name_bytes).cmp(&(b.frame, &b.morph_name_bytes)));
     frames
 }
 
-fn prefer_smaller_bone_tracks(
-    source: &[VmdParsedBoneFrame],
-    candidate: Vec<VmdParsedBoneFrame>,
-) -> Vec<VmdParsedBoneFrame> {
-    let mut source_tracks: HashMap<Vec<u8>, Vec<VmdParsedBoneFrame>> = HashMap::new();
-    let mut candidate_tracks: HashMap<Vec<u8>, Vec<VmdParsedBoneFrame>> = HashMap::new();
+fn prefer_smaller_tracks<T>(
+    source: Vec<T>,
+    candidate: Vec<T>,
+    frame_key: impl Fn(&T) -> (u32, &[u8]),
+) -> Vec<T> {
+    let mut source_tracks: HashMap<Vec<u8>, Vec<T>> = HashMap::new();
+    let mut candidate_tracks: HashMap<Vec<u8>, Vec<T>> = HashMap::new();
     for frame in source {
         source_tracks
-            .entry(mmd_anim_format::normalize_vmd_name(&frame.bone_name_bytes))
+            .entry(mmd_anim_format::normalize_vmd_name(frame_key(&frame).1))
             .or_default()
-            .push(frame.clone());
+            .push(frame);
     }
     for frame in candidate {
         candidate_tracks
-            .entry(mmd_anim_format::normalize_vmd_name(&frame.bone_name_bytes))
+            .entry(mmd_anim_format::normalize_vmd_name(frame_key(&frame).1))
             .or_default()
             .push(frame);
     }
@@ -302,38 +313,7 @@ fn prefer_smaller_bone_tracks(
             frames.extend(source_track);
         }
     }
-    frames.sort_by(|a, b| (a.frame, &a.bone_name_bytes).cmp(&(b.frame, &b.bone_name_bytes)));
-    frames
-}
-
-fn prefer_smaller_morph_tracks(
-    source: &[VmdParsedMorphFrame],
-    candidate: Vec<VmdParsedMorphFrame>,
-) -> Vec<VmdParsedMorphFrame> {
-    let mut source_tracks: HashMap<Vec<u8>, Vec<VmdParsedMorphFrame>> = HashMap::new();
-    let mut candidate_tracks: HashMap<Vec<u8>, Vec<VmdParsedMorphFrame>> = HashMap::new();
-    for frame in source {
-        source_tracks
-            .entry(mmd_anim_format::normalize_vmd_name(&frame.morph_name_bytes))
-            .or_default()
-            .push(frame.clone());
-    }
-    for frame in candidate {
-        candidate_tracks
-            .entry(mmd_anim_format::normalize_vmd_name(&frame.morph_name_bytes))
-            .or_default()
-            .push(frame);
-    }
-    let mut frames = Vec::new();
-    for (name, source_track) in source_tracks {
-        let candidate_track = candidate_tracks.remove(&name).unwrap_or_default();
-        if candidate_track.len() < source_track.len() {
-            frames.extend(candidate_track);
-        } else {
-            frames.extend(source_track);
-        }
-    }
-    frames.sort_by(|a, b| (a.frame, &a.morph_name_bytes).cmp(&(b.frame, &b.morph_name_bytes)));
+    frames.sort_by(|a, b| frame_key(a).cmp(&frame_key(b)));
     frames
 }
 
@@ -358,42 +338,17 @@ fn vmd_interpolation_block(curves: mmd_anim_runtime::VmdBoneInterpolation) -> [u
     block
 }
 
-fn unique_bone_names(
-    animation: &mmd_anim_format::VmdParsedAnimation,
+fn unique_names<'a>(
+    source: impl Iterator<Item = (&'a str, &'a [u8])>,
 ) -> (Vec<mmd_anim_format::VmdExportName>, HashMap<Vec<u8>, u32>) {
     let mut names = Vec::new();
     let mut indices = HashMap::new();
-    for frame in &animation.bone_frames {
-        let normalized = mmd_anim_format::normalize_vmd_name(&frame.bone_name_bytes);
+    for (text, bytes) in source {
+        let normalized = mmd_anim_format::normalize_vmd_name(bytes);
         if let std::collections::hash_map::Entry::Vacant(entry) = indices.entry(normalized) {
             let index = names.len() as u32;
             entry.insert(index);
-            names.push(mmd_anim_format::VmdExportName::new(
-                frame.bone_name.clone(),
-                frame.bone_name_bytes.clone(),
-            ));
-        }
-    }
-    if names.is_empty() {
-        names.push(mmd_anim_format::VmdExportName::new("", Vec::new()));
-    }
-    (names, indices)
-}
-
-fn unique_morph_names(
-    animation: &mmd_anim_format::VmdParsedAnimation,
-) -> (Vec<mmd_anim_format::VmdExportName>, HashMap<Vec<u8>, u32>) {
-    let mut names = Vec::new();
-    let mut indices = HashMap::new();
-    for frame in &animation.morph_frames {
-        let normalized = mmd_anim_format::normalize_vmd_name(&frame.morph_name_bytes);
-        if let std::collections::hash_map::Entry::Vacant(entry) = indices.entry(normalized) {
-            let index = names.len() as u32;
-            entry.insert(index);
-            names.push(mmd_anim_format::VmdExportName::new(
-                frame.morph_name.clone(),
-                frame.morph_name_bytes.clone(),
-            ));
+            names.push(mmd_anim_format::VmdExportName::new(text, bytes.to_vec()));
         }
     }
     (names, indices)

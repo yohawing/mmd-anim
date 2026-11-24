@@ -149,9 +149,7 @@ pub(crate) fn convert_pmx_to_fbx(
     };
 
     let mut baked_max_frame = None;
-    let mut reduction_report = None;
-    let mut reduction_work_stats = None;
-    let mut reduction_timings = None;
+    let mut pose_reduction = None;
     let fbx = if let Some(vmd_path) = vmd {
         let motion_data = read_file(vmd_path)?;
         let motion = mmd_anim_format::parse_vmd_animation(&motion_data).map_err(|error| {
@@ -209,34 +207,31 @@ pub(crate) fn convert_pmx_to_fbx(
         }
         baked_max_frame = Some(last_frame);
         let runtime_model = Arc::new(runtime_import.model);
-        if convert_options.physics_bake && convert_options.reduce_pose {
-            let export = export_reduced_fbx_with_physics_bake(
-                &model,
-                runtime_model,
-                &clip,
-                last_frame,
-                &options,
-                pose_reduction_tolerances(&convert_options),
-            )?;
-            reduction_report = Some(export.report);
-            reduction_work_stats = Some(export.work_stats);
-            reduction_timings = Some(export.timings);
+        if convert_options.reduce_pose {
+            let tolerances = pose_reduction_tolerances(&convert_options);
+            let export = if convert_options.physics_bake {
+                export_reduced_fbx_with_physics_bake(
+                    &model,
+                    runtime_model,
+                    &clip,
+                    last_frame,
+                    &options,
+                    tolerances,
+                )?
+            } else {
+                mmd_anim_format::fbx::export_pmx_fbx_binary_with_reduced_runtime_bake(
+                    &model,
+                    runtime_model,
+                    &clip,
+                    last_frame,
+                    tolerances,
+                    &options,
+                )?
+            };
+            pose_reduction = Some((export.report, export.work_stats, export.timings));
             export.bytes
         } else if convert_options.physics_bake {
             export_fbx_with_physics_bake(&model, runtime_model, &clip, last_frame, &options)?
-        } else if convert_options.reduce_pose {
-            let export = mmd_anim_format::fbx::export_pmx_fbx_binary_with_reduced_runtime_bake(
-                &model,
-                runtime_model,
-                &clip,
-                last_frame,
-                pose_reduction_tolerances(&convert_options),
-                &options,
-            )?;
-            reduction_report = Some(export.report);
-            reduction_work_stats = Some(export.work_stats);
-            reduction_timings = Some(export.timings);
-            export.bytes
         } else {
             mmd_anim_format::fbx::export_fbx_with_runtime_bake(
                 &model,
@@ -279,7 +274,7 @@ pub(crate) fn convert_pmx_to_fbx(
             copied_diffuse_textures,
         });
         let mut report = report;
-        if let Some(reduction) = reduction_report {
+        if let Some((reduction, work, timings)) = pose_reduction {
             report["poseReduction"] = json!({
                 "sourceBoneKeys": reduction.source_bone_key_count,
                 "reducedBoneKeys": reduction.reduced_bone_key_count,
@@ -291,8 +286,6 @@ pub(crate) fn convert_pmx_to_fbx(
                 "maxWorldRotationErrorRadians": reduction.max_world_rotation_error_radians,
                 "maxMorphWeightError": reduction.max_morph_weight_error,
             });
-        }
-        if let Some(work) = reduction_work_stats {
             report["poseReduction"]["workStats"] = json!({
                 "globalValidationPasses": work.global_validation_passes,
                 "candidateRebuilds": work.candidate_rebuilds,
@@ -315,8 +308,6 @@ pub(crate) fn convert_pmx_to_fbx(
                 "ancestorKeyAdditions": work.ancestor_key_additions,
                 "addedKeysPerPass": work.added_keys_per_pass,
             });
-        }
-        if let Some(timings) = reduction_timings {
             report["poseReduction"]["timingsMs"] = json!({
                 "localPrefit": timings.local_prefit.as_secs_f64() * 1000.0,
                 "candidateBuild": timings.candidate_build.as_secs_f64() * 1000.0,

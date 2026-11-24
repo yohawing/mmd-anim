@@ -7,6 +7,8 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use commands::patch::PmmFrameRangeArgs;
+
 mod commands;
 mod mmd_dumper_oracle;
 mod schema;
@@ -716,11 +718,7 @@ fn dispatch_inspect(
         }
         return commands::parse::parse_format_json(asset);
     }
-    if detect_path_format(asset)? == mmd_anim_format::MmdFormatKind::Pmx {
-        commands::parse::parse_pmx_summary(asset)
-    } else {
-        commands::parse::parse_format_summary(asset)
-    }
+    commands::parse::parse_format_summary(asset)
 }
 
 fn dispatch_completion(shell: CompletionShell) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -865,11 +863,10 @@ fn dispatch_roundtrip(
     use_json: bool,
     via_json: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    match (via_json, use_json) {
-        (true, true) => commands::export::export_json_roundtrip_json(asset),
-        (true, false) => commands::export::export_json_roundtrip_summary(asset),
-        (false, true) => commands::export::export_roundtrip_json(asset),
-        (false, false) => commands::export::export_roundtrip_summary(asset),
+    if via_json {
+        commands::export::export_json_roundtrip(asset, use_json)
+    } else {
+        commands::export::export_roundtrip(asset, use_json)
     }
 }
 
@@ -901,13 +898,8 @@ fn dispatch_bench(
         let Some(motion) = motion else {
             return usage_error("bench requires <model> <motion> unless --synthetic is set");
         };
-        let mut raw = vec![
-            model.to_string_lossy().into_owned(),
-            motion.to_string_lossy().into_owned(),
-        ];
-        raw.extend(extra_args);
-        let mut iter = raw.into_iter();
-        let cfg = match commands::bench::parse_bench_pair_args(&mut iter) {
+        let mut iter = extra_args.into_iter();
+        let cfg = match commands::bench::parse_bench_pair_args(model, motion, &mut iter) {
             Ok(cfg) => cfg,
             Err(error) => return usage_error(error.to_string()),
         };
@@ -935,7 +927,7 @@ fn dispatch_verify(
         {
             return usage_error("verify without --mode only supports oracle summary files");
         }
-        return commands::oracle::oracle_summary(&target.to_string_lossy(), use_json);
+        return commands::oracle::oracle_summary(target, use_json);
     };
 
     match mode {
@@ -1099,23 +1091,11 @@ fn dispatch_verify_ik(
     }
 
     if compare || use_json || sample_frame_offset.is_some() {
-        let mut raw = vec![root.to_string_lossy().into_owned()];
-        if let Some(offset) = sample_frame_offset {
-            raw.push(offset.to_string());
-        }
-        if use_json {
-            raw.push("--json".to_owned());
-        }
-        let mut iter = raw.into_iter();
-        return match commands::golden::parse_golden_ik_compare_args(&mut iter) {
-            Ok((root, offset, use_json)) => {
-                commands::golden::golden_ik_compare(Path::new(&root), offset, use_json)
-            }
-            Err(error) => {
-                eprintln!("{error}");
-                Ok(ExitCode::from(2))
-            }
-        };
+        return commands::golden::golden_ik_compare(
+            root,
+            sample_frame_offset.unwrap_or(0.0),
+            use_json,
+        );
     }
 
     commands::golden::golden_ik_summary(root)
@@ -1138,55 +1118,6 @@ fn dispatch_ik_diagnose(
     let offset = sample_frame_offset.unwrap_or(0.0);
 
     commands::golden::golden_ik_diagnose(root, &case_name, frame, &bone_name, offset)
-}
-
-struct PmmFrameRangeArgs {
-    current_frame: Option<i32>,
-    current_frame_text: Option<i32>,
-    begin_frame: Option<i32>,
-    end_frame: Option<i32>,
-    begin_frame_enabled: Option<String>,
-    end_frame_enabled: Option<String>,
-}
-
-impl PmmFrameRangeArgs {
-    fn has_any(&self) -> bool {
-        self.current_frame.is_some()
-            || self.current_frame_text.is_some()
-            || self.begin_frame.is_some()
-            || self.end_frame.is_some()
-            || self.begin_frame_enabled.is_some()
-            || self.end_frame_enabled.is_some()
-    }
-
-    fn to_option_args(&self) -> Vec<String> {
-        let mut args = Vec::new();
-        if let Some(value) = self.current_frame {
-            args.push("--current-frame".to_owned());
-            args.push(value.to_string());
-        }
-        if let Some(value) = self.current_frame_text {
-            args.push("--current-frame-text".to_owned());
-            args.push(value.to_string());
-        }
-        if let Some(value) = self.begin_frame {
-            args.push("--begin-frame".to_owned());
-            args.push(value.to_string());
-        }
-        if let Some(value) = self.end_frame {
-            args.push("--end-frame".to_owned());
-            args.push(value.to_string());
-        }
-        if let Some(value) = &self.begin_frame_enabled {
-            args.push("--begin-frame-enabled".to_owned());
-            args.push(value.clone());
-        }
-        if let Some(value) = &self.end_frame_enabled {
-            args.push("--end-frame-enabled".to_owned());
-            args.push(value.clone());
-        }
-        args
-    }
 }
 
 fn dispatch_patch(
@@ -1219,7 +1150,7 @@ fn dispatch_patch(
             commands::patch::patch_pmm_scene_frame_range(
                 input,
                 &output,
-                &frame_args.to_option_args(),
+                &frame_args.to_patch()?,
                 use_json,
             )
         }

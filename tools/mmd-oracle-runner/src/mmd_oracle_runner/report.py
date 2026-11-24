@@ -68,41 +68,71 @@ def generate_report(snapshot: dict[str, Any]) -> str:
     else:
         introduction += " It does not include absolute asset paths, per-frame data, or per-bone dumps."
     lines = [
-        "# Motion Golden Oracle Quality Report", "",
-        introduction, "",
-        "## Result at a glance", "",
-        f"Of {funnel['selected']} selected asset pairs, {funnel['compared']} reached numeric comparison and {funnel['passed']} passed the current parity thresholds.", "",
-        "The counts form an execution funnel. A pair that stops at an earlier stage is still part of the campaign and is classified below.", "",
-        "## Run and provenance", "", "| Field | Value |", "| --- | --- |",
-        f"| Commit SHA | {_cell(run['commitSha'])} |", f"| Repository state | {_cell(run['repositoryState'])} |",
-        f"| MMD version (self-reported) | {_cell(run['mmdVersion'])} |", f"| MMDDumper version (self-reported) | {_cell(run['dumperVersion'])} |",
-        f"| MMD version source | {_cell(run['mmdVersionSource'])} |", f"| MMDDumper version source | {_cell(run['dumperVersionSource'])} |",
-        f"| MMD executable SHA-256 | {_cell(run['mmdExecutableSha256'])} |", f"| Timestamp | {_cell(run['timestamp'])} |",
-        f"| Sampling policy | {_cell(run['samplingPolicy'])} |", f"| Manifest SHA-256 | {_cell(run['manifestHash'])} |",
-        "", "## Execution funnel", "", "| Stage | Cases |", "| --- | ---: |",
+        "# Motion Golden Oracle Quality Report",
+        "",
+        introduction,
+        "",
+        "## Result at a glance",
+        "",
+        f"Of {funnel['selected']} selected asset pairs, {funnel['compared']} reached numeric comparison and {funnel['passed']} passed the current parity thresholds.",
+        "",
+        "The counts form an execution funnel. A pair that stops at an earlier stage is still part of the campaign and is classified below.",
+        "",
+        "## Run and provenance",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        f"| Commit SHA | {_cell(run['commitSha'])} |",
+        f"| Repository state | {_cell(run['repositoryState'])} |",
+        f"| MMD version (self-reported) | {_cell(run['mmdVersion'])} |",
+        f"| MMDDumper version (self-reported) | {_cell(run['dumperVersion'])} |",
+        f"| MMD version source | {_cell(run['mmdVersionSource'])} |",
+        f"| MMDDumper version source | {_cell(run['dumperVersionSource'])} |",
+        f"| MMD executable SHA-256 | {_cell(run['mmdExecutableSha256'])} |",
+        f"| Timestamp | {_cell(run['timestamp'])} |",
+        f"| Sampling policy | {_cell(run['samplingPolicy'])} |",
+        f"| Manifest SHA-256 | {_cell(run['manifestHash'])} |",
+        "",
+        "## Execution funnel",
+        "",
+        "| Stage | Cases |",
+        "| --- | ---: |",
     ]
     lines.extend(f"| {field.capitalize()} | {funnel[field]} |" for field in _FUNNEL_FIELDS)
-    lines.extend((
-        "", "### How to read the funnel", "",
-        "| Stage | Meaning |", "| --- | --- |",
-        "| Prepared | A PMM scene was built for the pair. |",
-        "| Recorded | MMD played the scene and produced oracle samples. |",
-        "| Compared | The oracle samples and `mmd-anim` output had comparable fields. |",
-        "| Passed | Every reported metric stayed within the current thresholds. |",
-    ))
+    lines.extend(
+        (
+            "",
+            "### How to read the funnel",
+            "",
+            "| Stage | Meaning |",
+            "| --- | --- |",
+            "| Prepared | A PMM scene was built for the pair. |",
+            "| Recorded | MMD played the scene and produced oracle samples. |",
+            "| Compared | The oracle samples and `mmd-anim` output had comparable fields. |",
+            "| Passed | Every reported metric stayed within the current thresholds. |",
+        )
+    )
     cohorts = _cohort_counts(snapshot)
-    lines.extend((
-        "", "## Cohort summary", "",
-        "| Cohort | Selected | Compared | Passed | Confirmed | Failed |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
-        f"| Numeric parity | {cohorts['numeric-parity']['selected']} | {cohorts['numeric-parity']['compared']} | {cohorts['numeric-parity']['passed']} | — | — |",
-        f"| Applicability | {cohorts['no-compatible-motion']['selected']} | — | — | {cohorts['no-compatible-motion']['confirmed']} | {cohorts['no-compatible-motion']['failed']} |",
-    ))
+    lines.extend(
+        (
+            "",
+            "## Cohort summary",
+            "",
+            "| Cohort | Selected | Compared | Passed | Confirmed | Failed |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+            f"| Numeric parity | {cohorts['numeric-parity']['selected']} | {cohorts['numeric-parity']['compared']} | {cohorts['numeric-parity']['passed']} | — | — |",
+            f"| Applicability | {cohorts['no-compatible-motion']['selected']} | — | — | {cohorts['no-compatible-motion']['confirmed']} | {cohorts['no-compatible-motion']['failed']} |",
+        )
+    )
     if cohorts["no-compatible-motion"]["confirmed"]:
-        lines.extend((
-            "", "Applicability pass means:", "",
-            "No compatible bone or morph keyframes were written to the generated PMM, and MMD recorded the scene successfully.",
-        ))
+        lines.extend(
+            (
+                "",
+                "Applicability pass means:",
+                "",
+                "No compatible bone or morph keyframes were written to the generated PMM, and MMD recorded the scene successfully.",
+            )
+        )
     lines.extend(("", "## Parity thresholds", "", "| Metric | Threshold |", "| --- | ---: |"))
     lines.extend(f"| {_cell(metric)} | {_number(snapshot['thresholds'][metric])} |" for metric in _METRIC_NAMES)
     lines.extend(("", "## Metric distributions", ""))
@@ -111,13 +141,20 @@ def generate_report(snapshot: dict[str, Any]) -> str:
         for metric in _METRIC_NAMES:
             if metric in snapshot["metrics"]:
                 distribution = snapshot["metrics"][metric]
-                lines.append(f"| {_cell(metric)} | " + " | ".join(_number(distribution[field]) for field in _DISTRIBUTION_FIELDS) + " |")
+                lines.append(
+                    f"| {_cell(metric)} | "
+                    + " | ".join(_number(distribution[field]) for field in _DISTRIBUTION_FIELDS)
+                    + " |"
+                )
     else:
         lines.append("No comparable cases were available; metric distributions are empty.")
     lines.extend(("", "## Failure classifications", ""))
     if snapshot["failures"]:
         lines.extend(("| Classification | Cases | Meaning |", "| --- | ---: | --- |"))
-        lines.extend(f"| {_cell(name)} | {count} | {_cell(_FAILURE_MEANINGS.get(name, 'See the case outcome for this campaign-specific classification.'))} |" for name, count in sorted(snapshot["failures"].items()))
+        lines.extend(
+            f"| {_cell(name)} | {count} | {_cell(_FAILURE_MEANINGS.get(name, 'See the case outcome for this campaign-specific classification.'))} |"
+            for name, count in sorted(snapshot["failures"].items())
+        )
     else:
         lines.append("No failures were classified.")
     _append_summary_table(lines, "Feature summaries", snapshot["features"])
@@ -127,19 +164,44 @@ def generate_report(snapshot: dict[str, Any]) -> str:
         lines.extend(("| Case | Model | Motion | Metric | Value | Result |", "| --- | --- | --- | --- | ---: | --- |"))
         for case in snapshot["worstCases"]:
             pair = pair_by_id.get(case["caseId"], {})
-            lines.append(f"| {_cell(case['caseId'])} | {_cell(pair.get('model', '—'))} | {_cell(pair.get('motion', '—'))} | {_cell(case['metric'])} | {_number(case['value'])} | {_cell(case['result'])} |")
+            lines.append(
+                f"| {_cell(case['caseId'])} | {_cell(pair.get('model', '—'))} | {_cell(pair.get('motion', '—'))} | {_cell(case['metric'])} | {_number(case['value'])} | {_cell(case['result'])} |"
+            )
     else:
         lines.append("No worst cases were reported.")
     if cases:
-        lines.extend(("", "## Asset pair results", "", "Asset labels are relative to the local PMX and VMD library roots; machine-specific absolute paths are omitted.", "", f"<details><summary>Show all {len(cases)} asset pairs</summary>", "", "| Case | Model | Motion | Expectation | Applied motion keyframes | Outcome | Classifications |", "| --- | --- | --- | --- | ---: | --- | --- |"))
+        lines.extend(
+            (
+                "",
+                "## Asset pair results",
+                "",
+                "Asset labels are relative to the local PMX and VMD library roots; machine-specific absolute paths are omitted.",
+                "",
+                f"<details><summary>Show all {len(cases)} asset pairs</summary>",
+                "",
+                "| Case | Model | Motion | Expectation | Applied motion keyframes | Outcome | Classifications |",
+                "| --- | --- | --- | --- | ---: | --- | --- |",
+            )
+        )
         for case in cases:
             failures = ", ".join(case["failures"]) or "—"
             outcome = _OUTCOME_LABELS.get(case["result"], case["result"])
             expectation = case.get("expectation", "numeric-parity")
             applied = case.get("appliedMotionKeyframes", "—")
-            lines.append(f"| {_cell(case['caseId'])} | {_cell(case['model'])} | {_cell(case['motion'])} | {_cell(expectation)} | {_cell(applied)} | {_cell(outcome)} | {_cell(failures)} |")
+            lines.append(
+                f"| {_cell(case['caseId'])} | {_cell(case['model'])} | {_cell(case['motion'])} | {_cell(expectation)} | {_cell(applied)} | {_cell(outcome)} | {_cell(failures)} |"
+            )
         lines.extend(("", "</details>"))
-    lines.extend(("", "## Raw artifact retention", "", "Raw PMM, JSONL, and log artifacts are not retained by this quality-report workflow.", f"Snapshot retention flag: `{str(snapshot['rawArtifacts']['retained']).lower()}`.", ""))
+    lines.extend(
+        (
+            "",
+            "## Raw artifact retention",
+            "",
+            "Raw PMM, JSONL, and log artifacts are not retained by this quality-report workflow.",
+            f"Snapshot retention flag: `{str(snapshot['rawArtifacts']['retained']).lower()}`.",
+            "",
+        )
+    )
     return "\n".join(lines)
 
 

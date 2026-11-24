@@ -74,7 +74,7 @@ pub fn parse_vpd_pose(data: &[u8]) -> Result<VpdParsedPose, ImportError> {
                 });
             };
             let translation =
-                parse_f32_tuple3(lines.next().ok_or(ImportError::UnsupportedFormat {
+                parse_f32_tuple::<3>(lines.next().ok_or(ImportError::UnsupportedFormat {
                     format: "VPD",
                     detail: "missing bone translation",
                 })?)
@@ -82,14 +82,12 @@ pub fn parse_vpd_pose(data: &[u8]) -> Result<VpdParsedPose, ImportError> {
                     format: "VPD",
                     detail: "invalid bone translation",
                 })?;
-            let rotation =
-                lines
-                    .next()
-                    .and_then(parse_f32_tuple4)
-                    .ok_or(ImportError::UnsupportedFormat {
-                        format: "VPD",
-                        detail: "invalid bone rotation",
-                    })?;
+            let rotation = lines.next().and_then(parse_f32_tuple::<4>).ok_or(
+                ImportError::UnsupportedFormat {
+                    format: "VPD",
+                    detail: "invalid bone rotation",
+                },
+            )?;
             let closing = lines.next().ok_or(ImportError::UnsupportedFormat {
                 format: "VPD",
                 detail: "missing bone terminator",
@@ -148,25 +146,18 @@ pub fn export_vpd_pose(pose: &VpdParsedPose) -> Vec<u8> {
     encode_sjis(&text)
 }
 
-fn parse_f32_tuple3(line: &str) -> Option<[f32; 3]> {
-    parse_numbers(line).and_then(|values| values.try_into().ok())
-}
-
-fn parse_f32_tuple4(line: &str) -> Option<[f32; 4]> {
-    parse_numbers(line).and_then(|values| values.try_into().ok())
-}
-
-fn parse_numbers(line: &str) -> Option<Vec<f32>> {
-    strip_comment(line)
+fn parse_f32_tuple<const N: usize>(line: &str) -> Option<[f32; N]> {
+    let mut parts = strip_comment(line)
         .trim_matches(|c: char| c == ';' || c == '{' || c == '}')
-        .split(',')
-        .map(|part| {
-            part.trim()
-                .parse::<f32>()
-                .ok()
-                .filter(|value| value.is_finite())
-        })
-        .collect()
+        .split(',');
+    let mut values = [0.0; N];
+    for value in &mut values {
+        *value = parts.next()?.trim().parse::<f32>().ok()?;
+        if !value.is_finite() {
+            return None;
+        }
+    }
+    parts.next().is_none().then_some(values)
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -228,6 +219,10 @@ mod tests {
             "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\n0,0,0;\r\n0,0,0,1;\r\n",
             "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\ninvalid;\r\n0,0,0,1;\r\n}\r\n",
             "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\nNaN,0,0;\r\n0,0,0,1;\r\n}\r\n",
+            "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\n0,0;\r\n0,0,0,1;\r\n}\r\n",
+            "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\n0,0,0,0;\r\n0,0,0,1;\r\n}\r\n",
+            "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\n0,0,0;\r\n0,0,1;\r\n}\r\n",
+            "Vocaloid Pose Data file\r\n\r\nmodel.pmx;\r\n1;\r\nBone0{左腕\r\n0,0,0;\r\n0,0,0,1,0;\r\n}\r\n",
         ] {
             assert!(parse_vpd_pose(&encode_sjis(source)).is_err(), "{source:?}");
         }

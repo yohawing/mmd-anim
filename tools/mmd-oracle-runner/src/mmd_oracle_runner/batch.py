@@ -43,6 +43,7 @@ def run_batch(
             "casePath": path_text,
             "action": action_name,
         }
+        cases.append(entry)
         try:
             case = case_loader(case_path)
         except CaseValidationError as error:
@@ -52,11 +53,9 @@ def run_batch(
                     "error": {"kind": "validation", **error.as_dict()},
                 }
             )
-            cases.append(entry)
             continue
         except Exception as error:  # noqa: BLE001 - continue-on-error boundary
             entry.update({"ok": False, "error": _exception_error(error)})
-            cases.append(entry)
             continue
 
         entry["caseName"] = case.name
@@ -96,7 +95,6 @@ def run_batch(
                     )
         except Exception as error:  # noqa: BLE001 - continue-on-error boundary
             entry.update({"ok": False, "error": _exception_error(error)})
-        cases.append(entry)
 
     passed = sum(1 for case in cases if case["ok"] is True)
     failed = len(cases) - passed

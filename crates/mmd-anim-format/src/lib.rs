@@ -15,6 +15,7 @@ pub mod normalize;
 pub mod pmd;
 pub mod pmm;
 pub mod pmx;
+mod rigid_body_codes;
 mod sjis;
 pub mod vmd;
 pub mod vpd;

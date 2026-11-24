@@ -116,6 +116,106 @@ fn execution_error_exits_with_one_and_reports_input_path() {
 }
 
 #[test]
+#[cfg(windows)]
+fn verify_oracle_reads_non_unicode_file_paths() {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    let mut path = unique_temp_path("oracle").into_os_string();
+    path.push(OsString::from_wide(&[0xd800]));
+    let path = PathBuf::from(path);
+    let guard = TempFileGuard::new(path.clone());
+    fs::write(
+        &path,
+        r#"{"schemaVersion":1,"source":{"mmdVersion":"9.32-x64","dumperVersion":"test"},"frame":0.0,"models":[]}"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mmd-anim"))
+        .arg("verify")
+        .arg(&path)
+        .arg("--json")
+        .output()
+        .expect("oracle summary should run");
+    guard.cleanup();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_text(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["frames"], 1);
+    assert_eq!(report["input"], path.to_string_lossy().as_ref());
+}
+
+#[test]
+fn verify_ik_preserves_literal_root_names_and_typed_offsets() {
+    let parent = unique_temp_path("ik-roots");
+    let mut outputs = Vec::new();
+    for name in ["golden", "--json", "--root"] {
+        let root = parent.join(name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("oracle-batch.json"), r#"{"cases":[]}"#).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_mmd-anim"))
+            .current_dir(&parent)
+            .args([
+                "verify",
+                "--mode",
+                "ik",
+                "--json",
+                "--sample-frame-offset=-0.25",
+                "--",
+                name,
+            ])
+            .output()
+            .expect("IK comparison should run");
+        outputs.push((name, output));
+    }
+    fs::remove_dir_all(parent).unwrap();
+
+    for (name, output) in outputs {
+        assert_eq!(output.status.code(), Some(0), "{}", stderr_text(&output));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["root"], name);
+        assert_eq!(report["sampleFrameOffset"], -0.25);
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn verify_ik_rejects_invalid_arguments_at_the_cli_boundary() {
+    for invalid in ["--sample-frame-offset=nope", "--bad", "extra"] {
+        let output = run_cli(&["verify", "root", "--mode", "ik", invalid]);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr_text(&output));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn bench_pair_preserves_literal_model_and_motion_paths() {
+    let root = unique_temp_path("bench-paths");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("--json"),
+        include_bytes!("../../mmd-anim-format/fixtures/pmx/ik_multi_axis_limit.pmx"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("--no-ik"),
+        include_bytes!("../../mmd-anim-format/fixtures/vmd/ik_multi_bone_nondefault.vmd"),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mmd-anim"))
+        .current_dir(&root)
+        .args(["bench", "--", "--json", "--no-ik", "0", "1", "1", "--json"])
+        .output()
+        .expect("pair benchmark should run");
+    fs::remove_dir_all(root).unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_text(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["model"], "--json");
+    assert_eq!(report["motion"], "--no-ik");
+    assert_eq!(report["config"]["frameCount"], 1);
+    assert_eq!(report["config"]["solveIk"], true);
+}
+
+#[test]
 fn detected_format_parse_error_reports_path_and_format() {
     let malformed = unique_temp_path("malformed.pmx");
     fs::write(&malformed, b"PMX ").expect("malformed PMX fixture should be written");

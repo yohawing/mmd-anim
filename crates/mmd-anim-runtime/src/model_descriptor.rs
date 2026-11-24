@@ -250,7 +250,6 @@ pub fn compile_runtime_model_descriptor_v1(
     validate_append_transforms(&descriptor.append_transforms, bone_count)?;
 
     let mut bones = Vec::with_capacity(bone_count);
-    let mut local_axes = Vec::with_capacity(bone_count);
     for (bone_index, descriptor_bone) in descriptor.bones.iter().enumerate() {
         let parent = descriptor_bone.parent;
         let absolute_position = descriptor_bone.rest_position;
@@ -269,7 +268,6 @@ pub fn compile_runtime_model_descriptor_v1(
             // pose evaluation must not project rotations onto it.
             enforce_fixed_axis: false,
         });
-        local_axes.push(descriptor_bone.local_axis);
     }
 
     let ik_solvers = descriptor
@@ -321,7 +319,7 @@ pub fn compile_runtime_model_descriptor_v1(
             ),
         },
     )?;
-    Ok(model.with_local_axes(local_axes))
+    Ok(model.with_local_axes(descriptor.bones.iter().map(|bone| bone.local_axis)))
 }
 
 fn validate_bones(bones: &[RuntimeBoneDescriptorV1]) -> Result<(), RuntimeModelDescriptorError> {

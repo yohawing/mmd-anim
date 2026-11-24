@@ -466,6 +466,8 @@ pub struct ReductionWorkStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValidationMode {
     Incremental,
+    // Used by tests to compare incremental validation with a full rescan.
+    #[cfg_attr(not(test), allow(dead_code))]
     FullScan,
 }
 
@@ -767,7 +769,11 @@ fn reduce_dense_pose_sequence_internal(
     let mut timings = ReductionTimings::default();
     let worker_count = resolve_reduction_worker_count(worker_count, input.frame_count);
     let worker_pool = build_reduction_worker_pool(worker_count)?;
-    let local_euler_xyz = unwrap_euler_xyz(&local_rotations, input.frame_count, input.bone_count);
+    let local_euler_xyz = if target == ReductionTarget::DccCubic {
+        unwrap_euler_xyz(&local_rotations, input.frame_count, input.bone_count)
+    } else {
+        Vec::new()
+    };
     for frame in 0..input.frame_count {
         for morph in 0..input.morph_count {
             if !input.morph_weight(frame, morph).is_finite() {
@@ -1146,6 +1152,51 @@ fn validate_finite_matrix(
     }
 }
 
+/// Recursively splits `[0, frame_count - 1]` at the worst interior frame until every
+/// segment's worst normalized error is within tolerance (`<= 1.0`).
+///
+/// `worst_in_segment(start, end)` returns the worst `(normalized_error, frame)` among the
+/// interior frames of `start..=end`. Returns the number of newly inserted keys.
+fn split_track_at_worst_frames(
+    keys: &mut Vec<usize>,
+    frame_count: usize,
+    mut worst_in_segment: impl FnMut(usize, usize) -> Option<(f32, usize)>,
+) -> usize {
+    if frame_count <= 2 {
+        return 0;
+    }
+    let mut key_additions = 0;
+    let mut stack = vec![(0usize, frame_count - 1)];
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+        if let Some((_, frame)) = worst_in_segment(start, end).filter(|value| value.0 > 1.0) {
+            key_additions += usize::from(insert_key(keys, frame));
+            stack.push((frame, end));
+            stack.push((start, frame));
+        }
+    }
+    key_additions
+}
+
+/// Returns the interior frame of `start..=end` with the largest normalized error, preferring
+/// the earliest frame on ties.
+fn worst_interior_frame(
+    start: usize,
+    end: usize,
+    mut normalized_error_at: impl FnMut(usize) -> f32,
+) -> Option<(f32, usize)> {
+    let mut worst: Option<(f32, usize)> = None;
+    for frame in start + 1..end {
+        let normalized = normalized_error_at(frame);
+        if is_worse(worst, normalized, frame) {
+            worst = Some((normalized, frame));
+        }
+    }
+    worst
+}
+
 fn split_bone_track(
     keys: &mut Vec<usize>,
     input: DensePoseSequenceView<'_>,
@@ -1158,15 +1209,10 @@ fn split_bone_track(
         return;
     }
     let bone_count = translations.len() / input.frame_count;
-    let mut stack = vec![(0usize, input.frame_count - 1)];
-    while let Some((start, end)) = stack.pop() {
-        if end <= start + 1 {
-            continue;
-        }
+    split_track_at_worst_frames(keys, input.frame_count, |start, end| {
         let start_index = start * bone_count + bone;
         let end_index = end * bone_count + bone;
-        let mut worst: Option<(f32, usize)> = None;
-        for frame in start + 1..end {
+        worst_interior_frame(start, end, |frame| {
             let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
             let index = frame * bone_count + bone;
             let position_error = translations[index]
@@ -1175,20 +1221,12 @@ fn split_bone_track(
                 rotations[index],
                 rotations[start_index].slerp(rotations[end_index], amount),
             );
-            let normalized = normalized_error(position_error, tolerances.local_position).max(
-                normalized_error(rotation_error, tolerances.local_rotation_radians),
-            );
-            if is_worse(worst, normalized, frame) {
-                worst = Some((normalized, frame));
-            }
-        }
-        if let Some((normalized, frame)) = worst.filter(|value| value.0 > 1.0) {
-            let _ = normalized;
-            insert_key(keys, frame);
-            stack.push((frame, end));
-            stack.push((start, frame));
-        }
-    }
+            normalized_error(position_error, tolerances.local_position).max(normalized_error(
+                rotation_error,
+                tolerances.local_rotation_radians,
+            ))
+        })
+    });
 }
 
 #[derive(Default)]
@@ -1207,23 +1245,15 @@ fn split_dcc_bone_track(
     euler_xyz: &[Vec3A],
     tolerances: ReductionTolerances,
 ) -> LocalPrefitStats {
-    if input.frame_count <= 2 {
-        return LocalPrefitStats::default();
-    }
     let bone_count = input.bone_count;
     let mut stats = LocalPrefitStats::default();
-    let mut stack = vec![(0usize, input.frame_count - 1)];
-    while let Some((start, end)) = stack.pop() {
-        if end <= start + 1 {
-            continue;
-        }
+    stats.key_additions = split_track_at_worst_frames(keys, input.frame_count, |start, end| {
         let segment = fit_dcc_bone_segment(input, bone, start, end, translations, euler_xyz);
         stats.segment_fits += 1;
         let start_index = start * bone_count + bone;
         let end_index = end * bone_count + bone;
         let duration = input.sample_frame(end) - input.sample_frame(start);
-        let mut worst: Option<(f32, usize)> = None;
-        for frame in start + 1..end {
+        worst_interior_frame(start, end, |frame| {
             stats.samples += 1;
             let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
             let translation = sample_dcc_vec3(
@@ -1245,24 +1275,16 @@ fn split_dcc_bone_track(
             let rotation =
                 normalize_quat(Quat::from_euler(EulerRot::XYZ, euler.x, euler.y, euler.z));
             let index = frame * bone_count + bone;
-            let normalized = normalized_error(
+            normalized_error(
                 translations[index].distance(translation),
                 tolerances.local_position,
             )
             .max(normalized_error(
                 quat_angle(rotations[index], rotation),
                 tolerances.local_rotation_radians,
-            ));
-            if is_worse(worst, normalized, frame) {
-                worst = Some((normalized, frame));
-            }
-        }
-        if let Some((_, frame)) = worst.filter(|value| value.0 > 1.0) {
-            stats.key_additions += usize::from(insert_key(keys, frame));
-            stack.push((frame, end));
-            stack.push((start, frame));
-        }
-    }
+            ))
+        })
+    });
     stats
 }
 
@@ -1272,15 +1294,8 @@ fn split_dcc_morph_track(
     morph: usize,
     tolerance: f32,
 ) -> LocalPrefitStats {
-    if input.frame_count <= 2 {
-        return LocalPrefitStats::default();
-    }
     let mut stats = LocalPrefitStats::default();
-    let mut stack = vec![(0usize, input.frame_count - 1)];
-    while let Some((start, end)) = stack.pop() {
-        if end <= start + 1 {
-            continue;
-        }
+    stats.key_additions = split_track_at_worst_frames(keys, input.frame_count, |start, end| {
         let segment = fit_dcc_scalar_segment(
             start,
             end,
@@ -1289,8 +1304,7 @@ fn split_dcc_morph_track(
         );
         stats.segment_fits += 1;
         let duration = input.sample_frame(end) - input.sample_frame(start);
-        let mut worst: Option<(f32, usize)> = None;
-        for frame in start + 1..end {
+        worst_interior_frame(start, end, |frame| {
             stats.samples += 1;
             let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
             let expected = sample_hermite(
@@ -1301,20 +1315,12 @@ fn split_dcc_morph_track(
                 duration,
                 amount,
             );
-            let normalized = normalized_error(
+            normalized_error(
                 (input.morph_weight(frame, morph) - expected).abs(),
                 tolerance,
-            );
-            if is_worse(worst, normalized, frame) {
-                worst = Some((normalized, frame));
-            }
-        }
-        if let Some((_, frame)) = worst.filter(|value| value.0 > 1.0) {
-            stats.key_additions += usize::from(insert_key(keys, frame));
-            stack.push((frame, end));
-            stack.push((start, frame));
-        }
-    }
+            )
+        })
+    });
     stats
 }
 
@@ -1324,33 +1330,17 @@ fn split_morph_track(
     morph: usize,
     tolerance: f32,
 ) {
-    if input.frame_count <= 2 {
-        return;
-    }
-    let mut stack = vec![(0usize, input.frame_count - 1)];
-    while let Some((start, end)) = stack.pop() {
-        if end <= start + 1 {
-            continue;
-        }
-        let mut worst: Option<(f32, usize)> = None;
-        for frame in start + 1..end {
+    split_track_at_worst_frames(keys, input.frame_count, |start, end| {
+        worst_interior_frame(start, end, |frame| {
             let amount = segment_amount(start, end, frame, |sample| input.sample_frame(sample));
             let expected = input.morph_weight(start, morph)
                 + (input.morph_weight(end, morph) - input.morph_weight(start, morph)) * amount;
-            let normalized = normalized_error(
+            normalized_error(
                 (input.morph_weight(frame, morph) - expected).abs(),
                 tolerance,
-            );
-            if is_worse(worst, normalized, frame) {
-                worst = Some((normalized, frame));
-            }
-        }
-        if let Some((_, frame)) = worst.filter(|value| value.0 > 1.0) {
-            insert_key(keys, frame);
-            stack.push((frame, end));
-            stack.push((start, frame));
-        }
-    }
+            )
+        })
+    });
 }
 
 fn insert_key(keys: &mut Vec<usize>, frame: usize) -> bool {
@@ -1610,10 +1600,6 @@ fn prune_ancestor_keys(
         work_stats.ancestor_prune_attempts += 1;
         let start = bone_key_indices[bone][position - 1];
         let end = bone_key_indices[bone][position + 1];
-        let mut replacement_indices = bone_key_indices[bone].clone();
-        replacement_indices.remove(position);
-        let mut replacement_provenance = bone_key_provenance[bone].clone();
-        replacement_provenance.remove(position);
         let replacement = build_bone_track_without_key(sequence, input, local_pose, bone, position);
         work_stats.candidate_bone_track_rebuilds += 1;
         if sequence.target == ReductionTarget::DccCubic {
@@ -1637,8 +1623,8 @@ fn prune_ancestor_keys(
             continue;
         }
 
-        bone_key_indices[bone] = replacement_indices;
-        bone_key_provenance[bone] = replacement_provenance;
+        bone_key_indices[bone].remove(position);
+        bone_key_provenance[bone].remove(position);
         sequence.bone_tracks[bone] = replacement;
         apply_ancestor_prune_candidate(
             sequence,
@@ -1725,6 +1711,59 @@ fn is_descendant_or_self(snapshot: &SkeletonSnapshot, mut bone: usize, root: usi
     }
 }
 
+/// Identifies one bone of a subtree rebuilt while trying a candidate local pose for `bone`.
+#[derive(Clone, Copy)]
+struct SubtreeRebuild {
+    bone_count: usize,
+    frame: usize,
+    bone: usize,
+    current: usize,
+    bone_local: (Vec3A, Quat),
+}
+
+/// Recomputes the world transform of `rebuild.current` inside the subtree rooted at
+/// `rebuild.bone`. The root uses the candidate local pose, other subtree bones use the
+/// cached locals, and parents outside the subtree reuse cached world matrices.
+#[inline]
+fn rebuild_subtree_world(
+    sequence: &ReducedPoseSequence,
+    cache: &ValidationCache,
+    subtree_worlds: &mut [Mat4],
+    rebuild: SubtreeRebuild,
+    work_stats: &mut ReductionWorkStats,
+) -> Result<(Mat4, Quat), PoseReductionError> {
+    let SubtreeRebuild {
+        bone_count,
+        frame,
+        bone,
+        current,
+        bone_local,
+    } = rebuild;
+    let current_index = frame * bone_count + current;
+    let (local_translation, local_rotation) = if current == bone {
+        bone_local
+    } else {
+        (
+            cache.local_translations[current_index],
+            cache.local_rotations[current_index],
+        )
+    };
+    let local = Mat4::from_rotation_translation(local_rotation, local_translation.into());
+    let parent = sequence.snapshot.parent_indices[current];
+    let world = if parent < 0 {
+        local
+    } else if is_descendant_or_self(&sequence.snapshot, parent as usize, bone) {
+        subtree_worlds[parent as usize] * local
+    } else {
+        cache.world_matrices[frame * bone_count + parent as usize] * local
+    };
+    subtree_worlds[current] = world;
+    let world_rotation = decompose_rigid(world, frame, current)?.1;
+    work_stats.world_bone_recomputes += 1;
+    work_stats.world_rotation_decompositions += 1;
+    Ok((world, world_rotation))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_ancestor_prune_candidate(
     sequence: &ReducedPoseSequence,
@@ -1756,27 +1795,19 @@ fn validate_ancestor_prune_candidate(
 
         for &current in subtree {
             let current_index = frame * input.bone_count + current;
-            let (local_translation, local_rotation) = if current == bone {
-                (translation, rotation)
-            } else {
-                (
-                    cache.local_translations[current_index],
-                    cache.local_rotations[current_index],
-                )
-            };
-            let local = Mat4::from_rotation_translation(local_rotation, local_translation.into());
-            let parent = sequence.snapshot.parent_indices[current];
-            let world = if parent < 0 {
-                local
-            } else if is_descendant_or_self(&sequence.snapshot, parent as usize, bone) {
-                subtree_worlds[parent as usize] * local
-            } else {
-                cache.world_matrices[frame * input.bone_count + parent as usize] * local
-            };
-            subtree_worlds[current] = world;
-            let world_rotation = decompose_rigid(world, frame, current)?.1;
-            work_stats.world_bone_recomputes += 1;
-            work_stats.world_rotation_decompositions += 1;
+            let (world, world_rotation) = rebuild_subtree_world(
+                sequence,
+                cache,
+                subtree_worlds,
+                SubtreeRebuild {
+                    bone_count: input.bone_count,
+                    frame,
+                    bone,
+                    current,
+                    bone_local: (translation, rotation),
+                },
+                work_stats,
+            )?;
             if dense.world_positions[current_index].distance(Vec3A::from(world.w_axis.truncate()))
                 > tolerances.world_position
                 || quat_angle(dense.world_rotations[current_index], world_rotation)
@@ -1818,27 +1849,19 @@ fn apply_ancestor_prune_candidate(
 
         for &current in subtree {
             let current_index = frame * input.bone_count + current;
-            let (local_translation, local_rotation) = if current == bone {
-                (translation, rotation)
-            } else {
-                (
-                    cache.local_translations[current_index],
-                    cache.local_rotations[current_index],
-                )
-            };
-            let local = Mat4::from_rotation_translation(local_rotation, local_translation.into());
-            let parent = sequence.snapshot.parent_indices[current];
-            let world = if parent < 0 {
-                local
-            } else if is_descendant_or_self(&sequence.snapshot, parent as usize, bone) {
-                subtree_worlds[parent as usize] * local
-            } else {
-                cache.world_matrices[frame * input.bone_count + parent as usize] * local
-            };
-            subtree_worlds[current] = world;
-            let world_rotation = decompose_rigid(world, frame, current)?.1;
-            work_stats.world_bone_recomputes += 1;
-            work_stats.world_rotation_decompositions += 1;
+            let (world, world_rotation) = rebuild_subtree_world(
+                sequence,
+                cache,
+                subtree_worlds,
+                SubtreeRebuild {
+                    bone_count: input.bone_count,
+                    frame,
+                    bone,
+                    current,
+                    bone_local: (translation, rotation),
+                },
+                work_stats,
+            )?;
             cache.world_matrices[current_index] = world;
             cache.world_rotations[current_index] = world_rotation;
             cache.bone_errors[current_index].world_position =
@@ -1987,11 +2010,14 @@ fn refresh_full_validation_cache_parallel(
                     chunk
                         .morph_weights
                         .extend_from_slice(&scratch.morph_weights);
-                    for morph in 0..input.morph_count {
-                        chunk.morph_errors.push(
-                            (input.morph_weight(frame, morph) - scratch.morph_weights[morph]).abs(),
-                        );
-                    }
+                    chunk.morph_errors.extend(
+                        scratch.morph_weights[..input.morph_count]
+                            .iter()
+                            .enumerate()
+                            .map(|(morph, weight)| {
+                                (input.morph_weight(frame, morph) - weight).abs()
+                            }),
+                    );
                 }
                 Ok(chunk)
             })
@@ -2058,17 +2084,17 @@ fn measure_error_cached(
         false
     };
 
-    let mut world_dirty = dirty.bone_local.clone();
-    for &bone in sequence.snapshot.evaluation_order.iter() {
-        let parent = sequence.snapshot.parent_indices[bone];
-        if parent >= 0 {
-            for range in world_dirty[parent as usize].clone() {
-                insert_dirty_range(&mut world_dirty[bone], range);
+    if !refreshed_in_parallel {
+        let mut world_dirty = dirty.bone_local.clone();
+        for &bone in sequence.snapshot.evaluation_order.iter() {
+            let parent = sequence.snapshot.parent_indices[bone];
+            if parent >= 0 {
+                for range in world_dirty[parent as usize].clone() {
+                    insert_dirty_range(&mut world_dirty[bone], range);
+                }
             }
         }
-    }
 
-    if !refreshed_in_parallel {
         for (bone, ranges) in dirty.bone_local.iter().enumerate() {
             for range in ranges {
                 for frame in range.clone() {
@@ -2618,57 +2644,21 @@ fn sample_bone_track(
     if target == ReductionTarget::DccCubic {
         let duration = sample_frames[right.sample_index] - sample_frames[left.sample_index];
         let segment = right.dcc_segment;
-        let translation = Vec3A::new(
-            sample_hermite(
-                left.translation.x,
-                right.translation.x,
-                segment.translation_out_tangent.x,
-                segment.translation_in_tangent.x,
-                duration,
-                amount,
-            ),
-            sample_hermite(
-                left.translation.y,
-                right.translation.y,
-                segment.translation_out_tangent.y,
-                segment.translation_in_tangent.y,
-                duration,
-                amount,
-            ),
-            sample_hermite(
-                left.translation.z,
-                right.translation.z,
-                segment.translation_out_tangent.z,
-                segment.translation_in_tangent.z,
-                duration,
-                amount,
-            ),
+        let translation = sample_dcc_vec3(
+            left.translation,
+            right.translation,
+            segment.translation_out_tangent,
+            segment.translation_in_tangent,
+            duration,
+            amount,
         );
-        let euler = Vec3A::new(
-            sample_hermite(
-                segment.rotation_start_euler_xyz.x,
-                segment.rotation_end_euler_xyz.x,
-                segment.rotation_out_tangent.x,
-                segment.rotation_in_tangent.x,
-                duration,
-                amount,
-            ),
-            sample_hermite(
-                segment.rotation_start_euler_xyz.y,
-                segment.rotation_end_euler_xyz.y,
-                segment.rotation_out_tangent.y,
-                segment.rotation_in_tangent.y,
-                duration,
-                amount,
-            ),
-            sample_hermite(
-                segment.rotation_start_euler_xyz.z,
-                segment.rotation_end_euler_xyz.z,
-                segment.rotation_out_tangent.z,
-                segment.rotation_in_tangent.z,
-                duration,
-                amount,
-            ),
+        let euler = sample_dcc_vec3(
+            segment.rotation_start_euler_xyz,
+            segment.rotation_end_euler_xyz,
+            segment.rotation_out_tangent,
+            segment.rotation_in_tangent,
+            duration,
+            amount,
         );
         return (
             translation,

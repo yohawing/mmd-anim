@@ -140,109 +140,39 @@ def _compare_penetration_summary(
     failures: list[RegressionFailure],
 ) -> None:
     _require_numeric_fields(current, "summary", PENETRATION_SUMMARY_FIELDS, failures)
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "maxPenetrationDepth",
-        PENETRATION_SUMMARY_FIELDS["maxPenetrationDepth"],
-        tolerances.penetration_max_depth_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "maxBulletPenetrationDepth",
-        PENETRATION_SUMMARY_FIELDS["maxBulletPenetrationDepth"],
-        tolerances.bullet_penetration_max_depth_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "penetratingPairCount",
-        PENETRATION_SUMMARY_FIELDS["penetratingPairCount"],
-        tolerances.penetrating_pair_count_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "severePairCount",
-        PENETRATION_SUMMARY_FIELDS["severePairCount"],
-        tolerances.severe_pair_count_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "unconnectedPenetratingPairCount",
-        PENETRATION_SUMMARY_FIELDS["unconnectedPenetratingPairCount"],
-        0,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "unconnectedSeverePairCount",
-        PENETRATION_SUMMARY_FIELDS["unconnectedSeverePairCount"],
-        0,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "penetratingContactCount",
-        PENETRATION_SUMMARY_FIELDS["penetratingContactCount"],
-        tolerances.penetrating_contact_count_tolerance,
-        failures,
-    )
-    _compare_not_above_limit(
-        current,
-        "summary",
-        "maxPenetrationDepth",
-        PENETRATION_SUMMARY_FIELDS["maxPenetrationDepth"],
-        options.max_allowed_penetration_depth,
-        failures,
-    )
-    _compare_not_above_limit(
-        current,
-        "summary",
-        "maxBulletPenetrationDepth",
-        PENETRATION_SUMMARY_FIELDS["maxBulletPenetrationDepth"],
-        options.max_allowed_bullet_penetration_depth,
-        failures,
-    )
-    _compare_not_above_limit(
-        current,
-        "summary",
-        "penetratingPairCount",
-        PENETRATION_SUMMARY_FIELDS["penetratingPairCount"],
-        options.max_allowed_penetrating_pair_count,
-        failures,
-    )
-    _compare_not_above_limit(
-        current,
-        "summary",
-        "severePairCount",
-        PENETRATION_SUMMARY_FIELDS["severePairCount"],
-        options.max_allowed_severe_pair_count,
-        failures,
-    )
-    _compare_not_above_limit(
-        current,
-        "summary",
-        "penetratingContactCount",
-        PENETRATION_SUMMARY_FIELDS["penetratingContactCount"],
-        options.max_allowed_penetrating_contact_count,
-        failures,
-    )
+    for field, tolerance in (
+        ("maxPenetrationDepth", tolerances.penetration_max_depth_tolerance),
+        ("maxBulletPenetrationDepth", tolerances.bullet_penetration_max_depth_tolerance),
+        ("penetratingPairCount", tolerances.penetrating_pair_count_tolerance),
+        ("severePairCount", tolerances.severe_pair_count_tolerance),
+        ("unconnectedPenetratingPairCount", 0),
+        ("unconnectedSeverePairCount", 0),
+        ("penetratingContactCount", tolerances.penetrating_contact_count_tolerance),
+    ):
+        _compare_not_greater(
+            baseline,
+            current,
+            "summary",
+            field,
+            PENETRATION_SUMMARY_FIELDS[field],
+            tolerance,
+            failures,
+        )
+    for field, limit in (
+        ("maxPenetrationDepth", options.max_allowed_penetration_depth),
+        ("maxBulletPenetrationDepth", options.max_allowed_bullet_penetration_depth),
+        ("penetratingPairCount", options.max_allowed_penetrating_pair_count),
+        ("severePairCount", options.max_allowed_severe_pair_count),
+        ("penetratingContactCount", options.max_allowed_penetrating_contact_count),
+    ):
+        _compare_not_above_limit(
+            current,
+            "summary",
+            field,
+            PENETRATION_SUMMARY_FIELDS[field],
+            limit,
+            failures,
+        )
 
 
 def _compare_penetration_rigid_bodies(
@@ -390,78 +320,9 @@ def _compare_summary(
             },
             failures,
         )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "maxAbsError",
-        SUMMARY_NUMERIC_FIELDS["maxAbsError"],
-        tolerances.max_abs_error_tolerance,
-        failures,
-    )
-    if has_physics_cases:
-        _compare_not_greater(
-            baseline,
-            current,
-            "summary",
-            "translationMaxError",
-            SUMMARY_NUMERIC_FIELDS["translationMaxError"],
-            tolerances.translation_max_error_tolerance,
-            failures,
-        )
-        _compare_not_greater(
-            baseline,
-            current,
-            "summary",
-            "translationRmsError",
-            SUMMARY_NUMERIC_FIELDS["translationRmsError"],
-            tolerances.translation_rms_error_tolerance,
-            failures,
-        )
-        _compare_not_greater(
-            baseline,
-            current,
-            "summary",
-            "rotationMaxAngleRad",
-            SUMMARY_NUMERIC_FIELDS["rotationMaxAngleRad"],
-            tolerances.rotation_max_angle_rad_tolerance,
-            failures,
-        )
-        _compare_not_greater(
-            baseline,
-            current,
-            "summary",
-            "rotationRmsAngleRad",
-            SUMMARY_NUMERIC_FIELDS["rotationRmsAngleRad"],
-            tolerances.rotation_rms_angle_rad_tolerance,
-            failures,
-        )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "mismatchCount",
-        SUMMARY_NUMERIC_FIELDS["mismatchCount"],
-        tolerances.mismatch_count_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "missing",
-        SUMMARY_NUMERIC_FIELDS["missing"],
-        tolerances.missing_tolerance,
-        failures,
-    )
-    _compare_not_greater(
-        baseline,
-        current,
-        "summary",
-        "importErrors",
-        SUMMARY_NUMERIC_FIELDS["importErrors"],
-        tolerances.import_error_tolerance,
-        failures,
+    _compare_numeric_metrics(
+        baseline, current, "summary", SUMMARY_NUMERIC_FIELDS,
+        tolerances, has_physics_cases, failures,
     )
     for field, aliases in COVERAGE_FIELDS.items():
         _compare_not_lower(baseline, current, "summary", field, aliases, failures)
@@ -542,84 +403,43 @@ def _compare_cases(
                 },
                 failures,
             )
-        _compare_not_greater(
-            baseline,
-            current,
-            prefix,
-            "maxAbsError",
-            CASE_NUMERIC_FIELDS["maxAbsError"],
-            tolerances.max_abs_error_tolerance,
-            failures,
-        )
-        if is_physics_case:
-            _compare_not_greater(
-                baseline,
-                current,
-                prefix,
-                "translationMaxError",
-                CASE_NUMERIC_FIELDS["translationMaxError"],
-                tolerances.translation_max_error_tolerance,
-                failures,
-            )
-            _compare_not_greater(
-                baseline,
-                current,
-                prefix,
-                "translationRmsError",
-                CASE_NUMERIC_FIELDS["translationRmsError"],
-                tolerances.translation_rms_error_tolerance,
-                failures,
-            )
-            _compare_not_greater(
-                baseline,
-                current,
-                prefix,
-                "rotationMaxAngleRad",
-                CASE_NUMERIC_FIELDS["rotationMaxAngleRad"],
-                tolerances.rotation_max_angle_rad_tolerance,
-                failures,
-            )
-            _compare_not_greater(
-                baseline,
-                current,
-                prefix,
-                "rotationRmsAngleRad",
-                CASE_NUMERIC_FIELDS["rotationRmsAngleRad"],
-                tolerances.rotation_rms_angle_rad_tolerance,
-                failures,
-            )
-        _compare_not_greater(
-            baseline,
-            current,
-            prefix,
-            "mismatchCount",
-            CASE_NUMERIC_FIELDS["mismatchCount"],
-            tolerances.mismatch_count_tolerance,
-            failures,
-        )
-        _compare_not_greater(
-            baseline,
-            current,
-            prefix,
-            "missing",
-            CASE_NUMERIC_FIELDS["missing"],
-            tolerances.missing_tolerance,
-            failures,
-        )
-        _compare_not_greater(
-            baseline,
-            current,
-            prefix,
-            "importErrors",
-            CASE_NUMERIC_FIELDS["importErrors"],
-            tolerances.import_error_tolerance,
-            failures,
+        _compare_numeric_metrics(
+            baseline, current, prefix, CASE_NUMERIC_FIELDS,
+            tolerances, is_physics_case, failures,
         )
         _compare_required_physics_backend(baseline, current, prefix, options, failures)
         for field, aliases in COVERAGE_FIELDS.items():
             _compare_not_lower(baseline, current, prefix, field, aliases, failures)
         if not options.allow_skipped_target_changes:
             _compare_set_equal(baseline, current, prefix, "skippedTargets", (), failures)
+
+
+def _compare_numeric_metrics(
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+    prefix: str,
+    field_aliases: dict[str, tuple[str, ...]],
+    tolerances: Tolerances,
+    include_physics: bool,
+    failures: list[RegressionFailure],
+) -> None:
+    metrics = [("maxAbsError", tolerances.max_abs_error_tolerance)]
+    if include_physics:
+        metrics.extend((
+            ("translationMaxError", tolerances.translation_max_error_tolerance),
+            ("translationRmsError", tolerances.translation_rms_error_tolerance),
+            ("rotationMaxAngleRad", tolerances.rotation_max_angle_rad_tolerance),
+            ("rotationRmsAngleRad", tolerances.rotation_rms_angle_rad_tolerance),
+        ))
+    metrics.extend((
+        ("mismatchCount", tolerances.mismatch_count_tolerance),
+        ("missing", tolerances.missing_tolerance),
+        ("importErrors", tolerances.import_error_tolerance),
+    ))
+    for field, tolerance in metrics:
+        _compare_not_greater(
+            baseline, current, prefix, field, field_aliases[field], tolerance, failures,
+        )
 
 
 def _compare_status(

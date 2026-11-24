@@ -12,9 +12,6 @@ mod mmd_math;
 mod model;
 mod model_descriptor;
 mod pose;
-// The reducer remains crate-private until its Rust shape is stabilized by the
-// format targets and wrapper parity work in later POSE-REDUCE phases.
-#[allow(dead_code)]
 pub(crate) mod reduce;
 mod runtime;
 

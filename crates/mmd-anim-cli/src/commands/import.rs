@@ -1,9 +1,10 @@
 use std::{collections::BTreeMap, path::Path, process::ExitCode, sync::Arc};
 
 use glam::{Quat, Vec3A};
-use mmd_anim_runtime::{AnimationClip, IkSolverRuntimeStats, RuntimeInstance};
+use mmd_anim_runtime::{AnimationClip, RuntimeInstance};
 use serde::Serialize;
 
+use crate::support::{IkRuntimeStatsSummary, registered_morph_count, summarize_ik_runtime_stats};
 use crate::{
     diagnostics_suffix, f32_checksum, import_failure_error, read_file, translation_checksum,
 };
@@ -86,26 +87,24 @@ pub(crate) struct ImportVerboseAppendDiagnostics {
     pub details: Vec<ImportVerboseAppendDetail>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ImportVerboseIkAggregate {
-    pub solver_evaluations: u64,
-    pub configured_iterations: u64,
-    pub executed_iterations: u64,
-    pub skipped_iterations: u64,
-    pub skipped_ratio: f64,
-    pub tolerance_precheck_breaks: u64,
-    pub tolerance_post_iteration_breaks: u64,
-    pub rollback_breaks: u64,
-    pub max_iteration_exhaustions: u64,
-    pub link_visits: u64,
-    pub link_steps: u64,
+fn load_pmx_runtime(
+    path: &Path,
+) -> Result<mmd_anim_format::PmxRuntimeImport, Box<dyn std::error::Error>> {
+    mmd_anim_format::import_pmx_runtime(&read_file(path)?).map_err(|error| {
+        import_failure_error("import", path, mmd_anim_format::MmdFormatKind::Pmx, error)
+    })
+}
+
+fn load_vmd_motion(
+    path: &Path,
+) -> Result<mmd_anim_format::VmdImportResult, Box<dyn std::error::Error>> {
+    mmd_anim_format::import_vmd_motion(&read_file(path)?).map_err(|error| {
+        import_failure_error("import", path, mmd_anim_format::MmdFormatKind::Vmd, error)
+    })
 }
 
 pub(crate) fn import_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(path)?;
-    let imported = mmd_anim_format::import_pmx_runtime(&data).map_err(|error| {
-        import_failure_error("import", path, mmd_anim_format::MmdFormatKind::Pmx, error)
-    })?;
+    let imported = load_pmx_runtime(path)?;
     println!(
         "PMX runtime import: bones={} append={} fixedAxis={} ik={} boneNames={} morphNames={} ikNameMap={}",
         imported.model.bone_count(),
@@ -120,10 +119,7 @@ pub(crate) fn import_pmx_summary(path: &Path) -> Result<ExitCode, Box<dyn std::e
 }
 
 pub(crate) fn import_pmx_ik_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(path)?;
-    let imported = mmd_anim_format::import_pmx_runtime(&data).map_err(|error| {
-        import_failure_error("import", path, mmd_anim_format::MmdFormatKind::Pmx, error)
-    })?;
+    let imported = load_pmx_runtime(path)?;
     let solvers = imported.model.ik_solvers();
     let max_iterations = solvers
         .iter()
@@ -189,10 +185,7 @@ pub(crate) fn import_pmd_summary(path: &Path) -> Result<ExitCode, Box<dyn std::e
 }
 
 pub(crate) fn import_vmd_summary(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let data = read_file(path)?;
-    let imported = mmd_anim_format::import_vmd_motion(&data).map_err(|error| {
-        import_failure_error("import", path, mmd_anim_format::MmdFormatKind::Vmd, error)
-    })?;
+    let imported = load_vmd_motion(path)?;
     let property_ik_entries: usize = imported
         .property_ik_frames
         .iter()
@@ -212,22 +205,8 @@ pub(crate) fn import_pair_summary(
     pmx_path: &Path,
     vmd_path: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let pmx = mmd_anim_format::import_pmx_runtime(&read_file(pmx_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            pmx_path,
-            mmd_anim_format::MmdFormatKind::Pmx,
-            error,
-        )
-    })?;
-    let vmd = mmd_anim_format::import_vmd_motion(&read_file(vmd_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            vmd_path,
-            mmd_anim_format::MmdFormatKind::Vmd,
-            error,
-        )
-    })?;
+    let pmx = load_pmx_runtime(pmx_path)?;
+    let vmd = load_vmd_motion(vmd_path)?;
 
     let matched_bone_keys = vmd
         .bone_keyframes
@@ -300,22 +279,8 @@ pub(crate) fn import_pair_clip_summary(
     pmx_path: &Path,
     vmd_path: &Path,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let pmx = mmd_anim_format::import_pmx_runtime(&read_file(pmx_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            pmx_path,
-            mmd_anim_format::MmdFormatKind::Pmx,
-            error,
-        )
-    })?;
-    let vmd = mmd_anim_format::import_vmd_motion(&read_file(vmd_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            vmd_path,
-            mmd_anim_format::MmdFormatKind::Vmd,
-            error,
-        )
-    })?;
+    let pmx = load_pmx_runtime(pmx_path)?;
+    let vmd = load_vmd_motion(vmd_path)?;
 
     let solver_count = pmx.model.ik_count();
     let clip = mmd_anim_format::build_mmd_registered_pair_clip(
@@ -376,7 +341,7 @@ pub(crate) fn import_pair_frame_summary(
     );
 
     if verbose {
-        let ik_stats = aggregate_import_ik_runtime_stats(context.runtime.ik_runtime_stats());
+        let ik_stats = summarize_ik_runtime_stats(context.runtime.ik_runtime_stats());
         let append = collect_import_verbose_append_diagnostics(&context.runtime);
         for line in import_pair_frame_verbose_lines(&context.summary, &eval, ik_stats, append) {
             eprintln!("{line}");
@@ -384,52 +349,6 @@ pub(crate) fn import_pair_frame_summary(
     }
 
     Ok(ExitCode::SUCCESS)
-}
-
-pub(crate) fn aggregate_import_ik_runtime_stats(
-    stats: &[IkSolverRuntimeStats],
-) -> ImportVerboseIkAggregate {
-    let solver_evaluations = stats
-        .iter()
-        .map(|stats| stats.solver_evaluations)
-        .sum::<u64>();
-    let configured_iterations = stats
-        .iter()
-        .map(|stats| stats.configured_iterations)
-        .sum::<u64>();
-    let executed_iterations = stats
-        .iter()
-        .map(|stats| stats.executed_iterations)
-        .sum::<u64>();
-    let skipped_iterations = configured_iterations.saturating_sub(executed_iterations);
-    let skipped_ratio = if configured_iterations == 0 {
-        0.0
-    } else {
-        skipped_iterations as f64 / configured_iterations as f64
-    };
-
-    ImportVerboseIkAggregate {
-        solver_evaluations,
-        configured_iterations,
-        executed_iterations,
-        skipped_iterations,
-        skipped_ratio,
-        tolerance_precheck_breaks: stats
-            .iter()
-            .map(|stats| stats.tolerance_precheck_breaks)
-            .sum(),
-        tolerance_post_iteration_breaks: stats
-            .iter()
-            .map(|stats| stats.tolerance_post_iteration_breaks)
-            .sum(),
-        rollback_breaks: stats.iter().map(|stats| stats.rollback_breaks).sum(),
-        max_iteration_exhaustions: stats
-            .iter()
-            .map(|stats| stats.max_iteration_exhaustions)
-            .sum(),
-        link_visits: stats.iter().map(|stats| stats.link_visits).sum(),
-        link_steps: stats.iter().map(|stats| stats.link_steps).sum(),
-    }
 }
 
 pub(crate) fn collect_import_verbose_append_diagnostics(
@@ -504,7 +423,7 @@ fn append_rotation_output_is_nonidentity(rotation: Quat) -> bool {
 pub(crate) fn import_pair_frame_verbose_lines(
     summary: &ImportRuntimeBatchSummary,
     eval: &PairFrameEval,
-    ik_stats: ImportVerboseIkAggregate,
+    ik_stats: IkRuntimeStatsSummary,
     append: ImportVerboseAppendDiagnostics,
 ) -> Vec<String> {
     let ik_enabled_active = eval
@@ -662,17 +581,7 @@ pub(crate) fn parse_import_frame_range(text: &str) -> Result<ImportFrameSpec, St
     let mut index = 0usize;
     loop {
         let frame = start + index as f32 * step;
-        if frame > end {
-            if frames.last().copied() != Some(end) {
-                frames.push(end);
-                if frames.len() > MAX_IMPORT_BATCH_FRAMES {
-                    return Err(format!(
-                        "import batch frame count exceeds limit {MAX_IMPORT_BATCH_FRAMES}"
-                    ));
-                }
-            }
-            break;
-        }
+        let frame = if frame > end { end } else { frame };
         frames.push(frame);
         if frames.len() > MAX_IMPORT_BATCH_FRAMES {
             return Err(format!(
@@ -752,31 +661,12 @@ pub(crate) fn build_pair_runtime_context(
     pmx_path: &Path,
     vmd_path: &Path,
 ) -> Result<PairRuntimeContext, Box<dyn std::error::Error>> {
-    let pmx = mmd_anim_format::import_pmx_runtime(&read_file(pmx_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            pmx_path,
-            mmd_anim_format::MmdFormatKind::Pmx,
-            error,
-        )
-    })?;
-    let vmd = mmd_anim_format::import_vmd_motion(&read_file(vmd_path)?).map_err(|error| {
-        import_failure_error(
-            "import",
-            vmd_path,
-            mmd_anim_format::MmdFormatKind::Vmd,
-            error,
-        )
-    })?;
+    let pmx = load_pmx_runtime(pmx_path)?;
+    let vmd = load_vmd_motion(vmd_path)?;
 
     let bone_count = pmx.model.bone_count();
     let solver_count = pmx.model.ik_count();
-    let morph_count = pmx
-        .morph_name_to_index
-        .values()
-        .map(|index| index.as_usize() + 1)
-        .max()
-        .unwrap_or(0);
+    let morph_count = registered_morph_count(&pmx.morph_name_to_index);
 
     let clip = mmd_anim_format::build_mmd_registered_pair_clip(
         &pmx.model,
@@ -810,12 +700,12 @@ pub(crate) fn evaluate_pair_frame_with_ik_stats(
     clip: &AnimationClip,
     frame: f32,
     reset_ik_stats: bool,
-) -> (PairFrameEval, ImportVerboseIkAggregate) {
+) -> (PairFrameEval, IkRuntimeStatsSummary) {
     if reset_ik_stats {
         runtime.reset_ik_runtime_stats();
     }
     let eval = evaluate_pair_frame(runtime, clip, frame);
-    let ik_stats = aggregate_import_ik_runtime_stats(runtime.ik_runtime_stats());
+    let ik_stats = summarize_ik_runtime_stats(runtime.ik_runtime_stats());
     (eval, ik_stats)
 }
 

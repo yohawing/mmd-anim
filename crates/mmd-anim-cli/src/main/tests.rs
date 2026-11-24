@@ -391,13 +391,9 @@ fn bench_synthetic_args_reject_extra_values() {
 
 #[test]
 fn bench_pair_args_json_flag() {
-    let mut args = vec![
-        "model.pmx".to_owned(),
-        "motion.vmd".to_owned(),
-        "--json".to_owned(),
-    ]
-    .into_iter();
-    let cfg = bench::parse_bench_pair_args(&mut args).unwrap();
+    let mut args = vec!["--json".to_owned()].into_iter();
+    let cfg =
+        bench::parse_bench_pair_args("model.pmx".into(), "motion.vmd".into(), &mut args).unwrap();
     assert_eq!(cfg.pmx_path, PathBuf::from("model.pmx"));
     assert_eq!(cfg.vmd_path, PathBuf::from("motion.vmd"));
     assert_eq!(cfg.start_frame, 0.0);
@@ -411,8 +407,6 @@ fn bench_pair_args_json_flag() {
 #[test]
 fn bench_pair_args_json_with_positional_and_flags() {
     let mut args = vec![
-        "model.pmx".to_owned(),
-        "motion.vmd".to_owned(),
         "10".to_owned(),
         "--json".to_owned(),
         "120".to_owned(),
@@ -422,7 +416,8 @@ fn bench_pair_args_json_with_positional_and_flags() {
         "0.001".to_owned(),
     ]
     .into_iter();
-    let cfg = bench::parse_bench_pair_args(&mut args).unwrap();
+    let cfg =
+        bench::parse_bench_pair_args("model.pmx".into(), "motion.vmd".into(), &mut args).unwrap();
     assert_eq!(cfg.start_frame, 10.0);
     assert_eq!(cfg.frame_count, 120);
     assert_eq!(cfg.step, 2.0);
@@ -435,40 +430,30 @@ fn bench_pair_args_json_with_positional_and_flags() {
 #[test]
 fn bench_pair_args_instances_flag() {
     let mut args = vec![
-        "model.pmx".to_owned(),
-        "motion.vmd".to_owned(),
         "--instances".to_owned(),
         "30".to_owned(),
         "--json".to_owned(),
     ]
     .into_iter();
-    let cfg = bench::parse_bench_pair_args(&mut args).unwrap();
+    let cfg =
+        bench::parse_bench_pair_args("model.pmx".into(), "motion.vmd".into(), &mut args).unwrap();
     assert_eq!(cfg.instances, 30);
     assert!(cfg.use_json);
 }
 
 #[test]
 fn bench_pair_args_reject_zero_instances() {
-    let mut args = vec![
-        "model.pmx".to_owned(),
-        "motion.vmd".to_owned(),
-        "--instances".to_owned(),
-        "0".to_owned(),
-    ]
-    .into_iter();
-    let error = bench::parse_bench_pair_args(&mut args).unwrap_err();
+    let mut args = vec!["--instances".to_owned(), "0".to_owned()].into_iter();
+    let error = bench::parse_bench_pair_args("model.pmx".into(), "motion.vmd".into(), &mut args)
+        .unwrap_err();
     assert!(error.to_string().contains("instances must be positive"));
 }
 
 #[test]
 fn bench_pair_args_reject_unknown_flag() {
-    let mut args = vec![
-        "model.pmx".to_owned(),
-        "motion.vmd".to_owned(),
-        "--unknown".to_owned(),
-    ]
-    .into_iter();
-    let error = bench::parse_bench_pair_args(&mut args).unwrap_err();
+    let mut args = vec!["--unknown".to_owned()].into_iter();
+    let error = bench::parse_bench_pair_args("model.pmx".into(), "motion.vmd".into(), &mut args)
+        .unwrap_err();
     assert!(error.to_string().contains("unknown flag"));
 }
 
@@ -654,8 +639,21 @@ fn bench_pair_report_json_includes_ik_aggregate_and_top_solvers() {
         ik_stats: Some(&ik_stats),
     });
 
-    assert_eq!(report["ik"]["aggregate"]["solverEvaluations"], 360);
-    assert_eq!(report["ik"]["aggregate"]["executedIterations"], 1800);
+    assert_eq!(
+        report["ik"]["aggregate"],
+        serde_json::json!({
+            "solverEvaluations": 360,
+            "configuredIterations": 7200,
+            "executedIterations": 1800,
+            "skippedIterations": 5400,
+            "skippedRatio": 0.75,
+            "tolerancePrecheckBreaks": 18,
+            "tolerancePostIterationBreaks": 51,
+            "rollbackBreaks": 1,
+            "maxIterationExhaustions": 3,
+            "linkSteps": 5400,
+        })
+    );
     assert_eq!(report["ik"]["topSolvers"].as_array().unwrap().len(), 2);
     assert_eq!(report["ik"]["topSolvers"][0]["name"], "左足ＩＫ");
     assert_eq!(report["ik"]["topSolvers"][0]["executedIterations"], 1200);
@@ -838,11 +836,37 @@ fn import_frames_list_parser_preserves_order() {
 
 #[test]
 fn import_frame_range_parser_is_inclusive() {
-    let spec = import::parse_import_frame_range("0:10:5").unwrap();
-    let import::ImportFrameSpec::Range(frames) = spec else {
-        panic!("expected range frame spec");
-    };
-    assert_eq!(frames, vec![0.0, 5.0, 10.0]);
+    for (input, expected) in [
+        ("0:10:5", vec![0.0, 5.0, 10.0]),
+        ("0:10:6", vec![0.0, 6.0, 10.0]),
+        ("5:5:1", vec![5.0]),
+        ("-3e38:3e38:3e38", vec![-3e38, 0.0, 3e38]),
+    ] {
+        let spec = import::parse_import_frame_range(input).unwrap();
+        let import::ImportFrameSpec::Range(frames) = spec else {
+            panic!("expected range frame spec");
+        };
+        assert_eq!(frames, expected, "{input}");
+    }
+}
+
+#[test]
+fn import_frame_range_limit_includes_supplemented_end() {
+    for input in ["0:9999:1", "0:9998.5:1"] {
+        let import::ImportFrameSpec::Range(frames) =
+            import::parse_import_frame_range(input).unwrap()
+        else {
+            panic!("expected range frame spec");
+        };
+        assert_eq!(frames.len(), 10_000, "{input}");
+    }
+    for input in ["0:10000:1", "0:9999.5:1", "0:1:1e-45"] {
+        assert_eq!(
+            import::parse_import_frame_range(input).unwrap_err(),
+            "import batch frame count exceeds limit 10000",
+            "{input}"
+        );
+    }
 }
 
 #[test]
@@ -910,8 +934,8 @@ fn import_batch_frames_with_retained_ik_match_independent_samples() {
 }
 
 #[test]
-fn aggregate_import_ik_runtime_stats_sums_solver_metrics() {
-    use import::ImportVerboseIkAggregate;
+fn ik_runtime_stats_summary_sums_solver_metrics() {
+    use crate::support::IkRuntimeStatsSummary;
     use mmd_anim_runtime::IkSolverRuntimeStats;
 
     let stats = [
@@ -941,10 +965,10 @@ fn aggregate_import_ik_runtime_stats_sums_solver_metrics() {
         },
     ];
 
-    let aggregate = import::aggregate_import_ik_runtime_stats(&stats);
+    let aggregate = support::summarize_ik_runtime_stats(&stats);
     assert_eq!(
         aggregate,
-        ImportVerboseIkAggregate {
+        IkRuntimeStatsSummary {
             solver_evaluations: 3,
             configured_iterations: 60,
             executed_iterations: 15,
@@ -980,7 +1004,7 @@ fn import_pair_frame_verbose_lines_include_summary_and_result_fields() {
         ik_enabled: vec![1, 0, 1],
         ik_enabled_count: 3,
     };
-    let ik_stats = import::ImportVerboseIkAggregate {
+    let ik_stats = support::IkRuntimeStatsSummary {
         solver_evaluations: 4,
         configured_iterations: 80,
         executed_iterations: 20,
@@ -1040,7 +1064,7 @@ fn import_pair_frame_verbose_lines_include_append_descriptor_and_output_fields()
         ik_enabled: Vec::new(),
         ik_enabled_count: 0,
     };
-    let ik_stats = import::ImportVerboseIkAggregate {
+    let ik_stats = support::IkRuntimeStatsSummary {
         solver_evaluations: 0,
         configured_iterations: 0,
         executed_iterations: 0,
@@ -1666,7 +1690,10 @@ fn numeric_compare_report_summary_reuses_merged_stats() {
         compared_cases: 1,
         compared_frames: 2,
         mismatch_count: 3,
-        skipped_targets: Default::default(),
+        skipped_targets: ["morphs", "cameras"]
+            .map(String::from)
+            .into_iter()
+            .collect(),
         max_delta: 0.25,
     };
     let mut motion = compare::MotionNumericCompareStats {
@@ -1722,7 +1749,7 @@ fn numeric_compare_report_summary_reuses_merged_stats() {
     assert_eq!(value["summary"]["cameraMaxDelta"], 0.25);
     assert_eq!(
         value["summary"]["skippedTargets"],
-        serde_json::json!(["morphs", "rigidBodies"])
+        serde_json::json!(["cameras", "morphs", "rigidBodies"])
     );
 }
 
@@ -2152,8 +2179,8 @@ fn export_json_format_writes_full_vmd_dto_workflow() {
     )
     .unwrap();
 
-    export::export_json_format(&input, &output, false).unwrap();
-    export::export_roundtrip_summary(&output).unwrap();
+    let _ = export::export_json_format(&input, &output, false).unwrap();
+    let _ = export::export_roundtrip(&output, false).unwrap();
 
     let reparsed = mmd_anim_format::parse_vmd_animation(&fs::read(&output).unwrap()).unwrap();
     assert_eq!(reparsed.metadata.model_name, "cli-dto");
@@ -2570,7 +2597,7 @@ fn export_pmx_from_parts_manifest_writes_parseable_pmx() {
     )
     .unwrap();
 
-    export::export_pmx_from_parts_manifest(&input, &output, false).unwrap();
+    let _ = export::export_pmx_from_parts_manifest(&input, &output, false).unwrap();
 
     let data = fs::read(&output).unwrap();
     let parsed = mmd_anim_format::parse_pmx_model(&data).unwrap();
@@ -2834,13 +2861,13 @@ fn pmm_parse_export_parse_lossless_roundtrip_via_helpers() {
 }
 
 #[test]
-fn export_roundtrip_summary_calls_pmm_lossless_branch_successfully() {
+fn export_roundtrip_text_calls_pmm_lossless_branch_successfully() {
     let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
     let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
-    let result = export::export_roundtrip_summary(&pmm_path);
+    let result = export::export_roundtrip(&pmm_path, false);
     assert!(
         result.is_ok(),
-        "export_roundtrip_summary on repo-local PMM fixture must succeed (lossless branch)"
+        "export_roundtrip_text on repo-local PMM fixture must succeed (lossless branch)"
     );
     let code = result.unwrap();
     assert_eq!(code, ExitCode::SUCCESS);
@@ -2850,7 +2877,7 @@ fn export_roundtrip_summary_calls_pmm_lossless_branch_successfully() {
 fn export_roundtrip_json_calls_pmm_lossless_branch_successfully() {
     let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
     let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
-    let result = export::export_roundtrip_json(&pmm_path);
+    let result = export::export_roundtrip(&pmm_path, true);
     assert!(
         result.is_ok(),
         "export_roundtrip_json on repo-local PMM fixture must succeed (lossless branch)"
@@ -2860,12 +2887,12 @@ fn export_roundtrip_json_calls_pmm_lossless_branch_successfully() {
 }
 
 #[test]
-fn export_json_roundtrip_summary_rejects_pmm_as_unsupported() {
+fn export_json_roundtrip_text_rejects_pmm_as_unsupported() {
     let format_crate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mmd-anim-format");
     let pmm_path = format_crate.join("fixtures/pmm/ik_multi_bone_from_pmx_vmd.pmm");
-    let result = export::export_json_roundtrip_summary(&pmm_path);
+    let result = export::export_json_roundtrip(&pmm_path, false);
     let err =
-        result.expect_err("export_json_roundtrip_summary on PMM fixture must remain unsupported");
+        result.expect_err("export_json_roundtrip_text on PMM fixture must remain unsupported");
     let msg = err.to_string();
     assert!(
         msg.contains("roundtrip:") && msg.contains("PMM"),
@@ -3064,21 +3091,20 @@ fn patch_pmm_scene_frame_range_updates_fields_and_preserves_length() {
     let _ = fs::create_dir_all(&out_dir);
     let out_path = out_dir.join(format!("patched-scene-frame-range-{}.pmm", nanos));
 
-    let options = vec![
-        "--current-frame".to_string(),
-        "99".to_string(),
-        "--current-frame-text".to_string(),
-        "77".to_string(),
-        "--begin-frame-enabled".to_string(),
-        "true".to_string(),
-        "--end-frame-enabled".to_string(),
-        "false".to_string(),
-        "--begin-frame".to_string(),
-        "10".to_string(),
-        "--end-frame".to_string(),
-        "240".to_string(),
-    ];
-    let result = patch::patch_pmm_scene_frame_range(&pmm_path, &out_path, &options, false);
+    let result = dispatch_patch(
+        &pmm_path,
+        false,
+        None,
+        Some(out_path.clone()),
+        PmmFrameRangeArgs {
+            current_frame: Some(99),
+            current_frame_text: Some(77),
+            begin_frame: Some(10),
+            end_frame: Some(240),
+            begin_frame_enabled: Some("true".to_owned()),
+            end_frame_enabled: Some("false".to_owned()),
+        },
+    );
     assert!(
         result.is_ok(),
         "patch_pmm_scene_frame_range on repo-local fixture must succeed: {:?}",
@@ -3111,41 +3137,49 @@ fn patch_pmm_scene_frame_range_updates_fields_and_preserves_length() {
 }
 
 #[test]
-fn parse_pmm_scene_frame_range_patch_options_requires_at_least_one_option() {
-    let err = patch::parse_pmm_scene_frame_range_patch_options(&[]).unwrap_err();
-    assert!(
-        err.contains("at least one patch option is required"),
-        "unexpected error: {err}"
-    );
+fn dispatch_patch_frame_range_requires_at_least_one_option() {
+    let result = dispatch_patch(
+        Path::new("scene.pmm"),
+        false,
+        None,
+        Some(PathBuf::from("out.pmm")),
+        PmmFrameRangeArgs::default(),
+    )
+    .unwrap();
+    assert_eq!(result, ExitCode::from(2));
 }
 
 #[test]
-fn parse_pmm_scene_frame_range_patch_options_rejects_unknown_and_invalid_values() {
-    let unknown = patch::parse_pmm_scene_frame_range_patch_options(&[
-        "--unknown".to_string(),
-        "1".to_string(),
-    ])
+fn patch_cli_rejects_unknown_missing_and_invalid_values() {
+    for option in ["--unknown", "--begin-frame"] {
+        let error = Cli::try_parse_from([
+            "mmd-anim",
+            "patch",
+            "scene.pmm",
+            "--frame-range",
+            "out.pmm",
+            option,
+        ])
+        .err()
+        .expect("unknown options and missing values must fail CLI parsing");
+        assert!(error.to_string().contains(option), "{error}");
+    }
+
+    let invalid_bool = dispatch_patch(
+        Path::new("scene.pmm"),
+        false,
+        None,
+        Some(PathBuf::from("out.pmm")),
+        PmmFrameRangeArgs {
+            begin_frame_enabled: Some("maybe".to_owned()),
+            ..Default::default()
+        },
+    )
     .unwrap_err();
     assert!(
-        unknown.contains("unknown option"),
-        "unexpected unknown-option error: {unknown}"
-    );
-
-    let missing_value =
-        patch::parse_pmm_scene_frame_range_patch_options(&["--begin-frame".to_string()])
-            .unwrap_err();
-    assert!(
-        missing_value.contains("missing value"),
-        "unexpected missing-value error: {missing_value}"
-    );
-
-    let invalid_bool = patch::parse_pmm_scene_frame_range_patch_options(&[
-        "--begin-frame-enabled".to_string(),
-        "maybe".to_string(),
-    ])
-    .unwrap_err();
-    assert!(
-        invalid_bool.contains("invalid --begin-frame-enabled"),
+        invalid_bool
+            .to_string()
+            .contains("invalid --begin-frame-enabled"),
         "unexpected invalid-bool error: {invalid_bool}"
     );
 }

@@ -23,7 +23,7 @@ pub(crate) fn encode_sjis_prefix_fit(text: &str, len: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(len);
     for ch in text.chars() {
         let mut buf = [0u8; 4];
-        let encoded = encode_sjis(ch.encode_utf8(&mut buf));
+        let (encoded, _, _) = SHIFT_JIS.encode(ch.encode_utf8(&mut buf));
         if bytes.len() + encoded.len() > len {
             break;
         }

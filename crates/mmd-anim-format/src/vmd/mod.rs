@@ -274,13 +274,13 @@ pub fn parse_vmd_summary(data: &[u8]) -> Result<VmdSharedContextSummary, VmdSumm
 pub fn read_header(data: &[u8]) -> Result<(VmdHeader, usize), ImportError> {
     let mut r = Reader::new(data);
 
-    let magic = r.read_slice(30)?;
+    let magic = r.read_bytes(30)?;
     if magic != VMD_MAGIC && !magic.starts_with(VMD_MAGIC_PREFIX) {
         return Err(ImportError::InvalidVmdMagic);
     }
 
     let model_name_bytes: [u8; 20] = r
-        .read_slice(20)?
+        .read_bytes(20)?
         .try_into()
         .map_err(|_| ImportError::InvalidVmdModelName)?;
 
@@ -403,8 +403,7 @@ pub fn build_vmd_animation_from_parts(
     {
         return Err("bone SoA lengths do not match".to_owned());
     }
-    let morph_weight_len = morph_count;
-    if input.morph_frames.len() != morph_count || input.morph_weights.len() != morph_weight_len {
+    if input.morph_frames.len() != morph_count || input.morph_weights.len() != morph_count {
         return Err("morph SoA lengths do not match".to_owned());
     }
     validate_vmd_parts_count(bone_count, "bone")?;
@@ -414,9 +413,8 @@ pub fn build_vmd_animation_from_parts(
     validate_vmd_parts_count(descriptor.self_shadow_frames.len(), "self-shadow")?;
     validate_vmd_parts_count(descriptor.property_frames.len(), "property")?;
 
-    for (index, _frame) in input.bone_frames.iter().enumerate() {
-        let name_index = input.bone_name_indices[index] as usize;
-        if name_index >= descriptor.bone_names.len() {
+    for (index, &name_index) in input.bone_name_indices.iter().enumerate() {
+        if name_index as usize >= descriptor.bone_names.len() {
             return Err("bone name index out of range".to_owned());
         }
         if !input.bone_translations_xyz[index * 3..index * 3 + 3]
@@ -429,35 +427,31 @@ pub fn build_vmd_animation_from_parts(
             return Err("bone value is not finite".to_owned());
         }
     }
-    for (index, _frame) in input.morph_frames.iter().enumerate() {
-        let name_index = input.morph_name_indices[index] as usize;
-        if name_index >= descriptor.morph_names.len() {
+    for (&name_index, &weight) in input.morph_name_indices.iter().zip(input.morph_weights) {
+        if name_index as usize >= descriptor.morph_names.len() {
             return Err("morph name index out of range".to_owned());
         }
-        if !input.morph_weights[index].is_finite() {
+        if !weight.is_finite() {
             return Err("morph weight is not finite".to_owned());
         }
     }
 
-    let mut max_frame = 0u32;
-    for &frame in input.bone_frames {
-        max_frame = max_frame.max(frame);
-    }
-    for &frame in input.morph_frames {
-        max_frame = max_frame.max(frame);
-    }
-    for frame in &descriptor.camera_frames {
-        max_frame = max_frame.max(frame.frame);
-    }
-    for frame in &descriptor.light_frames {
-        max_frame = max_frame.max(frame.frame);
-    }
-    for frame in &descriptor.self_shadow_frames {
-        max_frame = max_frame.max(frame.frame);
-    }
-    for frame in &descriptor.property_frames {
-        max_frame = max_frame.max(frame.frame);
-    }
+    let max_frame = input
+        .bone_frames
+        .iter()
+        .chain(input.morph_frames)
+        .copied()
+        .chain(descriptor.camera_frames.iter().map(|frame| frame.frame))
+        .chain(descriptor.light_frames.iter().map(|frame| frame.frame))
+        .chain(
+            descriptor
+                .self_shadow_frames
+                .iter()
+                .map(|frame| frame.frame),
+        )
+        .chain(descriptor.property_frames.iter().map(|frame| frame.frame))
+        .max()
+        .unwrap_or(0);
 
     // Check all writer arithmetic before allocating/materializing records.
     let mut output_size = 50usize;
@@ -483,13 +477,13 @@ pub fn build_vmd_animation_from_parts(
         return Err("VMD output size exceeds addressable range".to_owned());
     }
 
-    let bone_frames = input
+    let bone_frames: Vec<VmdParsedBoneFrame> = input
         .bone_frames
         .iter()
         .enumerate()
         .map(|(index, &frame)| {
             let name = &descriptor.bone_names[input.bone_name_indices[index] as usize];
-            Ok(VmdParsedBoneFrame {
+            VmdParsedBoneFrame {
                 bone_name: name.name.clone(),
                 bone_name_bytes: name.name_bytes.clone(),
                 frame,
@@ -500,9 +494,9 @@ pub fn build_vmd_animation_from_parts(
                     .try_into()
                     .expect("validated rotation stride"),
                 interpolation: input.bone_interpolations[index * 64..index * 64 + 64].to_vec(),
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect();
     let morph_frames: Vec<VmdParsedMorphFrame> = input
         .morph_frames
         .iter()
@@ -927,7 +921,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
     });
     let mut bone_frames = options.build_parsed.then(|| Vec::with_capacity(bone_count));
     for _ in 0..bone_count {
-        let bone_name_field = r.read_slice(15)?;
+        let bone_name_field = r.read_bytes(15)?;
         if let Some(summary) = summary.as_mut() {
             summary.record_bone(trim_fixed_bytes(bone_name_field))?;
         }
@@ -949,7 +943,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         }
         let position = read_vmd_vec3(&mut r, options.build_summary, "bone translation")?;
         let rotation = read_vmd_quat(&mut r, options.build_summary, "bone rotation")?;
-        let interpolation: [u8; 64] = r.read_slice(64)?.try_into().unwrap();
+        let interpolation: [u8; 64] = r.read_bytes(64)?.try_into().unwrap();
         if let Some(raw) = raw.as_mut() {
             raw.bone_keyframes.push(VmdBoneKeyframeRaw {
                 bone_mode: VmdBoneImportMode::ByName(
@@ -1003,7 +997,7 @@ fn parse_vmd_scan(data: &[u8], options: VmdScanOptions) -> Result<VmdScanResult,
         .build_parsed
         .then(|| Vec::with_capacity(morph_count));
     for _ in 0..morph_count {
-        let morph_name_field = r.read_slice(15)?;
+        let morph_name_field = r.read_bytes(15)?;
         if let Some(summary) = summary.as_mut() {
             summary.record_morph(trim_fixed_bytes(morph_name_field))?;
         }
@@ -1269,7 +1263,7 @@ fn read_camera_frames(
         let distance = read_vmd_f32(r, summary.is_some(), "camera distance")?;
         let position = read_vmd_vec3(r, summary.is_some(), "camera position")?;
         let rotation = read_vmd_vec3(r, summary.is_some(), "camera rotation")?;
-        let interpolation: [u8; 24] = r.read_slice(24)?.try_into().unwrap();
+        let interpolation: [u8; 24] = r.read_bytes(24)?.try_into().unwrap();
         let fov = r.read_u32_le()?;
         let perspective = r.read_u8()? == 0;
         if let Some(summary) = summary.as_mut() {
@@ -1381,7 +1375,7 @@ fn read_property_frames(
         let mut raw_ik_entries = options.build_raw.then(|| Vec::with_capacity(ik_count));
         let mut ik_states = options.build_parsed.then(|| Vec::with_capacity(ik_count));
         for _ in 0..ik_count {
-            let name_field = r.read_slice(20)?;
+            let name_field = r.read_bytes(20)?;
             if options.build_summary {
                 validate_summary_name(trim_fixed_bytes(name_field), "empty property IK name")?;
             }
@@ -1451,21 +1445,7 @@ pub fn sample_vmd_camera_frames(
     frames: &[VmdParsedCameraFrame],
     frame: f32,
 ) -> Option<VmdCameraState> {
-    if frames.is_empty() {
-        return None;
-    }
-
-    let mut sorted: Vec<&VmdParsedCameraFrame> = frames.iter().collect();
-    sorted.sort_by_key(|keyframe| keyframe.frame);
-
-    let mut index = 0usize;
-    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
-        index += 1;
-    }
-
-    let previous = sorted[index];
-    let next = sorted.get(index + 1).copied().unwrap_or(previous);
-    let t = interpolation_ratio(previous.frame, next.frame, frame);
+    let (previous, next, t) = sample_frame_pair(frames, frame, |keyframe| keyframe.frame)?;
     let interpolation = decode_camera_interpolation(&next.interpolation);
 
     let distance_t = interpolation.distance.evaluate(t);
@@ -1500,21 +1480,7 @@ pub fn sample_vmd_light_frames(
     frames: &[VmdParsedLightFrame],
     frame: f32,
 ) -> Option<VmdLightState> {
-    if frames.is_empty() {
-        return None;
-    }
-
-    let mut sorted: Vec<&VmdParsedLightFrame> = frames.iter().collect();
-    sorted.sort_by_key(|keyframe| keyframe.frame);
-
-    let mut index = 0usize;
-    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
-        index += 1;
-    }
-
-    let previous = sorted[index];
-    let next = sorted.get(index + 1).copied().unwrap_or(previous);
-    let t = interpolation_ratio(previous.frame, next.frame, frame);
+    let (previous, next, t) = sample_frame_pair(frames, frame, |keyframe| keyframe.frame)?;
 
     Some(VmdLightState {
         color: [
@@ -1534,26 +1500,35 @@ pub fn sample_vmd_self_shadow_frames(
     frames: &[VmdParsedSelfShadowFrame],
     frame: f32,
 ) -> Option<VmdSelfShadowState> {
-    if frames.is_empty() {
-        return None;
-    }
-
-    let mut sorted: Vec<&VmdParsedSelfShadowFrame> = frames.iter().collect();
-    sorted.sort_by_key(|keyframe| keyframe.frame);
-
-    let mut index = 0usize;
-    while index + 1 < sorted.len() && sorted[index + 1].frame as f32 <= frame {
-        index += 1;
-    }
-
-    let previous = sorted[index];
-    let next = sorted.get(index + 1).copied().unwrap_or(previous);
-    let t = interpolation_ratio(previous.frame, next.frame, frame);
+    let (previous, next, t) = sample_frame_pair(frames, frame, |keyframe| keyframe.frame)?;
 
     Some(VmdSelfShadowState {
         mode: if t < 1.0 { previous.mode } else { next.mode },
         distance: lerp(previous.distance, next.distance, t),
     })
+}
+
+fn sample_frame_pair<T>(
+    frames: &[T],
+    frame: f32,
+    frame_number: impl Fn(&T) -> u32,
+) -> Option<(&T, &T, f32)> {
+    if frames.is_empty() {
+        return None;
+    }
+
+    let mut sorted: Vec<&T> = frames.iter().collect();
+    sorted.sort_by_key(|keyframe| frame_number(keyframe));
+
+    let mut index = 0usize;
+    while index + 1 < sorted.len() && frame_number(sorted[index + 1]) as f32 <= frame {
+        index += 1;
+    }
+
+    let previous = sorted[index];
+    let next = sorted.get(index + 1).copied().unwrap_or(previous);
+    let t = interpolation_ratio(frame_number(previous), frame_number(next), frame);
+    Some((previous, next, t))
 }
 
 struct CameraInterpolation {
@@ -1711,7 +1686,7 @@ fn vmd_registration_name(name: &[u8]) -> &[u8] {
 
 // MMD registers records in file order, replacing an existing key at the same
 // frame. Apply this after name resolution so aliases share the same track.
-fn last_vmd_keys_per_frame<T>(mut keys: Vec<T>, frame: impl Fn(&T) -> u32) -> Vec<T> {
+pub(crate) fn last_vmd_keys_per_frame<T>(mut keys: Vec<T>, frame: impl Fn(&T) -> u32) -> Vec<T> {
     keys.reverse();
     keys.sort_by_key(&frame); // stable: the last file record is now first
     keys.dedup_by_key(|key| frame(key));
@@ -1759,28 +1734,7 @@ pub fn build_clip_from_import(
         })
         .collect();
 
-    let mut morph_tracks_map: std::collections::BTreeMap<u32, Vec<MorphKeyframe>> =
-        std::collections::BTreeMap::new();
-
-    for (morph_name, frame, weight) in result.morph_keyframes {
-        let morph_name_normalized = normalize_vmd_name(&morph_name);
-        let morph_index = match morph_name_to_index(vmd_registration_name(&morph_name_normalized)) {
-            Some(idx) => idx,
-            None => continue,
-        };
-        morph_tracks_map
-            .entry(morph_index.0)
-            .or_default()
-            .push(MorphKeyframe::new(frame, weight));
-    }
-
-    let morph_tracks: Vec<MorphAnimationBinding> = morph_tracks_map
-        .into_iter()
-        .map(|(morph_idx, kfs)| MorphAnimationBinding {
-            morph: MorphIndex(morph_idx),
-            track: MorphTrack::from_keyframes(last_vmd_keys_per_frame(kfs, |key| key.frame)),
-        })
-        .collect();
+    let morph_tracks = build_morph_tracks(&result.morph_keyframes, morph_name_to_index);
 
     let property_track = if result.property_keyframes.is_empty() {
         None
@@ -1791,6 +1745,31 @@ pub fn build_clip_from_import(
     };
 
     AnimationClip::new_full(bone_tracks, morph_tracks, property_track)
+}
+
+fn build_morph_tracks(
+    keyframes: &[(Vec<u8>, u32, f32)],
+    morph_name_to_index: &dyn Fn(&[u8]) -> Option<MorphIndex>,
+) -> Vec<MorphAnimationBinding> {
+    let mut tracks: std::collections::BTreeMap<u32, Vec<MorphKeyframe>> =
+        std::collections::BTreeMap::new();
+    for (name, frame, weight) in keyframes {
+        let normalized_name = normalize_vmd_name(name);
+        let Some(index) = morph_name_to_index(vmd_registration_name(&normalized_name)) else {
+            continue;
+        };
+        tracks
+            .entry(index.0)
+            .or_default()
+            .push(MorphKeyframe::new(*frame, *weight));
+    }
+    tracks
+        .into_iter()
+        .map(|(index, keys)| MorphAnimationBinding {
+            morph: MorphIndex(index),
+            track: MorphTrack::from_keyframes(last_vmd_keys_per_frame(keys, |key| key.frame)),
+        })
+        .collect()
 }
 
 pub fn build_property_binding_with_ik_resolver(
@@ -2002,29 +1981,9 @@ fn build_pair_clip_with_registration_policy(
         })
         .collect();
 
-    let mut morph_tracks_map: std::collections::BTreeMap<u32, Vec<MorphKeyframe>> =
-        std::collections::BTreeMap::new();
-
-    for (morph_name, frame, weight) in &result.morph_keyframes {
-        let morph_name_normalized = normalize_vmd_name(morph_name);
-        let morph_index =
-            match morph_name_to_index.get(vmd_registration_name(&morph_name_normalized)) {
-                Some(idx) => *idx,
-                None => continue,
-            };
-        morph_tracks_map
-            .entry(morph_index.0)
-            .or_default()
-            .push(MorphKeyframe::new(*frame, *weight));
-    }
-
-    let morph_tracks: Vec<MorphAnimationBinding> = morph_tracks_map
-        .into_iter()
-        .map(|(morph_idx, kfs)| MorphAnimationBinding {
-            morph: MorphIndex(morph_idx),
-            track: MorphTrack::from_keyframes(last_vmd_keys_per_frame(kfs, |key| key.frame)),
-        })
-        .collect();
+    let morph_tracks = build_morph_tracks(&result.morph_keyframes, &|name| {
+        morph_name_to_index.get(name).copied()
+    });
 
     let property_track = if options.honor_property_ik {
         build_property_binding_with_ik_resolver(
@@ -2078,8 +2037,6 @@ fn project_rotation_to_fixed_axis(rotation: Quat, axis: Vec3A) -> Quat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[allow(unused_imports)]
-    use serde_json;
 
     #[test]
     fn vmd_parts_preserves_soa_order_interpolation_and_all_sections() {
@@ -3751,16 +3708,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn japanese_vmd_name_matches_pmx_utf8_name_via_normalization() {
-        let sjis_name: &[u8] = &[0x8D, 0xB6, 0x91, 0xAB];
-        let utf8_name: &[u8] = &[0xE5, 0xB7, 0xA6, 0xE8, 0xB6, 0xB3];
-
+    fn single_bone_pmx_bytes(encoding: u8, encoded_name: &[u8]) -> Vec<u8> {
         let mut pmx_buf = Vec::new();
         pmx_buf.extend_from_slice(b"PMX ");
         pmx_buf.extend_from_slice(&2.0f32.to_le_bytes());
         pmx_buf.push(8);
-        pmx_buf.push(1);
+        pmx_buf.push(encoding);
         pmx_buf.push(0);
         pmx_buf.push(4);
         pmx_buf.push(1);
@@ -3776,8 +3729,8 @@ mod tests {
         pmx_buf.extend_from_slice(&0i32.to_le_bytes());
         pmx_buf.extend_from_slice(&0i32.to_le_bytes());
         pmx_buf.extend_from_slice(&1i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&(utf8_name.len() as i32).to_le_bytes());
-        pmx_buf.extend_from_slice(utf8_name);
+        pmx_buf.extend_from_slice(&(encoded_name.len() as i32).to_le_bytes());
+        pmx_buf.extend_from_slice(encoded_name);
         pmx_buf.extend_from_slice(&0i32.to_le_bytes());
         pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
         pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
@@ -3789,6 +3742,15 @@ mod tests {
         pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
         pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
         pmx_buf.extend_from_slice(&0i32.to_le_bytes());
+        pmx_buf
+    }
+
+    #[test]
+    fn japanese_vmd_name_matches_pmx_utf8_name_via_normalization() {
+        let sjis_name: &[u8] = &[0x8D, 0xB6, 0x91, 0xAB];
+        let utf8_name: &[u8] = &[0xE5, 0xB7, 0xA6, 0xE8, 0xB6, 0xB3];
+
+        let pmx_buf = single_bone_pmx_bytes(1, utf8_name);
 
         let pmx = crate::pmx::import_pmx_runtime(&pmx_buf).unwrap();
 
@@ -3844,39 +3806,7 @@ mod tests {
             .flat_map(u16::to_le_bytes)
             .collect();
 
-        let mut pmx_buf = Vec::new();
-        pmx_buf.extend_from_slice(b"PMX ");
-        pmx_buf.extend_from_slice(&2.0f32.to_le_bytes());
-        pmx_buf.push(8);
-        pmx_buf.push(0);
-        pmx_buf.push(0);
-        pmx_buf.push(4);
-        pmx_buf.push(1);
-        pmx_buf.push(1);
-        pmx_buf.push(2);
-        pmx_buf.push(1);
-        pmx_buf.push(1);
-        for _ in 0..4 {
-            pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        }
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&1i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&(utf16le_name.len() as i32).to_le_bytes());
-        pmx_buf.extend_from_slice(&utf16le_name);
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&(-1i16).to_le_bytes());
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0u16.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0.0f32.to_le_bytes());
-        pmx_buf.extend_from_slice(&0i32.to_le_bytes());
+        let pmx_buf = single_bone_pmx_bytes(0, &utf16le_name);
 
         let pmx = crate::pmx::import_pmx_runtime(&pmx_buf).unwrap();
 
@@ -4572,6 +4502,38 @@ mod tests {
 
         assert_vec3_near(light.color, [0.5, 0.25, 0.5]);
         assert_vec3_near(light.direction, [0.5, -0.5, 0.0]);
+    }
+
+    #[test]
+    fn samples_unsorted_light_frames_with_stable_duplicate_keys() {
+        let frames: Vec<_> = [(30, 3.0), (10, 1.0), (10, 2.0)]
+            .into_iter()
+            .map(|(frame, value)| VmdParsedLightFrame {
+                frame,
+                color: [value; 3],
+                direction: [value; 3],
+            })
+            .collect();
+
+        for (frame, expected) in [
+            (f32::NEG_INFINITY, 1.0),
+            (0.0, 1.0),
+            (10.0, 2.0),
+            (20.0, 2.5),
+            (30.0, 3.0),
+            (f32::INFINITY, 3.0),
+        ] {
+            let light = sample_vmd_light_frames(&frames, frame).unwrap();
+            assert_vec3_near(light.color, [expected; 3]);
+            assert_vec3_near(light.direction, [expected; 3]);
+        }
+    }
+
+    #[test]
+    fn empty_vmd_tracks_have_no_sample() {
+        assert!(sample_vmd_camera_frames(&[], 0.0).is_none());
+        assert!(sample_vmd_light_frames(&[], 0.0).is_none());
+        assert!(sample_vmd_self_shadow_frames(&[], 0.0).is_none());
     }
 
     #[test]

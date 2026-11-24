@@ -147,22 +147,45 @@ where
         .map(|values| values.into_iter().map(|value| value.0).collect())
 }
 
-fn next_array_value<'de, A>(seq: &mut A, index: usize, len: usize) -> Result<f32, A::Error>
+fn deserialize_array<'de, D, const N: usize>(deserializer: D) -> Result<[f32; N], D::Error>
 where
-    A: SeqAccess<'de>,
+    D: Deserializer<'de>,
 {
-    seq.next_element::<JsonF32>()?
-        .map(|value| value.0)
-        .ok_or_else(|| de::Error::invalid_length(index, &ArrayLength { len }))
+    struct ArrayVisitor<const N: usize>;
+
+    impl<'de, const N: usize> Visitor<'de> for ArrayVisitor<N> {
+        type Value = [f32; N];
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "an array of {N} f32 values")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut values = [0.0; N];
+            for (index, value) in values.iter_mut().enumerate() {
+                *value = seq
+                    .next_element::<JsonF32>()?
+                    .ok_or_else(|| de::Error::invalid_length(index, &self))?
+                    .0;
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_seq(ArrayVisitor::<N>)
 }
 
-struct ArrayLength {
-    len: usize,
-}
+struct JsonF32Slice<'a>(&'a [f32]);
 
-impl de::Expected for ArrayLength {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "an array of {} f32 values", self.len)
+impl Serialize for JsonF32Slice<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_slice(self.0, serializer)
     }
 }
 
@@ -186,17 +209,6 @@ pub mod vec_f32 {
 
 pub mod nested_vec {
     use super::*;
-
-    struct JsonF32Slice<'a>(&'a [f32]);
-
-    impl Serialize for JsonF32Slice<'_> {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            serialize_slice(self.0, serializer)
-        }
-    }
 
     pub fn serialize<S>(values: &[Vec<f32>], serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -236,28 +248,7 @@ pub mod array3 {
     where
         D: Deserializer<'de>,
     {
-        struct Array3Visitor;
-
-        impl<'de> Visitor<'de> for Array3Visitor {
-            type Value = [f32; 3];
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("an array of 3 f32 values")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                Ok([
-                    next_array_value(&mut seq, 0, 3)?,
-                    next_array_value(&mut seq, 1, 3)?,
-                    next_array_value(&mut seq, 2, 3)?,
-                ])
-            }
-        }
-
-        deserializer.deserialize_seq(Array3Visitor)
+        deserialize_array(deserializer)
     }
 }
 
@@ -275,29 +266,7 @@ pub mod array4 {
     where
         D: Deserializer<'de>,
     {
-        struct Array4Visitor;
-
-        impl<'de> Visitor<'de> for Array4Visitor {
-            type Value = [f32; 4];
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("an array of 4 f32 values")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                Ok([
-                    next_array_value(&mut seq, 0, 4)?,
-                    next_array_value(&mut seq, 1, 4)?,
-                    next_array_value(&mut seq, 2, 4)?,
-                    next_array_value(&mut seq, 3, 4)?,
-                ])
-            }
-        }
-
-        deserializer.deserialize_seq(Array4Visitor)
+        deserialize_array(deserializer)
     }
 }
 
@@ -308,19 +277,8 @@ pub mod option_array3 {
     where
         S: Serializer,
     {
-        struct JsonF32Array3<'a>(&'a [f32; 3]);
-
-        impl Serialize for JsonF32Array3<'_> {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                serialize_slice(self.0, serializer)
-            }
-        }
-
         match values {
-            Some(values) => serializer.serialize_some(&JsonF32Array3(values)),
+            Some(values) => serializer.serialize_some(&JsonF32Slice(values)),
             None => serializer.serialize_none(),
         }
     }

@@ -266,10 +266,7 @@ pub fn parse_nmd_manifest(data: &[u8]) -> Result<NmdParsedManifest, ImportError>
     let mut keyframe_bundles = NmdKeyframeBundleCounts::default();
     let mut payload = NmdPayloadSummary::default();
 
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => {
                 r.skip_len()?;
@@ -280,14 +277,7 @@ pub fn parse_nmd_manifest(data: &[u8]) -> Result<NmdParsedManifest, ImportError>
                 metadata.main_object_name = Some(String::from_utf8_lossy(bytes).into_owned());
             }
             (3, WIRE_FIXED32) => {
-                let preferred_fps = r.read_f32()?;
-                if !preferred_fps.is_finite() {
-                    return Err(ImportError::UnsupportedFormat {
-                        format: "NMD",
-                        detail: "preferred FPS is not finite",
-                    });
-                }
-                metadata.preferred_fps = Some(preferred_fps);
+                metadata.preferred_fps = Some(r.read_f32()?);
             }
             (4, WIRE_LEN) => {
                 r.skip_len()?;
@@ -323,27 +313,21 @@ fn count_keyframe_bundle(
 ) -> Result<(), ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut oneof_payload = None;
-    let mut saw_len_field = false;
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         if wire_type == WIRE_LEN {
-            saw_len_field = true;
+            let bytes = r.read_len()?;
             if matches!(field, 1 | 2 | 3 | 5 | 6 | 7 | 9) {
-                oneof_payload = Some((field, r.peek_len()?));
+                oneof_payload = Some((field, bytes));
             }
+        } else {
+            r.skip_value(wire_type)?;
         }
-        r.skip_value(wire_type)?;
     }
 
     match oneof_payload {
         Some((1, bytes)) => {
             counts.accessory += 1;
-            let frames = read_len_messages(bytes, 2)?
-                .into_iter()
-                .map(parse_accessory_keyframe)
-                .collect::<Result<Vec<_>, _>>()?;
+            let frames = parse_len_messages(bytes, 2, parse_accessory_keyframe)?;
             payload.accessory_keyframes += frames.len();
             payload.accessory_frames.extend(frames);
         }
@@ -353,28 +337,19 @@ fn count_keyframe_bundle(
         }
         Some((3, bytes)) => {
             counts.camera += 1;
-            let frames = read_len_messages(bytes, 2)?
-                .into_iter()
-                .map(parse_camera_keyframe)
-                .collect::<Result<Vec<_>, _>>()?;
+            let frames = parse_len_messages(bytes, 2, parse_camera_keyframe)?;
             payload.camera_keyframes += frames.len();
             payload.camera_frames.extend(frames);
         }
         Some((5, bytes)) => {
             counts.light += 1;
-            let frames = read_len_messages(bytes, 2)?
-                .into_iter()
-                .map(parse_light_keyframe)
-                .collect::<Result<Vec<_>, _>>()?;
+            let frames = parse_len_messages(bytes, 2, parse_light_keyframe)?;
             payload.light_keyframes += frames.len();
             payload.light_frames.extend(frames);
         }
         Some((6, bytes)) => {
             counts.model += 1;
-            let frames = read_len_messages(bytes, 2)?
-                .into_iter()
-                .map(parse_model_keyframe)
-                .collect::<Result<Vec<_>, _>>()?;
+            let frames = parse_len_messages(bytes, 2, parse_model_keyframe)?;
             payload.model_keyframes += frames.len();
             payload.model_frames.extend(frames);
         }
@@ -384,16 +359,11 @@ fn count_keyframe_bundle(
         }
         Some((9, bytes)) => {
             counts.self_shadow += 1;
-            let frames = read_len_messages(bytes, 2)?
-                .into_iter()
-                .map(parse_self_shadow_keyframe)
-                .collect::<Result<Vec<_>, _>>()?;
+            let frames = parse_len_messages(bytes, 2, parse_self_shadow_keyframe)?;
             payload.self_shadow_keyframes += frames.len();
             payload.self_shadow_frames.extend(frames);
         }
-        Some((_, _)) => counts.unknown += 1,
-        None if saw_len_field => counts.unknown += 1,
-        None => counts.unknown += 1,
+        _ => counts.unknown += 1,
     }
     Ok(())
 }
@@ -403,10 +373,7 @@ fn count_bone_bundle_payload(
     payload: &mut NmdPayloadSummary,
 ) -> Result<(), ImportError> {
     payload.bone_local_tracks += count_len_field(data, 2)?;
-    let frames = read_len_messages(data, 3)?
-        .into_iter()
-        .map(parse_bone_keyframe)
-        .collect::<Result<Vec<_>, _>>()?;
+    let frames = parse_len_messages(data, 3, parse_bone_keyframe)?;
     payload.bone_keyframes += frames.len();
     payload.bone_frames.extend(frames);
     Ok(())
@@ -417,10 +384,7 @@ fn count_morph_bundle_payload(
     payload: &mut NmdPayloadSummary,
 ) -> Result<(), ImportError> {
     payload.morph_local_tracks += count_len_field(data, 2)?;
-    let frames = read_len_messages(data, 3)?
-        .into_iter()
-        .map(parse_morph_keyframe)
-        .collect::<Result<Vec<_>, _>>()?;
+    let frames = parse_len_messages(data, 3, parse_morph_keyframe)?;
     payload.morph_keyframes += frames.len();
     payload.morph_frames.extend(frames);
     Ok(())
@@ -429,10 +393,7 @@ fn count_morph_bundle_payload(
 fn count_len_field(data: &[u8], target_field: u32) -> Result<usize, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut count = 0usize;
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         if field == target_field && wire_type == WIRE_LEN {
             count += 1;
         }
@@ -441,28 +402,28 @@ fn count_len_field(data: &[u8], target_field: u32) -> Result<usize, ImportError>
     Ok(count)
 }
 
-fn read_len_messages(data: &[u8], target_field: u32) -> Result<Vec<&[u8]>, ImportError> {
+fn parse_len_messages<T>(
+    data: &[u8],
+    target_field: u32,
+    parse: impl FnMut(&[u8]) -> Result<T, ImportError>,
+) -> Result<Vec<T>, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut messages = Vec::new();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         if field == target_field && wire_type == WIRE_LEN {
-            messages.push(r.peek_len()?);
+            messages.push(r.read_len()?);
+        } else {
+            r.skip_value(wire_type)?;
         }
-        r.skip_value(wire_type)?;
     }
-    Ok(messages)
+    // Validate the complete envelope before decoding its payloads.
+    messages.into_iter().map(parse).collect()
 }
 
 fn parse_common(data: &[u8]) -> Result<NmdKeyframeCommon, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut common = NmdKeyframeCommon::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (2, WIRE_VARINT) => common.frame_index = r.read_varint()?,
             (3, WIRE_VARINT) => common.layer_index = Some(read_u32_varint(&mut r)?),
@@ -476,15 +437,12 @@ fn parse_common(data: &[u8]) -> Result<NmdKeyframeCommon, ImportError> {
 fn parse_accessory_keyframe(data: &[u8]) -> Result<NmdAccessoryKeyframe, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut frame = NmdAccessoryKeyframe::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
             (2, WIRE_VARINT) => frame.track_index = r.read_varint()?,
-            (3, WIRE_LEN) => frame.translation = parse_vec3(r.read_len()?)?,
-            (4, WIRE_LEN) => frame.orientation = parse_vec4(r.read_len()?)?,
+            (3, WIRE_LEN) => frame.translation = parse_vec(r.read_len()?)?,
+            (4, WIRE_LEN) => frame.orientation = parse_vec(r.read_len()?)?,
             (5, WIRE_FIXED32) => frame.scale_factor = r.read_f32()?,
             (6, WIRE_FIXED32) => frame.opacity = r.read_f32()?,
             (7, WIRE_LEN) => frame
@@ -503,15 +461,12 @@ fn parse_accessory_keyframe(data: &[u8]) -> Result<NmdAccessoryKeyframe, ImportE
 fn parse_bone_keyframe(data: &[u8]) -> Result<NmdBoneKeyframe, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut frame = NmdBoneKeyframe::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
             (2, WIRE_VARINT) => frame.track_index = r.read_varint()?,
-            (3, WIRE_LEN) => frame.local_translation = parse_vec3(r.read_len()?)?,
-            (4, WIRE_LEN) => frame.local_orientation = parse_vec4(r.read_len()?)?,
+            (3, WIRE_LEN) => frame.local_translation = parse_vec(r.read_len()?)?,
+            (4, WIRE_LEN) => frame.local_orientation = parse_vec(r.read_len()?)?,
             (5, WIRE_LEN) => frame.interpolation = Some(parse_bone_interpolation(r.read_len()?)?),
             (6, WIRE_VARINT) => frame.stage_index = Some(read_u32_varint(&mut r)?),
             (7, WIRE_VARINT) => frame.physics_simulation_enabled = Some(r.read_bool()?),
@@ -524,10 +479,7 @@ fn parse_bone_keyframe(data: &[u8]) -> Result<NmdBoneKeyframe, ImportError> {
 fn parse_morph_keyframe(data: &[u8]) -> Result<NmdMorphKeyframe, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut frame = NmdMorphKeyframe::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
             (2, WIRE_VARINT) => frame.track_index = r.read_varint()?,
@@ -542,14 +494,11 @@ fn parse_morph_keyframe(data: &[u8]) -> Result<NmdMorphKeyframe, ImportError> {
 fn parse_camera_keyframe(data: &[u8]) -> Result<NmdCameraKeyframe, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut frame = NmdCameraKeyframe::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
-            (2, WIRE_LEN) => frame.look_at = parse_vec3(r.read_len()?)?,
-            (3, WIRE_LEN) => frame.angle = parse_vec3(r.read_len()?)?,
+            (2, WIRE_LEN) => frame.look_at = parse_vec(r.read_len()?)?,
+            (3, WIRE_LEN) => frame.angle = parse_vec(r.read_len()?)?,
             (4, WIRE_FIXED32) => frame.fov = r.read_f32()?,
             (5, WIRE_FIXED32) => frame.distance = r.read_f32()?,
             (6, WIRE_LEN) => frame.interpolation = Some(parse_camera_interpolation(r.read_len()?)?),
@@ -564,14 +513,11 @@ fn parse_camera_keyframe(data: &[u8]) -> Result<NmdCameraKeyframe, ImportError> 
 fn parse_light_keyframe(data: &[u8]) -> Result<NmdLightKeyframe, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut frame = NmdLightKeyframe::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
-            (2, WIRE_LEN) => frame.color = parse_vec3(r.read_len()?)?,
-            (3, WIRE_LEN) => frame.direction = parse_vec3(r.read_len()?)?,
+            (2, WIRE_LEN) => frame.color = parse_vec(r.read_len()?)?,
+            (3, WIRE_LEN) => frame.direction = parse_vec(r.read_len()?)?,
             _ => r.skip_value(wire_type)?,
         }
     }
@@ -581,10 +527,7 @@ fn parse_light_keyframe(data: &[u8]) -> Result<NmdLightKeyframe, ImportError> {
 fn parse_model_keyframe(data: &[u8]) -> Result<NmdModelKeyframe, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut frame = NmdModelKeyframe::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
             (2, WIRE_VARINT) => frame.visible = r.read_bool()?,
@@ -616,10 +559,7 @@ fn parse_model_keyframe(data: &[u8]) -> Result<NmdModelKeyframe, ImportError> {
 fn parse_self_shadow_keyframe(data: &[u8]) -> Result<NmdSelfShadowKeyframe, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut frame = NmdSelfShadowKeyframe::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => frame.common = parse_common(r.read_len()?)?,
             (2, WIRE_VARINT) => frame.enabled = r.read_bool()?,
@@ -634,10 +574,7 @@ fn parse_self_shadow_keyframe(data: &[u8]) -> Result<NmdSelfShadowKeyframe, Impo
 fn parse_bone_interpolation(data: &[u8]) -> Result<NmdBoneKeyframeInterpolation, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut interpolation = NmdBoneKeyframeInterpolation::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => interpolation.x = Some(parse_interpolation_unit(r.read_len()?)?),
             (2, WIRE_LEN) => interpolation.y = Some(parse_interpolation_unit(r.read_len()?)?),
@@ -654,10 +591,7 @@ fn parse_bone_interpolation(data: &[u8]) -> Result<NmdBoneKeyframeInterpolation,
 fn parse_morph_interpolation(data: &[u8]) -> Result<NmdInterpolationUnit, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut interpolation = None;
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => interpolation = Some(parse_interpolation_unit(r.read_len()?)?),
             _ => r.skip_value(wire_type)?,
@@ -669,10 +603,7 @@ fn parse_morph_interpolation(data: &[u8]) -> Result<NmdInterpolationUnit, Import
 fn parse_camera_interpolation(data: &[u8]) -> Result<NmdCameraKeyframeInterpolation, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut interpolation = NmdCameraKeyframeInterpolation::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => interpolation.x = Some(parse_interpolation_unit(r.read_len()?)?),
             (2, WIRE_LEN) => interpolation.y = Some(parse_interpolation_unit(r.read_len()?)?),
@@ -691,13 +622,10 @@ fn parse_camera_interpolation(data: &[u8]) -> Result<NmdCameraKeyframeInterpolat
 fn parse_interpolation_unit(data: &[u8]) -> Result<NmdInterpolationUnit, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut unit = NmdInterpolationUnit::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_LEN) => unit.integer = Some(parse_integer_interpolation(r.read_len()?)?),
-            (2, WIRE_LEN) => unit.float = Some(parse_float_interpolation(r.read_len()?)?),
+            (2, WIRE_LEN) => unit.float = Some(parse_vec(r.read_len()?)?),
             _ => r.skip_value(wire_type)?,
         }
     }
@@ -707,10 +635,7 @@ fn parse_interpolation_unit(data: &[u8]) -> Result<NmdInterpolationUnit, ImportE
 fn parse_integer_interpolation(data: &[u8]) -> Result<[u32; 4], ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut values = [0; 4];
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_VARINT) => values[0] = read_u32_varint(&mut r)?,
             (2, WIRE_VARINT) => values[1] = read_u32_varint(&mut r)?,
@@ -722,31 +647,10 @@ fn parse_integer_interpolation(data: &[u8]) -> Result<[u32; 4], ImportError> {
     Ok(values)
 }
 
-fn parse_float_interpolation(data: &[u8]) -> Result<[f32; 4], ImportError> {
-    let mut r = ProtoReader { data, pos: 0 };
-    let mut values = [0.0; 4];
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
-        match (field, wire_type) {
-            (1, WIRE_FIXED32) => values[0] = r.read_f32()?,
-            (2, WIRE_FIXED32) => values[1] = r.read_f32()?,
-            (3, WIRE_FIXED32) => values[2] = r.read_f32()?,
-            (4, WIRE_FIXED32) => values[3] = r.read_f32()?,
-            _ => r.skip_value(wire_type)?,
-        }
-    }
-    Ok(values)
-}
-
 fn parse_constraint_state(data: &[u8]) -> Result<NmdConstraintState, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut state = NmdConstraintState::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_VARINT) => state.track_index = r.read_varint()?,
             (2, WIRE_VARINT) => state.enabled = r.read_bool()?,
@@ -759,16 +663,13 @@ fn parse_constraint_state(data: &[u8]) -> Result<NmdConstraintState, ImportError
 fn parse_effect_parameter(data: &[u8]) -> Result<NmdEffectParameter, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut parameter = NmdEffectParameter::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_VARINT) => parameter.track_index = r.read_varint()?,
             (2, WIRE_VARINT) => parameter.bool_value = Some(r.read_bool()?),
             (3, WIRE_VARINT) => parameter.int_value = Some(read_i32_varint(&mut r)?),
             (4, WIRE_FIXED32) => parameter.float_value = Some(r.read_f32()?),
-            (5, WIRE_LEN) => parameter.vector_value = Some(parse_vec4(r.read_len()?)?),
+            (5, WIRE_LEN) => parameter.vector_value = Some(parse_vec(r.read_len()?)?),
             _ => r.skip_value(wire_type)?,
         }
     }
@@ -778,10 +679,7 @@ fn parse_effect_parameter(data: &[u8]) -> Result<NmdEffectParameter, ImportError
 fn parse_model_binding(data: &[u8]) -> Result<NmdModelBinding, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut binding = NmdModelBinding::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
             (1, WIRE_VARINT) => binding.local_bone_track_index = Some(r.read_varint()?),
             (2, WIRE_VARINT) => binding.global_object_track_index = r.read_varint()?,
@@ -795,12 +693,9 @@ fn parse_model_binding(data: &[u8]) -> Result<NmdModelBinding, ImportError> {
 fn parse_edge(data: &[u8]) -> Result<NmdEdge, ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
     let mut edge = NmdEdge::default();
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
+    while let Some((field, wire_type)) = r.read_key()? {
         match (field, wire_type) {
-            (1, WIRE_LEN) => edge.color = parse_vec4(r.read_len()?)?,
+            (1, WIRE_LEN) => edge.color = parse_vec(r.read_len()?)?,
             (2, WIRE_FIXED32) => edge.scale_factor = r.read_f32()?,
             _ => r.skip_value(wire_type)?,
         }
@@ -808,36 +703,14 @@ fn parse_edge(data: &[u8]) -> Result<NmdEdge, ImportError> {
     Ok(edge)
 }
 
-fn parse_vec3(data: &[u8]) -> Result<[f32; 3], ImportError> {
+fn parse_vec<const N: usize>(data: &[u8]) -> Result<[f32; N], ImportError> {
     let mut r = ProtoReader { data, pos: 0 };
-    let mut values = [0.0; 3];
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
-        match (field, wire_type) {
-            (1, WIRE_FIXED32) => values[0] = r.read_f32()?,
-            (2, WIRE_FIXED32) => values[1] = r.read_f32()?,
-            (3, WIRE_FIXED32) => values[2] = r.read_f32()?,
-            _ => r.skip_value(wire_type)?,
-        }
-    }
-    Ok(values)
-}
-
-fn parse_vec4(data: &[u8]) -> Result<[f32; 4], ImportError> {
-    let mut r = ProtoReader { data, pos: 0 };
-    let mut values = [0.0; 4];
-    while !r.is_eof() {
-        let Some((field, wire_type)) = r.read_key()? else {
-            break;
-        };
-        match (field, wire_type) {
-            (1, WIRE_FIXED32) => values[0] = r.read_f32()?,
-            (2, WIRE_FIXED32) => values[1] = r.read_f32()?,
-            (3, WIRE_FIXED32) => values[2] = r.read_f32()?,
-            (4, WIRE_FIXED32) => values[3] = r.read_f32()?,
-            _ => r.skip_value(wire_type)?,
+    let mut values = [0.0; N];
+    while let Some((field, wire_type)) = r.read_key()? {
+        if wire_type == WIRE_FIXED32 && (1..=N).contains(&(field as usize)) {
+            values[field as usize - 1] = r.read_f32()?;
+        } else {
+            r.skip_value(wire_type)?;
         }
     }
     Ok(values)
@@ -873,12 +746,8 @@ const WIRE_FIXED32: u8 = 5;
 type ProtoReader<'a> = ByteReader<'a>;
 
 impl<'a> ByteReader<'a> {
-    fn is_eof(&self) -> bool {
-        self.remaining() == 0
-    }
-
     fn read_key(&mut self) -> Result<Option<(u32, u8)>, ImportError> {
-        if self.is_eof() {
+        if self.remaining() == 0 {
             return Ok(None);
         }
         let key = self.read_varint()?;
@@ -931,14 +800,6 @@ impl<'a> ByteReader<'a> {
         self.read_bytes(len)
     }
 
-    fn peek_len(&self) -> Result<&'a [u8], ImportError> {
-        let mut copy = ProtoReader {
-            data: self.data,
-            pos: self.pos,
-        };
-        copy.read_len()
-    }
-
     fn skip_len(&mut self) -> Result<(), ImportError> {
         self.read_len().map(|_| ())
     }
@@ -965,12 +826,12 @@ impl<'a> ByteReader<'a> {
                 Ok(())
             }
             WIRE_FIXED64 => {
-                self.skip_bytes(8)?;
+                self.skip(8)?;
                 Ok(())
             }
             WIRE_LEN => self.skip_len(),
             WIRE_FIXED32 => {
-                self.skip_bytes(4)?;
+                self.skip(4)?;
                 Ok(())
             }
             _ => Err(ImportError::UnsupportedFormat {
@@ -978,10 +839,6 @@ impl<'a> ByteReader<'a> {
                 detail: "unsupported protobuf wire type",
             }),
         }
-    }
-
-    fn skip_bytes(&mut self, len: usize) -> Result<(), ImportError> {
-        self.skip(len)
     }
 }
 
@@ -1556,6 +1413,23 @@ mod tests {
             Err(ImportError::UnsupportedFormat {
                 format: "NMD",
                 detail: "int32 varint value overflows u32"
+            })
+        ));
+    }
+
+    #[test]
+    fn vector_fields_keep_last_value_and_skip_unknown_components() {
+        let mut data = vec3(1.0, 2.0, 3.0);
+        push_f32_field(&mut data, 2, 5.0);
+        push_varint_field(&mut data, 1, 9);
+        push_f32_field(&mut data, 4, f32::NAN);
+
+        assert_eq!(parse_vec::<3>(&data).unwrap(), [1.0, 5.0, 3.0]);
+        assert!(matches!(
+            parse_vec::<4>(&data),
+            Err(ImportError::UnsupportedFormat {
+                format: "NMD",
+                detail: "float value is not finite"
             })
         ));
     }

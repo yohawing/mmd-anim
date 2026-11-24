@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -91,10 +91,9 @@ impl<'de> Visitor<'de> for StrictVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut seen = HashSet::new();
         let mut values = Map::new();
         while let Some(key) = map.next_key::<String>()? {
-            if !seen.insert(key.clone()) {
+            if values.contains_key(&key) {
                 return Err(de::Error::custom(format!("duplicate key {key:?}")));
             }
             values.insert(key, map.next_value::<StrictValue>()?.0);

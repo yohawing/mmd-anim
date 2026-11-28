@@ -405,6 +405,10 @@ mmd_anim_bullet_status mmd_anim_bullet_world_collect_contacts(
         if (!manifold) {
             continue;
         }
+        const int contact_count = manifold->getNumContacts();
+        if (contact_count == 0) {
+            continue;
+        }
         const int32_t body_a = rigidbody_index_for_collision_object(
             world,
             static_cast<const btCollisionObject *>(manifold->getBody0()));
@@ -414,7 +418,6 @@ mmd_anim_bullet_status mmd_anim_bullet_world_collect_contacts(
         if (body_a < 0 || body_b < 0) {
             continue;
         }
-        const int contact_count = manifold->getNumContacts();
         for (int contact_index = 0; contact_index < contact_count; ++contact_index) {
             const btManifoldPoint &point = manifold->getContactPoint(contact_index);
             if (count < capacity) {
